@@ -1,0 +1,177 @@
+# Epilogue rumors about Navi. HavePlayedEvent.TitleEventBase case 0 is the new
+# talk. Case 1 is the nxt or entry the hook replaced. A repeat (recent-talk
+# case 0) plays the rumor and ends. The first talk sets one castle bool and
+# steps EscapeFromCrumblingGanonCastle. The bool just set is not queried again.
+#
+# Step02, Step03, Step04, and Reset are never written. Adult Zelda compares them.
+# Mido sets no rumor flag. The Lost Woods stays sealed. His epilogue talk is
+# DoorOfTime_IsAfter_Step01_Exp_Talk (schedule row Goto_HyruleCastle_IsCompleted_Exp).
+# Talk is only the default schedule fallback. It starts at Event6, a BoolExp
+# switch, and has no Mask_All, so that hook is an entry hook. Near stays vanilla.
+#
+# Darunia's look-at is InitTalk::InitTalk with the turn and greeting Zora's
+# Event0 already uses. KokiriOnly is only for the Kokiri. NpcFairy_MovingFlag
+# is not on that generic entry here.
+#
+# On a cleared save, ranch Talon is on Minigame_FindOutCucco step Ready, so
+# that schedule wins. His talk is Ready_Npc_Hylia_Talon_Child_Talk. Event255
+# already called InitTalk. Npc_Hylia_Talon_Child::Talk stays as the fallback.
+patches:
+  - file: Event/EventFlow/Npc_Kokiri_012_Child.bfevfl.zs
+    rumor:
+      actor: Npc_EventStarter
+      challenge: EscapeFromCrumblingGanonCastle
+      show_progress: true
+      init:
+        flow: InitTalk
+        entry: InitTalk_KokiriOnly
+        params:
+          Arg_Turn: 4
+          Arg_Greeting: 4
+          NpcFairy_MovingFlag: false
+      flags:
+        - EscapeFromCrumblingGanonCastle_4F_BreakRoom
+        - EscapeFromCrumblingGanonCastle_AreYouOkCheck
+        - EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+        - EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+      steps:
+        1: Step05
+        2: Step06
+        3: Step07
+        4: Step08
+      talks:
+        - entry: Talk
+          hook: entry
+          greet: EventFlowMsg/Npc_Kokiri_012_Child:AtO_Kokiri012_Greet
+          rumor: EventFlowMsg/Npc_Kokiri_012_Child:AtO_Kokiri012_Rumor
+          flag: EscapeFromCrumblingGanonCastle_4F_BreakRoom
+  - file: Event/EventFlow/Npc_Goron_Darunia_Child.bfevfl.zs
+    rumor:
+      actor: Npc_Goron_Darunia_Child
+      challenge: EscapeFromCrumblingGanonCastle
+      show_progress: true
+      init:
+        flow: InitTalk
+        entry: InitTalk
+        params:
+          Arg_Turn: 4
+          Arg_Greeting: 4
+      flags:
+        - EscapeFromCrumblingGanonCastle_4F_BreakRoom
+        - EscapeFromCrumblingGanonCastle_AreYouOkCheck
+        - EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+        - EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+      steps:
+        1: Step05
+        2: Step06
+        3: Step07
+        4: Step08
+      talks:
+        - entry: Talk
+          hook: next
+          after: Event20
+          rejoin: Event8
+          greet: EventFlowMsg/Npc_Goron_Darunia_Child:AtO_Darunia_Greet
+          rumor: EventFlowMsg/Npc_Goron_Darunia_Child:AtO_Darunia_Rumor
+          flag: EscapeFromCrumblingGanonCastle_AreYouOkCheck
+  - file: Event/EventFlow/Npc_Zora_004.bfevfl.zs
+    rumor:
+      actor: Npc_Zora_004
+      challenge: EscapeFromCrumblingGanonCastle
+      show_progress: true
+      flags:
+        - EscapeFromCrumblingGanonCastle_4F_BreakRoom
+        - EscapeFromCrumblingGanonCastle_AreYouOkCheck
+        - EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+        - EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+      steps:
+        1: Step05
+        2: Step06
+        3: Step07
+        4: Step08
+      talks:
+        - entry: Talk
+          hook: next
+          after: Event0
+          rejoin: Event51
+          skip_init: true
+          greet: EventFlowMsg/Npc_Zora_004:AtO_Zora004_Greet
+          rumor: EventFlowMsg/Npc_Zora_004:AtO_Zora004_Rumor
+          flag: EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+  - file: Event/EventFlow/Npc_Hylia_Talon_Child.bfevfl.zs
+    rumor:
+      actor: Npc_Hylia_Talon_Child
+      challenge: EscapeFromCrumblingGanonCastle
+      show_progress: true
+      flags:
+        - EscapeFromCrumblingGanonCastle_4F_BreakRoom
+        - EscapeFromCrumblingGanonCastle_AreYouOkCheck
+        - EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+        - EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+      steps:
+        1: Step05
+        2: Step06
+        3: Step07
+        4: Step08
+      talks:
+        - entry: Talk
+          hook: next
+          after: Event50
+          rejoin: Event14
+          skip_init: true
+          greet: EventFlowMsg/Npc_Hylia_Talon_Child:AtO_Talon_Greet
+          rumor: EventFlowMsg/Npc_Hylia_Talon_Child:AtO_Talon_Rumor
+          flag: EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+  - file: Event/EventFlow/Minigame_FindOutCucco.bfevfl.zs
+    rumor:
+      actor: Npc_Hylia_Talon_Child
+      challenge: EscapeFromCrumblingGanonCastle
+      show_progress: true
+      flags:
+        - EscapeFromCrumblingGanonCastle_4F_BreakRoom
+        - EscapeFromCrumblingGanonCastle_AreYouOkCheck
+        - EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+        - EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+      steps:
+        1: Step05
+        2: Step06
+        3: Step07
+        4: Step08
+      talks:
+        - entry: Ready_Npc_Hylia_Talon_Child_Talk
+          hook: next
+          after: Event255
+          rejoin: Event385
+          skip_init: true
+          greet: EventFlowMsg/Npc_Hylia_Talon_Child:AtO_Talon_Greet
+          rumor: EventFlowMsg/Npc_Hylia_Talon_Child:AtO_Talon_Rumor
+          flag: EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+  - file: Event/EventFlow/Npc_Kokiri_Mido_Child.bfevfl.zs
+    rumor:
+      actor: Npc_EventStarter
+      challenge: EscapeFromCrumblingGanonCastle
+      finale: true
+      done_flag: EscapeFromCrumblingGanonCastle_EndTrap_Runaway00_Play
+      init:
+        flow: InitTalk
+        entry: InitTalk_KokiriOnly
+        params:
+          Arg_Turn: 4
+          Arg_Greeting: 4
+          NpcFairy_MovingFlag: false
+      flags:
+        - EscapeFromCrumblingGanonCastle_4F_BreakRoom
+        - EscapeFromCrumblingGanonCastle_AreYouOkCheck
+        - EscapeFromCrumblingGanonCastle_Bridge_ZeldaHoldON
+        - EscapeFromCrumblingGanonCastle_EndTrap_Relief00_Play
+      talks:
+        - entry: DoorOfTime_IsAfter_Step01_Exp_Talk
+          hook: next
+          after: Event186
+          rejoin: Event82
+          nudge: EventFlowMsg/Npc_Kokiri_Mido_Child:AtO_Mido_Nudge
+          rumor: EventFlowMsg/Npc_Kokiri_Mido_Child:AtO_Mido_Rumor
+        - entry: Talk
+          hook: entry
+          nudge: EventFlowMsg/Npc_Kokiri_Mido_Child:AtO_Mido_Nudge
+          rumor: EventFlowMsg/Npc_Kokiri_Mido_Child:AtO_Mido_Rumor

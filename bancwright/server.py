@@ -185,13 +185,22 @@ def list_scenes():
         try:
             project = Project(config["project"])
             modified = set(project.modified_scenes())
+            recipes = set(project.summary()["catalog"]["recipeBancs"])
         except BancError:
             modified = set()
+            recipes = set()
+    else:
+        recipes = set()
     scenes = dump.list_scenes()
     known = {scene["path"] for scene in scenes}
-    for path in sorted(modified - known):
+    for path in sorted((modified | recipes) - known):
         project_only.append(path)
-    return {"scenes": scenes, "modified": sorted(modified & known), "projectOnly": project_only}
+    return {
+        "scenes": scenes,
+        "modified": sorted(modified & known),
+        "recipes": sorted(recipes & known),
+        "projectOnly": project_only,
+    }
 
 
 @app.get("/api/scene")

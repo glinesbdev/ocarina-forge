@@ -1,0 +1,22 @@
+# The sitting ocarina Saria is Npc_Kokiri_Saria_Child_OcarinaHolder, index 415
+# in KokiriForest_Child_Static, at about (-18.86, 110.05, 1.06). She has no
+# Presence block, so the banc is left alone. Her sit on a cleared save is the
+# last ConditionalSchedule row, under ActionSchedule Setting.
+#
+# Her spawn is the uncompressed logic module below. The build ORs her create
+# gate with HavePlayedEvent.TitleEventBase. place: true would clone a standing
+# actor that has a presence flag. This file does not.
+#
+# Her sit and her ocarina on a cleared save come from the AIScheduleParam
+# below. The build appends one ConditionalSchedule row, copied from the
+# WarpDone sit, with the epilogue flag and the Dm_Kokiri_0150 EventEntry.
+# That row's OnPlayerTalk is C5C6_TT. The InHome row shares it. The new
+# row is last, so it wins only after the epilogue.
+place: false
+logic: Logic/KokiriForest_Child_Level_Npc_Kokiri_Saria_Child_a766.logic.module.ainb
+schedule: Component/AIScheduleParam/Npc_Kokiri_Saria_Child.game__component__AIScheduleParam.bgyml
+gyaml: Npc_Kokiri_Saria_Child
+flag: HavePlayedEvent.TitleEventBase
+opening_flag: HavePlayedEvent.Dm_Kokiri_0060
+near: [-46.5, 118.5, 15.4]
+near_radius: 40

@@ -1,0 +1,15 @@
+# The dead challenge becomes a Sub journal. Steps and the row order stay.
+# IsListAdventureLog is removed. IsCompleteTarget is new. Category Sub is the
+# u32 1200733368. Main is 460120899. Step02, Step03, Step04, and Reset stay in
+# the enum and are never written by a flow.
+# Every step lists Npc_Hylia_Zelda_Adult as a participant. Running a step makes the
+# challenge system create her, here in a child scene. Empty the lists.
+edits:
+  - file: RSDB/Challenge.Product.111.rstbl.byml.zs
+    row: Work/Challenge/EscapeFromCrumblingGanonCastle.game__challenge__Challenge.gyml
+    set:
+      IsCompleteTarget: true
+      Category: 1200733368
+    delete:
+      - IsListAdventureLog
+    clear_participants: true

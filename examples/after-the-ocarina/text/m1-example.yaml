@@ -1,0 +1,12 @@
+# M1 pipeline proof: one line we wrote, applied to the player's own text pack.
+# Saria's first line when Link leaves his house with Navi (Dm_Kokiri_0060).
+# If a dump has no such label, the build stops and prints the command that lists labels.
+edits:
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Dm_Kokiri_0060.msbt
+    label: Dm_Kokiri_0060_0002
+    note: >
+      Replaces the whole message with one plain line. Control codes in the
+      original are not kept. Copy codes from msbtmod.py cat when a real line
+      needs them. US English only.
+    text: "{3:0:010000}{4:0:09004c61756768535f303000}After the Ocarina: Navi is gone, and the forest is quiet."

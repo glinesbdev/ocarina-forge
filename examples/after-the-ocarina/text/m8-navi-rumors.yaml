@@ -1,0 +1,170 @@
+# US English only. A visible line stays at 52 characters, and a page stays at
+# three lines. The words are the approved lines. The breaks are only so a line
+# fits. Bradyn can retune the wording here.
+#
+# The journal file is new. new_file creates ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+# when the pack does not have it. The other languages have no copy of these labels.
+edits:
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Kokiri_012_Child.msbt
+    label: AtO_Kokiri012_Greet
+    create: true
+    note: Kokiri child, first epilogue talk.
+    text: "Link! You're up and about again."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Kokiri_012_Child.msbt
+    label: AtO_Kokiri012_Rumor
+    create: true
+    note: Kokiri child. The light went toward the hills.
+    text: "Navi? I saw a little light float off toward the\\nhills. Or was it the mountain? The Gorons up there\\nsee everything."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Goron_Darunia_Child.msbt
+    label: AtO_Darunia_Greet
+    create: true
+    note: Darunia, first epilogue talk.
+    text: "Brother! Good to see you on your feet."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Goron_Darunia_Child.msbt
+    label: AtO_Darunia_Rumor
+    create: true
+    note: Darunia. A glow drifted down to the river.
+    text: "A fairy? Gorons don't pay fairies much mind... but\\none of the little ones swears a glow drifted down to\\nthe river. Ask the Zoras."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Zora_004.msbt
+    label: AtO_Zora004_Greet
+    create: true
+    note: The Zora, first epilogue talk.
+    text: "Oh, the boy from the forest."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Zora_004.msbt
+    label: AtO_Zora004_Rumor
+    create: true
+    note: The Zora. The light followed the water back up.
+    text: "A tiny light did pass through here. It followed the\\nwater back up toward the forest, where the river\\nfirst begins."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Hylia_Talon_Child.msbt
+    label: AtO_Talon_Greet
+    create: true
+    note: Talon, first epilogue talk.
+    text: "Well, if it ain't the forest kid!"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Hylia_Talon_Child.msbt
+    label: AtO_Talon_Rumor
+    create: true
+    note: Talon. A glow over the cuccos, heading for the forest.
+    text: "A fairy? Now that ya mention it, I seen a glow over\\nthe cuccos one night, headin' for the forest.\\nFigured I was dreamin'."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Kokiri_Mido_Child.msbt
+    label: AtO_Mido_Nudge
+    create: true
+    note: Mido, when any of the four rumors is still missing.
+    text: "What are you bugging ME for? Go ask somebody else!"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Kokiri_Mido_Child.msbt
+    label: AtO_Mido_Rumor
+    create: true
+    note: Mido, once all four rumors are set. The woods stay sealed.
+    text: "Fine! I saw her. She flew into the Lost Woods,\\nbehind my house. But without a fairy, you'll never\\nfind your way back out."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Name
+    create: true
+    new_file: true
+    note: Journal title. This msbt is not in the vanilla pack.
+    text: "Asking About Navi"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Ready
+    create: true
+    new_file: true
+    text: "You wonder where Navi went."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Ready_NextAction
+    create: true
+    new_file: true
+    text: "Ask around"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Ready_NextActionContent_00
+    create: true
+    new_file: true
+    text: "Someone in Hyrule may have seen her."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step05
+    create: true
+    new_file: true
+    text: "You've heard 1 rumor about Navi."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step05_NextAction
+    create: true
+    new_file: true
+    text: "Keep asking"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step05_NextActionContent_00
+    create: true
+    new_file: true
+    text: "Ask around Kokiri Forest, Goron City, Zora's Domain\\nand Lon Lon Ranch."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step06
+    create: true
+    new_file: true
+    text: "You've heard 2 rumors about Navi."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step06_NextAction
+    create: true
+    new_file: true
+    text: "Keep asking"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step06_NextActionContent_00
+    create: true
+    new_file: true
+    text: "Ask around Kokiri Forest, Goron City, Zora's Domain\\nand Lon Lon Ranch."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step07
+    create: true
+    new_file: true
+    text: "You've heard 3 rumors about Navi."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step07_NextAction
+    create: true
+    new_file: true
+    text: "Keep asking"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step07_NextActionContent_00
+    create: true
+    new_file: true
+    text: "Ask around Kokiri Forest, Goron City, Zora's Domain\\nand Lon Lon Ranch."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step08
+    create: true
+    new_file: true
+    text: "You've heard 4 rumors about Navi."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step08_NextAction
+    create: true
+    new_file: true
+    text: "Keep asking"
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Step08_NextActionContent_00
+    create: true
+    new_file: true
+    text: "Maybe Mido knows more than he lets on."
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: ChallengeMsg/Info_EscapeFromCrumblingGanonCastle.msbt
+    label: Complete
+    create: true
+    new_file: true
+    text: "Mido told you Navi flew into the Lost Woods."

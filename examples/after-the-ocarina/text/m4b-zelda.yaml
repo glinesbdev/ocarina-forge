@@ -1,0 +1,17 @@
+# Child Zelda in the courtyard. create: true adds the label.
+#
+# The msbt path is an assumption. Her talk flow is Npc_Hylia_Zelda_Child,
+# and Saria's spoken lines live in the NPC msbt of the same name. This
+# checkout has no dump, so her emotion and animation ids were not copied.
+# The placeholder has none. Bradyn will refine the wording.
+#
+# Six pages, split with {0:4:}. Each visible line is within 52 characters
+# and each page is within three lines. No color tag. Page 4 is why the
+# stones went home and the Door of Time stays shut.
+edits:
+  - pack: Mals/USen.Product.110.sarc.zs
+    msbt: EventFlowMsg/Npc_Hylia_Zelda_Child.msbt
+    label: AtO_ZeldaLine
+    create: true
+    note: Courtyard talk after Mask_All, when TitleEventBase is true.
+    text: "Link... you came back. I knew you would.{0:4:}I remember everything... the Temple of Time, the\\nsword, all those years that never came to pass.{0:4:}The Ocarina, the stones, the door... I've hidden\\naway everything that could lead back to that future.{0:4:}The Spiritual Stones have gone home to their people.\\nWithout them, the Door of Time will stay sealed, and\\nso will the path to the Sacred Realm, and to him.{0:4:}You gave up so much to save Hyrule. Now it's your\\nturn to live the childhood you never had.{0:4:}Go on, Link. This is your time now."

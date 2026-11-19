@@ -7,6 +7,7 @@ const state = {
   status: null,
   scenes: [],
   modified: new Set(),
+  recipes: new Set(),
   projectOnly: [],
   banc: null,
   view: null,
@@ -76,6 +77,12 @@ $("build-run").addEventListener("click", runBuild);
 $("add-search").addEventListener("input", () => loadActorNames($("add-search").value));
 $("create-project").addEventListener("click", createProject);
 $("open-project").addEventListener("click", openProject);
+$("open-ato").addEventListener("click", () => {
+  const root = state.status && state.status.repo;
+  if (!root) return;
+  $("open-dir").value = `${root}/examples/after-the-ocarina`;
+  openProject();
+});
 $("import-run").addEventListener("click", () => importAto($("import-path").value));
 $("import-example").addEventListener("click", () => {
   const root = state.status && state.status.repo;
@@ -198,6 +205,7 @@ function renderChrome() {
     $("project-name").textContent = dump && dump.root ? dump.root : "";
     $("build-open").hidden = true;
   }
+  renderProjectContents();
 }
 
 function showGate() {
@@ -315,7 +323,65 @@ function openProjectDialog() {
   }
   if (state.status.dump && state.status.dump.root) $("dump-path").value = state.status.dump.root;
   if (state.status.repo) $("import-path").placeholder = `${state.status.repo}/examples/ato-scenes`;
+  const catalog = $("project-catalog");
+  catalog.replaceChildren();
+  if (projectReady()) catalog.append(catalogList(project.catalog));
   $("project-dialog").showModal();
+}
+
+function renderProjectContents() {
+  const box = $("project-contents");
+  const body = $("project-contents-body");
+  if (!box || !body) return;
+  body.replaceChildren();
+  const project = state.status && state.status.project;
+  if (!projectReady() || !project.catalog) {
+    box.hidden = true;
+    return;
+  }
+  const catalog = project.catalog;
+  const count = (catalog.text || []).length + (catalog.events || []).length + (catalog.quests || []).length;
+  if (!count && !(catalog.scenes || []).length) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  body.append(catalogList(catalog));
+}
+
+function catalogList(catalog) {
+  const root = document.createElement("div");
+  root.className = "catalog";
+  const sections = [
+    ["Quests", (catalog.quests || []).map((item) => `${item.name} · ${item.kind}`)],
+    ["Text", (catalog.text || []).map((item) => item.label || item.file)],
+    ["Events", (catalog.events || []).map((item) => `${item.title} · ${item.kind}`)],
+    ["Tables", (catalog.tables || []).map((item) => item.file)],
+    ["Game data", (catalog.gamedata || []).map((item) => (item.names || []).join(", ") || item.file)],
+    ["UI", (catalog.ui || []).map((item) => item.name)],
+    ["Scene recipes", (catalog.scenes || []).map((item) => item.summary)],
+  ];
+  for (const [title, rows] of sections) {
+    if (!rows.length) continue;
+    const block = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const list = document.createElement("ul");
+    for (const row of rows) {
+      const item = document.createElement("li");
+      item.textContent = row;
+      list.append(item);
+    }
+    block.append(heading, list);
+    root.append(block);
+  }
+  if (!root.childElementCount) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "This project has no text, events, or quests yet.";
+    root.append(empty);
+  }
+  return root;
 }
 
 async function createProject() {
@@ -372,6 +438,7 @@ async function refreshScenes() {
   const data = await api.scenes();
   state.scenes = data.scenes;
   state.modified = new Set(data.modified || []);
+  state.recipes = new Set(data.recipes || []);
   state.projectOnly = data.projectOnly || [];
   $("scene-count").textContent = `${state.scenes.length} scenes`;
   renderScenes();
@@ -435,7 +502,12 @@ function sceneButton(scene) {
   if (state.modified.has(scene.path)) {
     const dot = document.createElement("i");
     dot.className = "dot";
-    dot.title = "This scene has edits in the project";
+    dot.title = "This scene has actor edits in the project";
+    button.append(dot);
+  } else if (state.recipes.has(scene.path)) {
+    const dot = document.createElement("i");
+    dot.className = "dot recipe";
+    dot.title = "An advanced patch in this project rewrites this scene at build time";
     button.append(dot);
   }
   button.addEventListener("click", () => {

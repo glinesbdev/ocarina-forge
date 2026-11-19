@@ -1,6 +1,6 @@
 # Checking Bancwright on a real dump
 
-The copy of Bancwright that was built here never saw a game dump, and it never saw `docs/game-formats.md` from After the Ocarina. Synthetic fixtures cover the containers. This list is what to confirm on your machine, with `~/Games/Longshot/rc/v3.0.0`.
+The copy of Bancwright that was built here never saw a game dump. The resource-size rule now matches After the Ocarina's `docs/game-formats.md`, which was verified in game. Synthetic fixtures cover the containers. This list is what to confirm on your machine, with `~/Games/Longshot/rc/v3.0.0`. The file-by-file check against After the Ocarina's own build is [equivalence.md](equivalence.md).
 
 Do this on a copy of the dump if you want a safety net. Bancwright is written to only read the dump and to only write under `mods/<project name>/`. Watch the build log anyway.
 
@@ -24,7 +24,7 @@ Do this on a copy of the dump if you want a safety net. Bancwright is written to
 10. Build with install and zip. The log should name dictionary **3** for each `.bcett.byml.zs`, and it should say the size table was written.
 11. The installed folder is `mods/<name>/romfs`. `BUILD.txt` sits beside `romfs`, not inside it.
 12. Diff the exported banc against the dump’s banc with your usual tools. Unchanged actors should match in value. `AuxFlags` and any other hash map should still be present. Translate that was `{X, Y, Z}` should stay a dictionary.
-13. Compare the new RESTBL entry with `docs/game-formats.md`. Bancwright never lowers an entry. It uses `max(old, align8(new_unpacked + 512), align8(old + 8 * growth + 4096))` when the file grew. If your notes use a different constant, change `entry_for_byml` in `bancwright/formats/restbl.py` before shipping a mod. A too-small entry is the one that hangs on the load.
+13. Compare the new RESTBL entry with `docs/game-formats.md`. A changed file is `align8(old entry + max(0, growth) + 1024)`. The entry is never lowered, and a missing entry is not invented. A too-small entry is the one that hangs on the load.
 14. Boot Longshot with the mod enabled. The edited scene should load, the moved actor should be where you put it, and a hidden actor should be gone. Then quit and confirm the dump’s own `romfs/Banc` files are byte-for-byte unchanged.
 
 ## Importer
@@ -38,4 +38,4 @@ Do this on a copy of the dump if you want a safety net. Bancwright is written to
 - “no resource size table”: `System/Resource/*.rsizetable.zs` is missing. Export will refuse to install. Do not copy a table from somewhere else into the repo.
 - “dictionary” errors: `Pack/ZsDic.pack.zs` is missing or the frame’s dict id is not in the pack. The log names the file.
 - A scene that is in the project but missing from the dump is listed separately and will not open.
-- Dialog, event, and table YAML are not exported yet. The log says that on purpose.
+- A format 1 project stores dialog, event, and table YAML and does not export them. The log says that on purpose. An `engine: after-ocarina` project builds those files. See [equivalence.md](equivalence.md).

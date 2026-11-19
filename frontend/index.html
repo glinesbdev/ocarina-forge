@@ -41,6 +41,10 @@
             <h2>Scenes</h2>
             <span id="scene-count" class="muted"></span>
           </div>
+          <details id="project-contents" hidden>
+            <summary>This project</summary>
+            <div id="project-contents-body"></div>
+          </details>
           <input id="scene-search" type="search" placeholder="Search areas or scenes" autocomplete="off" />
           <div id="scene-list" class="scroll" role="list"></div>
           <div class="legend" aria-label="Actor colors">
@@ -134,6 +138,7 @@
           <button type="button" class="ghost" data-close>Close</button>
         </header>
         <div id="project-summary" class="summary"></div>
+        <div id="project-catalog"></div>
         <div class="split">
           <fieldset>
             <legend>New project</legend>
@@ -148,7 +153,8 @@
             <legend>Open</legend>
             <label>Folder with manifest.yaml<input id="open-dir" placeholder="projects/sample" /></label>
             <button id="open-project" type="button">Open folder</button>
-            <p class="muted tight">Longshot ignores a mods folder whose name starts with _ or -.</p>
+            <button id="open-ato" type="button" class="ghost">Open After the Ocarina</button>
+            <p class="muted tight">Longshot ignores a mods folder whose name starts with _ or -. After the Ocarina is the imported project in this repo.</p>
           </fieldset>
         </div>
         <fieldset>

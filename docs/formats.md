@@ -1,6 +1,6 @@
 # Formats this version reads and writes
 
-The After the Ocarina archive (`docs/game-formats.md` and the `after_ocarina` library) was not in the environment this project was built in. The rules below are the ones Bancwright implements. They follow the public MIT notes and tools in [Kabosune/oot-remake-modding](https://github.com/Kabosune/oot-remake-modding) (the tree After the Ocarina vendors as `third_party/oot-remake-modding`) and the resource-size behavior Longshot published. Compare them with `docs/game-formats.md` on your machine. The checklist is [testing-on-real-dump.md](testing-on-real-dump.md).
+The container rules below were reconciled with After the Ocarina's `docs/game-formats.md` and `docs/blockers.md` (branch `m8-navi-rumors`, commit `ad60e27`). Those notes were verified in game. An earlier Bancwright write-up used the public MIT notes instead, and its resource-size formula was wrong. The checklist is [testing-on-real-dump.md](testing-on-real-dump.md). The equivalence command is [equivalence.md](equivalence.md).
 
 `bancwright/formats/LICENSE-oot-remake-modding.txt` is that MIT license. The code here is a fresh implementation of those layouts, not a copy of the third-party tree, so the editor’s library can stand on its own.
 
@@ -51,15 +51,19 @@ Little endian only. Names are sorted by the usual hash (`h = h * 0x65 + byte`). 
 
 `System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs`, plain zstd, RESTBL version 1. If that name is missing, the first `System/Resource/*.rsizetable.zs` is used. If there are scene diffs and no table, export stops and does not install anything.
 
-The path key is the romfs path **without** `.zs`. CRC is `zlib.crc32`. Named entries exist for CRC collisions. The size is a memory budget, a multiple of 8, not the file size.
+The path key is the romfs path **without** `.zs`. CRC is `zlib.crc32`. A file that was not compressed keeps its suffix: logic modules and AI schedules are `.ainb` and `.bgyml` keys. Named entries exist for CRC collisions. The size is a memory budget, a multiple of 8, not the file size.
 
-When a placement file is rewritten:
+When a shipped file's bytes differ from the dump, the entry becomes:
 
-- The entry is never lowered.
-- It is at least `unpacked size + 512`, rounded up to 8. Rewritten BYML is a little larger than Nintendo’s for the same values, and shipping placement entries sit a few hundred bytes above the file.
-- If the unpacked file grew and an entry already existed, it is also at least `old entry + 8 * bytes grown + 4096`, rounded up to 8. That is the growth Longshot measured: a BYML list element costs more on the heap than it costs in the file. A bump of a few hundred bytes was not enough and the game could sit on the load.
+```text
+align8(old entry + max(0, new unpacked size - old unpacked size) + 1024)
+```
 
-The new entry is inserted as a hashed row, or as a named row when that CRC already belongs to a different path. Other rows, including ones this mod does not touch, are copied through.
+The raise is not skipped because the new file still fits under the old entry. An entry is never shrunk. Saria's schedule is the measured case: entry 14448 for a 3316-byte file. A file that grows to 3384 bytes is `align8(14448 + 68 + 1024)` = 15544. Leaving 14448 made her stand with no dialogue, because the game loaded a default schedule. The logic module's dump entry 12984, for a file that goes 12598 → 13189, becomes `align8(12984 + 591 + 1024)` = 14600.
+
+A path with no entry is not added, except when a patch asks for one. The tapestry step inserts two new hashed entries of 40152 (the CRC of the model path without `.zs`). The hashed list stays sorted. Named entries are copied unchanged. Longshot loads only the mod table that sorts last, so the shipped table has to be the one that wins.
+
+Scene export uses this formula and refuses a banc that has no row. The After the Ocarina engine writes the table with `rewrite_hashed`, including those two new rows.
 
 ## Actor placement
 

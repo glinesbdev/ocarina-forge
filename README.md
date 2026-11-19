@@ -2,7 +2,7 @@
 
 Bancwright is a local workbench for placing actors in the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
 
-This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Dialog editing, event-flow graphs, real models, and a desktop package are later stages. The project format already has a place for them.
+This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches with no visual editor yet, and the build still produces them. Dialog editing, event-flow graphs, real models, and a desktop package are later stages.
 
 Bancwright reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
 
@@ -68,11 +68,19 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | `bancwright/domains.py` | Where a future dialog, event, or table exporter plugs into the build. |
 | `frontend/` | Vite + Three.js editor. Boxes stand in for models; a later stage can swap in cached glTF on the same pivot the gizmo uses. |
 | `examples/sample-project/` | A small project in the format. |
-| `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the importer. |
-| `docs/formats.md` | The container rules this version implements, and where they came from. |
+| `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the simple scene importer. |
+| `examples/after-the-ocarina/` | The imported After the Ocarina project (Bradyn's YAML only). |
+| `vendor/after_ocarina/` | Bradyn's build library, plus the MIT community tools the pipeline shells out to. |
+| `docs/formats.md` | The container rules this version implements, reconciled with `game-formats.md`. |
+| `docs/equivalence.md` | How to diff this build against After the Ocarina's own `scripts/build.py`. |
 
-Import After the Ocarina scene YAML from the project menu (**Import the bundled example**, or a path to `src/scenes`). The importer accepts a banc path plus a list of actor edits (`hash`, `translate`, `rotate`, `params`, `op: add`, `hide`).
+Import a simple scene YAML from the project menu, or open **After the Ocarina** to load the full project. The project panel lists its text, events, and quests. Scene recipes are marked in the scene list.
+
+```bash
+python scripts/import_ato.py ~/Work/after-the-ocarina examples/after-the-ocarina
+python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
+```
 
 ## Not in this version
 
-Real actor models and textures, a dialog editor, an event-flow graph, and desktop packaging. Text, event, and table files in a project are kept and reported in the build log. They are not written into the romfs yet.
+Real actor models and textures, a dialog editor, an event-flow graph, and desktop packaging. Those advanced patches build, and they are not edited on screen yet.

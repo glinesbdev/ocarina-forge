@@ -1,6 +1,6 @@
 # Project format
 
-A Bancwright project is a folder of small text files. Format version is **1**. The folder is meant to be committed. The game dump is not.
+A Bancwright project is a folder of small text files. Format versions **1** and **2** are read. Format 1 is a scene-editor project. Format 2 is the same folder plus an `engine` key, so a build can run a scripted pipeline. The folder is meant to be committed. The game dump is not.
 
 ```text
 my-mod/
@@ -37,7 +37,25 @@ domains:
 
 `target.version` is the game the diffs were written against. Export warns when it is not `1.1.1`, because the size-table rule was checked against that version.
 
-`domains` lists the kinds of patch the project may contain. This version only exports `scenes`. The other three are stored so a later editor can fill them without a format break. See `bancwright/domains.py`. A new exporter should be called from `bancwright.export.build` beside the scene loop.
+`domains` lists the kinds of patch the project may contain. A format 1 project exports `scenes` and stores `text`, `events`, and `tables` for a later editor. See `bancwright/domains.py`.
+
+`engine` defaults to `scenes`. `after-ocarina` builds the project with the vendored pipeline instead of the scene rewriter. That project root is the pipeline's `src` directory:
+
+```text
+after-the-ocarina/
+  manifest.yaml          # format: 2, engine: after-ocarina
+  mod.toml
+  text/*.yaml            # MSBT edits
+  events/*.yaml          # flow patches, the boot hook, the rumor builder
+  scenes/*.yaml          # logic, schedule, stone, and castle recipes
+  rsdb/*.yaml            # GameAnalyzedEventInfo, EventSetting, challenge rows
+  gamedata/*.yaml        # GameDataList reset type and BoolExp appends
+  ui/*.yaml              # tapestry recipe; the bfres is cloned from the dump
+```
+
+`tables/` is still the name a visual RSDB editor would write. The pipeline reads `rsdb/` when that folder exists. Scene files in an engine project are recipes, not actor-hash diffs, unless they actually contain an `actors` map. The viewport highlights a recipe's banc with an open dot. Actor diffs, when a project has them, stay the filled dot and are not merged into the After the Ocarina build.
+
+Some of those recipes have no visual editor yet. They are advanced patches: the YAML is the source, and the build produces the romfs. That includes event flows, the rumor builder, the boot hook, GameDataList, RSDB rows, AINB logic, AIScheduleParam, the stone clones, and the tapestry. The scene editor still owns ordinary actor diffs for a format 1 project.
 
 ## Scene diffs
 
@@ -121,7 +139,7 @@ Actors with no `Hash` are shown as locked and copied through unchanged.
 
 ## Text, events, tables
 
-Any `text/**/*.yaml`, `events/**/*.yaml`, or `tables/**/*.yaml` is part of the project and is left alone by this version’s exporter. The build log says so. The shapes those files will take (MSBT control codes, evfl graphs, RSDB rows) belong to later stages. Do not invent a second scene format beside `scenes/`.
+On a format 1 project, `text/**/*.yaml`, `events/**/*.yaml`, and `tables/**/*.yaml` are stored and the scene build says they were not written. On `engine: after-ocarina` they are the sources the pipeline applies, together with `rsdb/`, `gamedata/`, and `ui/`. The project panel lists the labels, flows, and quests. It does not edit them.
 
 ## After the Ocarina YAML
 

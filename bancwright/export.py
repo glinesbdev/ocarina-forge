@@ -35,6 +35,8 @@ class Log:
 
 
 def build(project, dump, *, install: bool = False, make_zip: bool = False, level: int = 19) -> dict:
+    if project.manifest.get("engine") == "after-ocarina":
+        return _build_after_ocarina(project, dump, install=install, make_zip=make_zip)
     log = Log()
     out_root = project.root / "build" / "romfs"
     if out_root.exists():
@@ -98,6 +100,13 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(packed)
         old_entry = table.get(banc) or 0
+        if not old_entry:
+            raise BancError(
+                f"{banc} has no hashed or named entry in the resource size table. "
+                "A changed file is raised in place. A brand-new file is only added when a patch asks for one. "
+                "Nothing was installed.",
+                "rstb",
+            )
         new_entry = entry_for_byml(old_entry, len(original), len(payload))
         before, after = table.raise_to(banc, new_entry)
         log.info(
@@ -151,6 +160,75 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
             log.info(f"Wrote {zip_path}. Unzip it so {name}/ sits in the Longshot mods folder.")
             zip_path = str(zip_path)
 
+    log.info(f"Build folder: {out_root}.")
+    (project.root / "build").mkdir(exist_ok=True)
+    (project.root / "build" / "log.txt").write_text(_text(log), encoding="utf-8")
+    return {
+        "ok": True,
+        "log": log.lines,
+        "romfs": str(out_root),
+        "installed": installed,
+        "zip": zip_path,
+        "files": written,
+    }
+
+
+def _build_after_ocarina(project, dump, *, install: bool, make_zip: bool) -> dict:
+    """The After the Ocarina pipeline owns this project. Scene diffs are not merged in."""
+    import io
+    import contextlib
+
+    from bancwright.engine.ato import build_project
+
+    log = Log()
+    out_root = project.root / "build" / "romfs"
+    if project.modified_scenes():
+        log.warn(
+            "This project also has scene actor diffs. The After the Ocarina build does not merge them. "
+            "Those diffs stay in the editor."
+        )
+    log.info(
+        f"Project {project.manifest['name']} ({project.manifest.get('title')}), "
+        "engine after-ocarina. Text, events, gamedata, logic, schedule and the tapestry "
+        "are applied by that pipeline."
+    )
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            result = build_project(
+                project.root,
+                dump.romfs,
+                out_root,
+                mod_id=project.manifest["name"],
+                mod_name=project.manifest.get("title") or project.manifest["name"],
+                install=install,
+                mods_root=(dump.root / "mods") if install else None,
+            )
+    except Exception as exc:
+        message = getattr(exc, "message", None) or str(exc)
+        raise BancError(message, "build") from exc
+    for line in buffer.getvalue().splitlines():
+        if line.strip():
+            log.info(line)
+    written = list(result.files)
+    if result.resource_size_table:
+        from after_ocarina.paths import RSTB_REL
+
+        written.append(RSTB_REL)
+    installed = str(result.installed) if result.installed is not None else None
+    if installed:
+        log.info(f"Installed to {installed}. Longshot loads mods/{project.manifest['name']}/romfs.")
+    zip_path = None
+    if make_zip and out_root.is_dir():
+        name = project.manifest["name"]
+        zip_path = project.root / "build" / f"{name}.zip"
+        if zip_path.exists():
+            zip_path.unlink()
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for file in sorted(path for path in out_root.rglob("*") if path.is_file()):
+                archive.write(file, (Path(name) / "romfs" / file.relative_to(out_root)).as_posix())
+        log.info(f"Wrote {zip_path}.")
+        zip_path = str(zip_path)
     log.info(f"Build folder: {out_root}.")
     (project.root / "build").mkdir(exist_ok=True)
     (project.root / "build" / "log.txt").write_text(_text(log), encoding="utf-8")

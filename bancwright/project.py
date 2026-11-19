@@ -15,7 +15,11 @@ from bancwright.actors import format_hash, parse_hash
 from bancwright.errors import BancError
 
 FORMAT = 1
+FORMATS = (1, 2)
 DOMAINS = ("scenes", "text", "events", "tables")
+# Format 2 engine projects also use these folders. `tables` remains the name
+# a future visual editor writes; the After the Ocarina pipeline reads `rsdb`.
+ENGINE_DOMAINS = ("scenes", "text", "events", "tables", "rsdb", "gamedata", "ui")
 _NAME_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
@@ -106,15 +110,16 @@ class Project:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         if not isinstance(data, dict):
             raise BancError(f"{path} is not a project manifest.", "project")
-        if int(data.get("format", 0)) != FORMAT:
+        if int(data.get("format", 0)) not in FORMATS:
             raise BancError(
-                f"{path} uses project format {data.get('format')!r}. Bancwright writes format {FORMAT}.",
+                f"{path} uses project format {data.get('format')!r}. Bancwright reads formats {FORMATS}.",
                 "project",
             )
         data["name"] = check_mod_name(str(data.get("name", "")))
         data.setdefault("title", data["name"])
         data.setdefault("version", "0.1.0")
         data.setdefault("author", "")
+        data.setdefault("engine", "scenes")
         target = data.get("target") or {}
         data["target"] = {
             "game": target.get("game", "oot-switch2"),
@@ -196,9 +201,13 @@ class Project:
         return sorted(path for path in folder.rglob("*.yaml") if path.is_file())
 
     def summary(self) -> dict:
+        from bancwright.catalog import catalog
+
+        names = list(dict.fromkeys([*ENGINE_DOMAINS, *(self.manifest.get("domains") or [])]))
         return {
             "root": str(self.root),
             "manifest": self.manifest,
             "modified": self.modified_scenes(),
-            "domains": {domain: len(self.domain_files(domain)) for domain in DOMAINS},
+            "domains": {domain: len(self.domain_files(domain)) for domain in names if domain},
+            "catalog": catalog(self),
         }

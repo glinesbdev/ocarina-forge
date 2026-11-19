@@ -1,0 +1,42 @@
+# Display Spiritual Stones. Present only while HavePlayedEvent.TitleEventBase is set.
+#
+# Each actor is new. It is not a clone of Saria. The param shape is copied from
+# the one Market_Child altar stone with the same Gyaml. The banc index is not
+# used: on a 1.1.1 dump actor 357 is A_03, not A_02. Exactly one match is
+# required. Links, and any hash that points at another Market actor, are dropped.
+# y_offset is added to the Y below. rotate, when set, replaces the donor Rotate.
+# Both are radians. The stones spin on their own (AS Rotation), so a yaw may
+# only set the start phase.
+flag: HavePlayedEvent.TitleEventBase
+template: Banc/Market/Market_Child_Static.bcett.byml.zs
+stones:
+  # In front of the Deku Tree, near the MeetDekuTree anchor (84.25, 122.18, -26.92).
+  # Y 120.3 is out of child Link's reach. Anything at 118.5 or above is.
+  # Rotation stays the donor's.
+  - gyaml: Obj_TimeTemple_SpiritStone_A_01
+    name: AtO_SpiritStone_Forest
+    banc: Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs
+    translate: [84.0, 120.3, -27.0]
+    y_offset: 0.0
+    vanilla_entry: 132360
+  # On Obj_Goron_RubyBase_B_01.
+  # Translate (-0.05, 116.57, 3.086) and yaw -1.8 were tuned by hand in game.
+  # Positive yaw turns the stone to the player's right.
+  - gyaml: Obj_TimeTemple_SpiritStone_A_02
+    name: AtO_SpiritStone_Fire
+    banc: Banc/GoronCity/GoronCity_Child_Static.bcett.byml.zs
+    translate: [-0.0500, 116.57, 3.086]
+    y_offset: 0.0
+    rotate: [0.0, -1.8000, 0.0]
+    vanilla_entry: 67880
+  # Centred in front of Land_Zora_GateEmblem_A_01 at (67.678, 126.383, 15.680).
+  # Y 125.78 is 0.4 above 125.38. Same 1-unit step: no A_03 model bounds here.
+  # The emblem is a disc about 1.73 across, axis along X, front on the -X side
+  # toward King Zora. If the stone clips the frame, try X 67.15. If it looks
+  # buried in the face, try X 67.6.
+  - gyaml: Obj_TimeTemple_SpiritStone_A_03
+    name: AtO_SpiritStone_Water
+    banc: Banc/ZoraDomain/ZoraDomain_Child_Static.bcett.byml.zs
+    translate: [67.20, 125.78, 15.68]
+    y_offset: 0.0
+    vanilla_entry: 73192

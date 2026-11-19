@@ -1,8 +1,8 @@
 """RESTBL version 1, the resource size table.
 
 `System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs`
-on game 1.1.1. The table is plain zstd (no dictionary). Layout, from the
-public romfs notes:
+on game 1.1.1. The table is plain zstd (no dictionary). Layout, checked
+against After the Ocarina's `docs/game-formats.md`:
 
     0x00  "RESTBL"
     0x06  version, u32, 1
@@ -12,22 +12,27 @@ public romfs notes:
     0x16  hashed entries: CRC32 of the path (u32), size (u32), sorted by CRC
           named entries: path padded to name size, then size (u32)
 
-The path is the romfs path without `.zs`. The size is not the file size. It is
-the memory the game sets aside to load the file: a multiple of 8, and larger
-than the unpacked file.
+The path is the romfs path without `.zs`. An uncompressed file keeps its
+suffix, so `.ainb` and `.bgyml` keys are not stripped. The size is not the
+file size. It is the memory the game sets aside to load the file: a multiple
+of 8, and larger than the unpacked file.
 
-Rules Bancwright applies when a rewritten BYML is installed (public notes,
-plus the rule Longshot measured for parameter files):
+The rule below is the one After the Ocarina verified in game
+(`docs/game-formats.md` on that repo). An earlier Bancwright build used a
+public-notes guess (`unpacked + 512`, and `old + 8 * growth + 4096`). That
+guess is not what the game accepted. Saria's schedule is entry 14448 for a
+3316-byte file. Comparing the new file with that entry always says it still
+fits, and she then stands with no dialogue. The entry that worked was
+14448 + 1024.
 
-* Never lower an entry.
-* At least unpacked size + 512, rounded up to a multiple of 8. Rewritten BYML
-  is a little larger than Nintendo's for the same data, and the shipping
-  entries for placement files sit a few hundred bytes above the file.
-* If the unpacked file grew, also at least
-  `old entry + 8 * bytes grown + 4096`, rounded up to 8. Growing a BYML's
-  entry in proportion to the file was not enough: list elements cost more on
-  the heap than in the file. Longshot uses 8 bytes of entry per byte grown,
-  plus 4 KiB.
+When the shipped bytes differ from the dump:
+
+* Raise the entry to ``align8(old entry + max(0, new size - old size) + 1024)``.
+  The raise is not skipped because the new file still fits under the old entry.
+* Never shrink an entry.
+* A path with no entry is not invented here. A patch that adds a file (the
+  tapestry models) passes the new hashed entry in explicitly. See
+  ``after_ocarina.rstb.rewrite_hashed``.
 """
 
 from __future__ import annotations
@@ -48,14 +53,17 @@ def align8(size: int) -> int:
 
 
 def entry_for_byml(old_entry: int, old_unpacked: int | None, new_unpacked: int) -> int:
-    """The entry to store for a rewritten BYML. See the module docstring."""
-    floor = align8(new_unpacked + 512)
-    if old_entry and old_unpacked is not None and new_unpacked > old_unpacked:
-        growth = new_unpacked - old_unpacked
-        floor = max(floor, align8(old_entry + 8 * growth + 4096))
-    if old_entry:
-        return max(old_entry, floor)
-    return floor
+    """The entry to store for a rewritten file that already has a table row.
+
+    ``align8(old_entry + max(0, growth) + 1024)``. A missing entry raises
+    ValueError; the caller has to refuse it or pass an explicit new row.
+    """
+    if old_entry <= 0:
+        raise ValueError("no existing resource-size entry")
+    growth = 0
+    if old_unpacked is not None:
+        growth = max(0, new_unpacked - old_unpacked)
+    return align8(old_entry + growth + 1024)
 
 
 def _crc(path: str) -> int:

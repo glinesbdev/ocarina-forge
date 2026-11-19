@@ -1,0 +1,29 @@
+format: 2
+name: after-ocarina
+title: After the Ocarina
+version: 0.1.0
+author: Bradyn
+engine: after-ocarina
+target:
+  game: oot-switch2
+  version: "1.1.1"
+  host: longshot
+domains:
+- scenes
+- text
+- events
+- rsdb
+- gamedata
+- ui
+source:
+  repo: glinesbdev/after-the-ocarina
+  branch: m8-navi-rumors
+  commit: ad60e27d6342c8b602a077afa290ad646d7c3941
+  archive: 72c844a448bb31b82863e0f9b2b82f39065c746c
+  layout: The project root is the pipeline src directory.
+  note: >
+    The attached archive was 72c844a. This environment could not clone the
+    Origin repo, so the ad60e27 patch was applied on top: the tapestry, the
+    Zora starter bind, Mido's Show before Complete, and Defeat_Ganon Complete
+    on the boot hook. Re-run scripts/import_ato.py against a checkout to
+    replace this tree.

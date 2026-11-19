@@ -1,0 +1,18 @@
+# Child Zelda's courtyard talk during the epilogue.
+#
+# The schedule's EventSetting name is Npc_Hylia_Zelda_Child_DC1C2_TTT.
+# The flowchart entry is Talk. Talk starts at Event99, a same-file
+# subflow: res_flowchart_name is empty and entry_point_name is Mask_All.
+# Event99's nxt is Event6. Event6 is GameDataActor
+# EventQueryIsGameDataBoolExp on DoorOfTime_IsAfter_Step01_Exp, not a
+# talk. The first Npc_EventStarter.EventTalk reachable from Event6 is
+# Event5 (Talk_01). This patch leaves Talk on Event99. Event99's nxt
+# moves to a GameDataActor query on HavePlayedEvent.TitleEventBase.
+# Case 0 plays AtO_ZeldaLine. The parameters are copied from Event5,
+# and only MessageId changes. Case 1 continues to Event6.
+patches:
+  - file: Event/EventFlow/Npc_Hylia_Zelda_Child.bfevfl.zs
+    retarget_next: Event99
+    rejoin_event: Event6
+    talk_entry: Talk
+    message_id: EventFlowMsg/Npc_Hylia_Zelda_Child:AtO_ZeldaLine
