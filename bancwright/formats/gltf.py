@@ -88,14 +88,25 @@ def cluster_lod(
     uvs: list[tuple[float, float]] | None,
     ratio: float = 0.35,
 ) -> tuple[list, list, list | None] | None:
-    """A far mesh: quantize vertices onto a grid and drop degenerate triangles."""
-    if len(indices) < 6000 or len(positions) < 80:
+    """A far mesh: quantize vertices onto a grid and drop degenerate triangles.
+
+    The grid gets coarser as the source gets larger, so a view of the whole
+    forest is not still drawing the near mesh.
+    """
+    count = len(indices)
+    if count < 900 or len(positions) < 40:
         return None
+    if count > 80000:
+        ratio = min(ratio, 0.06)
+    elif count > 15000:
+        ratio = min(ratio, 0.12)
+    elif count > 4000:
+        ratio = min(ratio, 0.2)
     xs = [point[0] for point in positions]
     ys = [point[1] for point in positions]
     zs = [point[2] for point in positions]
     span = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs), 1e-4)
-    cells = max(2, int(round(max(24, len(positions) * ratio) ** (1 / 3))))
+    cells = max(2, int(round(max(16, len(positions) * ratio) ** (1 / 3))))
     step = span / cells
     origin = (min(xs), min(ys), min(zs))
     vertex_of: dict[tuple[int, int, int], int] = {}

@@ -6,6 +6,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
+import { chooseLod, isTerrainProxy } from "./cull.js";
 import { chooseHit } from "./pick.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -26,8 +27,9 @@ export const CATEGORY_COLOR = {
 
 /**
  * Actors are boxes until a converted glTF arrives. The gizmo stays on `pivot`.
- * Volumes (areas, system actors, large land) are translucent and lose picks
- * to anything solid along the same ray.
+ * Volumes (areas, system actors, large land) are edge outlines. The fill is
+ * drawn only while that volume is selected, so overlapping areas cannot wash
+ * the scene. Picks prefer a solid mesh over a volume.
  */
 export function createViewport(host, hooks) {
   const scene = new THREE.Scene();
@@ -38,8 +40,10 @@ export function createViewport(host, hooks) {
   camera.rotation.order = "YXZ";
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = false;
+  renderer.shadowMap.autoUpdate = false;
   host.appendChild(renderer.domElement);
 
   const labels = new CSS2DRenderer();
@@ -49,6 +53,7 @@ export function createViewport(host, hooks) {
   scene.add(new THREE.HemisphereLight(0xf3f6ea, 0x2c3a2e, 0.9));
   const sun = new THREE.DirectionalLight(0xfff6df, 1.2);
   sun.position.set(18, 36, 14);
+  sun.castShadow = false;
   scene.add(sun);
   scene.add(new THREE.AmbientLight(0x8ea090, 0.25));
 
@@ -87,8 +92,10 @@ export function createViewport(host, hooks) {
   const metaCache = new Map();
   const categories = { area: "show", system: "show" };
   let hideVolumes = false;
+  let showGround = false;
   let generation = 0;
   let terrainRoot = null;
+  let groundGrid = null;
   let lastClick = null;
   let grid = null;
   let selected = null;
@@ -126,6 +133,20 @@ export function createViewport(host, hooks) {
     terrainRoot = null;
   }
 
+  function clearGround() {
+    if (!groundGrid) return;
+    if (groundGrid.geometry) groundGrid.geometry.dispose();
+    const materials = Array.isArray(groundGrid.material) ? groundGrid.material : [groundGrid.material];
+    for (const material of materials) if (material) material.dispose();
+    groundGrid.removeFromParent();
+    groundGrid = null;
+  }
+
+  function applyGround() {
+    if (groundGrid) groundGrid.visible = showGround;
+    if (terrainRoot) terrainRoot.visible = showGround;
+  }
+
   function clearActors() {
     transform.detach();
     clearBatches();
@@ -133,15 +154,32 @@ export function createViewport(host, hooks) {
     entries.clear();
   }
 
+  function syncGhost(entry) {
+    const ghost = !entry.parts || !entry.parts.length;
+    const show = ghost && entry.pivot.visible;
+    const volume = Boolean(show && entry.volume);
+    const on = entry.key === selected;
+    if (volume) {
+      entry.material.opacity = on ? 0.08 : 0;
+      entry.material.depthWrite = false;
+      entry.edgeMaterial.color.set(on ? 0xf2d7a2 : 0xb7c0b4);
+      entry.edgeMaterial.opacity = on ? 1 : 0.66;
+    }
+    entry.mesh.visible = show && (!volume || on);
+    entry.edges.visible = show;
+  }
+
   function paint(entry) {
     const on = entry.key === selected;
     const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
     const ghost = !entry.parts || !entry.parts.length;
-    entry.material.opacity = on ? 0.1 : entry.status === "hidden" ? 0.02 : 0.04;
-    entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.color);
-    entry.edgeMaterial.opacity = on ? 1 : 0.82;
-    entry.mesh.visible = ghost;
-    entry.edges.visible = ghost;
+    entry.material.depthWrite = false;
+    if (!(ghost && entry.volume)) {
+      entry.material.opacity = on ? 0.1 : entry.status === "hidden" ? 0.02 : 0.04;
+      entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.color);
+      entry.edgeMaterial.opacity = on ? 1 : 0.82;
+    }
+    syncGhost(entry);
     tintInstance(entry);
   }
 
@@ -211,6 +249,8 @@ export function createViewport(host, hooks) {
 
   function setActors(actors, options = {}) {
     clearActors();
+    clearTerrain();
+    clearGround();
     const token = ++generation;
     actors.forEach((actor, index) => {
       const key = actor.id || `locked-${index}`;
@@ -458,13 +498,15 @@ export function createViewport(host, hooks) {
       if (!geometry.boundsTree) geometry.computeBoundsTree();
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
+      const material = prepareMaterial(source);
       parts.push({
         lod: identity.lod,
         family: identity.family,
         geometry,
-        material: prepareMaterial(source),
+        material,
         radius: geometry.boundingSphere ? geometry.boundingSphere.radius : 1,
         key: `${url}|${identity.lod}|${identity.family}|${index}`,
+        batchKey: batchKeyFor(material, geometry),
       });
       index += 1;
     });
@@ -529,8 +571,78 @@ export function createViewport(host, hooks) {
     return (radius / Math.max(distance, 0.25)) * (height / (2 * Math.tan(fov / 2)));
   }
 
-  function cellOf(position) {
-    return `${Math.floor(position.x / 64)}:${Math.floor(position.z / 64)}`;
+  const imageKeys = new WeakMap();
+
+  function imageSignature(image) {
+    if (!image) return "none";
+    const cached = imageKeys.get(image);
+    if (cached) return cached;
+    const width = image.width || image.videoWidth || 0;
+    const height = image.height || image.videoHeight || 0;
+    if (!width || !height) return `unready:${image.src || image.uuid || ""}`;
+    let key = `${width}x${height}`;
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = 16;
+      canvas.height = 16;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      context.drawImage(image, 0, 0, 16, 16);
+      const data = context.getImageData(0, 0, 16, 16).data;
+      let hash = 2166136261;
+      for (let i = 0; i < data.length; i += 1) {
+        hash ^= data[i];
+        hash = Math.imul(hash, 16777619);
+      }
+      key = `${key}:${hash >>> 0}`;
+    } catch {
+      key = `${key}:${image.src || "bitmap"}`;
+    }
+    imageKeys.set(image, key);
+    return key;
+  }
+
+  function batchKeyFor(material, geometry) {
+    const imageKey = material.map && material.map.image
+      ? imageSignature(material.map.image)
+      : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
+    const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
+    const attrs = Object.keys(geometry.attributes).sort().join(",");
+    const indexed = geometry.getIndex() ? "idx" : "no";
+    const tintHex = material.color ? material.color.getHexString() : "fff";
+    return `${imageKey}|${alpha}|s${material.side}|c${tintHex}|${indexed}|${attrs}`;
+  }
+
+  function actorScale(entry) {
+    return Math.max(entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z, 0.001);
+  }
+
+  function screenPixels(radius, distance) {
+    const height = renderer.domElement.height || 0;
+    if (height < 2) return 999;
+    return projectedPixels(radius, distance);
+  }
+
+  function lodFor(entry, part, distance) {
+    const scale = actorScale(entry);
+    const radius = part.radius * scale;
+    return chooseLod({
+      distance,
+      radius,
+      pixels: screenPixels(radius, distance),
+      hasFar: Boolean(entry.farNames && entry.farNames.has(part.family)),
+      selected: entry.key === selected,
+    });
+  }
+
+  function syncBatchVisibility() {
+    for (const entry of entries.values()) {
+      if (!entry.slots || !entry.slots.length) continue;
+      const distance = camera.position.distanceTo(entry.pivot.position);
+      for (const slot of entry.slots) {
+        const lod = entry.pivot.visible ? lodFor(entry, slot, distance) : null;
+        slot.mesh.setVisibleAt(slot.index, lod === slot.lod);
+      }
+    }
   }
 
   function rebuildBatches() {
@@ -538,58 +650,95 @@ export function createViewport(host, hooks) {
     const groups = new Map();
     naiveDraws = 0;
     for (const entry of entries.values()) {
-      const ghost = !entry.parts || !entry.parts.length;
-      entry.mesh.visible = ghost && entry.pivot.visible;
-      entry.edges.visible = ghost && entry.pivot.visible;
-      if (!entry.pivot.visible || ghost) continue;
-      naiveDraws += entry.parts.filter((part) => part.lod === 0).length;
+      syncGhost(entry);
+      if (!entry.parts || !entry.parts.length) continue;
+      if (entry.pivot.visible) naiveDraws += entry.parts.filter((part) => part.lod === 0).length;
       entry.pivot.updateWorldMatrix(true, false);
-      const distance = camera.position.distanceTo(entry.pivot.position);
-      const scale = Math.max(entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z, 0.001);
-      const useFar = distance > 80;
       for (const part of entry.parts) {
-        const radius = part.radius * scale;
-        if (radius < 8 && projectedPixels(radius, distance) < 1.4) continue;
-        const reduced = entry.farNames && entry.farNames.has(part.family);
-        if (useFar && reduced && part.lod === 0) continue;
-        if (part.lod > 0 && (!useFar || !reduced)) continue;
-        const key = `${part.key}|${cellOf(entry.pivot.position)}`;
-        let group = groups.get(key);
+        let group = groups.get(part.batchKey);
         if (!group) {
-          group = { part, records: [] };
-          groups.set(key, group);
+          group = { material: part.material, records: [], geometries: new Map() };
+          groups.set(part.batchKey, group);
         }
-        group.records.push(entry);
+        group.records.push({ entry, part });
+        if (!group.geometries.has(part.geometry.uuid)) group.geometries.set(part.geometry.uuid, part.geometry);
       }
     }
     for (const group of groups.values()) {
-      const mesh = new THREE.InstancedMesh(group.part.geometry, group.part.material, group.records.length);
-      mesh.frustumCulled = true;
-      mesh.count = group.records.length;
-      const ids = new Array(group.records.length);
-      group.records.forEach((entry, index) => {
-        mesh.setMatrixAt(index, entry.pivot.matrixWorld);
-        mesh.setColorAt(index, instanceTint(entry, tint));
-        ids[index] = entry.key;
-        entry.slots.push({ mesh, index });
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      let verts = 0;
+      let indices = 0;
+      for (const geometry of group.geometries.values()) {
+        const position = geometry.getAttribute("position");
+        verts += position ? position.count : 0;
+        indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
+      }
+      if (!verts || !group.records.length) continue;
+      let mesh;
+      try {
+        mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
+      } catch (error) {
+        console.error(error);
+        continue;
+      }
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.frustumCulled = false;
+      mesh.perObjectFrustumCulled = true;
+      mesh.sortObjects = Boolean(group.material.transparent);
+      const geomIds = new Map();
+      let built = true;
+      for (const [uuid, geometry] of group.geometries) {
+        try {
+          geomIds.set(uuid, mesh.addGeometry(geometry));
+        } catch (error) {
+          console.error(error);
+          built = false;
+          break;
+        }
+      }
+      if (!built) {
+        mesh.dispose();
+        continue;
+      }
+      const ids = [];
+      const geometries = [];
+      const spheres = [];
+      let count = 0;
+      for (const record of group.records) {
+        const geometryId = geomIds.get(record.part.geometry.uuid);
+        if (geometryId === undefined) continue;
+        const instanceId = mesh.addInstance(geometryId);
+        mesh.setMatrixAt(instanceId, record.entry.pivot.matrixWorld);
+        mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
+        ids[instanceId] = record.entry.key;
+        geometries[instanceId] = record.part.geometry;
+        spheres[instanceId] = record.part.geometry.boundingSphere;
+        count = Math.max(count, instanceId + 1);
+        record.entry.slots.push({
+          mesh,
+          index: instanceId,
+          lod: record.part.lod,
+          family: record.part.family,
+          radius: record.part.radius,
+        });
+      }
+      mesh.userData.pick = { ids, geometries, spheres, count };
+      mesh.raycast = raycastBatch;
       mesh.computeBoundingSphere();
       scene.add(mesh);
       batches.push({ mesh, ids });
     }
+    syncBatchVisibility();
   }
 
-  let rebuildQueued = false;
+  let rebuildTimer = 0;
   function queueRebuild() {
-    if (rebuildQueued) return;
-    rebuildQueued = true;
-    requestAnimationFrame(() => {
-      rebuildQueued = false;
+    if (rebuildTimer) clearTimeout(rebuildTimer);
+    rebuildTimer = window.setTimeout(() => {
+      rebuildTimer = 0;
       rebuildBatches();
       requestRender();
-    });
+    }, 100);
   }
 
   function attachModel(entry, template, url) {
@@ -604,6 +753,75 @@ export function createViewport(host, hooks) {
     entry.templateUrl = url;
     entry.volume = false;
     queueRebuild();
+  }
+
+  const scratchMatrix = new THREE.Matrix4();
+  const scratchSphere = new THREE.Sphere();
+  const scratchMesh = new THREE.Mesh();
+  const scratchHits = [];
+  scratchMesh.matrixAutoUpdate = false;
+
+  function raycastBatch(raycaster, intersects) {
+    const pick = this.userData.pick;
+    if (!pick) return;
+    for (let i = 0; i < pick.count; i += 1) {
+      if (!pick.ids[i] || !this.getVisibleAt(i)) continue;
+      this.getMatrixAt(i, scratchMatrix);
+      const source = pick.spheres[i];
+      if (!source) continue;
+      scratchSphere.copy(source).applyMatrix4(scratchMatrix);
+      if (!raycaster.ray.intersectsSphere(scratchSphere)) continue;
+      scratchMesh.geometry = pick.geometries[i];
+      scratchMesh.material = this.material;
+      scratchMesh.matrix.copy(scratchMatrix);
+      scratchMesh.matrixWorld.copy(scratchMatrix);
+      scratchHits.length = 0;
+      scratchMesh.raycast(raycaster, scratchHits);
+      for (let j = 0; j < scratchHits.length; j += 1) {
+        const hit = scratchHits[j];
+        hit.object = this;
+        hit.batchId = i;
+        intersects.push(hit);
+      }
+    }
+  }
+
+  function measureTemplate(template) {
+    const box = new THREE.Box3();
+    const ys = [];
+    const point = new THREE.Vector3();
+    template.updateWorldMatrix(true, true);
+    template.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      const position = child.geometry.attributes.position;
+      if (!position) return;
+      const step = Math.max(1, Math.floor(position.count / 2500));
+      for (let i = 0; i < position.count; i += step) {
+        point.fromBufferAttribute(position, i).applyMatrix4(child.matrixWorld);
+        box.expandByPoint(point);
+        ys.push(point.y);
+      }
+    });
+    ys.sort((a, b) => a - b);
+    const height = ys.length ? ys[Math.floor(ys.length * 0.5)] : 0;
+    return { box, height };
+  }
+
+  function placeGround(box, height) {
+    clearGround();
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const span = Math.max(10, Math.ceil(Math.max(size.x, size.z)));
+    const divisions = Math.min(120, Math.max(12, Math.round(span / 8)));
+    const gridLines = new THREE.GridHelper(span, divisions, 0x9aa394, 0x3c4740);
+    gridLines.position.set(center.x, height, center.z);
+    gridLines.visible = showGround;
+    gridLines.raycast = () => {};
+    gridLines.traverse((child) => {
+      child.raycast = () => {};
+    });
+    scene.add(gridLines);
+    groundGrid = gridLines;
   }
 
   function mergeStatic(template) {
@@ -647,6 +865,7 @@ export function createViewport(host, hooks) {
 
   async function loadTerrain(token, banc) {
     clearTerrain();
+    clearGround();
     if (!banc || !hooks.fetchTerrain) return;
     let meta;
     try {
@@ -665,11 +884,20 @@ export function createViewport(host, hooks) {
         else setTimeout(resolve, 0);
       });
       if (token !== generation) return;
+      if (isTerrainProxy(meta)) {
+        const measured = measureTemplate(template);
+        if (!measured.box.isEmpty()) placeGround(measured.box, measured.height);
+        requestRender();
+        return;
+      }
       terrainRoot = mergeStatic(template);
       terrainRoot.name = "terrain";
+      terrainRoot.visible = showGround;
       terrainRoot.raycast = () => {};
       terrainRoot.traverse((child) => {
         child.raycast = () => {};
+        child.castShadow = false;
+        child.receiveShadow = false;
       });
       scene.add(terrainRoot);
       requestRender();
@@ -692,9 +920,9 @@ export function createViewport(host, hooks) {
   function select(id) {
     selected = id;
     for (const entry of entries.values()) paint(entry);
+    syncBatchVisibility();
     attach();
     syncLabels();
-    for (const entry of entries.values()) tintInstance(entry);
     requestRender();
   }
 
@@ -709,10 +937,11 @@ export function createViewport(host, hooks) {
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
+    if (ground !== undefined) showGround = Boolean(ground);
     if (next) Object.assign(categories, next);
     for (const entry of entries.values()) {
       const hiddenByStatus = entry.status === "hidden" && !showHidden;
@@ -720,10 +949,13 @@ export function createViewport(host, hooks) {
       const hiddenByVolume = entry.volume && hideVolumes;
       entry.locked = categories[entry.category] === "lock" || (entry.companion && entry.pickable === false);
       entry.pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
+      syncGhost(entry);
     }
-    queueRebuild();
+    syncBatchVisibility();
+    applyGround();
     attach();
     syncLabels();
+    requestRender();
   }
 
   function modelInfo(id) {
@@ -767,13 +999,41 @@ export function createViewport(host, hooks) {
     for (const entry of entries.values()) {
       if (entry.pivot.visible && !entry.locked && (!entry.parts || !entry.parts.length)) roots.push(entry.pivot);
     }
-    return classify(roots.length ? raycaster.intersectObjects(roots, true) : []);
+    const groups = classify(roots.length ? raycaster.intersectObjects(roots, true) : []);
+    for (const found of volumeRayHits(raycaster)) {
+      if (!groups.volumes.includes(found.id)) groups.volumes.push(found.id);
+      if (found.edge && !groups.edges.includes(found.id)) groups.edges.push(found.id);
+    }
+    return groups;
+  }
+
+  const unitBox = new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5));
+  const localRay = new THREE.Ray();
+  const localInverse = new THREE.Matrix4();
+  const localPoint = new THREE.Vector3();
+
+  function volumeRayHits(raycaster) {
+    const found = [];
+    for (const entry of entries.values()) {
+      if (!entry.volume || entry.locked || !entry.pivot.visible) continue;
+      if (entry.parts && entry.parts.length) continue;
+      entry.mesh.updateWorldMatrix(true, false);
+      localInverse.copy(entry.mesh.matrixWorld).invert();
+      localRay.copy(raycaster.ray).applyMatrix4(localInverse);
+      if (!localRay.intersectBox(unitBox, localPoint)) continue;
+      const edge = ["x", "y", "z"].filter((axis) => Math.abs(Math.abs(localPoint[axis]) - 0.5) < 0.08).length >= 2;
+      const worldPoint = localPoint.clone().applyMatrix4(entry.mesh.matrixWorld);
+      found.push({ id: entry.key, edge, distance: raycaster.ray.origin.distanceTo(worldPoint) });
+    }
+    found.sort((a, b) => a.distance - b.distance);
+    return found;
   }
 
   function idOfHit(hit) {
-    if (hit.instanceId !== undefined) {
+    const index = hit.batchId !== undefined ? hit.batchId : hit.instanceId;
+    if (index !== undefined) {
       const batch = batches.find((item) => item.mesh === hit.object);
-      if (batch) return batch.ids[hit.instanceId] || null;
+      if (batch) return batch.ids[index] || null;
     }
     return idOf(hit.object);
   }
@@ -972,10 +1232,10 @@ export function createViewport(host, hooks) {
     const flying = updateFly(dt);
     const damped = nav === "orbit" ? orbit.update() : false;
     const now = performance.now();
-    if (now - lastCullAt > 180 && camera.position.distanceTo(lastCull) > 3) {
+    if (now - lastCullAt > 120 && camera.position.distanceTo(lastCull) > 2) {
       lastCullAt = now;
       lastCull.copy(camera.position);
-      rebuildBatches();
+      syncBatchVisibility();
       syncLabels();
     }
     const entry = selected ? entries.get(selected) : null;
@@ -1009,12 +1269,14 @@ export function createViewport(host, hooks) {
     },
     destroy() {
       running = false;
+      if (rebuildTimer) clearTimeout(rebuildTimer);
       if (frameHandle) cancelAnimationFrame(frameHandle);
       statsEl.remove();
       generation += 1;
       observer.disconnect();
       clearActors();
       clearTerrain();
+      clearGround();
       clearGrid();
       boxGeometry.dispose();
       edgesGeometry.dispose();

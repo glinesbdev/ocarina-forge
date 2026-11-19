@@ -22,6 +22,7 @@ const state = {
   companionPick: true,
   categories: { area: "show", system: "show" },
   hideVolumes: false,
+  showGround: false,
   terrain: null,
   nav: "orbit",
   gizmo: "translate",
@@ -58,6 +59,19 @@ const viewport = createViewport($("viewport"), {
   },
   onTerrain: (meta) => {
     state.terrain = meta;
+    const proxy = Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));
+    const show = Boolean(meta && meta.status === "mesh" && !proxy);
+    state.showGround = show;
+    const box = $("show-ground");
+    if (box) {
+      box.checked = show;
+      const title = proxy
+        ? "The static map has no albedo. On draws a neutral grid at its height instead of the green stand-in."
+        : "Show the static ground mesh";
+      box.title = title;
+      if (box.parentElement) box.parentElement.title = title;
+    }
+    viewport.setFlags({ ground: show });
   },
   onSelect: (id) => {
     state.selected = id;
@@ -117,6 +131,10 @@ $("companion-pick").addEventListener("change", (event) => {
 });
 $("show-stats").addEventListener("change", (event) => {
   viewport.setShowStats(event.target.checked);
+});
+$("show-ground").addEventListener("change", (event) => {
+  state.showGround = event.target.checked;
+  viewport.setFlags({ ground: state.showGround });
 });
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 document.querySelectorAll("[data-cat]").forEach((button) => {

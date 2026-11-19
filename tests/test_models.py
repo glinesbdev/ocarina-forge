@@ -854,3 +854,17 @@ def test_only_the_near_lod_is_the_full_mesh_and_images_shrink():
     names = [node["name"] for node in document["nodes"]]
     assert names == ["lod0:Canopy:0", "lod1:Canopy:0"]
     assert document["images"][0]["mimeType"] == "image/jpeg"
+
+
+def test_cluster_lod_shrinks_a_dense_mesh():
+    from bancwright.formats.gltf import cluster_lod
+
+    positions = [(float(x), float(y), 0.0) for y in range(40) for x in range(40)]
+    indices = []
+    for y in range(39):
+        for x in range(39):
+            corner = y * 40 + x
+            indices.extend((corner, corner + 1, corner + 40, corner + 1, corner + 41, corner + 40))
+    far = cluster_lod(positions, indices, None)
+    assert far is not None
+    assert len(far[1]) < len(indices) * 0.5
