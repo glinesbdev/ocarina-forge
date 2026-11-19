@@ -123,9 +123,42 @@ def textures(data: bytes) -> list[Texture]:
         if at + 8 > len(data):
             break
         brti = _u64(data, at)
-        if brti:
+        if not brti:
+            continue
+        try:
             found.append(_texture(data, brti))
+        except BntxError as exc:
+            name, fmt = _identity(data, brti)
+            found.append(Texture(name=name, width=0, height=0, rgba=b"", fmt=fmt, note=str(exc)))
     return found
+
+
+def image_names(data: bytes) -> list[str]:
+    """Texture names in a BNTX, without decoding the images."""
+    if len(data) < 0x40 or data[:4] != b"BNTX":
+        return []
+    count = _i32(data, 0x24)
+    table = _u64(data, 0x28)
+    if count <= 0 or count > 4096 or table <= 0:
+        return []
+    names = []
+    for index in range(count):
+        at = table + index * 8
+        if at + 8 > len(data):
+            break
+        brti = _u64(data, at)
+        name, _fmt = _identity(data, brti) if brti else ("", 0)
+        names.append(name)
+    return names
+
+
+def _identity(data: bytes, at: int) -> tuple[str, int]:
+    try:
+        if at <= 0 or at + 0x68 > len(data) or data[at : at + 4] != b"BRTI":
+            return "", 0
+        return _string(data, _u64(data, at + 0x60)), _u32(data, at + 0x1C)
+    except (struct.error, IndexError):
+        return "", 0
 
 
 def _texture(data: bytes, at: int) -> Texture:

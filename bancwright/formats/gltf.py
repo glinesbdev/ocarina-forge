@@ -15,6 +15,10 @@ class Primitive:
     uvs: list[tuple[float, float]] | None = None
     normals: list[tuple[float, float, float]] | None = None
     png: bytes | None = None
+    alpha: str = "opaque"
+    cutoff: float = 0.5
+    double_sided: bool = True
+    base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
 
 
 def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
@@ -67,6 +71,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
     materials = []
     gl_primitives = []
     image_of: dict[bytes, int] = {}
+    material_of: dict[tuple, int] = {}
 
     def pad(alignment: int) -> None:
         while len(bin_blob) % alignment:
@@ -119,39 +124,39 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             uv_bytes = b"".join(struct.pack("<2f", u, v) for u, v in prim.uvs)
             attributes["TEXCOORD_0"] = accessor(view(uv_bytes, 34962), len(prim.uvs), "VEC2", 5126)
         index_accessor = accessor(view(idx_bytes, 34963), len(indices), "SCALAR", 5123 if use_short else 5125)
-        material_index = 0
+        image_index = None
         if prim.png:
             if prim.png not in image_of:
                 image_view = view(prim.png)
                 images.append({"bufferView": image_view, "mimeType": "image/png"})
                 textures.append({"source": len(images) - 1})
-                materials.append(
-                    {
-                        "doubleSided": True,
-                        "pbrMetallicRoughness": {
-                            "baseColorTexture": {"index": len(textures) - 1},
-                            "metallicFactor": 0,
-                            "roughnessFactor": 0.85,
-                        },
-                    }
-                )
-                image_of[prim.png] = len(materials) - 1
-            material_index = image_of[prim.png]
-        elif not materials:
-            materials.append(
-                {
-                    "doubleSided": True,
-                    "pbrMetallicRoughness": {
-                        "baseColorFactor": [0.72, 0.7, 0.62, 1],
-                        "metallicFactor": 0,
-                        "roughnessFactor": 0.9,
-                    },
-                }
-            )
-            material_index = 0
-        else:
-            material_index = 0
-        gl_primitives.append({"attributes": attributes, "indices": index_accessor, "material": material_index})
+                image_of[prim.png] = len(images) - 1
+            image_index = image_of[prim.png]
+        color = [float(channel) for channel in prim.base_color[:4]]
+        if len(color) < 4:
+            color = (color + [1.0, 1.0, 1.0, 1.0])[:4]
+        alpha = prim.alpha if prim.alpha in ("opaque", "mask", "blend") else "opaque"
+        cutoff = round(min(max(float(prim.cutoff), 0.0), 1.0), 4)
+        key = (image_index, alpha, round(cutoff, 4), bool(prim.double_sided), tuple(round(channel, 4) for channel in color))
+        if key not in material_of:
+            pbr = {
+                "baseColorFactor": color,
+                "metallicFactor": 0,
+                "roughnessFactor": 0.85 if image_index is not None else 0.9,
+            }
+            if image_index is not None:
+                pbr["baseColorTexture"] = {"index": image_index}
+            material = {"doubleSided": bool(prim.double_sided), "pbrMetallicRoughness": pbr}
+            if alpha == "mask":
+                material["alphaMode"] = "MASK"
+                material["alphaCutoff"] = cutoff
+            elif alpha == "blend":
+                material["alphaMode"] = "BLEND"
+            materials.append(material)
+            material_of[key] = len(materials) - 1
+        gl_primitives.append(
+            {"attributes": attributes, "indices": index_accessor, "material": material_of[key]}
+        )
 
     if not gl_primitives:
         raise ValueError("the model has no triangles")

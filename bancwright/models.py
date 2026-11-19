@@ -21,11 +21,12 @@ import re
 import struct
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from bancwright.errors import BancError
-from bancwright.formats.bfres import FresError, base_color_name, parse
-from bancwright.formats.bntx import BntxError, textures as read_bntx
+from bancwright.formats.bfres import FresError, base_color_name, parse, texture_rank
+from bancwright.formats.bntx import BntxError, image_names, textures as read_bntx
 from bancwright.formats.byml import loads
 from bancwright.formats.gltf import Primitive, png_rgba, to_glb
 from bancwright.formats.sarc import Sarc
@@ -34,7 +35,8 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-3\0"
+_CACHE_VERSION = b"models-4\0"
+_NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
 _TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
@@ -99,7 +101,7 @@ def describe_terrain(dump, banc: str) -> dict:
             "url": None,
             "banc": banc,
         }
-    info = _first_mesh(banc, plan, f"/api/terrain/model.glb?banc={banc}", dump, tried)
+    info = _first_mesh(banc, plan, f"/api/terrain/model.glb?banc={banc}", dump, tried, terrain=True)
     info["banc"] = banc
     return info
 
@@ -138,14 +140,14 @@ def _missing(gyaml: str, tried: list[str]) -> str:
     )
 
 
-def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str]) -> dict:
+def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrain: bool = False) -> dict:
     errors = []
     first = ""
     for source, blob in _realize(dump, plan, errors):
         if not first:
             first = source
         try:
-            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}")
+            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}", terrain=terrain)
         except (FresError, BntxError, ValueError, struct.error, IndexError, OSError) as exc:
             errors.append(f"{source}: {exc}")
             continue
@@ -192,20 +194,20 @@ def _cached_glb(digest: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def _convert_cached(blob: bytes, dump, hint: str = "") -> tuple[str, dict]:
+def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False) -> tuple[str, dict]:
     if blob[:4] in (b"MCPK", b"FMSH"):
         raise FresError("this is a mesh-codec .bfres.mc stream, which this viewer does not decode")
     models = parse(blob)
-    _fill_texture_names(models)
-    textures, log = _texture_payloads(dump, models, hint)
-    digest = hashlib.sha256(_CACHE_VERSION + blob + _texture_key(textures)).hexdigest()
+    _fill_texture_names(models, dump)
+    external, log, raws = _resolve_materials(dump, models, hint, terrain)
+    digest = hashlib.sha256(_CACHE_VERSION + blob + _texture_key(raws)).hexdigest()
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"
     meta_path = folder / f"{digest}.json"
     with _LOCK:
         if glb_path.is_file() and meta_path.is_file():
             return digest, json.loads(meta_path.read_text(encoding="utf-8"))
-    glb, info = _assemble(models, textures, log)
+    glb, info = _assemble(models, external, log)
     encoded = json.dumps(info)
     with _LOCK:
         if not (glb_path.is_file() and meta_path.is_file()):
@@ -215,55 +217,16 @@ def _convert_cached(blob: bytes, dump, hint: str = "") -> tuple[str, dict]:
     return digest, info
 
 
-def _texture_key(textures: list[tuple[str, str, bytes]]) -> bytes:
-    return b"".join(name.encode("utf-8", "replace") + b"\0" + blob for name, _path, blob in textures)
+def _texture_key(blobs: list[bytes]) -> bytes:
+    return b"".join(blob + b"\0" for blob in blobs)
 
 
-def _assemble(models, textures: list[tuple[str, str, bytes]], log: list[dict] | None = None) -> tuple[bytes, dict]:
+def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[bytes, dict]:
     log = log if log is not None else []
-    by_wanted = {entry["wanted"]: entry for entry in log}
-    external: dict[str, object] = {}
-    for name, relative, blob in textures:
-        entry = by_wanted.get(name)
-        if not blob.startswith(b"BNTX"):
-            if entry is not None:
-                entry["error"] = f"{relative} is not a BNTX"
-            continue
-        try:
-            decoded = list(read_bntx(blob))
-        except BntxError as exc:
-            if entry is not None:
-                entry["found"] = relative
-                entry["error"] = str(exc)
-            continue
-        if not decoded:
-            if entry is not None:
-                entry["found"] = relative
-                entry["error"] = "BNTX has no images"
-            continue
-        chosen = next(
-            (image for image in decoded if image.name == name or image.name.lower() == name.lower()),
-            None,
-        )
-        if chosen is None:
-            chosen = next((image for image in decoded if "alb" in (image.name or "").lower()), decoded[0])
-        external[name] = chosen
-        for image in decoded:
-            if image.name:
-                external.setdefault(image.name, image)
-                external.setdefault(image.name.lower(), image)
-        if entry is not None:
-            entry["found"] = relative
-            entry["decoded"] = True
-            entry["format"] = chosen.codec or f"0x{chosen.fmt:04X}"
-            entry["size"] = f"{chosen.width}x{chosen.height}"
-            entry["swizzle"] = chosen.swizzle
-            entry["image"] = chosen.name
-            entry["images"] = len(decoded)
-            if chosen.name and chosen.name != name and chosen.name.lower() != name.lower():
-                entry["error"] = f"used image {chosen.name} from a {len(decoded)}-image bundle"
-            elif chosen.note:
-                entry["error"] = chosen.note
+    by_wanted = {}
+    for entry in log:
+        if entry.get("wanted") and entry["wanted"] not in by_wanted:
+            by_wanted[entry["wanted"]] = entry
     primitives: list[Primitive] = []
     notes: list[str] = []
     triangles = 0
@@ -274,9 +237,11 @@ def _assemble(models, textures: list[tuple[str, str, bytes]], log: list[dict] | 
         notes.extend(model.notes)
         png_for: dict[int, bytes] = {}
         for part in model.parts:
-            image = model.images.get(part.texture) or external.get(part.texture) or external.get((part.texture or "").lower())
-            if image is None and len(model.images) == 1 and not external:
-                image = next(iter(model.images.values()))
+            image = None
+            if part.texture:
+                image = model.images.get(part.texture) or external.get(part.texture) or external.get(part.texture.lower())
+            if image is not None and not image.rgba:
+                image = None
             png = None
             if image is not None:
                 png = png_for.get(id(image))
@@ -286,15 +251,30 @@ def _assemble(models, textures: list[tuple[str, str, bytes]], log: list[dict] | 
                     if id(image) not in seen_images:
                         texture_count += 1
                         seen_images.add(id(image))
-                    if image.note:
+                    if image.note and "punched" in image.note:
                         notes.append(image.note)
-            elif part.texture:
+            else:
                 detail = by_wanted.get(part.texture) or {}
-                why = detail.get("error") or "not in the bfres or in Tex/"
-                notes.append(f"Base color “{part.texture}” {why}, so this mesh is untextured.")
-            elif not model.images and not external:
-                notes.append("No base-color texture was embedded in this bfres or found in Tex/, so the mesh is untextured.")
-            primitives.append(Primitive(part.positions, part.indices, part.uvs, png=png))
+                why = detail.get("error") or ""
+                if part.texture:
+                    notes.append(f"Base color “{part.texture}” {why or 'was not usable'}, so this mesh uses a flat colour.")
+                elif not model.images and not external:
+                    reason = why or "No albedo sampler was usable and no Tex file matched."
+                    notes.append(f"{reason} This mesh uses a flat colour.")
+            color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
+            alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
+            primitives.append(
+                Primitive(
+                    part.positions,
+                    part.indices,
+                    part.uvs,
+                    png=png,
+                    alpha=alpha,
+                    cutoff=part.cutoff,
+                    double_sided=part.double_sided,
+                    base_color=color,
+                )
+            )
             triangles += len(part.indices) // 3
             positions.extend(part.positions)
     if not primitives:
@@ -306,7 +286,7 @@ def _assemble(models, textures: list[tuple[str, str, bytes]], log: list[dict] | 
             "min": [min(point[axis] for point in positions) for axis in range(3)],
             "max": [max(point[axis] for point in positions) for axis in range(3)],
         }
-    unique_notes = list(dict.fromkeys(notes))
+    unique_notes = list(dict.fromkeys(note for note in notes if note))[:12]
     return glb, {
         "triangles": triangles,
         "textures": texture_count,
@@ -316,74 +296,474 @@ def _assemble(models, textures: list[tuple[str, str, bytes]], log: list[dict] | 
     }
 
 
-def _fill_texture_names(models) -> None:
+def _fill_texture_names(models, dump) -> None:
+    index = _tex_index(dump) if dump is not None else {}
     for model in models:
-        extras = [name for name in model.extra_textures if name]
-        if not extras:
-            continue
-        chosen = base_color_name(extras)
+        pooled = _pool_albedo(model.string_pool or model.extra_textures, index)
+        if not pooled:
+            pooled = base_color_name([name for name in model.extra_textures if texture_rank(name) < 2])
         for part in model.parts:
-            if not part.texture:
-                part.texture = chosen
+            if part.texture or part.material_index >= 0:
+                continue
+            if pooled:
+                part.texture = pooled
+                part.candidates = [("", pooled)]
 
 
-def _texture_payloads(dump, models, hint: str = "") -> tuple[list[tuple[str, str, bytes]], list[dict]]:
-    if dump is None:
-        return [], []
+def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, list[dict], list[bytes]]:
     hints = _hint_tokens(hint)
-    found: list[tuple[str, str, bytes]] = []
+    external: dict = {}
     log: list[dict] = []
-    seen: set[str] = set()
+    raws: list[bytes] = []
+    remembered: dict[int, dict] = {}
     for model in models:
-        for part in model.parts:
-            name = part.texture
-            if not name or name in seen:
-                continue
-            if name in model.images:
-                seen.add(name)
-                image = model.images[name]
-                log.append(
-                    {
-                        "wanted": name,
-                        "tried": ["embedded in the bfres"],
-                        "found": "embedded",
-                        "decoded": True,
-                        "format": image.codec or f"0x{image.fmt:04X}",
-                        "size": f"{image.width}x{image.height}",
-                        "swizzle": image.swizzle,
-                        "image": image.name,
-                        "images": 1,
-                        "error": image.note,
-                    }
-                )
-                continue
-            seen.add(name)
-            relative, tried = _resolve_tex(dump, name, hints)
-            entry = {
-                "wanted": name,
-                "tried": tried,
-                "found": relative,
-                "decoded": False,
-                "format": "",
-                "size": "",
-                "swizzle": "",
-                "image": "",
-                "images": 0,
-                "error": "" if relative else "no Tex file matched",
-            }
-            log.append(entry)
-            if not relative:
-                continue
-            try:
-                blob, _dict_id = dump.read_file(relative)
-            except BancError as exc:
-                entry["error"] = exc.message
-                continue
-            if blob[:4] != b"BNTX":
-                entry["error"] = f"{relative} is not a BNTX"
-                continue
-            found.append((name, relative, blob))
-    return found, log
+        if model.materials:
+            for material in model.materials:
+                key = id(material)
+                if key not in remembered:
+                    remembered[key] = _choose_material(dump, model, material, hints, terrain, external, raws)
+                choice = remembered[key]
+                log.append(choice["entry"])
+                for part in model.parts:
+                    if part.material_index < 0 or part.material_index >= len(model.materials):
+                        continue
+                    if model.materials[part.material_index] is not material:
+                        continue
+                    part.texture = choice["wanted"]
+                    part.albedo_sampler = choice["sampler"]
+                    part.alpha = choice["alpha"]
+                    part.cutoff = choice["cutoff"]
+                    if choice.get("image") is not None:
+                        external[choice["wanted"]] = choice["image"]
+        else:
+            for part in model.parts:
+                choice = _choose_loose(dump, model, part, hints, terrain, external, raws)
+                log.append(choice["entry"])
+                part.texture = choice["wanted"]
+                part.alpha = choice["alpha"]
+                if choice.get("image") is not None and choice["wanted"]:
+                    external[choice["wanted"]] = choice["image"]
+    return external, log, raws
+
+
+def _choose_material(dump, model, material, hints, terrain, external, raws) -> dict:
+    sources = list(material.albedo)
+    pool_note = ""
+    if not sources:
+        pooled = _pool_albedo(model.string_pool or model.extra_textures, _tex_index(dump) if dump is not None else {})
+        if not pooled:
+            pooled = base_color_name([name for name in model.extra_textures if texture_rank(name) < 2])
+        if pooled:
+            sources = [("", pooled)]
+            pool_note = f"texture name taken from the file string pool ({pooled})"
+    misses = []
+    winner = None
+    tried: list[str] = []
+    last = {"image": None, "error": "", "tried": [], "found": "", "alpha": material.alpha, "cutoff": material.cutoff, "images": 0}
+    for sampler, name in sources:
+        found = _load_named(dump, model, name, hints, material.alpha, material.cutoff, external, raws)
+        last = found
+        for path in found.get("tried") or []:
+            if path not in tried:
+                tried.append(path)
+        if found["image"] is not None:
+            winner = (sampler, name, found)
+            break
+        if found["error"]:
+            misses.append(f"{sampler or 'texture'} {name}: {found['error']}")
+        elif name:
+            misses.append(f"{sampler or 'texture'} {name}: no Tex file matched")
+    if winner is None and terrain and dump is not None:
+        hinted = _hint_alb_path(dump, hints)
+        if hinted:
+            stem = _stem(hinted)
+            found = _load_named(dump, model, stem, hints, material.alpha, material.cutoff, external, raws, forced=hinted)
+            last = found
+            for path in found.get("tried") or []:
+                if path not in tried:
+                    tried.append(path)
+            if found["image"] is not None:
+                winner = ("", stem, found)
+                pool_note = f"no albedo name matched; used {hinted}"
+            elif found["error"]:
+                misses.append(f"terrain {stem}: {found['error']}")
+    if winner is not None:
+        sampler, wanted, found = winner
+    else:
+        sampler, wanted, found = "", (sources[0][1] if sources else ""), dict(last)
+        found["tried"] = tried or found.get("tried") or []
+    error = found.get("error") or ""
+    if misses and winner is not None:
+        error = "; ".join(misses + ([error] if error else []))
+    elif misses and winner is None:
+        error = "; ".join(misses)
+    elif not sources and not error:
+        if material.binds:
+            shown = ", ".join(f"{slot or '?'}={tex}" for slot, tex in material.binds)
+            error = f"only non-color samplers ({shown})"
+        else:
+            error = "material has no texture names"
+    if pool_note:
+        error = f"{pool_note}. {error}".strip() if error and winner is None else (pool_note if not error else f"{error}. {pool_note}")
+    alpha = found.get("alpha", material.alpha) if found.get("image") is not None else material.alpha
+    cutoff = found.get("cutoff", material.cutoff)
+    entry = _log_entry(material, sampler, wanted, found, alpha, cutoff, material.double_sided, error if not (found.get("image") is not None and not error) else error)
+    if found.get("image") is not None:
+        entry["decoded"] = True
+        _fill_image_log(entry, found)
+    return {"entry": entry, "wanted": wanted if (found.get("image") is not None or wanted) else "", "sampler": sampler, "alpha": alpha if found.get("image") is not None else ("blend" if material.alpha == "blend" else "opaque"), "cutoff": cutoff, "image": found.get("image")}
+
+
+def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
+    name = part.texture
+    found = _load_named(dump, model, name, hints, part.alpha, part.cutoff, external, raws) if name else {"image": None, "error": "material has no texture names", "tried": [], "found": "", "alpha": part.alpha, "cutoff": part.cutoff}
+    if found.get("image") is None and terrain and dump is not None:
+        hinted = _hint_alb_path(dump, hints)
+        if hinted:
+            stem = _stem(hinted)
+            alt = _load_named(dump, model, stem, hints, part.alpha, part.cutoff, external, raws, forced=hinted)
+            if alt.get("image") is not None:
+                name = stem
+                found = alt
+                found["error"] = f"no albedo name matched; used {hinted}"
+    entry = {
+        "material": part.material or part.name,
+        "sampler": part.albedo_sampler,
+        "samplers": [part.albedo_sampler] if part.albedo_sampler else [],
+        "binds": [[part.albedo_sampler, part.texture]] if part.texture else [],
+        "textures": [part.texture] if part.texture else [],
+        "wanted": name if found.get("image") is not None or name else "",
+        "tried": found.get("tried") or [],
+        "found": found.get("found") or "",
+        "decoded": found.get("image") is not None,
+        "format": "",
+        "size": "",
+        "swizzle": "",
+        "image": "",
+        "images": 0,
+        "alpha": _alpha_label(found.get("alpha") or part.alpha, found.get("cutoff") or part.cutoff) if found.get("image") is not None else "opaque",
+        "doubleSided": part.double_sided,
+        "error": found.get("error") or "",
+    }
+    if found.get("image") is not None:
+        _fill_image_log(entry, found)
+    return {"entry": entry, "wanted": entry["wanted"], "alpha": found.get("alpha") or "opaque", "image": found.get("image")}
+
+
+def _log_entry(material, sampler, wanted, found, alpha, cutoff, sided, error) -> dict:
+    decoded = found.get("image") is not None
+    return {
+        "material": material.name,
+        "sampler": sampler,
+        "samplers": [slot for slot, _tex in material.binds],
+        "binds": [[slot, tex] for slot, tex in material.binds],
+        "textures": [tex for _slot, tex in material.binds if tex],
+        "wanted": wanted,
+        "tried": found.get("tried") or [],
+        "found": found.get("found") or "",
+        "decoded": decoded,
+        "format": "",
+        "size": "",
+        "swizzle": "",
+        "image": "",
+        "images": 0,
+        "alpha": _alpha_label(alpha, cutoff) if decoded or alpha == "blend" else _alpha_label(alpha, cutoff),
+        "doubleSided": sided,
+        "error": error or "",
+    }
+
+
+def _fill_image_log(entry: dict, found: dict) -> None:
+    image = found.get("image")
+    if image is None:
+        return
+    entry["decoded"] = True
+    entry["found"] = found.get("found") or entry.get("found") or ""
+    entry["format"] = image.codec or (f"0x{image.fmt:04X}" if image.fmt else "")
+    entry["size"] = f"{image.width}x{image.height}" if image.width else ""
+    entry["swizzle"] = image.swizzle
+    entry["image"] = image.name
+    entry["images"] = found.get("images") or 1
+    if image.note and not entry.get("error"):
+        entry["error"] = image.note
+    elif image.note and image.note not in (entry.get("error") or ""):
+        entry["error"] = f"{entry['error']}. {image.note}".strip(". ")
+
+
+def _alpha_label(mode: str, cutoff: float) -> str:
+    if mode == "mask":
+        return f"mask {cutoff:.2f}"
+    if mode == "blend":
+        return "blend"
+    return "opaque"
+
+
+def _load_named(dump, model, name, hints, alpha, cutoff, external, raws, forced: str = "") -> dict:
+    result = {"image": None, "error": "", "tried": [], "found": "", "alpha": alpha, "cutoff": cutoff, "images": 0}
+    if not name and not forced:
+        result["error"] = "material has no texture names"
+        return result
+    embedded = None
+    if model is not None and name:
+        embedded = model.images.get(name) or model.images.get(name.lower())
+    if embedded is not None:
+        result["tried"] = ["embedded in the bfres"]
+        result["found"] = "embedded"
+        result["images"] = 1
+        image, mode, used_cut, note = _accept(embedded, alpha, cutoff)
+        result["alpha"] = mode
+        result["cutoff"] = used_cut
+        result["error"] = note
+        result["image"] = image
+        return result
+    if dump is None:
+        result["error"] = "no Tex file matched"
+        return result
+    relative = forced
+    tried: list[str] = []
+    if not relative:
+        relative, tried = _resolve_tex(dump, name, hints)
+        if not relative:
+            bundled, extra = _search_bundles(dump, name, hints)
+            tried.extend(path for path in extra if path not in tried)
+            relative = bundled
+    else:
+        tried = [relative]
+    result["tried"] = tried
+    if not relative:
+        result["error"] = "no Tex file matched"
+        return result
+    try:
+        blob, _dict_id = dump.read_file(relative)
+    except BancError as exc:
+        result["found"] = relative
+        result["error"] = exc.message
+        return result
+    raws.append(blob)
+    if blob[:4] != b"BNTX":
+        result["found"] = relative
+        result["error"] = f"{relative} is not a BNTX"
+        return result
+    try:
+        decoded = list(read_bntx(blob))
+    except BntxError as exc:
+        result["found"] = relative
+        result["error"] = str(exc)
+        return result
+    result["found"] = relative
+    result["images"] = len(decoded)
+    picked, why = pick_image(decoded, name)
+    if picked is None:
+        failed = next((image for image in decoded if image.note), None)
+        result["error"] = why or (failed.note if failed else "BNTX has no usable image")
+        if failed is not None and failed.fmt and "format" not in result["error"]:
+            result["error"] = f"{result['error']} (0x{failed.fmt:04X})"
+        return result
+    image, mode, used_cut, note = _accept(picked, alpha, cutoff)
+    result["alpha"] = mode
+    result["cutoff"] = used_cut
+    result["image"] = image
+    if image is None:
+        result["error"] = note or why or "texture was not usable"
+    elif note:
+        result["error"] = note
+    elif why:
+        result["error"] = why
+    return result
+
+
+def pick_image(decoded, wanted: str):
+    """The image to bind, or (None, reason). A multi-image file does not fall back to image 0."""
+    usable = [image for image in decoded if image.rgba]
+    if not usable:
+        failed = next((image for image in decoded if image.note), None)
+        return None, (failed.note if failed else "BNTX has no images")
+    wanted_l = (wanted or "").lower()
+    stem = _stem(wanted).lower()
+    for image in usable:
+        if image.name == wanted or (image.name or "").lower() == wanted_l:
+            return image, ""
+    for image in usable:
+        current = (image.name or "").lower()
+        if stem and (current == f"{stem}_alb" or current == f"{stem}_albedo" or (stem in current and "alb" in current)):
+            note = "" if current == wanted_l else f"used image {image.name}"
+            return image, note
+    if len(decoded) == 1 and usable:
+        only = usable[0]
+        if not only.name or (only.name or "").lower() in {wanted_l, stem, f"{stem}_alb"}:
+            return only, ""
+        return only, f"used image {only.name}"
+    names = ", ".join(image.name or "?" for image in decoded[:6])
+    for image in decoded:
+        if image.rgba or not image.note:
+            continue
+        if (image.name or "").lower() in {wanted_l, stem, f"{stem}_alb"}:
+            return None, image.note
+    return None, f"no image named {wanted} in this bntx ({names})"
+
+
+def _accept(image, alpha: str, cutoff: float):
+    if image is None or not image.rgba:
+        return None, alpha, cutoff, (image.note if image is not None else "") or "texture did not decode"
+    fraction = _magenta_fraction(image.rgba)
+    if fraction >= 0.85:
+        return None, alpha, cutoff, "decoded image is a magenta placeholder"
+    note = image.note or ""
+    rgba = image.rgba
+    mode = alpha
+    if fraction >= 0.02:
+        rgba = _punch_magenta(rgba)
+        if mode == "opaque":
+            mode = "mask"
+            cutoff = 0.5 if cutoff == 0.5 or alpha == "opaque" else cutoff
+        extra = "magenta texels were punched out and drawn as cutout"
+        note = f"{note}. {extra}".strip(". ")
+    if mode == "mask":
+        _low, high = _alpha_span(rgba)
+        if high < 8:
+            mode = "opaque"
+            note = f"{note}. alpha channel is empty, so cutout was not applied".strip(". ")
+    if rgba is not image.rgba or (note and note != image.note):
+        image = replace(image, rgba=rgba, note=note)
+    return image, mode, cutoff, note
+
+
+def _magenta_fraction(rgba: bytes) -> float:
+    total = len(rgba) // 4
+    if total <= 0:
+        return 0.0
+    step = max(1, total // 2048)
+    seen = 0
+    hit = 0
+    for index in range(0, total, step):
+        at = index * 4
+        red, green, blue, alpha = rgba[at : at + 4]
+        seen += 1
+        if alpha >= 200 and red >= 235 and green <= 25 and blue >= 235:
+            hit += 1
+    return hit / seen if seen else 0.0
+
+
+def _punch_magenta(rgba: bytes) -> bytes:
+    out = bytearray(rgba)
+    for at in range(0, len(out) - 3, 4):
+        if out[at] >= 235 and out[at + 1] <= 25 and out[at + 2] >= 235 and out[at + 3] >= 200:
+            out[at + 3] = 0
+    return bytes(out)
+
+
+def _alpha_span(rgba: bytes) -> tuple[int, int]:
+    total = len(rgba) // 4
+    if total <= 0:
+        return 0, 0
+    step = max(1, total // 2048)
+    low = 255
+    high = 0
+    for index in range(0, total, step):
+        alpha = rgba[index * 4 + 3]
+        if alpha < low:
+            low = alpha
+        if alpha > high:
+            high = alpha
+    return low, high
+
+
+def _pool_albedo(pool: list[str], index: dict[str, str]) -> str:
+    hits = []
+    for name in pool:
+        if texture_rank(name) == 2:
+            continue
+        if not index:
+            if texture_rank(name) == 0:
+                hits.append(name)
+            continue
+        stem = _stem(name).lower()
+        if stem in index or f"{stem}_alb" in index or f"{stem}_albedo" in index:
+            hits.append(name)
+    if not hits:
+        return ""
+    return base_color_name(hits)
+
+
+def _search_bundles(dump, wanted: str, hints: list[str]) -> tuple[str, list[str]]:
+    index = _tex_index(dump)
+    stem = _stem(wanted).lower()
+    if len(stem) < 3 or not index:
+        return "", []
+    hits = []
+    for key, path in index.items():
+        if stem in key or (len(key) >= 4 and key in stem):
+            hits.append(path)
+    for hint in hints:
+        token = hint.lower()
+        if len(token) < 8:
+            continue
+        for key, path in index.items():
+            if token in key and path not in hits:
+                hits.append(path)
+    hits = list(dict.fromkeys(hits))
+    hits.sort(key=lambda item: (0 if "alb" in item.lower() else 1, len(item)))
+    tried = []
+    for path in hits[:6]:
+        tried.append(path)
+        if _bundle_match(_bntx_names(dump, path), wanted, path):
+            return path, tried
+    return "", tried
+
+
+def _bundle_match(names: list[str], wanted: str, path: str) -> bool:
+    low = (wanted or "").lower()
+    stem = _stem(wanted).lower()
+    file_stem = _stem(path).lower()
+    named = [name for name in names if name]
+    for name in named:
+        current = name.lower()
+        if current == low or current == f"{stem}_alb" or current == f"{stem}_albedo":
+            return True
+        if stem and stem in current and "alb" in current:
+            return True
+    if len(named) == 1 and stem and (stem in file_stem or file_stem in stem):
+        return True
+    return False
+
+
+_BNTX_NAMES: dict[str, tuple[int, list[str]]] = {}
+
+
+def _bntx_names(dump, relative: str) -> list[str]:
+    path = dump.romfs / relative
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return []
+    key = str(path)
+    cached = _BNTX_NAMES.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    try:
+        blob, _dict_id = dump.read_file(relative)
+    except BancError:
+        return []
+    names = image_names(blob) if blob[:4] == b"BNTX" else []
+    _BNTX_NAMES[key] = (stamp, names)
+    return names
+
+
+def _hint_alb_path(dump, hints: list[str]) -> str:
+    index = _tex_index(dump)
+    for hint in hints:
+        token = hint.lower()
+        if len(token) < 6:
+            continue
+        for suffix in ("_alb", "_albedo", ""):
+            path = index.get(token + suffix)
+            if path and (suffix or "alb" in token):
+                return path
+        hits = [path for key, path in index.items() if token in key and "alb" in key]
+        if hits:
+            hits.sort(key=len)
+            return hits[0]
+    return ""
 
 
 def _hint_tokens(hint: str) -> list[str]:

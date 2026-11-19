@@ -380,12 +380,19 @@ export function createViewport(host, hooks) {
     const clone = template.clone(true);
     clone.traverse((child) => {
       if (!child.isMesh || !child.material) return;
-      const source = Array.isArray(child.material) ? child.material[0] : child.material;
-      const material = source.clone();
-      material.side = THREE.DoubleSide;
-      material.metalness = 0;
-      material.roughness = 0.85;
-      child.material = material;
+      const sources = Array.isArray(child.material) ? child.material : [child.material];
+      const materials = sources.map((source) => {
+        const material = source.clone();
+        material.metalness = 0;
+        material.roughness = 0.85;
+        if (material.alphaTest > 0) {
+          material.alphaToCoverage = true;
+          material.transparent = false;
+          material.depthWrite = true;
+        }
+        return material;
+      });
+      child.material = materials.length === 1 ? materials[0] : materials;
     });
     return clone;
   }

@@ -11,7 +11,9 @@ otherwise the first scene in the dump.
 
 The script prints one block you can paste back: a summary, every actor
 that stayed a box, then every mesh with its source path, triangle count
-and texture count. The same conversion the editor uses, including Tex/.
+and texture count. Under each mesh, one block per material: sampler
+names, the albedo that was used, the Tex path, decode result, and alpha
+mode. The same conversion the editor uses, including Tex/.
 """
 
 from __future__ import annotations
@@ -113,22 +115,33 @@ def _default_banc(dump: Dump) -> str:
 def _print_textures(log: list, label: str = "") -> None:
     prefix = f"{label} " if label else "    "
     for entry in log:
-        wanted = entry.get("wanted") or "(no name)"
+        material = entry.get("material") or "(material)"
+        alpha = entry.get("alpha") or "opaque"
+        sided = "both" if entry.get("doubleSided", True) else "front"
+        binds = entry.get("binds") or []
+        if binds:
+            shown = ", ".join(f"{pair[0] or '?'}={pair[1]}" for pair in binds if len(pair) >= 2)
+        else:
+            textures = entry.get("textures") or []
+            shown = ", ".join(textures) if textures else "(no samplers)"
+        sampler = entry.get("sampler") or ""
+        wanted = entry.get("wanted") or "(no albedo)"
+        albedo = f"{sampler} {wanted}".strip()
         tried = ", ".join(entry.get("tried") or []) or "nothing"
         found = entry.get("found") or "not found"
+        print(f"{prefix}material {material}  alpha {alpha}  {sided}")
+        print(f"{prefix}  samplers {shown}")
+        print(f"{prefix}  albedo texture {albedo}")
+        print(f"{prefix}  tried {tried}")
         if entry.get("decoded"):
             detail = f"{entry.get('format') or '?'} {entry.get('size') or ''} {entry.get('swizzle') or ''}".strip()
             image = entry.get("image") or ""
             extra = f" image {image}" if image and image != wanted else ""
             count = entry.get("images") or 0
             bundle = f" ({count} in the bntx)" if count > 1 else ""
-            print(f"{prefix}texture {wanted}")
-            print(f"{prefix}  tried {tried}")
             print(f"{prefix}  found {found}{bundle}{extra}  decoded {detail}")
         else:
-            print(f"{prefix}texture {wanted}")
-            print(f"{prefix}  tried {tried}")
-            print(f"{prefix}  found {found}  {entry.get('error') or 'not decoded'}")
+            print(f"{prefix}  found {found}  not decoded  {entry.get('error') or 'no usable albedo'}")
         if entry.get("decoded") and entry.get("error"):
             print(f"{prefix}  note {entry['error']}")
 

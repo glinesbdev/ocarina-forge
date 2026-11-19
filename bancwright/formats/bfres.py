@@ -52,6 +52,29 @@ class Part:
     indices: list[int]
     uvs: list[tuple[float, float]] | None
     texture: str
+    material: str = ""
+    material_index: int = -1
+    # (sampler, texture) in file order, then the albedo candidates best-first.
+    binds: list[tuple[str, str]] = field(default_factory=list)
+    candidates: list[tuple[str, str]] = field(default_factory=list)
+    albedo_sampler: str = ""
+    alpha: str = "opaque"
+    cutoff: float = 0.5
+    double_sided: bool = True
+    base_color: tuple[float, float, float, float] | None = None
+
+
+@dataclass
+class Material:
+    name: str
+    binds: list[tuple[str, str]] = field(default_factory=list)
+    albedo: list[tuple[str, str]] = field(default_factory=list)
+    alpha: str = "opaque"
+    cutoff: float = 0.5
+    double_sided: bool = True
+    base_color: tuple[float, float, float, float] | None = None
+    shader: str = ""
+    note: str = ""
 
 
 @dataclass
@@ -62,6 +85,9 @@ class Model:
     notes: list[str] = field(default_factory=list)
     # Texture names found in the file but not tied to one shape (string pool).
     extra_textures: list[str] = field(default_factory=list)
+    materials: list[Material] = field(default_factory=list)
+    # Other identifiers in the file, used when a material names no texture.
+    string_pool: list[str] = field(default_factory=list)
 
 
 def parse(data: bytes) -> list[Model]:
@@ -132,10 +158,11 @@ class _File:
         if not keys or not self.model_values:
             raise FresError("the BFRES has no models")
         images = self._images()
+        pool = _string_pool(self.data)
         found = []
         at = self.model_values
         for key in keys:
-            model, at = self._model(at, key, images)
+            model, at = self._model(at, key, images, pool)
             found.append(model)
         if not any(model.parts for model in found):
             raise FresError("the BFRES models have no triangles")
@@ -175,7 +202,7 @@ class _File:
         self._image_notes = notes
         return images
 
-    def _model(self, at: int, fallback: str, images: dict[str, Texture]) -> tuple[Model, int]:
+    def _model(self, at: int, fallback: str, images: dict[str, Texture], pool: list[str]) -> tuple[Model, int]:
         if self.data[at : at + 4] != b"FMDL":
             raise FresError(f"expected a model at {at:#x}")
         cursor = at + 4
@@ -220,7 +247,7 @@ class _File:
         end = cursor
         bones = self._bones(skel) if skel else []
         materials = self._materials(mat_values, mat_dict)
-        if not any(materials):
+        if not any(material.binds or material.albedo for material in materials):
             scanned = self._scan_fmats()
             if scanned:
                 materials = scanned
@@ -237,6 +264,8 @@ class _File:
             images,
             list(getattr(self, "_image_notes", [])),
             _texture_strings(self.data),
+            materials,
+            pool,
         )
         if not parts:
             model.notes.append(f"{model.name or fallback}: no drawable shape")
@@ -279,68 +308,209 @@ class _File:
             bones.append((parent, pos, rot, scale))
         return bones
 
-    def _materials(self, values: int, dictionary: int) -> list[list[str]]:
+    def _materials(self, values: int, dictionary: int) -> list[Material]:
         names = self.dict_keys(dictionary)
         # Version 9 and later (including Switch 2 files that report a higher
         # major) keep the texture-name array at a fixed offset. Walking a
         # guessed version-10 header skips that array and the mesh stays grey.
+        stride = 0xA8 if self.major >= 9 else 0xB8
         if self.major >= 9 and values and self.data[values : values + 4] == b"FMAT":
             count = len(names) or 1
             found = []
             for index in range(count):
-                at = values + index * 0xA8
-                if at + 0xA8 > len(self.data) or self.data[at : at + 4] != b"FMAT":
+                at = values + index * stride
+                if at + stride > len(self.data) or self.data[at : at + 4] != b"FMAT":
                     break
-                found.append(self._fmat_names(at))
+                found.append(self._read_material(at, names[index] if index < len(names) else ""))
             if found:
                 return found
         at = values
         found = []
-        for _name in names:
+        for name in names:
             if not at or self.data[at : at + 4] != b"FMAT":
-                found.append([])
+                found.append(Material(name))
                 continue
-            found.append(self._fmat_names(at))
-            at += 0xB8 if self.major < 9 else 0xA8
+            found.append(self._read_material(at, name))
+            at += stride
         return found
 
-    def _fmat_names(self, at: int) -> list[str]:
+    def _read_material(self, at: int, fallback: str) -> Material:
         if self.major >= 9:
-            if at + 0x9E > len(self.data):
-                return []
+            if at + 0xA8 > len(self.data):
+                return Material(fallback)
+            name = self.string(self.u64(at + 0x08)) or fallback
+            render_at = self.u64(at + 0x10)
+            render_dict = self.u64(at + 0x18)
+            assign_at = self.u64(at + 0x20)
             texture_at = self.u64(at + 0x30)
+            sampler_dict = self.u64(at + 0x48)
+            param_at = self.u64(at + 0x50)
+            param_dict = self.u64(at + 0x58)
+            param_data = self.u64(at + 0x60)
+            render_count = self.u16(at + 0x9A)
+            sampler_count = self.data[at + 0x9C]
             texture_count = self.data[at + 0x9D]
+            param_count = self.u16(at + 0x9E)
         else:
-            if at + 0xAA > len(self.data):
-                return []
+            if at + 0xB4 > len(self.data):
+                return Material(fallback)
+            name = self.string(self.u64(at + 0x10)) or fallback
+            render_at = self.u64(at + 0x18)
+            render_dict = self.u64(at + 0x20)
+            assign_at = self.u64(at + 0x28)
             texture_at = self.u64(at + 0x38)
+            sampler_dict = self.u64(at + 0x50)
+            param_at = self.u64(at + 0x58)
+            param_dict = self.u64(at + 0x60)
+            param_data = self.u64(at + 0x68)
+            render_count = self.u16(at + 0xA6)
+            sampler_count = self.data[at + 0xA8]
             texture_count = self.data[at + 0xA9]
-        if texture_count > 64 or not texture_at:
+            param_count = self.u16(at + 0xAA)
+        textures = self._name_list(texture_at, texture_count)
+        if not textures and sampler_count:
+            textures = self._name_list(texture_at, sampler_count)
+        try:
+            sampler_names = self.dict_keys(sampler_dict) if sampler_dict else []
+        except FresError:
+            sampler_names = []
+        render: dict = {}
+        shader = ""
+        assign: dict[str, str] = {}
+        options: dict[str, str] = {}
+        color = None
+        try:
+            render = self._render_map(render_at, render_dict, render_count)
+        except (FresError, struct.error, IndexError, OSError):
+            render = {}
+        try:
+            shader, assign, options = self._shader_assign(assign_at)
+        except (FresError, struct.error, IndexError, OSError):
+            shader, assign, options = "", {}, {}
+        try:
+            color = self._param_color(param_at, param_dict, param_data, param_count)
+        except (FresError, struct.error, IndexError, OSError):
+            color = None
+        role = {target: slot for slot, target in assign.items() if target}
+        binds: list[tuple[str, str]] = []
+        count = max(len(textures), len(sampler_names))
+        for index in range(count):
+            texture = textures[index] if index < len(textures) else ""
+            sampler = sampler_names[index] if index < len(sampler_names) else ""
+            if not texture and not sampler:
+                continue
+            binds.append((role.get(sampler, sampler), texture))
+        albedo = rank_albedo(binds)
+        alpha, cutoff, sided = _alpha_state(render, options, shader, name)
+        return Material(name, binds, albedo, alpha, cutoff, sided, color, shader)
+
+    def _name_list(self, at: int, count: int) -> list[str]:
+        if not at or count <= 0 or count > 64:
             return []
         names = []
-        for index in range(texture_count):
-            slot = texture_at + index * 8
+        for index in range(count):
+            slot = at + index * 8
             if slot + 8 > len(self.data):
                 break
             text = self.string(self.u64(slot))
-            if text:
-                names.append(text)
+            if not text or not _TEX_NAME.fullmatch(text):
+                if index == 0:
+                    return []
+                break
+            names.append(text)
         return names
 
-    def _scan_fmats(self) -> list[list[str]]:
+    def _render_map(self, array: int, dictionary: int, count: int) -> dict:
+        if not array or count <= 0 or count > 64:
+            return {}
+        try:
+            labels = self.dict_keys(dictionary) if dictionary else []
+        except FresError:
+            labels = []
+        found = {}
+        for index in range(count):
+            at = array + index * 0x18
+            if at + 0x14 > len(self.data):
+                break
+            name = self.string(self.u64(at)) or (labels[index] if index < len(labels) else "")
+            if not name:
+                continue
+            data_at = self.u64(at + 8)
+            amount = self.u16(at + 0x10)
+            kind = self.data[at + 0x12]
+            found[name] = _render_values(self, data_at, kind, amount)
+        return found
+
+    def _shader_assign(self, at: int) -> tuple[str, dict[str, str], dict[str, str]]:
+        if not at or at + 0x48 > len(self.data):
+            return "", {}, {}
+        archive = self.string(self.u64(at))
+        model = self.string(self.u64(at + 8))
+        if archive and not _TEX_NAME.fullmatch(archive):
+            return "", {}, {}
+        if model and not _TEX_NAME.fullmatch(model):
+            return "", {}, {}
+        samp_arr = self.u64(at + 0x20)
+        samp_dict = self.u64(at + 0x28)
+        opt_arr = self.u64(at + 0x30)
+        opt_dict = self.u64(at + 0x38)
+        samp_count = self.data[at + 0x45]
+        opt_count = self.u16(at + 0x46)
+        samplers: dict[str, str] = {}
+        keys = self.dict_keys(samp_dict) if samp_dict else []
+        for index, key in enumerate(keys[: max(samp_count, len(keys)) or 0][:64]):
+            target = key
+            if samp_arr:
+                target = self.string(self.u64(samp_arr + index * 8)) or key
+            if key:
+                samplers[key] = target
+        options: dict[str, str] = {}
+        okeys = self.dict_keys(opt_dict) if opt_dict else []
+        for index, key in enumerate(okeys[: max(opt_count, len(okeys)) or 0][:64]):
+            if not opt_arr or not key:
+                continue
+            options[key] = self.string(self.u64(opt_arr + index * 8))
+        return model or archive, samplers, options
+
+    def _param_color(self, array: int, dictionary: int, data: int, count: int) -> tuple[float, float, float, float] | None:
+        if not array or not data or count <= 0 or count > 80:
+            return None
+        try:
+            labels = self.dict_keys(dictionary) if dictionary else []
+        except FresError:
+            labels = []
+        for index in range(count):
+            at = array + index * 0x20
+            if at + 0x14 > len(self.data):
+                break
+            name = self.string(self.u64(at + 8)) or (labels[index] if index < len(labels) else "")
+            kind = self.data[at + 0x10]
+            offset = self.u16(at + 0x12)
+            if kind not in (0x0E, 0x0F) or not _COLOR_PARAM.search(name) or _COLOR_SKIP.search(name):
+                continue
+            comps = 4 if kind == 0x0F else 3
+            if data + offset + comps * 4 > len(self.data):
+                continue
+            values = [self.f32(data + offset + comp * 4) for comp in range(comps)]
+            if comps == 3:
+                values.append(1.0)
+            return _sane_color(tuple(values))
+        return None
+
+    def _scan_fmats(self) -> list[Material]:
         found = []
         start = 0
         while True:
             at = self.data.find(b"FMAT", start)
             if at < 0:
                 break
-            names = self._fmat_names(at)
-            if names:
-                found.append(names)
+            material = self._read_material(at, "")
+            if material.binds or material.albedo:
+                found.append(material)
             start = at + 4
         return found
 
-    def _shape(self, at: int, name: str, bones, materials: list[list[str]]) -> tuple[Part | None, int]:
+    def _shape(self, at: int, name: str, bones, materials: list[Material]) -> tuple[Part | None, int]:
         if self.data[at : at + 4] != b"FSHP":
             raise FresError(f"expected a shape at {at:#x}")
         cursor = at + 4
@@ -384,12 +554,10 @@ class _File:
         positions, uvs = self._vertices(fvtx, lod)
         if skin_count == 0 and bones:
             positions = _rigid(positions, bones, bone_index)
-        tex = ""
-        if 0 <= material_index < len(materials) and materials[material_index]:
-            tex = base_color_name(materials[material_index])
+        material = materials[material_index] if 0 <= material_index < len(materials) else None
         if not positions or not lod["indices"]:
             return None, end
-        return Part(name, positions, lod["indices"], uvs, tex), end
+        return _part_from(name, positions, lod["indices"], uvs, material, material_index), end
 
     def _fvtx(self, at: int) -> dict | None:
         if at + 0x40 > len(self.data) or self.data[at : at + 4] != b"FVTX":
@@ -678,8 +846,55 @@ def _apply(matrix, point) -> tuple[float, float, float]:
     )
 
 
-_ALBEDO = {"alb", "albedo", "basecolor", "diffuse", "diff"}
-_SKIP = {"nrm", "nml", "normal", "norm", "spm", "spc", "spec", "rgh", "rough", "emm", "emit", "mtl", "orm", "msk", "mask"}
+_ALBEDO = {"alb", "albedo", "basecolor", "diffuse", "diff", "paint", "color"}
+_SKIP = {
+    "nrm",
+    "nml",
+    "normal",
+    "norm",
+    "spm",
+    "spc",
+    "spec",
+    "rgh",
+    "rough",
+    "emm",
+    "emit",
+    "mtl",
+    "orm",
+    "msk",
+    "mask",
+    "blend",
+    "splat",
+    "height",
+}
+_TEX_NAME = re.compile(r"[A-Za-z0-9_./+-]{1,120}")
+_COLOR_PARAM = re.compile(r"(const_color|albedo_color|base_color|diffuse_color|material_color|color0|gsys_color)", re.I)
+_COLOR_SKIP = re.compile(r"(spec|emit|emiss|rim|shadow|fog|light)", re.I)
+_SAMPLER_SKIP = re.compile(
+    r"^(n|n[0-7]|nrm[0-7]?|normal[0-7]?|s[0-7]|spc[0-7]?|spec[0-7]?|r[0-7]|rgh[0-7]?|rough[0-7]?|"
+    r"m[0-7]|mtl[0-7]?|metal[0-7]?|e[0-7]|emm[0-7]?|emit[0-7]?|b[0-7]|blend[0-7]?|splat[0-7]?|"
+    r"ao[0-7]?|mask[0-7]?|orm[0-7]?|h[0-7]|height[0-7]?)$"
+)
+_PRIMARY_SAMPLER = {
+    "a0",
+    "alb",
+    "alb0",
+    "albedo",
+    "albedo0",
+    "basecolor",
+    "basecolor0",
+    "diffuse",
+    "diffuse0",
+    "d0",
+    "col0",
+    "bc0",
+    "color0",
+    "base",
+    "color",
+}
+_EXTRA_SAMPLER = {"alb1", "alb2", "alb3", "albedo1", "albedo2", "albedo3"}
+_POOL = re.compile(rb"([A-Za-z][A-Za-z0-9_]{3,80})\x00")
+_POOL_SKIP = {"FRES", "FMDL", "FMAT", "FSHP", "FVTX", "FSKL", "BNTX", "BRTI", "Body"}
 
 
 _TEXTURE_IN_FILE = re.compile(
@@ -688,7 +903,7 @@ _TEXTURE_IN_FILE = re.compile(
 
 
 def _texture_strings(data: bytes) -> list[str]:
-    """Names sitting in the string pool when the material table is unreadable."""
+    """Albedo-like names sitting in the string pool when the material table is unreadable."""
     found = []
     for match in _TEXTURE_IN_FILE.finditer(data):
         text = match.group(1).decode("ascii", errors="ignore")
@@ -697,36 +912,219 @@ def _texture_strings(data: bytes) -> list[str]:
     return found
 
 
+def _string_pool(data: bytes) -> list[str]:
+    found = []
+    seen: set[str] = set()
+    for match in _POOL.finditer(data):
+        text = match.group(1).decode("ascii", "ignore")
+        if not text or text in seen or text in _POOL_SKIP:
+            continue
+        seen.add(text)
+        found.append(text)
+        if len(found) >= 400:
+            break
+    return found
+
+
+def texture_rank(name: str) -> int:
+    """0 albedo, 1 anything else, 2 a normal / mask / blend map."""
+    stem = (name or "").lower().rsplit("/", 1)[-1]
+    tokens: list[str] = []
+    token: list[str] = []
+    for char in stem:
+        if char.isalnum():
+            token.append(char)
+        elif token:
+            tokens.append("".join(token))
+            token = []
+    if token:
+        tokens.append("".join(token))
+    bag = set(tokens)
+    if bag & _ALBEDO or any(item.startswith("alb") for item in bag):
+        return 0
+    if bag & _SKIP or any(item.startswith(("nrm", "normal")) for item in bag):
+        return 2
+    return 1
+
+
+def _sampler_rank(name: str) -> int | None:
+    token = "".join(char for char in (name or "").lower() if char.isalnum())
+    if not token:
+        return None
+    if token in _PRIMARY_SAMPLER:
+        return 0
+    if token in _EXTRA_SAMPLER or (len(token) == 2 and token[0] == "a" and token[1] in "1234567"):
+        return 1
+    if _SAMPLER_SKIP.fullmatch(token):
+        return 9
+    return None
+
+
+def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Albedo slots first. ``_a0`` wins even when it is not sampler 0.
+
+    A normal, specular, or blend slot is left out, including when its
+    texture name does not say ``_Nrm``. The caller draws a flat colour
+    instead of that map.
+    """
+    ranked = []
+    for index, (sampler, texture) in enumerate(binds):
+        if not texture:
+            continue
+        srank = _sampler_rank(sampler)
+        trank = texture_rank(texture)
+        if srank == 9 or (srank is None and trank == 2):
+            continue
+        if srank == 0:
+            key = (0, trank, index)
+        elif srank == 1:
+            key = (1, trank, index)
+        elif trank == 0:
+            key = (2, 0, index)
+        else:
+            key = (3, trank, index)
+        ranked.append((key, sampler, texture))
+    ranked.sort(key=lambda item: item[0])
+    return [(sampler, texture) for _key, sampler, texture in ranked]
+
+
 def base_color_name(names: list[str]) -> str:
     """The material texture that should color the mesh.
 
     Real materials list a normal or mask beside the albedo. Names like
     ``Obj_Rock_A_Alb`` win over ``Obj_Rock_A_Nrm``. A material with one
-    texture keeps that texture.
+    texture keeps that texture. A list that is only non-color maps
+    returns an empty string.
     """
-    if not names:
-        return ""
+    chosen = rank_albedo([("", name) for name in names])
+    return chosen[0][1] if chosen else ""
 
-    def score(name: str) -> int:
-        stem = name.lower().rsplit("/", 1)[-1]
-        tokens: list[str] = []
-        token: list[str] = []
-        for char in stem:
-            if char.isalnum():
-                token.append(char)
-            elif token:
-                tokens.append("".join(token))
-                token = []
-        if token:
-            tokens.append("".join(token))
-        bag = set(tokens)
-        if bag & _ALBEDO or any(item.startswith("alb") for item in bag):
-            return 0
-        if bag & _SKIP:
-            return 2
-        return 1
 
-    return min(names, key=lambda name: (score(name), names.index(name)))
+def _part_from(name, positions, indices, uvs, material: Material | None, material_index: int) -> Part:
+    sampler, texture = ("", "")
+    if material and material.albedo:
+        sampler, texture = material.albedo[0]
+    return Part(
+        name,
+        positions,
+        indices,
+        uvs,
+        texture,
+        material.name if material else "",
+        material_index if material else -1,
+        list(material.binds) if material else [],
+        list(material.albedo) if material else [],
+        sampler,
+        material.alpha if material else "opaque",
+        material.cutoff if material else 0.5,
+        material.double_sided if material else True,
+        material.base_color if material else None,
+    )
+
+
+def _render_values(reader, data_at: int, kind: int, amount: int):
+    if not data_at or amount <= 0:
+        return None
+    values = []
+    for index in range(min(amount, 8)):
+        if kind == 0:
+            values.append(reader.i32(data_at + index * 4))
+        elif kind == 1:
+            values.append(reader.f32(data_at + index * 4))
+        elif kind == 2:
+            values.append(reader.string(reader.u64(data_at + index * 8)))
+        else:
+            return None
+    if len(values) == 1:
+        return values[0]
+    return values
+
+
+def _lookup_render(render: dict, *keys):
+    for key in keys:
+        if key in render:
+            return render[key]
+        for name, value in render.items():
+            if str(name).lower() == key.lower():
+                return value
+    return None
+
+
+def _as_text(value) -> str:
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "")
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, list):
+        value = value[0] if value else 0
+    if isinstance(value, str):
+        return value.lower() in {"1", "true", "yes", "enable", "enabled", "on"}
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    return False
+
+
+def _sane_color(values) -> tuple[float, float, float, float] | None:
+    if not values or len(values) < 3:
+        return None
+    red, green, blue = float(values[0]), float(values[1]), float(values[2])
+    alpha = float(values[3]) if len(values) > 3 else 1.0
+    if max(red, green, blue) > 1.5:
+        red, green, blue = red / 255.0, green / 255.0, blue / 255.0
+        if alpha > 1.5:
+            alpha /= 255.0
+    if min(red, green, blue, alpha) < 0 or max(red, green, blue) > 1 or alpha > 1:
+        return None
+    if red > 0.9 and green < 0.15 and blue > 0.9:
+        return None
+    return (red, green, blue, alpha)
+
+
+def _alpha_state(render: dict, options: dict, shader: str, material_name: str) -> tuple[str, float, bool]:
+    """Return alpha mode, cutoff, and whether both sides are drawn.
+
+    Missing render info stays double-sided and opaque, which is how the
+    view already drew meshes. An explicit front face, a mask, or a blend
+    comes from the material.
+    """
+    mode = _as_text(_lookup_render(render, "gsys_render_state_mode", "render_state_mode")).lower()
+    face = _as_text(_lookup_render(render, "gsys_render_state_display_face", "display_face")).lower().replace(" ", "")
+    blend = _as_text(_lookup_render(render, "gsys_render_state_blend_mode", "blend_mode")).lower()
+    func = _as_text(_lookup_render(render, "gsys_alpha_test_func", "alpha_test_func")).lower()
+    enabled = _truthy(_lookup_render(render, "gsys_alpha_test_enable", "alpha_test_enable"))
+    raw_cut = _lookup_render(render, "gsys_alpha_test_value", "alpha_test_value")
+    if isinstance(raw_cut, list):
+        raw_cut = raw_cut[0] if raw_cut else None
+    cutoff = 0.5
+    if isinstance(raw_cut, (int, float)) and not isinstance(raw_cut, bool):
+        cutoff = float(raw_cut)
+        if cutoff > 1:
+            cutoff /= 255.0
+        cutoff = min(max(cutoff, 0.0), 1.0)
+    if func in {"always", "never"}:
+        enabled = False
+    option_test = _truthy(options.get("enable_alphatest") or options.get("gsys_alpha_test_enable"))
+    option_blend = _truthy(options.get("enable_alphablend") or options.get("enable_blend"))
+    alpha = "opaque"
+    if any(token in mode for token in ("translucen", "blend")) or option_blend or (
+        blend and blend not in {"opaque", "none", "0", "off"}
+    ):
+        alpha = "blend"
+    elif "mask" in mode or "clip" in mode or "cutout" in mode or enabled or option_test:
+        alpha = "mask"
+    if alpha == "opaque":
+        blob = " ".join((shader, material_name)).lower()
+        if any(token in blob for token in ("_trs", "alphatest", "cutout", "billboard")):
+            alpha = "mask"
+    sided = True
+    if face:
+        if any(token in face for token in ("both", "double", "none", "frontandback")):
+            sided = True
+        elif "front" in face or "back" in face:
+            sided = False
+    return alpha, cutoff, sided
 
 
 def sample_bfres(
@@ -741,6 +1139,11 @@ def sample_bfres(
     swizzled: bool = False,
     texture_name: str = "alb",
     embed_texture: bool = True,
+    samplers: list[tuple[str, str]] | None = None,
+    alpha: str = "",
+    cutoff: float = 0.5,
+    display_face: str = "",
+    link_textures: bool = True,
 ) -> bytes:
     """A version-9 Switch BFRES with one textured triangle mesh. Synthetic."""
     if len(positions) != len(uvs):
@@ -781,6 +1184,7 @@ def sample_bfres(
     model_name = add_string(name)
     shape_name = add_string("Body")
     mat_name = add_string("lambert")
+    custom_material = samplers is not None or bool(alpha) or bool(display_face) or not link_textures
     tex_name = add_string(texture_name)
     pos_name = add_string("_p0")
     uv_name = add_string("_u0")
@@ -842,26 +1246,85 @@ def sample_bfres(
     shape_dict = add_dict([shape_name])
 
     align(8)
-    tex_array = len(blob)
-    blob.extend(struct.pack("<Q", tex_name))
+    if not custom_material:
+        tex_ptr = len(blob)
+        blob.extend(struct.pack("<Q", tex_name))
+        render_at = render_dict = 0
+        render_count = 0
+        sampler_dict_at = 0
+        sampler_count = 0
+        texture_count = 1
+    else:
+        pairs = list(samplers) if samplers is not None else [("_a0", texture_name)]
+        tex_offs = [add_string(tex) for _sampler, tex in pairs]
+        samp_offs = [add_string(sampler) for sampler, _tex in pairs if sampler]
+        infos: list[tuple[str, int, list]] = []
+        if alpha == "mask":
+            infos.append(("gsys_alpha_test_enable", 0, [1]))
+            infos.append(("gsys_alpha_test_value", 1, [float(cutoff)]))
+        elif alpha == "blend":
+            infos.append(("gsys_render_state_mode", 2, ["translucent"]))
+        if display_face:
+            infos.append(("gsys_render_state_display_face", 2, [display_face]))
+        info_names = []
+        info_rows = []
+        for info_name, kind, values in infos:
+            info_names.append(add_string(info_name))
+            if kind == 2:
+                text_offs = [add_string(str(item)) for item in values]
+                align(8)
+                data_at = len(blob)
+                for item in text_offs:
+                    blob.extend(struct.pack("<Q", item))
+            else:
+                align(4)
+                data_at = len(blob)
+                pack = "<f" if kind == 1 else "<i"
+                for item in values:
+                    blob.extend(struct.pack(pack, float(item) if kind == 1 else int(item)))
+            info_rows.append((info_names[-1], data_at, len(values), kind))
+        if info_rows:
+            align(8)
+            render_at = len(blob)
+            for name_off, data_at, count, kind in info_rows:
+                blob.extend(struct.pack("<QQ", name_off, data_at))
+                blob.extend(struct.pack("<HB", count, kind))
+                blob.extend(b"\0" * 5)
+            render_dict = add_dict(info_names)
+            render_count = len(info_rows)
+        else:
+            render_at = render_dict = 0
+            render_count = 0
+        align(8)
+        if link_textures:
+            tex_ptr = len(blob)
+            for off in tex_offs:
+                blob.extend(struct.pack("<Q", off))
+            texture_count = len(pairs)
+            sampler_count = len(samp_offs)
+        else:
+            tex_ptr = 0
+            texture_count = 0
+            sampler_count = 0
+        sampler_dict_at = add_dict(samp_offs) if samp_offs and link_textures else 0
     mat_at = len(blob)
     blob.extend(b"FMAT")
     blob.extend(struct.pack("<I", 1))
     blob.extend(struct.pack("<Q", mat_name))
-    blob.extend(struct.pack("<QQ", 0, 0))  # render info
+    blob.extend(struct.pack("<QQ", render_at, render_dict))
     blob.extend(struct.pack("<Q", 0))  # shader assign
     blob.extend(struct.pack("<Q", 0))  # runtime textures
-    blob.extend(struct.pack("<Q", tex_array))
+    blob.extend(struct.pack("<Q", tex_ptr))
     blob.extend(struct.pack("<Q", 0))  # sampler array
-    blob.extend(struct.pack("<QQ", 0, 0))  # samplers
+    blob.extend(struct.pack("<QQ", 0, sampler_dict_at))
     blob.extend(struct.pack("<QQ", 0, 0))  # shader params
     blob.extend(struct.pack("<Q", 0))  # param data
     blob.extend(struct.pack("<QQ", 0, 0))  # user data
     blob.extend(struct.pack("<Q", 0))  # volatile
     blob.extend(struct.pack("<Q", 0))  # user pointer
     blob.extend(struct.pack("<QQ", 0, 0))  # slots
-    blob.extend(struct.pack("<HH", 0, 0))
-    blob.extend(bytes((0, 1)))  # samplers, textures
+    blob.extend(struct.pack("<HH", 0, render_count))
+    blob.extend(bytes((sampler_count & 0xFF, texture_count & 0xFF)))
     blob.extend(struct.pack("<HHHHH", 0, 0, 0, 0, 0))
     mat_dict = add_dict([mat_name])
 
