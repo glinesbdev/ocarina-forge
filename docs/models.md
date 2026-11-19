@@ -6,17 +6,19 @@ The 3D view loads a mesh from the dump you point Bancwright at. Converted glTF i
 
 For each actor name (`Gyaml`):
 
-1. Open `Pack/Actor/<Gyaml>.pack.zs` (zstd dictionary 4) and look for a `.bfres` in the SARC. A file whose name contains the actor name is preferred.
-2. Otherwise read strings in that pack. `ModelProjectName` and a `Model/<name>.bfres` path become `Model/<name>.bfres.zs` (dictionary 1), then the uncompressed `.bfres`.
-3. Otherwise try `Model/<Gyaml>.bfres.zs`.
+1. Open `Pack/Actor/<Gyaml>.pack.zs` (zstd dictionary 4) and read every `Component/ModelInfo/*.engine__component__ModelInfo.bgyml`. Each one, including entries under `SubModels`, has `ModelProjectName` and `FmdbName`.
+2. Try `Model/<Project>.<Fmdb>.bfres.zs` (dictionary 1), then the uncompressed `.bfres`. When `FmdbName` is missing, the project name is used for both: `Model/<Project>.<Project>.bfres.zs`.
+3. If that file is missing, try the other `Model/<Project>.*.bfres.zs` files, skipping `*.anim.bfres.zs`.
+4. Then `Model/<Gyaml>.<Gyaml>.bfres.zs`.
+5. Older layouts still work: a `.bfres` stored inside the pack, a `Model/<name>.bfres` string in the pack, and `Model/<Gyaml>.bfres.zs`.
 
-The first file that converts is the one shown. The same glTF is reused for every instance of that actor. Three downloads run at a time. Until one arrives, the actor is the labeled box.
+The first file that converts is the one shown. The same glTF is reused for every instance of that actor. Three downloads run at a time. Until one arrives, the actor is the labeled box. A static map is requested after the actors, and it is not part of picking, so a few hundred thousand triangles do not sit on the click path.
 
-A scene can also draw a static map, not pickable, from the first file that exists:
+A scene draws a static map, not pickable, from the first file that exists:
 
-- `Model/<Scene>.bfres.zs`
-- `Model/<Area>.bfres.zs`
-- `Model/<Area>_Static.bfres.zs` and `Model/<Scene>_Static.bfres.zs`
+- `Model/<Area>_NN.<Area>_NN.bfres.zs` (Kokiri Forest child is `Model/KokiriForest_01.KokiriForest_01.bfres.zs`)
+- `Model/<Scene>.<Scene>.bfres.zs`
+- the older single names `Model/<Scene>.bfres.zs`, `Model/<Area>.bfres.zs`, `Model/<Area>_Static.bfres.zs`
 - the same stems under `Terrain/` and `Map/`
 
 No map file means no extra object. It does not add a box.
@@ -25,7 +27,11 @@ No map file means no extra object. It does not add a box.
 
 Meshes and one base color. Vertices stay in bind pose. A shape with a skin count of zero is moved by its single bone. A skinned shape is already stored in model space, so it is drawn as stored. Animation is not read.
 
-Textures are the embedded BNTX. Tile mode and block compression (BC1–BC7, ASTC, RGBA8) are decoded on the server to PNG and packed into a glTF binary. A mesh whose texture cannot be decoded is still drawn, untextured, and the properties panel says so.
+The base color is the material texture whose name looks like an albedo (`_Alb`, `Albedo`, `Diffuse`). A normal or mask (`_Nrm`, `_Spm`, `_Mtl`) is not used as the color. Real textures are not inside the bfres. The viewer loads `Tex/<TextureName>.bntx.zs` (dictionary 1), or `Tex/<TextureName>.bntx` when the file is already unpacked. An embedded BNTX is still used when the bfres has one. Tile mode and block compression (BC1–BC7, ASTC, RGBA8) are decoded on the server to PNG and packed into a glTF binary. A mesh whose texture cannot be decoded is still drawn, untextured, and the properties panel says so.
+
+## Build-time actors
+
+An After the Ocarina recipe that places an actor (the `stones:` list, or any other scene YAML row with a gyaml, a translate, and a banc) is drawn on that map before you build. It is a read-only ghost: a violet tint, the label “added by build, flag-gated” when the file names a flag, and the recipe path in the properties panel. Selecting it does not write the banc. Saria’s file leaves `place: false` and does not add a ghost.
 
 The cache key is a hash of the source bytes plus a version prefix. Files live in `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`.
 
@@ -35,7 +41,7 @@ The cache key is a hash of the source bytes plus a version prefix. Files live in
 
 The properties panel shows the reason.
 
-- No pack and no `Model/<Gyaml>.bfres.zs`.
+- No pack, and no `Model/<Project>.<Fmdb>.bfres.zs` or `Model/<Gyaml>.<Gyaml>.bfres.zs`. The properties panel lists the paths it tried.
 - The pack is not a SARC, or the bfres is truncated or not a Switch `FRES` file.
 - `.bfres.mc` (mesh codec). This viewer does not decode that stream.
 - The GPU buffer is an external section past the end of the file (the HasExternalGPU flag).

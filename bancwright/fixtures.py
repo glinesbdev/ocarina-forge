@@ -13,6 +13,7 @@ from pathlib import Path
 import zstandard
 
 from bancwright.formats.bfres import sample_bfres
+from bancwright.formats.bntx import write_rgba
 from bancwright.formats.byml import Hash32, U32, U64, dumps
 from bancwright.formats.restbl import ResourceSizeTable, save_table
 from bancwright.formats.sarc import pack
@@ -197,10 +198,7 @@ def build_fixture(root: Path) -> Path:
     }
     actor_params = {}
     for name in CATALOG:
-        body = {"Name": name, "Synthetic": True}
-        if name == "Obj_Tree":
-            body["ModelProjectName"] = "Obj_Tree"
-        actor_params[name] = dumps(body)
+        actor_params[name] = dumps({"Name": name, "Synthetic": True})
     dictionaries = _train(list(scenes.values()) + list(actor_params.values()))
     dict_bytes = {dict_id: dictionaries[dict_id] for dict_id in dictionaries}
     zsdic = pack({("zs.zsdic" if i == 1 else "bkprb.zsdic" if i == 2 else "bcett.byml.zsdic" if i == 3 else "pack.zsdic"): raw for i, raw in dict_bytes.items()})
@@ -220,21 +218,42 @@ def build_fixture(root: Path) -> Path:
 
     folder = romfs / "Pack" / "Actor"
     folder.mkdir(parents=True, exist_ok=True)
+    model_info = {
+        # Root FmdbName / ModelProjectName, the usual actor shape.
+        "Npc_Kokiri_F_01": _model_info("Npc_Kokiri_F", "Npc_Kokiri_F_01"),
+        # SubModels only, which is how some packs list every mesh.
+        "Obj_Tree": _model_info("Obj_Tree", "Obj_Tree", sub=True),
+        "Enemy_DekuBaba": _model_info("Enemy_DekuBaba", "Enemy_DekuBaba"),
+    }
     for name, payload in actor_params.items():
         files = {f"Actor/{name}.engine__actor__ActorParam.bgyml": payload}
-        if name == "Npc_Kokiri_F_01":
-            files["Model/Npc_Kokiri_F_01.bfres"] = _fado_model()
-        elif name == "Enemy_DekuBaba":
-            # A truncated header, so the viewer can show a box and a reason.
-            files["Model/Enemy_DekuBaba.bfres"] = b"FRES    " + bytes(48)
+        if name in model_info:
+            files[f"Component/ModelInfo/{name}.engine__component__ModelInfo.bgyml"] = model_info[name]
         archive = pack(files)
         packed = compress(archive, 4, loaded, level=3)
         (folder / f"{name}.pack.zs").write_bytes(packed)
 
     model_dir = romfs / "Model"
     model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "Obj_Tree.bfres.zs").write_bytes(compress(_tree_model(), 1, loaded, level=3))
-    (model_dir / "KokiriForest_Child_Static.bfres.zs").write_bytes(compress(_terrain_model(), 1, loaded, level=3))
+    tex_dir = romfs / "Tex"
+    tex_dir.mkdir(parents=True, exist_ok=True)
+    # Real dumps name meshes Model/<Project>.<Fmdb>.bfres.zs and keep the
+    # base color in Tex/<name>.bntx.zs. The bfres itself has no embedded BNTX.
+    _write_model(model_dir, tex_dir, loaded, "Npc_Kokiri_F.Npc_Kokiri_F_01", "Npc_Kokiri_F_01_Alb", _fado_model(), _fado_rgba())
+    _write_model(model_dir, tex_dir, loaded, "Obj_Tree.Obj_Tree", "Obj_Tree_Alb", _tree_model(), _tree_rgba())
+    _write_model(
+        model_dir,
+        tex_dir,
+        loaded,
+        "KokiriForest_01.KokiriForest_01",
+        "KokiriForest_01_Alb",
+        _terrain_model(),
+        _terrain_rgba(),
+    )
+    # A truncated header at the path ModelInfo names, so the viewer can show a box and a reason.
+    (model_dir / "Enemy_DekuBaba.Enemy_DekuBaba.bfres.zs").write_bytes(
+        compress(b"FRES    " + bytes(48), 1, loaded, level=3)
+    )
 
     # A named entry and an unrelated hashed entry, so export has to keep both.
     table.named.append(("System/Resource/KeepMe.bgyml", 4096))
@@ -251,6 +270,18 @@ def build_fixture(root: Path) -> Path:
     return root
 
 
+def _model_info(project: str, fmdb: str, *, sub: bool = False) -> bytes:
+    pair = {"FmdbName": fmdb, "ModelProjectName": project}
+    return dumps({"SubModels": [pair]} if sub else pair)
+
+
+def _write_model(model_dir, tex_dir, dicts, stem: str, texture: str, mesh: bytes, rgba: tuple[bytes, int, int]) -> None:
+    pixels, width, height = rgba
+    (model_dir / f"{stem}.bfres.zs").write_bytes(compress(mesh, 1, dicts, level=3))
+    image = write_rgba(texture, width, height, pixels, swizzled=True)
+    (tex_dir / f"{texture}.bntx.zs").write_bytes(compress(image, 1, dicts, level=3))
+
+
 def _checker(width: int, height: int, a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bytes:
     out = bytearray()
     for y in range(height):
@@ -259,28 +290,70 @@ def _checker(width: int, height: int, a: tuple[int, int, int, int], b: tuple[int
     return bytes(out)
 
 
+def _fado_rgba():
+    return _checker(16, 16, (224, 176, 90, 255), (92, 64, 28, 255)), 16, 16
+
+
 def _fado_model() -> bytes:
-    rgba = _checker(16, 16, (224, 176, 90, 255), (92, 64, 28, 255))
+    rgba, width, height = _fado_rgba()
     positions = [(0.0, 1.4, 0.0), (-0.45, 0.0, -0.45), (0.45, 0.0, -0.45), (0.0, 0.0, 0.55)]
     uvs = [(0.5, 1.0), (0.0, 0.0), (1.0, 0.0), (0.5, 0.15)]
     indices = [0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 3, 2]
-    return sample_bfres("Npc_Kokiri_F_01", positions, indices, uvs, rgba, 16, 16, swizzled=True)
+    return sample_bfres(
+        "Npc_Kokiri_F_01",
+        positions,
+        indices,
+        uvs,
+        rgba,
+        width,
+        height,
+        texture_name="Npc_Kokiri_F_01_Alb",
+        embed_texture=False,
+    )
+
+
+def _tree_rgba():
+    return _checker(16, 16, (46, 110, 52, 255), (28, 72, 34, 255)), 16, 16
 
 
 def _tree_model() -> bytes:
-    rgba = _checker(16, 16, (46, 110, 52, 255), (28, 72, 34, 255))
+    rgba, width, height = _tree_rgba()
     positions = [(0.0, 3.2, 0.0), (-0.9, 0.4, -0.9), (0.9, 0.4, -0.9), (0.0, 0.4, 1.0), (0.0, 0.0, 0.0)]
     uvs = [(0.5, 1.0), (0.0, 0.3), (1.0, 0.3), (0.5, 0.0), (0.5, 0.2)]
     indices = [0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 4, 2, 2, 4, 3, 3, 4, 1]
-    return sample_bfres("Obj_Tree", positions, indices, uvs, rgba, 16, 16, swizzled=True)
+    return sample_bfres(
+        "Obj_Tree",
+        positions,
+        indices,
+        uvs,
+        rgba,
+        width,
+        height,
+        texture_name="Obj_Tree_Alb",
+        embed_texture=False,
+    )
+
+
+def _terrain_rgba():
+    return bytes([78, 112, 58, 255, 96, 128, 64, 255, 70, 104, 50, 255, 88, 120, 60, 255]), 2, 2
 
 
 def _terrain_model() -> bytes:
-    rgba = bytes([78, 112, 58, 255, 96, 128, 64, 255, 70, 104, 50, 255, 88, 120, 60, 255])
+    rgba, width, height = _terrain_rgba()
     positions = [(-40.0, -0.05, -40.0), (40.0, -0.05, -40.0), (40.0, -0.05, 40.0), (-40.0, -0.05, 40.0)]
     uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
     indices = [0, 2, 1, 0, 3, 2]
-    return sample_bfres("KokiriForest_Child_Static", positions, indices, uvs, rgba, 2, 2)
+    return sample_bfres(
+        "KokiriForest_01",
+        positions,
+        indices,
+        uvs,
+        rgba,
+        width,
+        height,
+        texture_name="KokiriForest_01_Alb",
+        embed_texture=False,
+    )
 
 
 def main() -> None:

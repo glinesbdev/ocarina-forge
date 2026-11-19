@@ -6,7 +6,7 @@ from pathlib import Path
 from bancwright.actors import is_volume, view_actor
 from bancwright.dump import Dump
 from bancwright.fixtures import KOKIRI_STATIC, build_fixture
-from bancwright.formats.bfres import _rigid, parse, sample_bfres
+from bancwright.formats.bfres import _rigid, base_color_name, parse, sample_bfres
 from bancwright.formats.bntx import _decode
 from bancwright.formats.gltf import Primitive, png_rgba, to_glb
 from bancwright.formats.swizzle import deswizzle, swizzle
@@ -50,6 +50,11 @@ def test_rigid_bone_is_applied_once():
     assert abs(point[2]) < 1e-4
 
 
+def test_base_color_prefers_albedo():
+    assert base_color_name(["Obj_Rock_A_Nrm", "Obj_Rock_A_Alb"]) == "Obj_Rock_A_Alb"
+    assert base_color_name(["Bomb_Leaf_Trs"]) == "Bomb_Leaf_Trs"
+
+
 def test_bc1_block_decodes_red():
     try:
         import texture2ddecoder  # noqa: F401
@@ -69,7 +74,8 @@ def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
     assert fado["status"] == "mesh"
     assert fado["textures"] >= 1
     assert fado["triangles"] >= 1
-    assert "Npc_Kokiri_F_01.bfres" in fado["source"]
+    assert fado["source"].endswith("Model/Npc_Kokiri_F.Npc_Kokiri_F_01.bfres.zs")
+    assert "untextured" not in (fado["reason"] or "")
     glb = cache_dir() / fado["digest"][:2] / f"{fado['digest']}.glb"
     assert glb.is_file()
     assert glb.read_bytes()[:4] == b"glTF"
@@ -79,7 +85,8 @@ def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
 
     tree = describe_actor(dump, "Obj_Tree")
     assert tree["status"] == "mesh"
-    assert tree["source"].endswith("Model/Obj_Tree.bfres.zs")
+    assert tree["source"].endswith("Model/Obj_Tree.Obj_Tree.bfres.zs")
+    assert tree["textures"] >= 1
     again = describe_actor(dump, "Obj_Tree")
     assert again["digest"] == tree["digest"]
 
@@ -91,12 +98,14 @@ def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
     missing = describe_actor(dump, "Npc_Kokiri_M_01")
     assert missing["status"] == "box"
     assert "No model" in missing["reason"]
+    assert "Model/Npc_Kokiri_M_01.Npc_Kokiri_M_01.bfres.zs" in missing["reason"]
 
     assert describe_actor(dump, "../etc/passwd")["status"] == "box"
 
     terrain = describe_terrain(dump, KOKIRI_STATIC)
     assert terrain["status"] == "mesh"
-    assert terrain["source"].endswith("KokiriForest_Child_Static.bfres.zs")
+    assert terrain["source"].endswith("Model/KokiriForest_01.KokiriForest_01.bfres.zs")
+    assert terrain["textures"] >= 1
     assert describe_terrain(dump, "Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs")["status"] == "none"
     assert os.environ["BANCWRIGHT_CACHE"] == str(cache)
 
@@ -113,3 +122,130 @@ def test_volume_flags():
     pot = view_actor({"Gyaml": "Obj_Pot", "Hash": 4, "Translate": [0, 0, 0]}, "vanilla")
     assert pot["volume"] is False
     assert is_volume("Obj_TriggerBox", [1, 1, 1]) is True
+
+
+def test_modelinfo_names_the_real_bfres_and_tex(tmp_path, monkeypatch):
+    """The path a 1.1.1 dump actually uses: Model/<Project>.<Fmdb>.bfres.zs plus Tex/."""
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bntx import write_rgba
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.sarc import pack
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    gyaml = "Obj_LiftRock_A_01"
+    info = dumps(
+        {
+            "FmdbName": gyaml,
+            "ModelProjectName": "Obj_Rock_A",
+            "SubModels": [{"FmdbName": "Obj_Rock_A_Extra", "ModelProjectName": "Obj_Rock_A"}],
+        }
+    )
+    archive = pack(
+        {
+            f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps({"Name": gyaml}),
+            f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info,
+        }
+    )
+    dicts = dump.dicts()
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dicts, level=3))
+    rgba = bytes([180, 40, 40, 255, 40, 40, 40, 255, 180, 40, 40, 255, 40, 40, 40, 255])
+    mesh = sample_bfres(
+        gyaml,
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        rgba,
+        2,
+        2,
+        texture_name="Obj_Rock_A_Alb",
+        embed_texture=False,
+    )
+    (dump.romfs / "Model" / "Obj_Rock_A.Obj_LiftRock_A_01.bfres.zs").write_bytes(compress(mesh, 1, dicts, level=3))
+    # The old resolver stopped at Model/<Project>.bfres.zs. That file must not win.
+    decoy = sample_bfres("decoy", [(0, 0, 0), (1, 0, 0), (0, 2, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], rgba, 2, 2)
+    (dump.romfs / "Model" / "Obj_Rock_A.bfres.zs").write_bytes(compress(decoy, 1, dicts, level=3))
+    (dump.romfs / "Model" / "Obj_Rock_A.Skip.anim.bfres.zs").write_bytes(b"not a model")
+    image = write_rgba("Obj_Rock_A_Alb", 2, 2, rgba, swizzled=True)
+    (dump.romfs / "Tex" / "Obj_Rock_A_Alb.bntx.zs").write_bytes(compress(image, 1, dicts, level=3))
+
+    resolved = describe_actor(dump, gyaml)
+    assert resolved["status"] == "mesh"
+    assert resolved["source"].endswith("Model/Obj_Rock_A.Obj_LiftRock_A_01.bfres.zs")
+    assert resolved["triangles"] == 1
+    assert resolved["textures"] == 1
+    assert "untextured" not in (resolved["reason"] or "")
+
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    (dump.romfs / "Model" / "Obj_Rock_A.Obj_LiftRock_A_01.bfres.zs").unlink()
+    other = sample_bfres(
+        "other",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        rgba,
+        2,
+        2,
+        texture_name="Obj_Rock_A_Alb",
+        embed_texture=False,
+    )
+    (dump.romfs / "Model" / "Obj_Rock_A.Other.bfres.zs").write_bytes(compress(other, 1, dicts, level=3))
+    fallback = describe_actor(dump, gyaml)
+    assert fallback["status"] == "mesh"
+    assert fallback["source"].endswith("Model/Obj_Rock_A.Other.bfres.zs")
+
+
+def test_old_single_name_model_still_resolves(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    rgba = bytes([20, 80, 200, 255]) * 4
+    mesh = sample_bfres("Mido", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], rgba, 2, 2)
+    (dump.romfs / "Model" / "Npc_Kokiri_M_01.bfres.zs").write_bytes(compress(mesh, 1, dump.dicts(), level=3))
+    info = describe_actor(dump, "Npc_Kokiri_M_01")
+    assert info["status"] == "mesh"
+    assert info["source"].endswith("Model/Npc_Kokiri_M_01.bfres.zs")
+    assert info["textures"] >= 1
+
+
+def test_spirit_stone_is_a_read_only_ghost():
+    from bancwright.project import Project
+    from bancwright.recipes import recipe_actors
+
+    project = Project(Path(__file__).resolve().parents[1] / "examples" / "after-the-ocarina")
+    stones = recipe_actors(project, KOKIRI_STATIC)
+    assert [item["name"] for item in stones] == ["AtO_SpiritStone_Forest"]
+    stone = stones[0]
+    assert stone["gyaml"] == "Obj_TimeTemple_SpiritStone_A_01"
+    assert stone["translate"] == [84.0, 120.3, -27.0]
+    assert stone["status"] == "recipe"
+    assert stone["recipe"]["file"] == "scenes/m6-stones.yaml"
+    assert stone["recipe"]["note"] == "added by build, flag-gated"
+    assert stone["recipe"]["flag"] == "HavePlayedEvent.TitleEventBase"
+    assert all(item["gyaml"] != "Npc_Kokiri_Saria_Child" for item in stones)
+    fire = recipe_actors(project, "Banc/GoronCity/GoronCity_Child_Static.bcett.byml.zs")
+    assert fire[0]["name"] == "AtO_SpiritStone_Fire"
+    assert abs(fire[0]["rotate"][1] + 1.8) < 1e-6
+
+
+def test_check_models_script(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    dump = build_fixture(tmp_path / "dump")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_models.py"
+    result = subprocess.run(
+        [sys.executable, str(script), str(dump), KOKIRI_STATIC],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Model/KokiriForest_01.KokiriForest_01.bfres.zs" in result.stdout
+    assert "Npc_Kokiri_F_01" in result.stdout
+    assert "Obj_Tree" in result.stdout
+    assert "mesh" in result.stdout

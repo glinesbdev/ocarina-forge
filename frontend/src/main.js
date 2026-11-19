@@ -62,6 +62,8 @@ const viewport = createViewport($("viewport"), {
     fillNumber("rz", deg(rotate[2]));
   },
   onTransform: (id, translate, rotate) => {
+    const actor = state.actors.find((item) => item.id === id);
+    if (actor && actor.status === "recipe") return;
     edit({ command: "transform", id, translate: translate.map(round4), rotate: rotate.map(round4) });
   },
 });
@@ -144,8 +146,11 @@ window.addEventListener("keydown", (event) => {
     setGizmo("rotate");
   } else if (event.key === "h" && state.selected) {
     const actor = selectedActor();
-    edit({ command: actor && actor.status === "hidden" ? "unhide" : "hide", id: state.selected });
+    if (!actor || actor.status === "recipe") return;
+    edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: state.selected });
   } else if (event.key === "Delete" && state.selected) {
+    const actor = selectedActor();
+    if (!actor || actor.status === "recipe") return;
     edit({ command: "remove", id: state.selected });
   } else if (event.key === "Escape") {
     state.selected = null;
@@ -705,13 +710,13 @@ function actorRow(actor) {
   const strong = document.createElement("strong");
   strong.textContent = actor.name || actor.gyaml;
   const small = document.createElement("small");
-  small.textContent = actor.name ? actor.gyaml : actor.category;
+  small.textContent = actor.status === "recipe" ? (actor.recipe && actor.recipe.note) || "added by build" : actor.name ? actor.gyaml : actor.category;
   text.append(strong, small);
   button.append(swatch, text);
   if (actor.status && actor.status !== "vanilla") {
     const badge = document.createElement("span");
     badge.className = `badge ${actor.status}`;
-    badge.textContent = actor.status;
+    badge.textContent = actor.status === "recipe" ? "build" : actor.status;
     button.append(badge);
   }
   button.addEventListener("click", () => {
@@ -750,11 +755,16 @@ function renderProps() {
   if (actor.status !== "vanilla") {
     const status = document.createElement("span");
     status.className = `badge ${actor.status}`;
-    status.textContent = actor.status;
+    status.textContent = actor.status === "recipe" ? "build" : actor.status;
     meta.append(" ", status);
   }
   head.append(title, gyaml, hash, meta);
   panel.append(head);
+  if (actor.status === "recipe") {
+    panel.append(recipeNote(actor));
+    panel.append(modelBlock(actor));
+    return;
+  }
   panel.append(modelBlock(actor));
 
   if (!actor.id || actor.status === "locked") return;
@@ -803,6 +813,27 @@ function renderProps() {
     srt.textContent = `SRT hash ${actor.srtHash}. The instance id is left alone; the project uses it as the key.`;
     panel.append(srt);
   }
+}
+
+function recipeNote(actor) {
+  const wrap = document.createElement("div");
+  wrap.className = "model-note";
+  const note = document.createElement("p");
+  note.textContent = (actor.recipe && actor.recipe.note) || "added by build";
+  const file = document.createElement("p");
+  file.className = "muted";
+  file.textContent = (actor.recipe && actor.recipe.file) || "";
+  wrap.append(note, file);
+  if (actor.recipe && actor.recipe.flag) {
+    const flag = document.createElement("p");
+    flag.className = "muted";
+    flag.textContent = `Present while ${actor.recipe.flag} is set. The build places this actor. The banc file is unchanged.`;
+    wrap.append(flag);
+  }
+  const where = document.createElement("p");
+  where.textContent = `Position ${actor.translate.map((value) => formatNum(value)).join(", ")}`;
+  wrap.append(where);
+  return wrap;
 }
 
 function modelBlock(actor) {

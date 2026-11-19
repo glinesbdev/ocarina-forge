@@ -380,7 +380,7 @@ class _File:
             positions = _rigid(positions, bones, bone_index)
         tex = ""
         if 0 <= material_index < len(materials) and materials[material_index]:
-            tex = materials[material_index][0]
+            tex = base_color_name(materials[material_index])
         if not positions or not lod["indices"]:
             return None, end
         return Part(name, positions, lod["indices"], uvs, tex), end
@@ -672,6 +672,42 @@ def _apply(matrix, point) -> tuple[float, float, float]:
     )
 
 
+_ALBEDO = {"alb", "albedo", "basecolor", "diffuse", "diff"}
+_SKIP = {"nrm", "nml", "normal", "norm", "spm", "spc", "spec", "rgh", "rough", "emm", "emit", "mtl", "orm", "msk", "mask"}
+
+
+def base_color_name(names: list[str]) -> str:
+    """The material texture that should color the mesh.
+
+    Real materials list a normal or mask beside the albedo. Names like
+    ``Obj_Rock_A_Alb`` win over ``Obj_Rock_A_Nrm``. A material with one
+    texture keeps that texture.
+    """
+    if not names:
+        return ""
+
+    def score(name: str) -> int:
+        stem = name.lower().rsplit("/", 1)[-1]
+        tokens: list[str] = []
+        token: list[str] = []
+        for char in stem:
+            if char.isalnum():
+                token.append(char)
+            elif token:
+                tokens.append("".join(token))
+                token = []
+        if token:
+            tokens.append("".join(token))
+        bag = set(tokens)
+        if bag & _ALBEDO or any(item.startswith("alb") for item in bag):
+            return 0
+        if bag & _SKIP:
+            return 2
+        return 1
+
+    return min(names, key=lambda name: (score(name), names.index(name)))
+
+
 def sample_bfres(
     name: str,
     positions: list[tuple[float, float, float]],
@@ -682,12 +718,13 @@ def sample_bfres(
     height: int,
     *,
     swizzled: bool = False,
+    texture_name: str = "alb",
+    embed_texture: bool = True,
 ) -> bytes:
     """A version-9 Switch BFRES with one textured triangle mesh. Synthetic."""
     if len(positions) != len(uvs):
         raise FresError("positions and uvs must match")
-    texture_name = "alb"
-    bntx = write_rgba(texture_name, width, height, rgba, swizzled=swizzled)
+    bntx = write_rgba(texture_name, width, height, rgba, swizzled=swizzled) if embed_texture else b""
     stride = 20
     vertex = bytearray()
     for (x, y, z), (u, v) in zip(positions, uvs):
@@ -824,14 +861,20 @@ def sample_bfres(
     blob.extend(struct.pack("<I", 0))
     model_dict = add_dict([model_name])
 
-    align(16)
-    bntx_at = len(blob)
-    blob.extend(bntx)
-    align(8)
-    ext_at = len(blob)
-    blob.extend(struct.pack("<QQ", bntx_at, len(bntx)))
-    ext_name = add_string("textures.bntx")
-    ext_dict = add_dict([ext_name])
+    if embed_texture:
+        align(16)
+        bntx_at = len(blob)
+        blob.extend(bntx)
+        align(8)
+        ext_at = len(blob)
+        blob.extend(struct.pack("<QQ", bntx_at, len(bntx)))
+        ext_name = add_string("textures.bntx")
+        ext_dict = add_dict([ext_name])
+        ext_count = 1
+    else:
+        ext_at = 0
+        ext_dict = 0
+        ext_count = 0
 
     align(8)
     info_at = len(blob)
@@ -858,6 +901,6 @@ def sample_bfres(
     struct.pack_into("<Q", blob, 0xB8, ext_at)
     struct.pack_into("<Q", blob, 0xC0, ext_dict)
     struct.pack_into("<H", blob, 0xDC, 1)
-    struct.pack_into("<H", blob, 0xEC, 1)
+    struct.pack_into("<H", blob, 0xEC, ext_count)
     struct.pack_into("<I", blob, 0x1C, len(blob))
     return bytes(blob)

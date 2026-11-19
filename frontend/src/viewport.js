@@ -125,7 +125,7 @@ export function createViewport(host, hooks) {
     const on = entry.key === selected;
     entry.material.emissive.set(on ? entry.color : 0x000000);
     entry.material.emissiveIntensity = on ? 0.45 : 0;
-    const marked = entry.status === "edited" || entry.status === "added";
+    const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
     entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.volume ? entry.color : 0x101612);
     entry.mesh.visible = !entry.model;
     entry.edges.visible = !entry.model && (entry.volume || on || marked || entry.status === "hidden");
@@ -197,17 +197,18 @@ export function createViewport(host, hooks) {
     const token = ++generation;
     actors.forEach((actor, index) => {
       const key = actor.id || `locked-${index}`;
-      const color = CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
+      const recipe = actor.status === "recipe";
+      const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
       const volume = Boolean(actor.volume);
       const material = new THREE.MeshStandardMaterial({
         color,
         roughness: 0.7,
         metalness: 0.05,
       });
-      if (actor.status === "hidden" || volume) {
+      if (actor.status === "hidden" || volume || recipe) {
         material.transparent = true;
-        material.opacity = actor.status === "hidden" ? 0.18 : 0.07;
-        material.depthWrite = false;
+        material.opacity = actor.status === "hidden" ? 0.18 : recipe ? 0.72 : 0.07;
+        material.depthWrite = recipe;
       }
       const mesh = new THREE.Mesh(boxGeometry, material);
       const edgeMaterial = new THREE.LineBasicMaterial({ color: volume ? color : 0x101612 });
@@ -243,7 +244,9 @@ export function createViewport(host, hooks) {
         model: null,
         modelMeta: metaCache.get(actor.gyaml) || null,
         label: null,
-        labelText: actor.name || actor.gyaml,
+        labelText: recipe
+          ? `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`
+          : actor.name || actor.gyaml,
       });
     });
     if (selected && !entries.has(selected)) selected = null;
@@ -257,7 +260,15 @@ export function createViewport(host, hooks) {
     }
     syncLabels();
     loadModels(token, actors);
-    if (options.banc !== undefined) loadTerrain(token, options.banc);
+    if (options.banc !== undefined) {
+      const banc = options.banc;
+      // The static map can be hundreds of thousands of triangles. Let the
+      // actor requests start first, and never raycast the map, so picking
+      // stays on the actors while the terrain converts.
+      setTimeout(() => {
+        if (token === generation) loadTerrain(token, banc);
+      }, 300);
+    }
   }
 
   function report(info) {
@@ -369,6 +380,14 @@ export function createViewport(host, hooks) {
     model.traverse((child) => {
       child.userData.actorId = entry.id;
     });
+    if (entry.status === "recipe") {
+      model.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        child.material.color.set(0xc9b6f2);
+        child.material.transparent = true;
+        child.material.opacity = 0.92;
+      });
+    }
     entry.pivot.add(model);
     entry.model = model;
     entry.volume = false;
@@ -390,8 +409,17 @@ export function createViewport(host, hooks) {
     try {
       const template = await ensureTemplate(meta.url);
       if (token !== generation) return;
+      await new Promise((resolve) => {
+        if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: 800 });
+        else setTimeout(resolve, 0);
+      });
+      if (token !== generation) return;
       terrainRoot = cloneModel(template);
       terrainRoot.name = "terrain";
+      terrainRoot.raycast = () => {};
+      terrainRoot.traverse((child) => {
+        child.raycast = () => {};
+      });
       scene.add(terrainRoot);
     } catch (error) {
       if (token === generation && hooks.onTerrain) {
@@ -402,7 +430,7 @@ export function createViewport(host, hooks) {
 
   function attach() {
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id || !entry.pivot.visible || entry.locked) {
+    if (!entry || !entry.id || !entry.pivot.visible || entry.locked || entry.status === "recipe") {
       transform.detach();
       return;
     }
@@ -595,7 +623,7 @@ export function createViewport(host, hooks) {
       return;
     }
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id) return;
+    if (!entry || !entry.id || entry.status === "recipe") return;
     const p = entry.pivot.position;
     const r = entry.pivot.rotation;
     hooks.onTransform(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);

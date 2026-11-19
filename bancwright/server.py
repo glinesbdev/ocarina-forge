@@ -20,6 +20,7 @@ from bancwright.fixtures import build_fixture
 from bancwright.importers.ato import import_scenes
 from bancwright.models import actor_glb, describe_actor, describe_terrain, terrain_glb
 from bancwright.project import Project
+from bancwright.recipes import recipe_actors
 from bancwright.scene import apply_command, replace_diff, scene_view
 
 app = FastAPI(title="Bancwright", version=__version__)
@@ -229,6 +230,19 @@ def scene_change_list(banc: str):
     return scene_changes(dump, project, banc)
 
 
+def _attach_recipes(view: dict, banc: str) -> dict:
+    config = load_config()
+    if not config.get("project"):
+        return view
+    try:
+        extras = recipe_actors(Project(config["project"]), banc)
+    except BancError:
+        return view
+    if extras:
+        view["actors"] = [*(view.get("actors") or []), *extras]
+    return view
+
+
 @app.get("/api/scene")
 def get_scene(banc: str):
     dump = _open_dump()
@@ -236,7 +250,7 @@ def get_scene(banc: str):
     diff = _diff_for(banc)
     view = scene_view(document, diff)
     view["banc"] = banc
-    return view
+    return _attach_recipes(view, banc)
 
 
 @app.post("/api/scene/edit")
@@ -253,7 +267,7 @@ def edit_scene(body: dict):
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
     view["focus"] = focus
-    return view
+    return _attach_recipes(view, banc)
 
 
 @app.put("/api/scene/diff")
@@ -268,7 +282,7 @@ def put_diff(body: dict):
     project.save_scene_diff(updated)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
-    return view
+    return _attach_recipes(view, banc)
 
 
 @app.get("/api/models/{gyaml}")
