@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bancwright</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23121614'/%3E%3Cpath d='M16 6l8 10-8 10-8-10z' fill='%23e0b15a'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,520;9..144,640&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@380;500;640&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="top">
+        <div class="brand">
+          <span class="mark" aria-hidden="true"></span>
+          <div>
+            <strong>Bancwright</strong>
+            <span class="brand-sub">scene workbench</span>
+          </div>
+        </div>
+        <button id="project-chip" class="project-chip" type="button" hidden>
+          <span id="project-title">No project</span>
+          <span id="project-name" class="muted"></span>
+        </button>
+        <div class="top-actions">
+          <button id="undo" type="button" class="ghost" title="Undo the last edit in this scene (this session)" disabled>Undo</button>
+          <button id="redo" type="button" class="ghost" title="Redo" disabled>Redo</button>
+          <button id="build-open" type="button" class="primary" hidden>Build mod</button>
+          <button id="open-scenes" type="button" class="ghost mobile-only">Scenes</button>
+          <button id="open-side" type="button" class="ghost mobile-only">Actors</button>
+        </div>
+      </header>
+
+      <div id="banner" class="banner" hidden></div>
+
+      <div id="workspace" hidden>
+        <aside id="scene-pane" class="pane">
+          <div class="pane-head">
+            <h2>Scenes</h2>
+            <span id="scene-count" class="muted"></span>
+          </div>
+          <input id="scene-search" type="search" placeholder="Search areas or scenes" autocomplete="off" />
+          <div id="scene-list" class="scroll" role="list"></div>
+          <div class="legend" aria-label="Actor colors">
+            <span><i class="swatch npc"></i>NPC</span>
+            <span><i class="swatch enemy"></i>Enemy</span>
+            <span><i class="swatch object"></i>Object</span>
+            <span><i class="swatch land"></i>Land</span>
+            <span><i class="swatch effect"></i>Effect</span>
+            <span><i class="swatch animal"></i>Animal</span>
+            <span><i class="swatch system"></i>System</span>
+          </div>
+        </aside>
+
+        <main id="stage">
+          <div id="warnings" class="warnings" hidden></div>
+          <div id="viewport">
+            <div id="viewport-empty">
+              <p>Open a scene from the list.</p>
+              <p class="muted">Each actor is a box at its placement. Models come later.</p>
+            </div>
+          </div>
+          <div class="stage-bar">
+            <strong id="scene-name"></strong>
+            <div class="seg" role="group" aria-label="Camera">
+              <button type="button" data-nav="orbit" class="is-on">Orbit</button>
+              <button type="button" data-nav="fly">Fly</button>
+            </div>
+            <div class="seg" role="group" aria-label="Gizmo">
+              <button type="button" data-gizmo="translate" class="is-on">Move</button>
+              <button type="button" data-gizmo="rotate">Rotate</button>
+            </div>
+            <label class="check"><input id="show-hidden" type="checkbox" /> Show hidden</label>
+            <label class="check"><input id="show-labels" type="checkbox" checked /> All labels</label>
+            <button id="frame" type="button" class="ghost">Frame</button>
+            <span id="stage-hint" class="hint">Left drag orbits. Scroll zooms. Click a box to select.</span>
+          </div>
+        </main>
+
+        <aside id="side-pane" class="pane">
+          <div class="tabs" role="tablist">
+            <button type="button" id="tab-outliner" class="is-on" role="tab" aria-selected="true">Outliner</button>
+            <button type="button" id="tab-props" role="tab" aria-selected="false">Properties</button>
+          </div>
+          <div id="outliner-panel">
+            <div class="pane-tools">
+              <input id="actor-search" type="search" placeholder="Search this scene" autocomplete="off" />
+              <button id="add-actor" type="button" class="primary">Add</button>
+            </div>
+            <div id="outliner" class="scroll" role="listbox" aria-label="Actors"></div>
+          </div>
+          <div id="props-panel" class="scroll" hidden></div>
+        </aside>
+      </div>
+
+      <section id="gate" class="gate" hidden></section>
+    </div>
+
+    <dialog id="add-dialog">
+      <form method="dialog" class="dialog-card">
+        <header>
+          <h2 id="add-title">Add an actor</h2>
+          <button type="button" class="ghost" data-close>Close</button>
+        </header>
+        <p class="muted" id="add-help">Names come from Pack/Actor in the dump. The new actor is placed at the camera target.</p>
+        <input id="add-search" type="search" placeholder="Npc, Obj, Enemy…" autocomplete="off" />
+        <div id="add-results" class="scroll dialog-list"></div>
+      </form>
+    </dialog>
+
+    <dialog id="build-dialog">
+      <form method="dialog" class="dialog-card wide">
+        <header>
+          <h2>Build the mod</h2>
+          <button type="button" class="ghost" data-close>Close</button>
+        </header>
+        <p class="muted">Changed placement files are re-encoded with the dump’s zstd dictionary. The size table is only raised. The dump’s own files are not modified.</p>
+        <label class="check"><input id="build-install" type="checkbox" checked /> Install into mods/&lt;project&gt; under the dump</label>
+        <label class="check"><input id="build-zip" type="checkbox" /> Also write a zip</label>
+        <div class="dialog-actions">
+          <button id="build-run" type="button" class="primary">Build</button>
+          <a id="build-download" class="ghost linkish" href="/api/export/download" hidden>Download zip</a>
+        </div>
+        <ol id="build-log" class="log"></ol>
+      </form>
+    </dialog>
+
+    <dialog id="project-dialog">
+      <form method="dialog" class="dialog-card wide">
+        <header>
+          <h2>Project</h2>
+          <button type="button" class="ghost" data-close>Close</button>
+        </header>
+        <div id="project-summary" class="summary"></div>
+        <div class="split">
+          <fieldset>
+            <legend>New project</legend>
+            <label>Folder<input id="new-dir" placeholder="projects/my-mod" /></label>
+            <label>Mod name<input id="new-name" placeholder="after-the-ocarina" /></label>
+            <label>Title<input id="new-title" placeholder="After the Ocarina" /></label>
+            <label>Author<input id="new-author" placeholder="Your name" /></label>
+            <label>Version<input id="new-version" value="0.1.0" /></label>
+            <button id="create-project" type="button" class="primary">Create project</button>
+          </fieldset>
+          <fieldset>
+            <legend>Open</legend>
+            <label>Folder with manifest.yaml<input id="open-dir" placeholder="projects/sample" /></label>
+            <button id="open-project" type="button">Open folder</button>
+            <p class="muted tight">Longshot ignores a mods folder whose name starts with _ or -.</p>
+          </fieldset>
+        </div>
+        <fieldset>
+          <legend>Import After the Ocarina scene YAML</legend>
+          <label>Path to a scenes folder or one YAML file<input id="import-path" /></label>
+          <div class="dialog-actions">
+            <button id="import-run" type="button">Import</button>
+            <button id="import-example" type="button" class="ghost">Import the bundled example</button>
+          </div>
+          <pre id="import-log" class="log"></pre>
+        </fieldset>
+        <details>
+          <summary>Change dump folder</summary>
+          <label>Folder that contains romfs<input id="dump-path" placeholder="~/Games/Longshot/rc/v3.0.0" /></label>
+          <div class="dialog-actions">
+            <button id="save-dump" type="button">Save dump path</button>
+            <button id="use-sample" type="button" class="ghost">Use the sample dump</button>
+          </div>
+        </details>
+      </form>
+    </dialog>
+
+    <div id="toasts" aria-live="polite"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

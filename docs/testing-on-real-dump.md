@@ -1,0 +1,41 @@
+# Checking Bancwright on a real dump
+
+The copy of Bancwright that was built here never saw a game dump, and it never saw `docs/game-formats.md` from After the Ocarina. Synthetic fixtures cover the containers. This list is what to confirm on your machine, with `~/Games/Longshot/rc/v3.0.0`.
+
+Do this on a copy of the dump if you want a safety net. Bancwright is written to only read the dump and to only write under `mods/<project name>/`. Watch the build log anyway.
+
+## Setup
+
+1. `./scripts/dev.sh`, open http://127.0.0.1:47231.
+2. Set the dump to `~/Games/Longshot/rc/v3.0.0` (the folder that contains `romfs`, not `romfs` itself). Both forms are accepted.
+3. The scene list should fill from `romfs/Banc/<Area>/*.bcett.byml.zs` and should not list `GameBancParam` files.
+4. Create a project whose name does not start with `_` or `-`. Confirm a name like `_draft` is rejected.
+
+## A scene you know
+
+5. Open a small scene and a large one. Actors should sit on the ground plane, Y up, at roughly the positions you expect from the game. A town NPC should be gold, an enemy red, a field object teal.
+6. Select an actor. The instance id should match `Hash` if you open the same file with the community BYML tools. `Phive.Placement.ID` should be the same number.
+7. Move it by a metre, undo, and confirm the project YAML lost that actor key when the move was undone all the way. Redo should put it back.
+8. Hide a vanilla actor, build, and confirm that hash is absent from the exported Actors array and still present in the project file with `state: hidden`.
+9. Add an actor by a real pack name. The new hash should have bit 62 set. Load the mod in Longshot only after the size-table check below.
+
+## Export
+
+10. Build with install and zip. The log should name dictionary **3** for each `.bcett.byml.zs`, and it should say the size table was written.
+11. The installed folder is `mods/<name>/romfs`. `BUILD.txt` sits beside `romfs`, not inside it.
+12. Diff the exported banc against the dump’s banc with your usual tools. Unchanged actors should match in value. `AuxFlags` and any other hash map should still be present. Translate that was `{X, Y, Z}` should stay a dictionary.
+13. Compare the new RESTBL entry with `docs/game-formats.md`. Bancwright never lowers an entry. It uses `max(old, align8(new_unpacked + 512), align8(old + 8 * growth + 4096))` when the file grew. If your notes use a different constant, change `entry_for_byml` in `bancwright/formats/restbl.py` before shipping a mod. A too-small entry is the one that hangs on the load.
+14. Boot Longshot with the mod enabled. The edited scene should load, the moved actor should be where you put it, and a hidden actor should be gone. Then quit and confirm the dump’s own `romfs/Banc` files are byte-for-byte unchanged.
+
+## Importer
+
+15. Point **Import** at After the Ocarina’s `src/scenes`. Each file should become `scenes/<Area>/<Scene>.yaml` in the project, with hashes preserved and `op: add` turned into `state: added`.
+16. Open one imported scene in the view and confirm the moved actors sit on the vanilla ones you expect. Then build only if the size-table check above agreed with your notes.
+
+## If it fails
+
+- “No game dump” or “no Banc folder”: the path is not the Longshot folder that contains `romfs`.
+- “no resource size table”: `System/Resource/*.rsizetable.zs` is missing. Export will refuse to install. Do not copy a table from somewhere else into the repo.
+- “dictionary” errors: `Pack/ZsDic.pack.zs` is missing or the frame’s dict id is not in the pack. The log names the file.
+- A scene that is in the project but missing from the dump is listed separately and will not open.
+- Dialog, event, and table YAML are not exported yet. The log says that on purpose.

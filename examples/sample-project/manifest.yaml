@@ -1,0 +1,14 @@
+format: 1
+name: sample-kokiri
+title: Sample Kokiri edits
+version: 0.1.0
+author: Bancwright
+target:
+  game: oot-switch2
+  version: "1.1.1"
+  host: longshot
+domains:
+- scenes
+- text
+- events
+- tables

@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+bancwright.local.yaml
+projects/
+fixtures/dump/
+frontend/node_modules/
+frontend/dist/
+build/
+*.zip
+.DS_Store
