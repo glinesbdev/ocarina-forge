@@ -868,3 +868,225 @@ def test_cluster_lod_shrinks_a_dense_mesh():
     far = cluster_lod(positions, indices, None)
     assert far is not None
     assert len(far[1]) < len(indices) * 0.5
+
+
+def _document(glb: bytes) -> dict:
+    import json
+    import struct
+
+    return json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
+
+
+def _install(dump, gyaml: str, mesh: bytes, textures: dict[str, bytes] | None = None) -> None:
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.sarc import pack
+    from bancwright.formats.zsio import compress
+
+    dicts = dump.dicts()
+    info = dumps({"FmdbName": gyaml, "ModelProjectName": gyaml})
+    archive = pack(
+        {
+            f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps({"Name": gyaml}),
+            f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info,
+        }
+    )
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dicts, level=3))
+    (dump.romfs / "Model" / f"{gyaml}.{gyaml}.bfres.zs").write_bytes(compress(mesh, 1, dicts, level=3))
+    for name, blob in (textures or {}).items():
+        (dump.romfs / "Tex" / f"{name}.bntx.zs").write_bytes(compress(blob, 1, dicts, level=3))
+
+
+def test_a_busy_albedo_keeps_the_stored_block_height():
+    from bancwright.formats.bntx import textures, write_rgba
+
+    width = height = 64
+    rgba = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            rgba[(y * width + x) * 4 : (y * width + x) * 4 + 4] = bytes((90 + (x * 5 + y * 2) % 70, 50 + (y * 3) % 40, 30, 255))
+    stored = write_rgba("Bark", width, height, bytes(rgba), swizzled=True, log2=0, layout0=0, layout4=0)
+    image = textures(stored)[0]
+    assert image.block_height == 1
+    assert "looked like noise" not in (image.note or "")
+    assert image.rgba[:3] == bytes((90, 50, 30))
+
+
+def test_a_normal_named_texture_is_not_albedo_on_a0():
+    assert rank_albedo([("_a0", "Field_Water_Nrm"), ("_n0", "Field_Water_N0")]) == []
+
+
+def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.bntx import write_rgba
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    green = bytes([20, 140, 60, 255]) * (8 * 8)
+    cream = bytes([240, 236, 220, 255]) * (8 * 8)
+    normal = bytes([128, 128, 255, 255]) * (8 * 8)
+    _install(
+        dump,
+        "Fld_Water",
+        sample_v10_bfres(
+            "Fld_Water",
+            [{"name": "Mt_Field_Water", "samplers": [("_a0", "Field_Water_Alb"), ("_n0", "Field_Water_Nrm")], "mode": "custom"}],
+            shapes=[{"name": "Water", "material": 0}],
+        ),
+        {"Field_Water_Alb": write_rgba("Field_Water_Alb", 8, 8, green)},
+    )
+    _install(
+        dump,
+        "Fld_WaterSheet",
+        sample_v10_bfres(
+            "Fld_WaterSheet",
+            [{"name": "Mt_Lake_Water", "samplers": [("_a0", "Lake_Water_Alb")], "mode": "custom"}],
+            shapes=[{"name": "Sheet", "material": 0}],
+        ),
+        {"Lake_Water_Alb": write_rgba("Lake_Water_Alb", 8, 8, cream)},
+    )
+    _install(
+        dump,
+        "Fld_WaterNorm",
+        sample_v10_bfres(
+            "Fld_WaterNorm",
+            [{"name": "Mt_Pond_Water", "samplers": [("_n0", "Pond_Water_Nrm")], "mode": "opaque"}],
+            shapes=[{"name": "Pond", "material": 0}],
+        ),
+    )
+    _install(
+        dump,
+        "Fld_WaterBlue",
+        sample_v10_bfres(
+            "Fld_WaterBlue",
+            [{"name": "Mt_Sea_Water", "samplers": [("_a0", "Sea_Water_Alb")], "mode": "translucent"}],
+            shapes=[{"name": "Sea", "material": 0}],
+        ),
+        {"Sea_Water_Alb": write_rgba("Sea_Water_Alb", 8, 8, normal)},
+    )
+    _install(
+        dump,
+        "Npc_River_A",
+        sample_v10_bfres(
+            "Npc_River_A",
+            [{"name": "Mt_Npc_River_A", "samplers": [], "mode": "opaque"}],
+            shapes=[{"name": "Body", "material": 0}],
+        ),
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+
+    real = describe_actor(dump, "Fld_Water")
+    assert real["status"] == "mesh"
+    assert real["textures"] == 1
+    assert "water stand-in" not in (real["reason"] or "")
+    assert "unlit translucent" in (real["textureLog"][0].get("error") or "")
+    real_doc = _document((tmp_path / "cache" / real["digest"][:2] / f"{real['digest']}.glb").read_bytes())
+    real_mat = real_doc["materials"][0]
+    assert real_mat["alphaMode"] == "BLEND"
+    assert real_mat["extensions"]["KHR_materials_unlit"] == {}
+    assert real_mat["extras"]["banc"] == "water"
+    assert "baseColorTexture" in real_mat["pbrMetallicRoughness"]
+
+    for gyaml in ("Fld_WaterSheet", "Fld_WaterNorm", "Fld_WaterBlue"):
+        info = describe_actor(dump, gyaml)
+        assert info["textures"] == 0, gyaml
+        assert "water stand-in" in (info["reason"] or ""), gyaml
+        assert info["textureLog"][0].get("standIn") == "water"
+        doc = _document((tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes())
+        mat = doc["materials"][0]
+        factor = mat["pbrMetallicRoughness"]["baseColorFactor"]
+        assert mat["alphaMode"] == "BLEND"
+        assert "baseColorTexture" not in mat["pbrMetallicRoughness"]
+        assert factor[1] > factor[0]
+        assert factor[2] > factor[0]
+        assert factor[3] < 0.8
+        assert doc["extensionsUsed"] == ["KHR_materials_unlit"]
+
+    npc = describe_actor(dump, "Npc_River_A")
+    assert "water" not in (npc["reason"] or "")
+    npc_mat = _document((tmp_path / "cache" / npc["digest"][:2] / f"{npc['digest']}.glb").read_bytes())["materials"][0]
+    assert "extensions" not in npc_mat
+    assert npc_mat["pbrMetallicRoughness"]["baseColorFactor"][3] == 1
+
+
+def test_wrong_block_height_that_matches_the_mip_size_is_retried():
+    from bancwright.formats.bntx import textures, write_rgba
+
+    width = height = 64
+    rgba = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            pale = x < 40
+            rgba[(y * width + x) * 4 : (y * width + x) * 4 + 4] = bytes((240, 230, 210, 255) if pale else (30, 40, 50, 255))
+    stored = write_rgba("Sheet", width, height, bytes(rgba), swizzled=True, log2=0, layout0=1)
+    image = textures(stored)[0]
+    assert image.block_height == 1
+    assert "stored 1 looked like noise" in (image.note or "")
+    assert image.rgba[0] > 200
+    assert image.rgba[(width - 1) * 4] < 50
+
+
+def test_unlisted_channel_type_uses_the_known_block_family():
+    import struct
+
+    from bancwright.formats.bntx import textures, write_rgba
+
+    rgba = bytes([10, 20, 30, 255]) * 16
+    stored = bytearray(write_rgba("Flat", 4, 4, rgba))
+    at = stored.find(struct.pack("<I", 0x0B01))
+    assert at > 0
+    stored[at : at + 4] = struct.pack("<I", 0x0B03)
+    image = textures(bytes(stored))[0]
+    assert image.codec == "rgba8"
+    assert image.rgba[:4] == bytes((10, 20, 30, 255))
+    assert "0x0B03" in (image.note or "")
+
+
+def test_warm_cache_does_not_decode_textures_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.bntx import write_rgba
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    green = bytes([12, 90, 40, 255]) * 4
+    _install(
+        dump,
+        "Obj_CacheRock",
+        sample_v10_bfres(
+            "Obj_CacheRock",
+            [{"name": "Rock", "samplers": [("_a0", "CacheRock_Alb")]}],
+            shapes=[{"name": "Rock", "material": 0}],
+        ),
+        {"CacheRock_Alb": write_rgba("CacheRock_Alb", 2, 2, green)},
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    first = describe_actor(dump, "Obj_CacheRock")
+    assert first["status"] == "mesh"
+    assert first["textures"] == 1
+    assert list((tmp_path / "cache").glob("src/*/*.json"))
+    calls = {"n": 0}
+    real = model_mod.read_bntx
+
+    def counted(blob):
+        calls["n"] += 1
+        return real(blob)
+
+    monkeypatch.setattr(model_mod, "read_bntx", counted)
+    again = describe_actor(dump, "Obj_CacheRock")
+    assert again["digest"] == first["digest"]
+    assert calls["n"] == 0
+    red = bytes([200, 20, 20, 255]) * 4
+    from bancwright.formats.zsio import compress
+    import os
+
+    path = dump.romfs / "Tex" / "CacheRock_Alb.bntx.zs"
+    path.write_bytes(compress(write_rgba("CacheRock_Alb", 2, 2, red), 1, dump.dicts(), level=3))
+    os.utime(path, None)
+    changed = describe_actor(dump, "Obj_CacheRock")
+    assert changed["digest"] != first["digest"]
+    assert calls["n"] >= 1

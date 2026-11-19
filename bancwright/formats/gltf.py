@@ -21,6 +21,8 @@ class Primitive:
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
     lod: int = 0
     name: str = ""
+    unlit: bool = False
+    kind: str = ""
 
 
 def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
@@ -191,6 +193,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
     grouped: dict[int, list] = {}
     image_of: dict[bytes, int] = {}
     material_of: dict[tuple, int] = {}
+    used_unlit = False
 
     def pad(alignment: int) -> None:
         while len(bin_blob) % alignment:
@@ -257,7 +260,16 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             color = (color + [1.0, 1.0, 1.0, 1.0])[:4]
         alpha = prim.alpha if prim.alpha in ("opaque", "mask", "blend") else "opaque"
         cutoff = round(min(max(float(prim.cutoff), 0.0), 1.0), 4)
-        key = (image_index, alpha, round(cutoff, 4), bool(prim.double_sided), tuple(round(channel, 4) for channel in color))
+        kind = prim.kind or ""
+        key = (
+            image_index,
+            alpha,
+            round(cutoff, 4),
+            bool(prim.double_sided),
+            tuple(round(channel, 4) for channel in color),
+            bool(prim.unlit),
+            kind,
+        )
         if key not in material_of:
             pbr = {
                 "baseColorFactor": color,
@@ -272,6 +284,12 @@ def to_glb(primitives: list[Primitive]) -> bytes:
                 material["alphaCutoff"] = cutoff
             elif alpha == "blend":
                 material["alphaMode"] = "BLEND"
+            if prim.unlit:
+                material["extensions"] = {"KHR_materials_unlit": {}}
+                used_unlit = True
+            if kind:
+                material["name"] = kind
+                material["extras"] = {"banc": kind}
             materials.append(material)
             material_of[key] = len(materials) - 1
         label = prim.name or f"part{len(grouped)}"
@@ -301,6 +319,8 @@ def to_glb(primitives: list[Primitive]) -> bytes:
     if images:
         document["images"] = images
         document["textures"] = textures
+    if used_unlit:
+        document["extensionsUsed"] = ["KHR_materials_unlit"]
     text = json.dumps(document, separators=(",", ":")).encode()
     while len(text) % 4:
         text += b" "

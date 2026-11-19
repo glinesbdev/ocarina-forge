@@ -148,7 +148,9 @@ def _print_textures(log: list, label: str = "") -> None:
         shapes = entry.get("shapes") or []
         if shapes:
             print(f"{prefix}  shapes {', '.join(shapes)}")
-        if entry.get("flat"):
+        if entry.get("standIn"):
+            print(f"{prefix}  {entry['standIn']} stand-in")
+        elif entry.get("flat"):
             print(f"{prefix}  flat fallback")
         print(f"{prefix}  samplers {shown}")
         print(f"{prefix}  albedo texture {albedo}")

@@ -64,6 +64,8 @@ class Part:
     double_sided: bool = True
     base_color: tuple[float, float, float, float] | None = None
     proxy: bool = False
+    # "water" is an unlit translucent stand-in (or a real albedo drawn that way).
+    stand_in: str = ""
     # 0 is the near mesh. A higher value is a farther BFRES LOD of the same shape.
     lod: int = 0
 
@@ -1159,6 +1161,8 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     When the material names its samplers, only ``_a0`` then ``_a1`` / ``_a2``
     are albedo. A normal, roughness, bake, or runtime slot (``tc``, ``ta``,
     ``MaterialAlb``) is not a fallback, and neither is the string pool.
+    A texture whose name is a normal, mask, or blend map is skipped even
+    when the slot is ``_a0``.
     A material with no sampler names still ranks texture names, which is
     how the version-9 samples are written.
     """
@@ -1189,6 +1193,8 @@ def _rank_locked_samplers(binds: list[tuple[str, str]]) -> list[tuple[str, str]]
     ranked = []
     for index, (sampler, texture) in enumerate(binds):
         if not texture:
+            continue
+        if texture_rank(texture) >= 2:
             continue
         token = "".join(char for char in sampler.lower() if char.isalnum())
         if token in _PRIMARY_SAMPLER:

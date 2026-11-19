@@ -286,6 +286,7 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   flex-direction: column;
   gap: 6px;
   min-width: 190px;
+  max-width: 320px;
   padding: 8px 10px;
   background: rgba(16, 22, 18, 0.9);
   border: 1px solid rgba(224, 177, 90, 0.28);

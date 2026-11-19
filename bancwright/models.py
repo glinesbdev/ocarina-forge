@@ -14,6 +14,7 @@ separate `Tex/<name>.bntx.zs`, not a BNTX embedded in the bfres. Older
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import re
 import struct
 import tempfile
 import threading
+import zlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -43,13 +45,25 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-8\0"
+_CACHE_VERSION = b"models-9\0"
+_BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
 _TERRAIN = (0.36, 0.45, 0.28, 1.0)
+# Unlit translucent water when the shader cannot be reproduced.
+_WATER = (0.16, 0.42, 0.40, 0.5)
+_WATER_TOKENS = {"water", "lake", "waterfall", "ocean", "pond", "sea", "river"}
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
 _TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
+_FILE_SIG: dict[str, tuple[int, int, str]] = {}
+_BNTX_MEM: dict[str, list] = {}
+_BNTX_ORDER: list[str] = []
+_FILES: contextvars.ContextVar[list | None] = contextvars.ContextVar("banc_tex_files", default=None)
+
+
+class CacheMiss(Exception):
+    """The converted glTF is not on disk yet. The server converts it in a worker."""
 
 _cache_dir: Path | None = None
 
@@ -79,7 +93,7 @@ def cache_dir() -> Path:
     return root
 
 
-def describe_actor(dump, gyaml: str) -> dict:
+def describe_actor(dump, gyaml: str, *, convert: bool = True) -> dict:
     if not _NAME.fullmatch(gyaml or ""):
         return _box(gyaml, "That is not an actor pack name.")
     try:
@@ -88,7 +102,7 @@ def describe_actor(dump, gyaml: str) -> dict:
         return _box(gyaml, exc.message)
     if not any(item[0] == "blob" or (dump.romfs / item[1]).is_file() for item in plan):
         return _box(gyaml, _missing(gyaml, tried))
-    return _first_mesh(gyaml, plan, f"/api/models/{gyaml}/model.glb", dump, tried)
+    return _first_mesh(gyaml, plan, f"/api/models/{gyaml}/model.glb", dump, tried, convert=convert)
 
 
 def actor_glb(dump, gyaml: str) -> Path | None:
@@ -98,7 +112,7 @@ def actor_glb(dump, gyaml: str) -> Path | None:
     return _cached_glb(info["digest"])
 
 
-def describe_terrain(dump, banc: str) -> dict:
+def describe_terrain(dump, banc: str, *, convert: bool = True) -> dict:
     if not banc or ".." in banc or banc.startswith("/"):
         return {"status": "none", "reason": "That scene path is not in the dump.", "source": "", "url": None}
     plan = _terrain_plan(dump, banc)
@@ -111,7 +125,7 @@ def describe_terrain(dump, banc: str) -> dict:
             "url": None,
             "banc": banc,
         }
-    info = _first_mesh(banc, plan, f"/api/terrain/model.glb?banc={banc}", dump, tried, terrain=True)
+    info = _first_mesh(banc, plan, f"/api/terrain/model.glb?banc={banc}", dump, tried, terrain=True, convert=convert)
     info["banc"] = banc
     return info
 
@@ -150,14 +164,16 @@ def _missing(gyaml: str, tried: list[str]) -> str:
     )
 
 
-def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrain: bool = False) -> dict:
+def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrain: bool = False, convert: bool = True) -> dict:
     errors = []
     first = ""
     for source, blob in _realize(dump, plan, errors):
         if not first:
             first = source
         try:
-            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}", terrain=terrain)
+            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}", terrain=terrain, convert=convert)
+        except CacheMiss:
+            raise
         except UndecodedGeometry as exc:
             result = _box(label, str(exc), exc.bounds)
             result["source"] = source
@@ -208,24 +224,57 @@ def _cached_glb(digest: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False) -> tuple[str, dict]:
+def describe_actor_at(root: str, gyaml: str) -> dict:
+    """Worker entry. Rebuilds the dump from its root so a child process can convert."""
+    from bancwright.dump import Dump
+
+    return describe_actor(Dump(Path(root)), gyaml)
+
+
+def describe_terrain_at(root: str, banc: str) -> dict:
+    from bancwright.dump import Dump
+
+    return describe_terrain(Dump(Path(root)), banc)
+
+
+def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, convert: bool = True) -> tuple[str, dict]:
     if blob[:4] in (b"MCPK", b"FMSH"):
         raise FresError("this is a mesh-codec .bfres.mc stream, which this viewer does not decode")
+    source = _source_id(blob, hint, terrain)
+    pointer = cache_dir() / "src" / source[:2] / f"{source}.json"
+    cached = _read_pointer(pointer, dump)
+    if cached is not None:
+        if cached.get("kind") == "box":
+            raise UndecodedGeometry(cached.get("bounds"))
+        return cached["digest"], cached["info"]
+    if not convert:
+        raise CacheMiss()
     models = parse(blob)
     if models and not any(model.parts for model in models):
         flagged = [model for model in models if any(note.startswith("geometry format not decoded") for note in model.notes)]
         if flagged:
             bounds = next((model.shape_bounds for model in flagged if model.shape_bounds), None)
+            _write_pointer(pointer, {"kind": "box", "bounds": bounds})
             raise UndecodedGeometry(bounds)
-    _fill_texture_names(models, dump)
-    external, log, raws = _resolve_materials(dump, models, hint, terrain)
+    files: list[dict] = []
+    token = _FILES.set(files)
+    try:
+        _fill_texture_names(models, dump)
+        external, log, raws = _resolve_materials(dump, models, hint, terrain)
+    finally:
+        _FILES.reset(token)
     digest = hashlib.sha256(_CACHE_VERSION + blob + _texture_key(raws)).hexdigest()
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"
     meta_path = folder / f"{digest}.json"
     with _LOCK:
         if glb_path.is_file() and meta_path.is_file():
-            return digest, json.loads(meta_path.read_text(encoding="utf-8"))
+            info = json.loads(meta_path.read_text(encoding="utf-8"))
+            _write_pointer(
+                pointer,
+                {"kind": "mesh", "digest": digest, "info": info, "files": files, "texDir": _tex_token(dump)},
+            )
+            return digest, info
     glb, info = _assemble(models, external, log)
     encoded = json.dumps(info)
     with _LOCK:
@@ -233,11 +282,347 @@ def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False) ->
             folder.mkdir(parents=True, exist_ok=True)
             glb_path.write_bytes(glb)
             meta_path.write_text(encoded, encoding="utf-8")
+        _write_pointer(
+            pointer,
+            {"kind": "mesh", "digest": digest, "info": info, "files": files, "texDir": _tex_token(dump)},
+        )
     return digest, info
+
+
+def _source_id(blob: bytes, hint: str, terrain: bool) -> str:
+    flag = b"t" if terrain else b"a"
+    return hashlib.sha256(_CACHE_VERSION + flag + hint.encode("utf-8", "replace") + b"\0" + blob).hexdigest()
+
+
+def _tex_token(dump) -> dict:
+    if dump is None:
+        return {"mtime_ns": 0}
+    folder = dump.romfs / "Tex"
+    if not folder.is_dir():
+        return {"mtime_ns": 0}
+    try:
+        return {"mtime_ns": folder.stat().st_mtime_ns}
+    except OSError:
+        return {"mtime_ns": 0}
+
+
+def _write_pointer(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_pointer(path: Path, dump) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if record.get("kind") == "box":
+        return record
+    digest = record.get("digest") or ""
+    if not digest or not (cache_dir() / digest[:2] / f"{digest}.glb").is_file():
+        return None
+    saved = record.get("texDir") or {}
+    current = _tex_token(dump)
+    if int(saved.get("mtime_ns") or 0) != int(current.get("mtime_ns") or 0):
+        return None
+    if not _files_match(record.get("files") or [], dump):
+        return None
+    if not isinstance(record.get("info"), dict):
+        return None
+    return record
+
+
+def _files_match(files: list, dump) -> bool:
+    if dump is None:
+        return not files
+    for item in files:
+        relative = item.get("path") or ""
+        path = dump.romfs / relative
+        if not path.is_file():
+            return False
+        try:
+            st = path.stat()
+        except OSError:
+            return False
+        if st.st_size == item.get("size") and st.st_mtime_ns == item.get("mtime_ns"):
+            continue
+        if _file_sig(path, st) != item.get("sig"):
+            return False
+    return True
+
+
+def _track_file(dump, relative: str) -> None:
+    files = _FILES.get()
+    if files is None or dump is None or not relative or relative.startswith("embedded"):
+        return
+    if any(item.get("path") == relative for item in files):
+        return
+    path = dump.romfs / relative
+    try:
+        st = path.stat()
+    except OSError:
+        return
+    files.append(
+        {
+            "path": relative,
+            "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns,
+            "sig": _file_sig(path, st),
+        }
+    )
+
+
+def _file_sig(path: Path, st=None) -> str:
+    st = st or path.stat()
+    key = str(path)
+    found = _FILE_SIG.get(key)
+    if found and found[0] == st.st_mtime_ns and found[1] == st.st_size:
+        return found[2]
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    _FILE_SIG[key] = (st.st_mtime_ns, st.st_size, digest)
+    return digest
+
+
+def _decode_bntx_cached(blob: bytes) -> list:
+    key = hashlib.sha256(_BNTX_VERSION + blob).hexdigest()
+    cached = _BNTX_MEM.get(key)
+    if cached is not None:
+        _touch_bntx(key)
+        return cached
+    path = cache_dir() / "bntx" / key[:2] / f"{key}.bwtx"
+    loaded = _read_bwtx(path)
+    if loaded is not None:
+        _remember_bntx(key, loaded)
+        return loaded
+    decoded = list(read_bntx(blob))
+    _write_bwtx(path, decoded)
+    _remember_bntx(key, decoded)
+    return decoded
+
+
+def _touch_bntx(key: str) -> None:
+    if key in _BNTX_ORDER:
+        _BNTX_ORDER.remove(key)
+    _BNTX_ORDER.append(key)
+
+
+def _remember_bntx(key: str, decoded: list) -> None:
+    _BNTX_MEM[key] = decoded
+    _touch_bntx(key)
+    while len(_BNTX_ORDER) > 32:
+        old = _BNTX_ORDER.pop(0)
+        _BNTX_MEM.pop(old, None)
+
+
+def _write_bwtx(path: Path, decoded: list) -> None:
+    payload = bytearray()
+    payload += struct.pack("<I", len(decoded))
+    for image in decoded:
+        payload += _pack_str(image.name)
+        payload += _pack_str(image.codec)
+        payload += _pack_str(image.swizzle)
+        payload += _pack_str(image.note)
+        rgba = image.rgba or b""
+        payload += struct.pack("<IIIIII", image.width, image.height, image.fmt, image.tile, image.block_height, len(rgba))
+        payload += rgba
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(b"BWTX" + struct.pack("<H", 1) + zlib.compress(bytes(payload), 1))
+    os.replace(tmp, path)
+
+
+def _pack_str(text: str) -> bytes:
+    raw = (text or "").encode("utf-8", "replace")
+    return struct.pack("<H", len(raw)) + raw
+
+
+def _read_bwtx(path: Path) -> list | None:
+    if not path.is_file():
+        return None
+    try:
+        blob = path.read_bytes()
+        if blob[:4] != b"BWTX" or struct.unpack_from("<H", blob, 4)[0] != 1:
+            return None
+        payload = zlib.decompress(blob[6:])
+        count = struct.unpack_from("<I", payload, 0)[0]
+        at = 4
+        found = []
+        from bancwright.formats.bntx import Texture
+
+        for _index in range(count):
+            name, at = _unpack_str(payload, at)
+            codec, at = _unpack_str(payload, at)
+            swizzle, at = _unpack_str(payload, at)
+            note, at = _unpack_str(payload, at)
+            width, height, fmt, tile, block_height, size = struct.unpack_from("<IIIIII", payload, at)
+            at += 24
+            rgba = payload[at : at + size]
+            at += size
+            found.append(
+                Texture(
+                    name=name,
+                    width=width,
+                    height=height,
+                    rgba=bytes(rgba),
+                    fmt=fmt,
+                    note=note,
+                    codec=codec,
+                    tile=tile,
+                    swizzle=swizzle,
+                    block_height=block_height,
+                )
+            )
+        return found
+    except (OSError, zlib.error, struct.error, ValueError):
+        return None
+
+
+def _unpack_str(payload: bytes, at: int) -> tuple[str, int]:
+    size = struct.unpack_from("<H", payload, at)[0]
+    at += 2
+    text = payload[at : at + size].decode("utf-8", "replace")
+    return text, at + size
 
 
 def _texture_key(blobs: list[bytes]) -> bytes:
     return b"".join(blob + b"\0" for blob in blobs)
+
+
+_IMG_MEM: dict[str, bytes] = {}
+_IMG_ORDER: list[str] = []
+
+
+def _encode_cached(image, alpha: str) -> bytes:
+    """JPEG or PNG for this image, reused when another model shares the pixels."""
+    token = hashlib.sha256(
+        _BNTX_VERSION + struct.pack("<II", image.width, image.height) + (alpha or "opaque").encode() + image.rgba
+    ).hexdigest()
+    hit = _IMG_MEM.get(token)
+    if hit is not None:
+        return hit
+    path = cache_dir() / "img" / token[:2] / f"{token}.bin"
+    if path.is_file():
+        try:
+            stored = path.read_bytes()
+        except OSError:
+            stored = b""
+        if stored[:2] in (b"\xff\xd8", b"\x89P"):
+            _remember_img(token, stored)
+            return stored
+    encoded, _mime = encode_albedo(image.width, image.height, image.rgba, alpha)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(encoded)
+    os.replace(tmp, path)
+    _remember_img(token, encoded)
+    return encoded
+
+
+def _remember_img(token: str, encoded: bytes) -> None:
+    _IMG_MEM[token] = encoded
+    if token in _IMG_ORDER:
+        _IMG_ORDER.remove(token)
+    _IMG_ORDER.append(token)
+    while len(_IMG_ORDER) > 64:
+        _IMG_MEM.pop(_IMG_ORDER.pop(0), None)
+
+
+def _apply_stand_in(part, choice: dict) -> None:
+    if choice.get("kind") != "water":
+        return
+    part.stand_in = "water"
+    part.alpha = "blend"
+    part.proxy = False
+    if choice.get("image") is None:
+        part.texture = ""
+        part.base_color = _WATER
+
+
+def _consider_water(names: list[str], binds, result: dict) -> dict:
+    labels = [name for name in names if name]
+    labels.extend(tex for _slot, tex in binds if tex)
+    if not _water_names(*labels):
+        return result
+    reject = _water_reject(result.get("image"), result.get("wanted") or "")
+    result["alpha"] = "blend"
+    result["kind"] = "water"
+    entry = result.get("entry") or {}
+    entry["alpha"] = "blend"
+    if reject:
+        result["image"] = None
+        result["wanted"] = ""
+        result["sampler"] = ""
+        entry["wanted"] = ""
+        entry["sampler"] = ""
+        entry["decoded"] = False
+        entry["textured"] = False
+        entry["flat"] = True
+        entry["standIn"] = "water"
+        previous = entry.get("error") or ""
+        entry["error"] = f"water stand-in ({reject})" if not previous else f"water stand-in ({reject}). {previous}"
+    else:
+        extra = "water material, unlit translucent, depth write off"
+        previous = entry.get("error") or ""
+        entry["error"] = extra if not previous else f"{previous}. {extra}"
+    result["entry"] = entry
+    return result
+
+
+def _water_names(*names: str) -> bool:
+    tokens: set[str] = set()
+    for name in names:
+        tokens.update(re.findall(r"[a-z0-9]+", (name or "").lower()))
+    if "npc" in tokens:
+        return False
+    return bool(tokens & _WATER_TOKENS)
+
+
+def _water_reject(image, wanted: str) -> str:
+    if image is None or not getattr(image, "rgba", None):
+        return "no usable albedo"
+    if texture_rank(wanted) >= 2:
+        return "non-color sampler"
+    note = getattr(image, "note", "") or ""
+    if "still looks noisy" in note:
+        return "swizzle still looks noisy"
+    if _looks_like_normal(image.rgba):
+        return "albedo looks like a normal map"
+    if _looks_blank(image.rgba):
+        return "albedo is a flat pale sheet"
+    return ""
+
+
+def _pixel_samples(rgba: bytes) -> list[bytes]:
+    total = len(rgba) // 4
+    if total < 16:
+        return []
+    step = max(1, total // 512)
+    return [rgba[index * 4 : index * 4 + 4] for index in range(0, total, step)]
+
+
+def _looks_like_normal(rgba: bytes) -> bool:
+    samples = _pixel_samples(rgba)
+    if len(samples) < 16:
+        return False
+    count = len(samples)
+    red = sum(pixel[0] for pixel in samples) / count
+    green = sum(pixel[1] for pixel in samples) / count
+    blue = sum(pixel[2] for pixel in samples) / count
+    return 90 <= red <= 175 and 90 <= green <= 175 and blue >= 185 and blue > red + 40 and blue > green + 40
+
+
+def _looks_blank(rgba: bytes) -> bool:
+    samples = _pixel_samples(rgba)
+    if len(samples) < 16:
+        return False
+    count = len(samples)
+    lum = sum(0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2] for pixel in samples) / count
+    chroma = sum(max(pixel[0], pixel[1], pixel[2]) - min(pixel[0], pixel[1], pixel[2]) for pixel in samples) / count
+    return lum > 200 and chroma < 28
 
 
 def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[bytes, dict]:
@@ -262,10 +647,14 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             if image is not None and not image.rgba:
                 image = None
             png = None
-            if image is not None:
+            water = part.stand_in == "water"
+            if water and image is None:
+                if "water stand-in" not in notes:
+                    notes.append("water stand-in")
+            elif image is not None:
                 png = png_for.get(id(image))
                 if png is None:
-                    png, _mime = encode_albedo(image.width, image.height, image.rgba, part.alpha)
+                    png = _encode_cached(image, part.alpha)
                     png_for[id(image)] = png
                     if id(image) not in seen_images:
                         texture_count += 1
@@ -283,11 +672,24 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 elif not model.images and not external:
                     reason = why or "No albedo sampler was usable and no Tex file matched."
                     notes.append(f"{reason} This mesh uses a flat colour.")
-            if part.proxy and image is None:
+            unlit = False
+            kind = ""
+            if water and image is None:
+                color = part.base_color or _WATER
+                alpha = "blend"
+                unlit = True
+                kind = "water"
+            elif water:
+                color = (1.0, 1.0, 1.0, 0.72)
+                alpha = "blend"
+                unlit = True
+                kind = "water"
+            elif part.proxy and image is None:
                 color = _TERRAIN
+                alpha = "opaque"
             else:
                 color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
-            alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
+                alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
             primitives.append(
                 Primitive(
                     part.positions,
@@ -300,6 +702,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     base_color=color,
                     lod=part.lod,
                     name=f"{part.name}:{part.material_index}",
+                    unlit=unlit,
+                    kind=kind,
                 )
             )
             if part.lod == 0:
@@ -317,6 +721,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             base_color=color,
                             lod=1,
                             name=f"{part.name}:{part.material_index}",
+                            unlit=unlit,
+                            kind=kind,
                         )
                     )
             triangles += len(part.indices) // 3
@@ -391,6 +797,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                         part.proxy = True
                         part.base_color = _TERRAIN
                         part.texture = ""
+                    _apply_stand_in(part, choice)
                     if choice.get("image") is not None:
                         external[choice["wanted"]] = choice["image"]
         else:
@@ -399,6 +806,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 log.append(choice["entry"])
                 part.texture = choice["wanted"]
                 part.alpha = choice["alpha"]
+                _apply_stand_in(part, choice)
                 if choice.get("image") is not None and choice["wanted"]:
                     external[choice["wanted"]] = choice["image"]
     return external, log, raws
@@ -483,15 +891,19 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         entry["wanted"] = ""
         entry["error"] = "terrain proxy"
         entry["decoded"] = False
-    return {
-        "entry": entry,
-        "wanted": "" if proxy and winner is None else (wanted if (found.get("image") is not None or wanted) else ""),
-        "sampler": "" if proxy and winner is None else sampler,
-        "alpha": alpha if found.get("image") is not None else ("blend" if material.alpha == "blend" else "opaque"),
-        "cutoff": cutoff,
-        "image": None if proxy and winner is None else found.get("image"),
-        "proxy": proxy and winner is None,
-    }
+    return _consider_water(
+        [material.name, getattr(material, "shader", "")],
+        list(material.binds),
+        {
+            "entry": entry,
+            "wanted": "" if proxy and winner is None else (wanted if (found.get("image") is not None or wanted) else ""),
+            "sampler": "" if proxy and winner is None else sampler,
+            "alpha": alpha if found.get("image") is not None else ("blend" if material.alpha == "blend" else "opaque"),
+            "cutoff": cutoff,
+            "image": None if proxy and winner is None else found.get("image"),
+            "proxy": proxy and winner is None,
+        },
+    )
 
 
 def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
@@ -532,7 +944,17 @@ def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
     }
     if found.get("image") is not None:
         _fill_image_log(entry, found)
-    return {"entry": entry, "wanted": entry["wanted"], "alpha": found.get("alpha") or "opaque", "image": found.get("image")}
+    return _consider_water(
+        [part.material or part.name],
+        [(part.albedo_sampler, part.texture)] if part.texture else [],
+        {
+            "entry": entry,
+            "wanted": entry["wanted"],
+            "sampler": part.albedo_sampler,
+            "alpha": found.get("alpha") or "opaque",
+            "image": found.get("image"),
+        },
+    )
 
 
 def _log_entry(material, sampler, wanted, found, alpha, cutoff, sided, error) -> dict:
@@ -629,12 +1051,13 @@ def _load_named(dump, model, name, hints, alpha, cutoff, external, raws, forced:
         result["error"] = exc.message
         return result
     raws.append(blob)
+    _track_file(dump, relative)
     if blob[:4] != b"BNTX":
         result["found"] = relative
         result["error"] = f"{relative} is not a BNTX"
         return result
     try:
-        decoded = list(read_bntx(blob))
+        decoded = _decode_bntx_cached(blob)
     except BntxError as exc:
         result["found"] = relative
         result["error"] = str(exc)

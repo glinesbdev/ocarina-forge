@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import os
 import shutil
+import threading
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -19,7 +23,15 @@ from bancwright.errors import BancError
 from bancwright.export import build
 from bancwright.fixtures import build_fixture
 from bancwright.importers.ato import import_scenes
-from bancwright.models import actor_glb, describe_actor, describe_terrain, terrain_glb
+from bancwright.models import (
+    CacheMiss,
+    actor_glb,
+    describe_actor,
+    describe_actor_at,
+    describe_terrain,
+    describe_terrain_at,
+    terrain_glb,
+)
 from bancwright.project import Project
 from bancwright.recipes import recipe_actors
 from bancwright.scene import apply_command, replace_diff, scene_view, sibling_bancs
@@ -34,6 +46,51 @@ app.add_middleware(
 )
 
 _dump_cache: dict = {"key": None, "dump": None}
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+def _worker_count() -> int:
+    raw = os.environ.get("BANCWRIGHT_WORKERS", "4")
+    try:
+        count = int(raw)
+    except ValueError:
+        return 4
+    return max(0, count)
+
+
+def _pool():
+    """Cold model converts run in child processes. A warm cache hit stays here."""
+    global _POOL
+    count = _worker_count()
+    if count <= 1:
+        return None
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = ProcessPoolExecutor(max_workers=count, mp_context=multiprocessing.get_context("spawn"))
+        return _POOL
+
+
+def _model_info(gyaml: str) -> dict:
+    dump = _open_dump()
+    try:
+        return describe_actor(dump, gyaml, convert=False)
+    except CacheMiss:
+        pool = _pool()
+        if pool is None:
+            return describe_actor(dump, gyaml)
+        return pool.submit(describe_actor_at, str(dump.root), gyaml).result()
+
+
+def _terrain_info(banc: str) -> dict:
+    dump = _open_dump()
+    try:
+        return describe_terrain(dump, banc, convert=False)
+    except CacheMiss:
+        pool = _pool()
+        if pool is None:
+            return describe_terrain(dump, banc)
+        return pool.submit(describe_terrain_at, str(dump.root), banc).result()
 
 
 def repo_root() -> Path:
@@ -345,7 +402,7 @@ def put_recipes(body: dict):
 
 @app.get("/api/models/{gyaml}")
 def model_info(gyaml: str):
-    return describe_actor(_open_dump(), gyaml)
+    return _model_info(gyaml)
 
 
 @app.get("/api/models/{gyaml}/model.glb")
@@ -358,7 +415,7 @@ def model_file(gyaml: str):
 
 @app.get("/api/terrain")
 def terrain_info(banc: str):
-    return describe_terrain(_open_dump(), banc)
+    return _terrain_info(banc)
 
 
 @app.get("/api/terrain/model.glb")

@@ -10,7 +10,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from bancwright.formats.swizzle import block_log2, deswizzle, div_up
+from bancwright.formats.swizzle import block_log2, deswizzle, div_up, surface_bytes
 
 try:
     import texture2ddecoder
@@ -70,6 +70,22 @@ _FORMATS: dict[int, tuple[str, int, int, int]] = {
     0x3A01: ("astc12", 12, 12, 16),
     0x3A06: ("astc12", 12, 12, 16),
 }
+
+
+def _format_info(fmt: int) -> tuple[tuple[str, int, int, int] | None, str]:
+    """Known NVN id, or the same block codec for an unlisted channel type.
+
+    A new type nibble on a known family (unorm versus sRGB, and the other
+    small variants) is still that codec. An unknown family is refused.
+    """
+    info = _FORMATS.get(fmt)
+    if info is not None:
+        return info, ""
+    family = fmt & 0xFF00
+    for known, value in _FORMATS.items():
+        if (known & 0xFF00) == family:
+            return value, f"format 0x{fmt:04X} decoded as {value[0]} (same block family)"
+    return None, ""
 
 
 @dataclass
@@ -178,7 +194,7 @@ def _texture(data: bytes, at: int) -> Texture:
     image = _u64(data, mip_table) if mip_table and mip_table + 8 <= len(data) else 0
     if width <= 0 or height <= 0 or width > 16384 or height > 16384:
         raise BntxError(f"{name or 'texture'}: size {width}x{height} is not usable")
-    info = _FORMATS.get(fmt)
+    info, family_note = _format_info(fmt)
     if info is None:
         raise BntxError(f"{name or 'texture'}: texture format 0x{fmt:04X} is not decoded")
     codec, block_w, block_h, bytes_per = info
@@ -195,9 +211,11 @@ def _texture(data: bytes, at: int) -> Texture:
     if image <= 0 or image >= len(data):
         raise BntxError(f"{name or 'texture'}: image data is missing")
     raw = data[image:]
-    linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw)
-    rgba, note = _decode(codec, width, height, linear, fmt)
-    rgba = _channels(rgba, width, height, channels)
+    rgba, note, log2 = _decode_swizzle(
+        codec, width, height, block_w, block_h, bytes_per, tile, log2, raw, fmt, channels
+    )
+    if family_note:
+        note = f"{note}. {family_note}".strip(". ")
     block_height = 1 << max(0, log2)
     swizzle = "linear" if tile == 1 else f"deswizzled tile {tile}"
     return Texture(
@@ -237,6 +255,81 @@ def _mip0_bytes(data: bytes, at: int, image: int) -> int:
     if start and 0 < start < len(data):
         return len(data) - start
     return 0
+
+
+def _decode_swizzle(
+    codec: str,
+    width: int,
+    height: int,
+    block_w: int,
+    block_h: int,
+    bytes_per: int,
+    tile: int,
+    log2: int,
+    raw: bytes,
+    fmt: int,
+    channels: bytes,
+) -> tuple[bytes, str, int]:
+    """Decode one mip. A self-consistent but noisy block height is retried.
+
+    Several log2 values share a surface size on smaller mips, so the mip
+    table can agree with a wrong height. That draws as diagonal stripes.
+    A much smoother candidate replaces it. Images that stay noisy keep the
+    stored height and say so.
+    """
+    linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw)
+    rgba, note = _decode(codec, width, height, linear, fmt)
+    rgba = _channels(rgba, width, height, channels)
+    if tile == 1 or width < 32 or height < 32:
+        return rgba, note, log2
+    score = _noise(rgba, width, height)
+    # Several block heights share one surface size. A wrong one of those turns
+    # a smooth sheet into stripes. Only a much smoother same-sized height wins,
+    # so a busy albedo is left on the stored height.
+    if score < 18:
+        return rgba, note, log2
+    expected = surface_bytes(width, height, block_w, block_h, bytes_per, log2)
+    best_rgba, best_log, best_score = rgba, log2, score
+    for alt in range(6):
+        if alt == log2:
+            continue
+        if surface_bytes(width, height, block_w, block_h, bytes_per, alt) != expected:
+            continue
+        alt_linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, alt, raw)
+        try:
+            alt_rgba, _alt_note = _decode(codec, width, height, alt_linear, fmt)
+        except BntxError:
+            continue
+        alt_rgba = _channels(alt_rgba, width, height, channels)
+        alt_score = _noise(alt_rgba, width, height)
+        if alt_score + 10 <= best_score and alt_score <= best_score * 0.45:
+            best_rgba, best_log, best_score = alt_rgba, alt, alt_score
+    if best_log != log2:
+        extra = f"swizzle log2 {best_log}, stored {log2} looked like noise"
+        return best_rgba, f"{note}. {extra}".strip(". "), best_log
+    if score >= 70:
+        extra = f"swizzle log2 {log2} still looks noisy"
+        return rgba, f"{note}. {extra}".strip(". "), log2
+    return rgba, note, log2
+
+
+def _noise(rgba: bytes, width: int, height: int) -> float:
+    """Mean absolute difference between samples four pixels apart."""
+    if width < 8 or height < 8 or len(rgba) < width * height * 4:
+        return 0.0
+    step = 4
+    total = 0
+    count = 0
+    for y in range(0, height - step, step):
+        for x in range(0, width - step, step):
+            left = (y * width + x) * 4
+            right = (y * width + x + step) * 4
+            below = ((y + step) * width + x) * 4
+            for channel in range(3):
+                total += abs(rgba[left + channel] - rgba[right + channel])
+                total += abs(rgba[left + channel] - rgba[below + channel])
+                count += 2
+    return total / max(count, 1)
 
 
 def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tuple[bytes, str]:

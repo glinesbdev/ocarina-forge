@@ -94,6 +94,9 @@ export function createViewport(host, hooks) {
   let hideVolumes = false;
   let showGround = false;
   let generation = 0;
+  let loadQueue = null;
+  const loadDelta = new THREE.Vector3();
+  const loadForward = new THREE.Vector3();
   let terrainRoot = null;
   let groundGrid = null;
   let lastClick = null;
@@ -357,6 +360,27 @@ export function createViewport(host, hooks) {
     if (info.finished && hooks.onModels) hooks.onModels();
   }
 
+  function gyamlScore(gyaml) {
+    camera.getWorldDirection(loadForward);
+    let best = Infinity;
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml) continue;
+      loadDelta.subVectors(entry.pivot.position, camera.position);
+      const dist = loadDelta.lengthSq();
+      const len = Math.sqrt(dist) || 1;
+      const ahead = loadDelta.dot(loadForward) / len;
+      const score = dist * (ahead > -0.15 ? 1 : 8);
+      if (score < best) best = score;
+    }
+    return best;
+  }
+
+  function prioritizeLoad() {
+    if (!loadQueue || loadQueue.length < 2) return;
+    camera.getWorldDirection(loadForward);
+    loadQueue.sort((a, b) => gyamlScore(a) - gyamlScore(b));
+  }
+
   function loadModels(token, actors) {
     const names = [...new Set(actors.map((actor) => actor.gyaml).filter(Boolean))];
     const pending = names.filter((name) => !metaCache.has(name));
@@ -394,17 +418,24 @@ export function createViewport(host, hooks) {
       }
     };
     applyCached();
+    const queue = pending.slice();
+    loadQueue = queue;
+    prioritizeLoad();
+    const progressLabel = (finished) => {
+      if (!names.length) return "No actors";
+      return finished ? `Models ${done} of ${names.length}` : `Models ${done} of ${names.length} · nearest first, view stays usable`;
+    };
     report({
       done,
       total: names.length,
       boxes,
       finished: pending.length === 0,
-      label: names.length ? `Models ${done} of ${names.length}` : "No actors",
+      label: progressLabel(pending.length === 0),
     });
-    const queue = pending.slice();
     async function worker() {
       while (queue.length) {
         if (token !== generation) return;
+        prioritizeLoad();
         const gyaml = queue.shift();
         let meta;
         try {
@@ -440,11 +471,11 @@ export function createViewport(host, hooks) {
           total: names.length,
           boxes,
           finished: done >= names.length,
-          label: `Models ${done} of ${names.length}`,
+          label: progressLabel(done >= names.length),
         });
       }
     }
-    const workers = Math.min(4, queue.length);
+    const workers = Math.min(6, queue.length);
     if (workers) Promise.all(Array.from({ length: workers }, () => worker()));
   }
 
@@ -478,10 +509,15 @@ export function createViewport(host, hooks) {
       material.map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
       material.map.needsUpdate = true;
     }
+    const tag = (material.userData && material.userData.banc) || material.name || "";
     if (material.alphaTest > 0) {
       material.alphaToCoverage = true;
       material.transparent = false;
       material.depthWrite = true;
+    } else if (material.transparent || tag === "water") {
+      material.transparent = true;
+      material.depthWrite = false;
+      if (tag === "water") material.side = THREE.DoubleSide;
     }
     material.userData.bancPrepared = true;
     return material;
@@ -1235,6 +1271,7 @@ export function createViewport(host, hooks) {
     if (now - lastCullAt > 120 && camera.position.distanceTo(lastCull) > 2) {
       lastCullAt = now;
       lastCull.copy(camera.position);
+      prioritizeLoad();
       syncBatchVisibility();
       syncLabels();
     }
