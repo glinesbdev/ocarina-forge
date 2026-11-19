@@ -12,6 +12,7 @@ from pathlib import Path
 
 import zstandard
 
+from bancwright.formats.bfres import sample_bfres
 from bancwright.formats.byml import Hash32, U32, U64, dumps
 from bancwright.formats.restbl import ResourceSizeTable, save_table
 from bancwright.formats.sarc import pack
@@ -30,6 +31,8 @@ CUCCO = 0x1000000000000009
 SIGN = 0x100000000000000A
 HOUSE = 0x100000000000000B
 POT = 0x100000000000000C
+AREA = 0x100000000000000D
+TREE2 = 0x100000000000000E
 STAL = 0x1000000000000020
 GUARD = 0x1000000000000021
 ROCK = 0x1000000000000022
@@ -57,6 +60,7 @@ CATALOG = (
     "Animal_Cucco",
     "FldObj_Sign",
     "StartPos",
+    "Area_Kokiri_Town",
     "Weapon_Sword_Kokiri",
     "Shop_Kokiri",
 )
@@ -127,6 +131,8 @@ def kokiri_static() -> dict:
             _actor("Npc_Kokiri_M_01", MIDO, (-4, 0, 1), name="Mido", Presence="Default"),
             _actor("Enemy_DekuBaba", BABA, (8, 0, -2), rotate=(0, 1.0, 0)),
             _actor("Obj_Tree", TREE, (0, 0, -6), scale=(1.5, 1.5, 1.5)),
+            _actor("Obj_Tree", TREE2, (6, 0, -8), name="Twin"),
+            _actor("Area_Kokiri_Town", AREA, (0, 2, 0), scale=(30, 8, 30), name="Town"),
             _actor("StartPos", START, (0, 1, 8)),
             _actor("Item_RecoveryHeart", HEART, (3, 0.5, 5)),
             _actor("Land_Kokiri_Ground", GROUND, (0, -0.2, 0), scale=(20, 1, 20), Bakeable=True),
@@ -189,7 +195,12 @@ def build_fixture(root: Path) -> Path:
         KOKIRI_DYNAMIC: dumps(kokiri_dynamic()),
         FIELD_STATIC: dumps(field_static()),
     }
-    actor_params = {name: dumps({"Name": name, "Synthetic": True}) for name in CATALOG}
+    actor_params = {}
+    for name in CATALOG:
+        body = {"Name": name, "Synthetic": True}
+        if name == "Obj_Tree":
+            body["ModelProjectName"] = "Obj_Tree"
+        actor_params[name] = dumps(body)
     dictionaries = _train(list(scenes.values()) + list(actor_params.values()))
     dict_bytes = {dict_id: dictionaries[dict_id] for dict_id in dictionaries}
     zsdic = pack({("zs.zsdic" if i == 1 else "bkprb.zsdic" if i == 2 else "bcett.byml.zsdic" if i == 3 else "pack.zsdic"): raw for i, raw in dict_bytes.items()})
@@ -207,12 +218,23 @@ def build_fixture(root: Path) -> Path:
         destination.write_bytes(packed)
         table.raise_to(relative, (len(payload) + 512 + 7) & ~7)
 
+    folder = romfs / "Pack" / "Actor"
+    folder.mkdir(parents=True, exist_ok=True)
     for name, payload in actor_params.items():
-        archive = pack({f"Actor/{name}.engine__actor__ActorParam.bgyml": payload})
+        files = {f"Actor/{name}.engine__actor__ActorParam.bgyml": payload}
+        if name == "Npc_Kokiri_F_01":
+            files["Model/Npc_Kokiri_F_01.bfres"] = _fado_model()
+        elif name == "Enemy_DekuBaba":
+            # A truncated header, so the viewer can show a box and a reason.
+            files["Model/Enemy_DekuBaba.bfres"] = b"FRES    " + bytes(48)
+        archive = pack(files)
         packed = compress(archive, 4, loaded, level=3)
-        folder = romfs / "Pack" / "Actor"
-        folder.mkdir(parents=True, exist_ok=True)
         (folder / f"{name}.pack.zs").write_bytes(packed)
+
+    model_dir = romfs / "Model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "Obj_Tree.bfres.zs").write_bytes(compress(_tree_model(), 1, loaded, level=3))
+    (model_dir / "KokiriForest_Child_Static.bfres.zs").write_bytes(compress(_terrain_model(), 1, loaded, level=3))
 
     # A named entry and an unrelated hashed entry, so export has to keep both.
     table.named.append(("System/Resource/KeepMe.bgyml", 4096))
@@ -227,6 +249,38 @@ def build_fixture(root: Path) -> Path:
         encoding="utf-8",
     )
     return root
+
+
+def _checker(width: int, height: int, a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bytes:
+    out = bytearray()
+    for y in range(height):
+        for x in range(width):
+            out.extend(a if ((x // 4) + (y // 4)) % 2 == 0 else b)
+    return bytes(out)
+
+
+def _fado_model() -> bytes:
+    rgba = _checker(16, 16, (224, 176, 90, 255), (92, 64, 28, 255))
+    positions = [(0.0, 1.4, 0.0), (-0.45, 0.0, -0.45), (0.45, 0.0, -0.45), (0.0, 0.0, 0.55)]
+    uvs = [(0.5, 1.0), (0.0, 0.0), (1.0, 0.0), (0.5, 0.15)]
+    indices = [0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 3, 2]
+    return sample_bfres("Npc_Kokiri_F_01", positions, indices, uvs, rgba, 16, 16, swizzled=True)
+
+
+def _tree_model() -> bytes:
+    rgba = _checker(16, 16, (46, 110, 52, 255), (28, 72, 34, 255))
+    positions = [(0.0, 3.2, 0.0), (-0.9, 0.4, -0.9), (0.9, 0.4, -0.9), (0.0, 0.4, 1.0), (0.0, 0.0, 0.0)]
+    uvs = [(0.5, 1.0), (0.0, 0.3), (1.0, 0.3), (0.5, 0.0), (0.5, 0.2)]
+    indices = [0, 1, 2, 0, 2, 3, 0, 3, 1, 1, 4, 2, 2, 4, 3, 3, 4, 1]
+    return sample_bfres("Obj_Tree", positions, indices, uvs, rgba, 16, 16, swizzled=True)
+
+
+def _terrain_model() -> bytes:
+    rgba = bytes([78, 112, 58, 255, 96, 128, 64, 255, 70, 104, 50, 255, 88, 120, 60, 255])
+    positions = [(-40.0, -0.05, -40.0), (40.0, -0.05, -40.0), (40.0, -0.05, 40.0), (-40.0, -0.05, 40.0)]
+    uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    indices = [0, 2, 1, 0, 3, 2]
+    return sample_bfres("KokiriForest_Child_Static", positions, indices, uvs, rgba, 2, 2)
 
 
 def main() -> None:

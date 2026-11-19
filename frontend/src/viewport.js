@@ -2,6 +2,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+import { chooseHit } from "./pick.js";
 
 export const CATEGORY_COLOR = {
   npc: 0xe0b15a,
@@ -11,12 +14,14 @@ export const CATEGORY_COLOR = {
   effect: 0xc58be0,
   animal: 0xe08a3c,
   system: 0x8aa4c0,
+  area: 0x6f8f78,
   other: 0xd7dccf,
 };
 
 /**
- * Boxes stand in for actors. A later stage can swap `entry.visual` for a
- * cached glTF keyed by gyaml. TransformControls stays attached to `entry.pivot`.
+ * Actors are boxes until a converted glTF arrives. The gizmo stays on `pivot`.
+ * Volumes (areas, system actors, large land) are translucent and lose picks
+ * to anything solid along the same ray.
  */
 export function createViewport(host, hooks) {
   const scene = new THREE.Scene();
@@ -60,6 +65,13 @@ export function createViewport(host, hooks) {
   const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
+  const loader = new GLTFLoader();
+  const templateCache = new Map();
+  const metaCache = new Map();
+  const categories = { area: "show", system: "show" };
+  let generation = 0;
+  let terrainRoot = null;
+  let lastClick = null;
   let grid = null;
   let selected = null;
   let hovered = null;
@@ -84,7 +96,23 @@ export function createViewport(host, hooks) {
     entry.pivot.removeFromParent();
     entry.material.dispose();
     entry.edgeMaterial.dispose();
+    if (entry.model) {
+      entry.model.traverse((child) => {
+        const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+        materials.forEach((material) => material.dispose());
+      });
+    }
     if (entry.label) entry.label.element.remove();
+  }
+
+  function clearTerrain() {
+    if (!terrainRoot) return;
+    terrainRoot.traverse((child) => {
+      const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+      materials.forEach((material) => material.dispose());
+    });
+    terrainRoot.removeFromParent();
+    terrainRoot = null;
   }
 
   function clearActors() {
@@ -98,8 +126,15 @@ export function createViewport(host, hooks) {
     entry.material.emissive.set(on ? entry.color : 0x000000);
     entry.material.emissiveIntensity = on ? 0.45 : 0;
     const marked = entry.status === "edited" || entry.status === "added";
-    entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : 0x101612);
-    entry.edges.visible = on || marked || entry.status === "hidden";
+    entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.volume ? entry.color : 0x101612);
+    entry.mesh.visible = !entry.model;
+    entry.edges.visible = !entry.model && (entry.volume || on || marked || entry.status === "hidden");
+    if (!entry.model) return;
+    entry.model.traverse((child) => {
+      if (!child.isMesh || !child.material || !child.material.emissive) return;
+      child.material.emissive.set(on ? 0x3a2a10 : 0x000000);
+      child.material.emissiveIntensity = on ? 0.35 : 0;
+    });
   }
 
   function ensureLabel(entry) {
@@ -159,21 +194,23 @@ export function createViewport(host, hooks) {
 
   function setActors(actors, options = {}) {
     clearActors();
+    const token = ++generation;
     actors.forEach((actor, index) => {
       const key = actor.id || `locked-${index}`;
       const color = CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
+      const volume = Boolean(actor.volume);
       const material = new THREE.MeshStandardMaterial({
         color,
         roughness: 0.7,
         metalness: 0.05,
       });
-      if (actor.status === "hidden") {
+      if (actor.status === "hidden" || volume) {
         material.transparent = true;
-        material.opacity = 0.3;
+        material.opacity = actor.status === "hidden" ? 0.18 : 0.07;
         material.depthWrite = false;
       }
       const mesh = new THREE.Mesh(boxGeometry, material);
-      const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x101612 });
+      const edgeMaterial = new THREE.LineBasicMaterial({ color: volume ? color : 0x101612 });
       const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
       const pivot = new THREE.Group();
       pivot.add(mesh);
@@ -185,17 +222,26 @@ export function createViewport(host, hooks) {
       pivot.rotation.set(rx, ry, rz);
       pivot.scale.set(sx || 1, sy || 1, sz || 1);
       pivot.userData.actorId = actor.id;
-      pivot.visible = actor.status !== "hidden" || showHidden;
+      const hiddenByStatus = actor.status === "hidden" && !showHidden;
+      const hiddenByCategory = categories[actor.category] === "hide";
+      pivot.visible = !hiddenByStatus && !hiddenByCategory;
       scene.add(pivot);
       entries.set(key, {
         key,
         id: actor.id,
+        gyaml: actor.gyaml,
+        category: actor.category,
         status: actor.status,
+        volume,
+        locked: categories[actor.category] === "lock",
         color,
         pivot,
+        mesh,
         material,
         edges,
         edgeMaterial,
+        model: null,
+        modelMeta: metaCache.get(actor.gyaml) || null,
         label: null,
         labelText: actor.name || actor.gyaml,
       });
@@ -204,16 +250,159 @@ export function createViewport(host, hooks) {
     for (const entry of entries.values()) paint(entry);
     attach();
     if (options.frame) {
-      const visible = [...entries.values()].filter((entry) => entry.pivot.visible).map((entry) => entry.pivot);
+      const solids = [...entries.values()].filter((entry) => entry.pivot.visible && !entry.volume);
+      const visible = (solids.length ? solids : [...entries.values()].filter((entry) => entry.pivot.visible)).map((entry) => entry.pivot);
       frameObjects(visible.length ? visible : [...entries.values()].map((entry) => entry.pivot));
       rebuildGrid();
     }
     syncLabels();
+    loadModels(token, actors);
+    if (options.banc !== undefined) loadTerrain(token, options.banc);
+  }
+
+  function report(info) {
+    if (hooks.onProgress) hooks.onProgress(info);
+    if (info.finished && hooks.onModels) hooks.onModels();
+  }
+
+  function loadModels(token, actors) {
+    const names = [...new Set(actors.map((actor) => actor.gyaml).filter(Boolean))];
+    const pending = names.filter((name) => !metaCache.has(name));
+    let done = names.length - pending.length;
+    let boxes = names.filter((name) => {
+      const meta = metaCache.get(name);
+      return meta && meta.status !== "mesh";
+    }).length;
+    const applyCached = () => {
+      for (const entry of entries.values()) {
+        const meta = metaCache.get(entry.gyaml);
+        if (!meta) continue;
+        entry.modelMeta = meta;
+        if (meta.status === "mesh" && meta.url) {
+          ensureTemplate(meta.url)
+            .then((template) => {
+              if (token !== generation) return;
+              const current = entries.get(entry.key);
+              if (current) attachModel(current, template);
+            })
+            .catch(() => {});
+        }
+      }
+    };
+    applyCached();
+    report({
+      done,
+      total: names.length,
+      boxes,
+      finished: pending.length === 0,
+      label: names.length ? `Models ${done} of ${names.length}` : "No actors",
+    });
+    const queue = pending.slice();
+    async function worker() {
+      while (queue.length) {
+        if (token !== generation) return;
+        const gyaml = queue.shift();
+        let meta;
+        try {
+          meta = hooks.fetchModel ? await hooks.fetchModel(gyaml) : { status: "box", reason: "Model loading is not connected." };
+        } catch (error) {
+          meta = { status: "box", reason: error.message || "The model request failed.", source: "" };
+        }
+        if (token !== generation) return;
+        metaCache.set(gyaml, meta);
+        if (meta.status !== "mesh") boxes += 1;
+        for (const entry of entries.values()) {
+          if (entry.gyaml !== gyaml) continue;
+          entry.modelMeta = meta;
+          if (meta.status !== "mesh" || !meta.url) continue;
+          try {
+            const template = await ensureTemplate(meta.url);
+            if (token !== generation) return;
+            attachModel(entry, template);
+          } catch (error) {
+            entry.modelMeta = { status: "box", reason: error.message || "The glTF did not load.", source: meta.source || "" };
+            entry.mesh.visible = true;
+          }
+        }
+        done += 1;
+        report({
+          done,
+          total: names.length,
+          boxes,
+          finished: done >= names.length,
+          label: `Models ${done} of ${names.length}`,
+        });
+      }
+    }
+    const workers = Math.min(3, queue.length);
+    if (workers) Promise.all(Array.from({ length: workers }, () => worker()));
+  }
+
+  function ensureTemplate(url) {
+    let pending = templateCache.get(url);
+    if (!pending) {
+      pending = new Promise((resolve, reject) => {
+        loader.load(url, (gltf) => resolve(gltf.scene), undefined, reject);
+      });
+      templateCache.set(url, pending);
+    }
+    return pending;
+  }
+
+  function cloneModel(template) {
+    const clone = template.clone(true);
+    clone.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const source = Array.isArray(child.material) ? child.material[0] : child.material;
+      const material = source.clone();
+      material.side = THREE.DoubleSide;
+      material.metalness = 0;
+      material.roughness = 0.85;
+      child.material = material;
+    });
+    return clone;
+  }
+
+  function attachModel(entry, template) {
+    if (entry.model) return;
+    const model = cloneModel(template);
+    model.traverse((child) => {
+      child.userData.actorId = entry.id;
+    });
+    entry.pivot.add(model);
+    entry.model = model;
+    entry.volume = false;
+    paint(entry);
+  }
+
+  async function loadTerrain(token, banc) {
+    clearTerrain();
+    if (!banc || !hooks.fetchTerrain) return;
+    let meta;
+    try {
+      meta = await hooks.fetchTerrain(banc);
+    } catch (error) {
+      meta = { status: "none", reason: error.message || "The map model request failed." };
+    }
+    if (token !== generation) return;
+    if (hooks.onTerrain) hooks.onTerrain(meta);
+    if (meta.status !== "mesh" || !meta.url) return;
+    try {
+      const template = await ensureTemplate(meta.url);
+      if (token !== generation) return;
+      terrainRoot = cloneModel(template);
+      terrainRoot.name = "terrain";
+      scene.add(terrainRoot);
+    } catch (error) {
+      if (token === generation && hooks.onTerrain) {
+        hooks.onTerrain({ status: "box", reason: error.message || "The map glTF did not load.", source: meta.source || "" });
+      }
+    }
   }
 
   function attach() {
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id || !entry.pivot.visible) {
+    if (!entry || !entry.id || !entry.pivot.visible || entry.locked) {
       transform.detach();
       return;
     }
@@ -238,14 +427,24 @@ export function createViewport(host, hooks) {
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function setFlags({ hidden, labels }) {
+  function setFlags({ hidden, labels, categories: next }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
+    if (next) Object.assign(categories, next);
     for (const entry of entries.values()) {
-      if (entry.status === "hidden") entry.pivot.visible = showHidden;
+      const hiddenByStatus = entry.status === "hidden" && !showHidden;
+      const hiddenByCategory = categories[entry.category] === "hide";
+      entry.locked = categories[entry.category] === "lock";
+      entry.pivot.visible = !hiddenByStatus && !hiddenByCategory;
     }
     attach();
     syncLabels();
+  }
+
+  function modelInfo(id) {
+    const entry = entries.get(id);
+    if (!entry) return null;
+    return entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
   }
 
   function frame(id) {
@@ -273,14 +472,55 @@ export function createViewport(host, hooks) {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
 
-  function pick(event) {
+  function aimed(event) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects([...entries.values()].map((entry) => entry.pivot), true);
-    const hit = hits.find((item) => item.object.visible);
-    hooks.onSelect(hit ? idOf(hit.object) : null);
+    const roots = [];
+    for (const entry of entries.values()) {
+      if (entry.pivot.visible && !entry.locked) roots.push(entry.pivot);
+    }
+    return classify(roots.length ? raycaster.intersectObjects(roots, true) : []);
+  }
+
+  function classify(hits) {
+    const solids = [];
+    const volumes = [];
+    const edges = [];
+    for (const hit of hits) {
+      if (!hit.object.visible) continue;
+      const id = idOf(hit.object);
+      const entry = id ? entries.get(id) : null;
+      if (!entry || entry.locked || !entry.pivot.visible) continue;
+      if (entry.volume && !entry.model) {
+        if (!volumes.includes(id)) volumes.push(id);
+        if (nearEdge(hit, entry) && !edges.includes(id)) edges.push(id);
+      } else if (!solids.includes(id)) {
+        solids.push(id);
+      }
+    }
+    return { solids, volumes, edges };
+  }
+
+  function nearEdge(hit, entry) {
+    const local = entry.mesh.worldToLocal(hit.point.clone());
+    const close = ["x", "y", "z"].filter((axis) => Math.abs(Math.abs(local[axis]) - 0.5) < 0.08);
+    return close.length >= 2;
+  }
+
+  function signature(groups) {
+    return [...groups.solids, "|", ...groups.edges, "|", ...groups.volumes].join(",");
+  }
+
+  function pick(event) {
+    const groups = aimed(event);
+    const repeat = Boolean(
+      lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
+    );
+    const id = chooseHit({ ...groups, selected, alt: event.altKey, repeat });
+    lastClick = { x: event.clientX, y: event.clientY, signature: signature(groups) };
+    hooks.onSelect(id);
   }
 
   renderer.domElement.addEventListener("pointerdown", (event) => {
@@ -318,9 +558,7 @@ export function createViewport(host, hooks) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects([...entries.values()].map((entry) => entry.pivot), true);
-    const next = hits.length ? idOf(hits[0].object) : null;
+    const next = chooseHit(aimed(event));
     const key = next || null;
     if (key !== hovered) {
       hovered = key;
@@ -425,13 +663,16 @@ export function createViewport(host, hooks) {
     setNav,
     setGizmo,
     setFlags,
+    modelInfo,
     frame,
     spawnPoint,
     resize,
     destroy() {
       running = false;
+      generation += 1;
       observer.disconnect();
       clearActors();
+      clearTerrain();
       clearGrid();
       boxGeometry.dispose();
       edgesGeometry.dispose();

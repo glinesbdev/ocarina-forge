@@ -54,6 +54,7 @@
             <span><i class="swatch land"></i>Land</span>
             <span><i class="swatch effect"></i>Effect</span>
             <span><i class="swatch animal"></i>Animal</span>
+            <span><i class="swatch area"></i>Area</span>
             <span><i class="swatch system"></i>System</span>
           </div>
         </aside>
@@ -63,7 +64,11 @@
           <div id="viewport">
             <div id="viewport-empty">
               <p>Open a scene from the list.</p>
-              <p class="muted">Each actor is a box at its placement. Models come later.</p>
+              <p class="muted">Actors start as boxes. Models load from the dump when the scene opens.</p>
+            </div>
+            <div id="model-progress" class="model-progress" hidden>
+              <span id="model-progress-text">Loading models</span>
+              <i><b id="model-progress-bar"></b></i>
             </div>
           </div>
           <div class="stage-bar">
@@ -78,8 +83,20 @@
             </div>
             <label class="check"><input id="show-hidden" type="checkbox" /> Show hidden</label>
             <label class="check"><input id="show-labels" type="checkbox" checked /> All labels</label>
+            <div class="seg cat-toggle" role="group" aria-label="Areas">
+              <span>Areas</span>
+              <button type="button" data-cat="area" data-mode="show" class="is-on">Show</button>
+              <button type="button" data-cat="area" data-mode="lock">Lock</button>
+              <button type="button" data-cat="area" data-mode="hide">Hide</button>
+            </div>
+            <div class="seg cat-toggle" role="group" aria-label="System actors">
+              <span>System</span>
+              <button type="button" data-cat="system" data-mode="show" class="is-on">Show</button>
+              <button type="button" data-cat="system" data-mode="lock">Lock</button>
+              <button type="button" data-cat="system" data-mode="hide">Hide</button>
+            </div>
             <button id="frame" type="button" class="ghost">Frame</button>
-            <span id="stage-hint" class="hint">Left drag orbits. Scroll zooms. Click a box to select.</span>
+            <span id="stage-hint" class="hint">Click a model to select. Alt-click, or click again, cycles overlaps. Volumes are the faint boxes.</span>
           </div>
         </main>
 

@@ -15,6 +15,8 @@ const state = {
   history: { undo: [], redo: [] },
   showHidden: false,
   showLabels: true,
+  categories: { area: "show", system: "show" },
+  terrain: null,
   nav: "orbit",
   gizmo: "translate",
   tab: "outliner",
@@ -22,6 +24,24 @@ const state = {
 };
 
 const viewport = createViewport($("viewport"), {
+  fetchModel: (gyaml) => api.model(gyaml),
+  fetchTerrain: (banc) => api.terrain(banc),
+  onProgress: (info) => {
+    const box = $("model-progress");
+    if (!box) return;
+    if (!info || !info.total) {
+      box.hidden = true;
+      return;
+    }
+    const extra = info.boxes ? ` · ${info.boxes} still boxes` : "";
+    $("model-progress-text").textContent = `${info.label}${extra}`;
+    $("model-progress-bar").style.width = `${Math.round((100 * info.done) / Math.max(info.total, 1))}%`;
+    box.hidden = Boolean(info.finished);
+  },
+  onModels: () => renderProps(),
+  onTerrain: (meta) => {
+    state.terrain = meta;
+  },
   onSelect: (id) => {
     state.selected = id;
     viewport.select(id);
@@ -62,6 +82,17 @@ $("show-labels").addEventListener("change", (event) => {
   viewport.setFlags({ labels: state.showLabels });
 });
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
+document.querySelectorAll("[data-cat]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const cat = button.dataset.cat;
+    const mode = button.dataset.mode;
+    state.categories[cat] = mode;
+    document.querySelectorAll(`[data-cat="${cat}"]`).forEach((item) => {
+      item.classList.toggle("is-on", item.dataset.mode === mode);
+    });
+    viewport.setFlags({ categories: { [cat]: mode } });
+  });
+});
 $("tab-outliner").addEventListener("click", () => showTab("outliner"));
 $("tab-props").addEventListener("click", () => showTab("props"));
 document.querySelectorAll("[data-nav]").forEach((button) => {
@@ -542,7 +573,7 @@ function applyView(view, { frame = false, select } = {}) {
   if (select !== undefined) state.selected = select;
   else if (view.focus) state.selected = view.focus;
   else if (state.selected && !view.actors.some((actor) => actor.id === state.selected)) state.selected = null;
-  viewport.setActors(view.actors, { frame });
+  viewport.setActors(view.actors, { frame, banc: view.banc });
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
   const warnings = $("warnings");
@@ -576,7 +607,7 @@ async function edit(command) {
   } catch (error) {
     state.history.undo.pop();
     toast(error.message);
-    if (state.view) viewport.setActors(state.view.actors, { frame: false });
+    if (state.view) viewport.setActors(state.view.actors, { frame: false, banc: state.banc });
     viewport.select(state.selected);
   }
   updateHistoryButtons();
@@ -710,6 +741,7 @@ function renderProps() {
   }
   head.append(title, gyaml, hash, meta);
   panel.append(head);
+  panel.append(modelBlock(actor));
 
   if (!actor.id || actor.status === "locked") return;
 
@@ -757,6 +789,40 @@ function renderProps() {
     srt.textContent = `SRT hash ${actor.srtHash}. The instance id is left alone; the project uses it as the key.`;
     panel.append(srt);
   }
+}
+
+function modelBlock(actor) {
+  const wrap = document.createElement("div");
+  wrap.className = "model-note";
+  const info = viewport.modelInfo(actor.id) || { status: "loading", reason: "Looking up the model." };
+  const title = document.createElement("div");
+  title.className = "axis-label";
+  title.textContent = "Model";
+  const body = document.createElement("p");
+  if (info.status === "mesh") {
+    const bits = [`${info.triangles || 0} triangles`];
+    if (info.textures) bits.push(info.textures === 1 ? "1 base color" : `${info.textures} base colors`);
+    if (info.source) bits.push(info.source);
+    body.textContent = bits.join(" · ");
+  } else if (info.status === "loading") {
+    body.textContent = info.reason || "Looking up the model.";
+  } else {
+    wrap.classList.add("is-box");
+    body.textContent = info.reason || "This actor stays a labeled box.";
+  }
+  wrap.append(title, body);
+  if (info.status === "mesh" && info.reason) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = info.reason;
+    wrap.append(note);
+  } else if (info.status !== "mesh" && info.source) {
+    const source = document.createElement("p");
+    source.className = "muted";
+    source.textContent = info.source;
+    wrap.append(source);
+  }
+  return wrap;
 }
 
 function vectorFields(label, prefix, values) {

@@ -2,7 +2,7 @@
 
 Bancwright is a local workbench for placing actors in the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
 
-This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches with no visual editor yet, and the build still produces them. Dialog editing, event-flow graphs, real models, and a desktop package are later stages.
+This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Actor meshes and base-color textures are loaded from the dump at runtime (bind pose, no animation) and cached under `~/.cache/bancwright/models`. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches with no visual editor yet, and the build still produces them. Dialog editing, event-flow graphs, and a desktop package are later stages.
 
 Bancwright reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
 
@@ -36,7 +36,7 @@ Mods are written to `~/Games/Longshot/rc/v3.0.0/mods/<project name>/romfs`. Long
 
 If you do not have a dump on this machine, choose **Use the bundled sample dump**. It builds a tiny synthetic Kokiri Forest (no Nintendo data) and opens the sample project.
 
-The dump path and the open project are stored in `./bancwright.local.yaml` (gitignored), or in `~/.config/bancwright/config.yaml` if that file already exists. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` override them.
+The dump path and the open project are stored in `./bancwright.local.yaml` (gitignored), or in `~/.config/bancwright/config.yaml` if that file already exists. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` override them. Converted models are written to `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`. That cache stays outside the repo.
 
 ## What you can do
 
@@ -66,7 +66,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | `bancwright/` | Python library and FastAPI server. This is the piece that can later replace a mod’s build step. |
 | `bancwright/formats/` | BYML, SARC, zstd dictionaries, RESTBL. |
 | `bancwright/domains.py` | Where a future dialog, event, or table exporter plugs into the build. |
-| `frontend/` | Vite + Three.js editor. Boxes stand in for models; a later stage can swap in cached glTF on the same pivot the gizmo uses. |
+| `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. |
 | `examples/sample-project/` | A small project in the format. |
 | `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the simple scene importer. |
 | `examples/after-the-ocarina/` | The imported After the Ocarina project (Bradyn's YAML only). |
@@ -83,4 +83,4 @@ python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 
 ## Not in this version
 
-Real actor models and textures, a dialog editor, an event-flow graph, and desktop packaging. Those advanced patches build, and they are not edited on screen yet.
+Skeletal animation, a dialog editor, an event-flow graph, and desktop packaging. Those advanced patches build, and they are not edited on screen yet. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).

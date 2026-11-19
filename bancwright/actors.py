@@ -30,6 +30,7 @@ _PREFIXES = (
     ("animal", ("Animal_",)),
     ("effect", ("Eft",)),
     ("land", ("Land_",)),
+    ("area", ("Area_", "Area")),
     ("object", ("Obj_", "FldObj_", "Item_", "Weapon_", "Dm_")),
     ("system", ("StartPos", "Player", "Sound", "AirWall", "Ground")),
 )
@@ -43,6 +44,25 @@ def category(gyaml: str) -> str:
     if "Anchor" in name or name.endswith("Actor"):
         return "system"
     return "other"
+
+
+def is_volume(gyaml: str, scale: list[float] | None = None) -> bool:
+    """Large areas, triggers, and system actors are volumes, not solid props.
+
+    A land actor whose scale reaches 8 metres on any axis is treated the same
+    way: the sample ground slab, and real terrain slabs, would otherwise win
+    every click that lands inside them.
+    """
+    name = gyaml or ""
+    kind = category(name)
+    if kind in ("area", "system"):
+        return True
+    if "Trigger" in name or name.startswith("AirWall"):
+        return True
+    axes = scale or [1.0, 1.0, 1.0]
+    if kind == "land" and max(abs(float(axis)) for axis in axes[:3]) >= 8:
+        return True
+    return False
 
 
 def format_hash(value: int) -> str:
@@ -111,6 +131,7 @@ def view_actor(actor: dict, status: str) -> dict:
     gyaml = str(actor.get("Gyaml") or "Unnamed")
     params = {key: value for key, value in actor.items() if key not in HEADER_KEYS}
     srt = actor.get("SRTHash")
+    scale = read_vec(actor, "Scale", [1.0, 1.0, 1.0])
     return {
         "id": actor_id(actor),
         "gyaml": gyaml,
@@ -118,7 +139,8 @@ def view_actor(actor: dict, status: str) -> dict:
         "category": category(gyaml),
         "translate": read_vec(actor, "Translate", [0.0, 0.0, 0.0]),
         "rotate": read_vec(actor, "Rotate", [0.0, 0.0, 0.0]),
-        "scale": read_vec(actor, "Scale", [1.0, 1.0, 1.0]),
+        "scale": scale,
+        "volume": is_volume(gyaml, scale),
         "srtHash": f"0x{int(srt) & 0xFFFFFFFF:08x}" if srt is not None else None,
         "status": status,
         "params": tag(params),

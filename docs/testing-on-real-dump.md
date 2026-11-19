@@ -32,6 +32,15 @@ Do this on a copy of the dump if you want a safety net. Bancwright is written to
 15. Point **Import** at After the Ocarina’s `src/scenes`. Each file should become `scenes/<Area>/<Scene>.yaml` in the project, with hashes preserved and `op: add` turned into `state: added`.
 16. Open one imported scene in the view and confirm the moved actors sit on the vanilla ones you expect. Then build only if the size-table check above agreed with your notes.
 
+## Models and picking
+
+17. Open a scene you know. The progress chip should count models, then disappear. Actors whose pack contains a bfres, or whose pack names `Model/<name>.bfres.zs`, should become meshes with a base color. The rest stay labeled boxes. Select one and read **Model** in the properties: a mesh names its source and triangle count; a box names the reason.
+18. The sample dump (Use the bundled sample dump, then Kokiri Forest child static) is the known-good picture: Fado is a gold pyramid from the actor pack, both trees are green cones from `Model/Obj_Tree.bfres.zs`, and a flat green quad is the static map. Deku Baba stays a box because its bfres is truncated. Mido, the heart, the sign, the firefly, and StartPos stay boxes because the sample has no model for them. The sample project hides the cucco; turn on Show hidden to see that box. On a real dump those actors should become meshes when the pack or `Model/` file is a readable BFRES.
+19. Click an NPC who stands inside a large Area. The NPC should be selected, not the Area. The Area is a faint box. Click its edge, or click empty space inside it, to select it. Alt-click, or click the same spot again, cycles through whatever the ray hit. **Areas** and **System** in the stage bar are Show, Lock (visible, not pickable, no gizmo), or Hide. A land actor scaled to 8 metres or more is also a volume, so a ground slab does not swallow clicks; the toggles do not hide Land.
+20. If `Model/<Scene>.bfres.zs` (or `Model/<Area>.bfres.zs`, `Terrain/`, or `Map/`) exists, it is drawn as static context and is not pickable. A missing map model is silent: actors stay where they are, with no extra box.
+21. Converted glTF is under `~/.cache/bancwright/models` (or `$BANCWRIGHT_CACHE`). It must not appear in the repo. Quit and reopen the same scene: the second open should be immediate, from that cache.
+22. What this build does not do, so do not file those as regressions yet: skeletal animation (bind pose only), anything but the base color, `.bfres.mc` mesh-codec streams, and a BFRES whose GPU buffer is an external section past the end of the file. Those stay boxes, and the properties panel should say why. Upside-down textures are possible; the viewer does not flip V.
+
 ## If it fails
 
 - “No game dump” or “no Banc folder”: the path is not the Longshot folder that contains `romfs`.

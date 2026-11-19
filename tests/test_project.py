@@ -208,7 +208,7 @@ def test_api_sample_edit_and_export(tmp_path, monkeypatch):
     scene = client.get("/api/scene", params={"banc": KOKIRI_STATIC})
     assert scene.status_code == 200
     body = scene.json()
-    assert len([actor for actor in body["actors"] if actor["status"] != "hidden"]) == 10
+    assert len([actor for actor in body["actors"] if actor["status"] != "hidden"]) == 12
     fado = next(actor for actor in body["actors"] if actor["gyaml"] == "Npc_Kokiri_F_01")
     assert fado["category"] == "npc"
     assert fado["name"] == "Fado"

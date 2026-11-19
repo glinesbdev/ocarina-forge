@@ -17,6 +17,7 @@ from bancwright.errors import BancError
 from bancwright.export import build
 from bancwright.fixtures import build_fixture
 from bancwright.importers.ato import import_scenes
+from bancwright.models import actor_glb, describe_actor, describe_terrain, terrain_glb
 from bancwright.project import Project
 from bancwright.scene import apply_command, replace_diff, scene_view
 
@@ -243,6 +244,32 @@ def put_diff(body: dict):
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
     return view
+
+
+@app.get("/api/models/{gyaml}")
+def model_info(gyaml: str):
+    return describe_actor(_open_dump(), gyaml)
+
+
+@app.get("/api/models/{gyaml}/model.glb")
+def model_file(gyaml: str):
+    path = actor_glb(_open_dump(), gyaml)
+    if path is None:
+        raise BancError("This actor has no converted model.", "not_found")
+    return FileResponse(path, media_type="model/gltf-binary", filename=f"{gyaml}.glb")
+
+
+@app.get("/api/terrain")
+def terrain_info(banc: str):
+    return describe_terrain(_open_dump(), banc)
+
+
+@app.get("/api/terrain/model.glb")
+def terrain_file(banc: str):
+    path = terrain_glb(_open_dump(), banc)
+    if path is None:
+        raise BancError("This scene has no converted map model.", "not_found")
+    return FileResponse(path, media_type="model/gltf-binary", filename="terrain.glb")
 
 
 @app.get("/api/actors")
