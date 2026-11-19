@@ -104,6 +104,7 @@
           <div class="tabs" role="tablist">
             <button type="button" id="tab-outliner" class="is-on" role="tab" aria-selected="true">Outliner</button>
             <button type="button" id="tab-props" role="tab" aria-selected="false">Properties</button>
+            <button type="button" id="tab-changes" role="tab" aria-selected="false">Changes <span id="change-count" class="badge" hidden></span></button>
           </div>
           <div id="outliner-panel">
             <div class="pane-tools">
@@ -113,6 +114,7 @@
             <div id="outliner" class="scroll" role="listbox" aria-label="Actors"></div>
           </div>
           <div id="props-panel" class="scroll" hidden></div>
+          <div id="changes-panel" class="scroll" hidden></div>
         </aside>
       </div>
 
@@ -155,6 +157,7 @@
           <button type="button" class="ghost" data-close>Close</button>
         </header>
         <div id="project-summary" class="summary"></div>
+        <section id="project-changes" hidden></section>
         <div id="project-catalog"></div>
         <div class="split">
           <fieldset>

@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from bancwright import __version__
+from bancwright.changes import project_report, scene_changes
 from bancwright.config import load_config, save_config
 from bancwright.dump import Dump
 from bancwright.errors import BancError
@@ -196,12 +197,36 @@ def list_scenes():
     known = {scene["path"] for scene in scenes}
     for path in sorted((modified | recipes) - known):
         project_only.append(path)
+    change_counts = {}
+    if config["project"] and config["dump"]:
+        try:
+            report = project_report(dump, Project(config["project"]))
+            change_counts = {item["banc"]: item["counts"] for item in report["maps"]}
+        except BancError:
+            change_counts = {}
     return {
         "scenes": scenes,
         "modified": sorted(modified & known),
         "recipes": sorted(recipes & known),
         "projectOnly": project_only,
+        "changes": change_counts,
     }
+
+
+@app.get("/api/changes")
+def project_changes():
+    dump = _open_dump()
+    project = _open_project()
+    return project_report(dump, project)
+
+
+@app.get("/api/scene/changes")
+def scene_change_list(banc: str):
+    if not banc:
+        raise BancError("Which scene?", "edit")
+    dump = _open_dump()
+    project = _open_project()
+    return scene_changes(dump, project, banc)
 
 
 @app.get("/api/scene")

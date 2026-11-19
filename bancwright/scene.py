@@ -416,9 +416,83 @@ def apply_command(document: dict, diff: dict, command: dict) -> tuple[dict, str 
             raise BancError("That actor has no edits to revert.", "edit")
         del actors[ident]
         focus = ident if ident in base else None
+    elif name == "revert_part":
+        ident = format_hash(parse_hash(command.get("id")))
+        record = actors.get(ident)
+        if not isinstance(record, dict):
+            raise BancError("That change is already gone.", "edit")
+        part = str(command.get("part") or "")
+        if part == "added":
+            if not _is_added(record):
+                raise BancError("That actor was not added by this project.", "edit")
+            del actors[ident]
+            focus = None
+        elif part == "removed":
+            if record.get("state") != "removed":
+                raise BancError("That actor is not removed.", "edit")
+            del actors[ident]
+            focus = ident if ident in base else None
+        elif part == "hidden":
+            if record.get("state") != "hidden":
+                raise BancError("That actor is not hidden.", "edit")
+            if "actor" in record:
+                record["state"] = "added"
+            elif any(key in record for key in ("translate", "rotate", "scale", "gyaml", "name", "set")):
+                record["state"] = "edited"
+                _prune(base.get(ident), actors, ident, record)
+            else:
+                del actors[ident]
+            focus = ident if ident in actors or ident in base else None
+        elif part in ("translate", "rotate", "scale", "gyaml"):
+            if part not in record:
+                raise BancError("That change is already gone.", "edit")
+            record.pop(part, None)
+            _prune(base.get(ident), actors, ident, record)
+            focus = ident
+        elif part == "name":
+            if "name" not in record:
+                raise BancError("That change is already gone.", "edit")
+            record.pop("name", None)
+            _prune(base.get(ident), actors, ident, record)
+            focus = ident
+        elif part == "param":
+            path = str(command.get("path") or "")
+            if not path:
+                raise BancError("Which parameter should be restored?", "edit")
+            if _is_added(record):
+                params = record.get("params")
+                if not isinstance(params, dict) or not _pop_nested(params, path):
+                    raise BancError("That parameter is not part of this actor.", "edit")
+            else:
+                bag = record.get("set")
+                if not isinstance(bag, dict) or path not in bag:
+                    raise BancError("That parameter is not part of this edit.", "edit")
+                del bag[path]
+                if not bag:
+                    record.pop("set", None)
+                _prune(base.get(ident), actors, ident, record)
+            focus = ident
+        else:
+            raise BancError(f"Unknown change {part!r}.", "edit")
     else:
         raise BancError(f"Unknown edit {name!r}.", "edit")
     return diff, focus
+
+
+def _pop_nested(root: dict, path: str) -> bool:
+    parts = [part for part in path.split(".") if part]
+    if not parts:
+        return False
+    current = root
+    for part in parts[:-1]:
+        nxt = current.get(part) if isinstance(current, dict) else None
+        if not isinstance(nxt, dict):
+            return False
+        current = nxt
+    if not isinstance(current, dict) or parts[-1] not in current:
+        return False
+    del current[parts[-1]]
+    return True
 
 
 def replace_diff(document: dict, banc: str, actors: dict) -> dict:

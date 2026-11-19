@@ -9,6 +9,9 @@ const state = {
   modified: new Set(),
   recipes: new Set(),
   projectOnly: [],
+  changeCounts: {},
+  changes: null,
+  changeToken: 0,
   banc: null,
   view: null,
   selected: null,
@@ -95,6 +98,7 @@ document.querySelectorAll("[data-cat]").forEach((button) => {
 });
 $("tab-outliner").addEventListener("click", () => showTab("outliner"));
 $("tab-props").addEventListener("click", () => showTab("props"));
+$("tab-changes").addEventListener("click", () => showTab("changes"));
 document.querySelectorAll("[data-nav]").forEach((button) => {
   button.addEventListener("click", () => setNav(button.dataset.nav));
 });
@@ -357,6 +361,7 @@ function openProjectDialog() {
   const catalog = $("project-catalog");
   catalog.replaceChildren();
   if (projectReady()) catalog.append(catalogList(project.catalog));
+  fillProjectChanges();
   $("project-dialog").showModal();
 }
 
@@ -370,14 +375,15 @@ function renderProjectContents() {
     box.hidden = true;
     return;
   }
-  const catalog = project.catalog;
-  const count = (catalog.text || []).length + (catalog.events || []).length + (catalog.quests || []).length;
-  if (!count && !(catalog.scenes || []).length) {
-    box.hidden = true;
-    return;
-  }
   box.hidden = false;
-  body.append(catalogList(catalog));
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = "ghost";
+  all.textContent = "All map changes";
+  all.addEventListener("click", () => openProjectDialog());
+  const list = catalogList(project.catalog);
+  body.append(all);
+  if (list.querySelector("section")) body.append(list);
 }
 
 function catalogList(catalog) {
@@ -471,6 +477,7 @@ async function refreshScenes() {
   state.modified = new Set(data.modified || []);
   state.recipes = new Set(data.recipes || []);
   state.projectOnly = data.projectOnly || [];
+  state.changeCounts = data.changes || {};
   $("scene-count").textContent = `${state.scenes.length} scenes`;
   renderScenes();
   const preferred = [...state.modified][0] || (state.scenes[0] && state.scenes[0].path);
@@ -530,7 +537,13 @@ function sceneButton(scene) {
   small.textContent = scene.path;
   text.append(strong, small);
   button.append(text);
-  if (state.modified.has(scene.path)) {
+  const counts = state.changeCounts[scene.path];
+  if (counts && counts.total) {
+    const dot = document.createElement("i");
+    dot.className = actorChange(counts) ? "dot" : "dot recipe";
+    dot.title = changeSummary(counts);
+    button.append(dot);
+  } else if (state.modified.has(scene.path)) {
     const dot = document.createElement("i");
     dot.className = "dot";
     dot.title = "This scene has actor edits in the project";
@@ -586,6 +599,7 @@ function applyView(view, { frame = false, select } = {}) {
   }
   renderOutliner();
   renderProps();
+  loadChanges(view.banc || state.banc);
   if (state.banc) state.modified.add(state.banc);
   if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
 }
@@ -1053,14 +1067,222 @@ function selectedActor() {
   return state.view.actors.find((actor) => actor.id === state.selected) || null;
 }
 
+const CHANGE_LABELS = [
+  ["added", "added"],
+  ["removed", "removed or hidden"],
+  ["moved", "moved"],
+  ["turned", "rotated or scaled"],
+  ["params", "parameters"],
+  ["events", "events"],
+  ["logic", "logic"],
+  ["schedule", "schedules"],
+  ["text", "text"],
+];
+
+function changeSummary(counts) {
+  if (!counts || !counts.total) return "";
+  return CHANGE_LABELS.filter(([key]) => counts[key]).map(([key, label]) => `${counts[key]} ${label}`).join(", ");
+}
+
+function actorChange(counts) {
+  return Boolean(counts && (counts.added || counts.removed || counts.moved || counts.turned || counts.params));
+}
+
+async function loadChanges(banc) {
+  const token = ++state.changeToken;
+  if (!banc || !projectReady()) {
+    state.changes = { banc, groups: [], counts: { total: 0 } };
+    renderChanges();
+    return;
+  }
+  state.changes = null;
+  renderChanges();
+  try {
+    const report = await api.sceneChanges(banc);
+    if (token !== state.changeToken || state.banc !== banc) return;
+    state.changes = report;
+    state.changeCounts[banc] = report.counts || {};
+    renderChanges();
+    renderScenes();
+  } catch (error) {
+    if (token !== state.changeToken) return;
+    state.changes = { error: error.message, groups: [], counts: { total: 0 } };
+    renderChanges();
+  }
+}
+
+function renderChanges() {
+  const panel = $("changes-panel");
+  const badge = $("change-count");
+  if (!panel || !badge) return;
+  panel.replaceChildren();
+  const report = state.changes;
+  const total = report && report.counts ? report.counts.total : 0;
+  badge.hidden = !total;
+  badge.textContent = total ? String(total) : "";
+  if (!state.banc) {
+    panel.append(empty("Open a scene to see what the project changed."));
+    return;
+  }
+  if (!report) {
+    panel.append(empty("Loading changes…"));
+    return;
+  }
+  if (report.error) {
+    panel.append(empty(report.error));
+    return;
+  }
+  if (!total) {
+    panel.append(empty("Nothing in this project changes this map."));
+    return;
+  }
+  panel.append(changeGroups(report.groups || []));
+}
+
+function changeGroups(groups) {
+  const root = document.createElement("div");
+  root.className = "change-list";
+  for (const group of groups) {
+    const heading = document.createElement("div");
+    heading.className = "area";
+    heading.textContent = group.title;
+    root.append(heading);
+    for (const entry of group.entries || []) root.append(changeRow(entry));
+  }
+  return root;
+}
+
+function changeRow(entry) {
+  const row = document.createElement("div");
+  row.className = "change-row";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "change-row";
+  const text = document.createElement("span");
+  text.className = "grow";
+  const strong = document.createElement("strong");
+  const who = entry.label || entry.gyaml || entry.title;
+  strong.textContent = entry.title && entry.title !== who ? `${who} · ${entry.title}` : entry.title || who;
+  const delta = document.createElement("small");
+  delta.textContent = `${entry.before} → ${entry.after}`;
+  const source = document.createElement("small");
+  source.textContent = `${entry.sourceLabel || "Project"} · ${entry.file || "project"}`;
+  text.append(strong, delta, source);
+  button.append(text);
+  button.addEventListener("click", () => focusChange(entry));
+  row.append(button);
+  if (entry.revertable && entry.actorId) {
+    const revert = document.createElement("button");
+    revert.type = "button";
+    revert.className = "ghost";
+    revert.textContent = "Revert";
+    revert.addEventListener("click", async () => {
+      const command = { command: "revert_part", id: entry.actorId, part: entry.part, path: entry.path || "" };
+      const open = document.querySelector("dialog[open]");
+      if (open) open.close();
+      if (entry.banc && entry.banc !== state.banc) await openScene(entry.banc, { keepHistory: true });
+      showTab("changes");
+      edit(command);
+    });
+    row.append(revert);
+  }
+  return row;
+}
+
+async function focusChange(entry) {
+  const open = document.querySelector("dialog[open]");
+  if (open) open.close();
+  if (entry.banc && entry.banc !== state.banc) {
+    await openScene(entry.banc, { frame: false, keepHistory: true });
+  }
+  showTab("changes");
+  if (!entry.actorId || !state.view) {
+    toast(entry.source === "patch"
+      ? "This patch is applied when you build. It does not select an actor in the view."
+      : "That actor is not in the view. Restore it to frame it.");
+    return;
+  }
+  const actor = state.view.actors.find((item) => item.id === entry.actorId);
+  if (!actor) {
+    toast("That actor is not in the view. Restore it to frame it.");
+    return;
+  }
+  if (actor.status === "hidden" && !state.showHidden) {
+    state.showHidden = true;
+    $("show-hidden").checked = true;
+    viewport.setFlags({ hidden: true });
+  }
+  state.selected = entry.actorId;
+  viewport.select(entry.actorId);
+  viewport.frame(entry.actorId);
+  renderOutliner();
+  renderProps();
+}
+
+async function fillProjectChanges() {
+  const host = $("project-changes");
+  if (!host) return;
+  host.hidden = false;
+  host.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.textContent = "Changes";
+  if (!projectReady()) {
+    host.append(heading, empty("Open a project to see map changes."));
+    return;
+  }
+  host.append(heading, empty("Loading changes…"));
+  try {
+    const report = await api.projectChanges();
+    if (!$("project-dialog").open) return;
+    host.replaceChildren(heading);
+    host.append(projectChangeList(report));
+  } catch (error) {
+    host.replaceChildren(heading, empty(error.message));
+  }
+}
+
+function projectChangeList(report) {
+  const root = document.createElement("div");
+  const maps = report.maps || [];
+  if (!maps.length) {
+    root.append(empty("No map in this project has edits yet."));
+    return root;
+  }
+  const intro = document.createElement("p");
+  intro.className = "muted";
+  intro.textContent = `${maps.length} ${maps.length === 1 ? "map" : "maps"} · ${changeSummary(report.totals)}`;
+  root.append(intro);
+  for (const map of maps) {
+    const details = document.createElement("details");
+    details.className = "map-change";
+    const summary = document.createElement("summary");
+    summary.textContent = `${pretty(map.name)} · ${changeSummary(map.counts)}`;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "ghost";
+    open.textContent = "Open map";
+    open.addEventListener("click", () => {
+      closeDialogs();
+      openScene(map.banc, { frame: true, keepHistory: true });
+      showTab("changes");
+    });
+    details.append(summary, open, changeGroups(map.groups || []));
+    root.append(details);
+  }
+  return root;
+}
+
 function showTab(name) {
   state.tab = name;
   $("outliner-panel").hidden = name !== "outliner";
   $("props-panel").hidden = name !== "props";
+  $("changes-panel").hidden = name !== "changes";
   $("tab-outliner").classList.toggle("is-on", name === "outliner");
   $("tab-props").classList.toggle("is-on", name === "props");
+  $("tab-changes").classList.toggle("is-on", name === "changes");
   $("tab-outliner").setAttribute("aria-selected", name === "outliner" ? "true" : "false");
   $("tab-props").setAttribute("aria-selected", name === "props" ? "true" : "false");
+  $("tab-changes").setAttribute("aria-selected", name === "changes" ? "true" : "false");
   if (mobileQuery.matches) {
     $("side-pane").classList.remove("shut");
     $("scene-pane").classList.add("shut");
@@ -1073,7 +1295,7 @@ function setNav(mode) {
   document.querySelectorAll("[data-nav]").forEach((button) => button.classList.toggle("is-on", button.dataset.nav === mode));
   $("stage-hint").textContent = mode === "fly"
     ? "WASD moves. Q and E go down and up. Right-drag looks. Shift is faster."
-    : "Left drag orbits. Right drag pans. Scroll zooms. Click a box to select.";
+    : "Click a model to select. Alt-click, or click again, cycles overlaps. Volumes are the faint boxes.";
 }
 
 function setGizmo(mode) {
