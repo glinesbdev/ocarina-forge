@@ -15,6 +15,7 @@ Nothing in it comes from a game.
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -91,6 +92,8 @@ class Model:
     materials: list[Material] = field(default_factory=list)
     # Other identifiers in the file, used when a material names no texture.
     string_pool: list[str] = field(default_factory=list)
+    # Model-space AABB from shapes whose geometry this reader does not decode.
+    shape_bounds: dict | None = None
 
 
 def parse(data: bytes) -> list[Model]:
@@ -168,7 +171,9 @@ class _File:
             model, at = self._model(at, key, images, pool)
             found.append(model)
         if not any(model.parts for model in found):
-            raise FresError("the BFRES models have no triangles")
+            flagged = any(note.startswith("geometry format not decoded") for model in found for note in model.notes)
+            if not flagged:
+                raise FresError("the BFRES models have no triangles")
         return found
 
     def dict_keys(self, at: int) -> list[str]:
@@ -223,10 +228,18 @@ class _File:
         cursor += 8
         shape_dict = self.u64(cursor)
         cursor += 8
-        if self.major >= 9:
-            # Version 9 and later keep an 8-byte reserved slot between the
-            # material array and its dictionary. Reading past it is what
-            # made every material texture name come back empty.
+        if self.major >= 10:
+            # Version 10 has no reserved qword between the material array and
+            # its dictionary. +0x48 is a different pointer; using it as the
+            # dictionary made every model look like it had one material.
+            mat_values = self.u64(cursor)
+            cursor += 8
+            mat_dict = self.u64(cursor)
+            cursor += 8
+            cursor += 8  # keep user data and the counts at +0x68
+        elif self.major >= 9:
+            # Version 9 keeps an 8-byte reserved slot between the material
+            # array and its dictionary.
             mat_values = self.u64(cursor)
             cursor += 8
             maybe = self.u64(cursor)
@@ -242,26 +255,35 @@ class _File:
             cursor += 8
         cursor += 16  # user data
         cursor += 8  # user pointer
-        cursor += 6  # vertex, shape, material counts
+        # +0x68 on version 9 and 10: vtx count, shape count, material count.
+        vtx_count = self.u16(cursor)
+        shape_count = self.u16(cursor + 2)
+        material_count = self.u16(cursor + 4)
+        cursor += 6
         if self.major >= 9:
             cursor += 2 + 2 + 2 + 4
         else:
             cursor += 2 + 4 + 4
         end = cursor
+        del vtx_count, shape_count
         bones = self._bones(skel) if skel else []
-        materials = self._materials(mat_values, mat_dict)
+        materials = self._materials(mat_values, mat_dict, material_count)
         if not any(material.binds or material.albedo for material in materials):
             scanned = self._scan_fmats()
             if scanned:
                 materials = scanned
         shape_names = self.dict_keys(shape_dict)
         parts: list[Part] = []
+        undecoded: list[dict] = []
         shape_at = shape_values
         for index, shape_name in enumerate(shape_names):
-            part, shape_at = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
+            part, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
             if part is not None:
                 parts.append(part)
+            elif info.get("flags", 0) & 0x10:
+                undecoded.append(info)
         parts = _drop_opaque_twins(parts)
+        bounds = _union_bounds([item["bounds"] for item in undecoded if item.get("bounds")])
         model = Model(
             name or fallback,
             parts,
@@ -270,8 +292,13 @@ class _File:
             _texture_strings(self.data),
             materials,
             pool,
+            bounds,
         )
-        if not parts:
+        if undecoded and not parts:
+            model.notes.append("geometry format not decoded (FSHP flag 0x10)")
+        elif undecoded:
+            model.notes.append(f"{len(undecoded)} shapes use FSHP flag 0x10 and were not decoded")
+        elif not parts:
             model.notes.append(f"{model.name or fallback}: no drawable shape")
         return model, end
 
@@ -312,7 +339,7 @@ class _File:
             bones.append((parent, pos, rot, scale))
         return bones
 
-    def _materials(self, values: int, dictionary: int) -> list[Material]:
+    def _materials(self, values: int, dictionary: int, declared: int = 0) -> list[Material]:
         names = self.dict_keys(dictionary)
         # Version 9 materials are 0xA8 bytes. Version 10 (the Switch 2 files)
         # are 0xB0: the texture array, sampler dictionary, and counts moved.
@@ -325,7 +352,18 @@ class _File:
         else:
             stride = 0xB8
         if self.major >= 9 and values and self.data[values : values + 4] == b"FMAT":
-            count = len(names) or 1
+            count = len(names)
+            if declared > count:
+                present = 0
+                for index in range(min(declared, 256)):
+                    at = values + index * stride
+                    if at + 4 > len(self.data) or self.data[at : at + 4] != b"FMAT":
+                        break
+                    present += 1
+                if present > count:
+                    count = present
+            if count <= 0:
+                count = 1
             found = []
             for index in range(count):
                 at = values + index * stride
@@ -420,8 +458,8 @@ class _File:
         """Switch 2 FMAT. Offsets are from the FMAT magic, and the block is 0xB0 bytes.
 
         +0x08 name, +0x20 texture-name pointer array, +0x38 sampler-name
-        dictionary, +0x40 render-state string array, +0xA0 render-state count,
-        +0xA2 sampler count, +0xA3 texture count. Sampler names and texture
+        dictionary, +0x40 render-state string array. +0xA0 is 0 or 1 and is not
+        that array's length. +0xA2 sampler count, +0xA3 texture count. Sampler names and texture
         names are in the same order.
         """
         if at + 0xB0 > len(self.data) or self.data[at : at + 4] != b"FMAT":
@@ -440,7 +478,9 @@ class _File:
             sampler_names = self.dict_keys(sampler_dict) if sampler_dict else []
         except FresError:
             sampler_names = []
-        states = self._state_strings(state_at, render_count)
+        # +0xA0 is 0 or 1 on these files. It is not the length of the string array.
+        del render_count
+        states = self._state_strings(state_at, 31)
         binds: list[tuple[str, str]] = []
         count = max(len(textures), len(sampler_names), texture_count, sampler_count)
         for index in range(min(count, 64)):
@@ -458,6 +498,7 @@ class _File:
         return Material(name, binds, albedo, alpha, cutoff, sided, None, "", render_state=mode)
 
     def _state_strings(self, at: int, count: int) -> list[str]:
+        """Fixed render-state slots. Stop at a null or a pointer that is not a string."""
         if not at or count <= 0 or count > 64:
             return []
         found = []
@@ -465,8 +506,26 @@ class _File:
             slot = at + index * 8
             if slot + 8 > len(self.data):
                 break
-            found.append(self.string(self.u64(slot)))
+            ptr = self.u64(slot)
+            if not ptr or not self._is_string(ptr):
+                break
+            found.append(self.string(ptr))
         return found
+
+    def _is_string(self, at: int) -> bool:
+        if at <= 0 or at + 3 > len(self.data):
+            return False
+        length = self.u16(at)
+        if length > 160:
+            return False
+        end = at + 2 + length
+        if end >= len(self.data) or self.data[end] != 0:
+            return False
+        try:
+            self.data[at + 2 : end].decode("ascii")
+        except UnicodeDecodeError:
+            return False
+        return True
 
     def _name_list(self, at: int, count: int) -> list[str]:
         if not at or count <= 0 or count > 64:
@@ -574,9 +633,11 @@ class _File:
             start = at + 4
         return found
 
-    def _shape(self, at: int, name: str, bones, materials: list[Material]) -> tuple[Part | None, int]:
+    def _shape(self, at: int, name: str, bones, materials: list[Material]) -> tuple[Part | None, int, dict]:
         if self.data[at : at + 4] != b"FSHP":
             raise FresError(f"expected a shape at {at:#x}")
+        flags = self.u32(at + 4) if self.major >= 9 else 0
+        info = {"flags": flags, "bounds": None, "name": name}
         cursor = at + 4
         if self.major >= 9:
             cursor += 4
@@ -609,19 +670,52 @@ class _File:
         cursor += 1  # target attributes
         cursor += 2 if self.major <= 3 or self.major >= 9 else 6
         end = cursor
-        if not vtx or not mesh_count:
-            return None, end
+        # Flag 0x10 (seen as flags 0x12) is a meshlet/mesh-codec shape. The
+        # FVTX pointer does not land on an FVTX, and the mesh-count byte is 0.
+        # Public Switch 1 notes have no layout for that payload.
+        standard = bool(vtx and mesh_count and vtx + 4 <= len(self.data) and self.data[vtx : vtx + 4] == b"FVTX")
+        if not standard:
+            if flags & 0x10:
+                info["bounds"] = self._shape_bounds(at)
+            return None, end, info
         fvtx = self._fvtx(vtx)
         lod = self._lod(mesh_at)
         if fvtx is None or lod is None:
-            return None, end
+            if flags & 0x10:
+                info["bounds"] = self._shape_bounds(at)
+            return None, end, info
         positions, uvs = self._vertices(fvtx, lod)
         if skin_count == 0 and bones:
             positions = _rigid(positions, bones, bone_index)
         material = materials[material_index] if 0 <= material_index < len(materials) else None
         if not positions or not lod["indices"]:
-            return None, end
-        return _part_from(name, positions, lod["indices"], uvs, material, material_index), end
+            if flags & 0x10:
+                info["bounds"] = self._shape_bounds(at)
+            return None, end, info
+        return _part_from(name, positions, lod["indices"], uvs, material, material_index), end, info
+
+    def _shape_bounds(self, at: int) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+        """One shape AABB. Version 9+ stores center and extent at the +0x38 pointer."""
+        if self.major < 9 or at + 0x48 > len(self.data):
+            return None
+        ptr = self.u64(at + 0x38)
+        if ptr and ptr + 24 <= len(self.data):
+            values = struct.unpack_from("<6f", self.data, ptr)
+            if all(math.isfinite(item) and abs(item) < 5000 for item in values):
+                center, extent = values[:3], values[3:]
+                if all(item >= 0 for item in extent) and max(extent) > 0.01:
+                    return (
+                        tuple(center[i] - extent[i] for i in range(3)),
+                        tuple(center[i] + extent[i] for i in range(3)),
+                    )
+                if all(center[i] < extent[i] for i in range(3)):
+                    return (center, extent)
+        radius_at = self.u64(at + 0x40)
+        if radius_at and radius_at + 4 <= len(self.data):
+            radius = self.f32(radius_at)
+            if math.isfinite(radius) and 0.05 < radius < 500:
+                return ((-radius, -radius, -radius), (radius, radius, radius))
+        return None
 
     def _fvtx(self, at: int) -> dict | None:
         if at + 0x40 > len(self.data) or self.data[at : at + 4] != b"FVTX":
@@ -1208,6 +1302,16 @@ def _shape_key(part: Part) -> tuple:
     return points, tuple(sorted(triangles))
 
 
+def _union_bounds(boxes: list[tuple]) -> dict | None:
+    usable = [box for box in boxes if box and len(box) == 2]
+    if not usable:
+        return None
+    return {
+        "min": [min(box[0][axis] for box in usable) for axis in range(3)],
+        "max": [max(box[1][axis] for box in usable) for axis in range(3)],
+    }
+
+
 def _drop_opaque_twins(parts: list[Part]) -> list[Part]:
     """Drop an opaque shape that sits on the same vertices as a masked one.
 
@@ -1538,6 +1642,7 @@ def sample_v10_bfres(
     indices: list[int] | None = None,
     with_uvs: bool = True,
     pool_name: str = "",
+    decoy_dict: bool = False,
 ) -> bytes:
     """A version-10 BFRES with stride-0xB0 materials. Synthetic, for tests.
 
@@ -1709,11 +1814,15 @@ def sample_v10_bfres(
         struct.pack_into("<Q", header, 0x20, tex_ptr)
         struct.pack_into("<Q", header, 0x38, sampler_dict)
         struct.pack_into("<Q", header, 0x40, state_ptr)
-        struct.pack_into("<H", header, 0xA0, state_count)
+        # Real files store 0 or 1 here. It is not the render-state array length.
+        struct.pack_into("<H", header, 0xA0, 1 if state_count else 0)
         header[0xA2] = sampler_count & 0xFF
         header[0xA3] = texture_count & 0xFF
         blob.extend(header)
     mat_dict = add_dict(mat_names)
+    # A one-name dictionary in the qword after the real dict. Readers that still
+    # take FMDL+0x48 as the material dictionary stop after the first material.
+    decoy_at = add_dict(mat_names[:1]) if decoy_dict and mat_names else 0
 
     align(8)
     fmdl_at = len(blob)
@@ -1724,7 +1833,7 @@ def sample_v10_bfres(
     blob.extend(struct.pack("<Q", 0))
     blob.extend(struct.pack("<Q", fvtx_at))
     blob.extend(struct.pack("<QQ", shape_at, shape_dict))
-    blob.extend(struct.pack("<QQQ", mat_at, 0, mat_dict))
+    blob.extend(struct.pack("<QQQ", mat_at, mat_dict, decoy_at))
     blob.extend(struct.pack("<QQ", 0, 0))
     blob.extend(struct.pack("<Q", 0))
     blob.extend(struct.pack("<HHH", 1, len(shapes), len(materials)))

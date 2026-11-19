@@ -8,7 +8,7 @@ For each actor name (`Gyaml`):
 
 1. Open `Pack/Actor/<Gyaml>.pack.zs` (zstd dictionary 4) and read every `Component/ModelInfo/*.engine__component__ModelInfo.bgyml`. Each one, including entries under `SubModels`, has `ModelProjectName` and `FmdbName`.
 2. Try `Model/<Project>.<Fmdb>.bfres.zs` (dictionary 1), then the uncompressed `.bfres`. When `FmdbName` is missing, the project name is used for both: `Model/<Project>.<Project>.bfres.zs`.
-3. If that file is missing, try the other `Model/<Project>.*.bfres.zs` files, skipping `*.anim.bfres.zs`.
+3. If that exact file is missing, try the other `Model/<Project>.*.bfres.zs` files, skipping `*.anim.bfres.zs`. When the exact file is on disk and its shapes are FSHP flag `0x10` (no decodable vertex buffer), the actor stays a box. Another fmdb in the same project is not drawn in its place. `Land_Kokiri_House_Outside_C_00` used to pick up `Land_Kokiri_House_Inside_C_03`.
 4. Then `Model/<Gyaml>.<Gyaml>.bfres.zs`.
 5. Older layouts still work: a `.bfres` stored inside the pack, a `Model/<name>.bfres` string in the pack, and `Model/<Gyaml>.bfres.zs`.
 
@@ -33,7 +33,7 @@ The base color is the albedo sampler. On a version-10 material that names its sa
 
 Tile mode and block compression (BC1–BC7, ASTC, RGBA8) are decoded on the server to PNG and packed into a glTF binary. The block height is the low 3 bits of BRTI+0x34. If that value’s padded surface does not match the mip-table size, the size picks the height. ASTC ids `0x37`–`0x3A` are 10×8, 10×10, 12×10, and 12×12. A BC1 block with color0 ≤ color1 treats index 3 as transparent, which is the sky on the FarView cards. An all-zero ASTC block on a last GOB row that is not a multiple of 8 is replaced with the block above. A failed decode, an unsupported format, or a solid magenta image is not bound: that part is a flat colour (the material’s colour parameter, or a neutral grey) and it does not reuse another part’s texture. Magenta texels in an otherwise real image are punched out and the part is drawn as cutout.
 
-Version-10 alpha comes from the render-state string array: index 11 `mask` (or index 15 `true`) is glTF `MASK`, `translucent` is `BLEND`, and index 10 `both` is double-sided while `front` is single-sided. Version-9 files still use the named `gsys_*` render info. The view turns on alpha-to-coverage for a mask. An opaque shape that shares its positions with a masked twin (FarView and FarView_Shaking) is dropped, so the opaque copy does not paint the punched sky black. `scripts/check_models.py` prints one block per material: the sampler names, the texture each one references, which one was used as the albedo, the `Tex/` path, whether it decoded (format, size, swizzle, block height), the alpha mode, and the render-state word.
+Version-10 alpha comes from the render-state string array. The u16 at FMAT `+0xA0` is 0 or 1 and is not that array’s length; the reader walks the 31 slots at the `+0x40` pointer and stops on a null or a non-string. Index 11 `mask` (or index 15 `true`) is glTF `MASK`, `translucent` is `BLEND`, and index 10 `both` is double-sided while `front` is single-sided. Version-9 files still use the named `gsys_*` render info. The view turns on alpha-to-coverage for a mask. An opaque shape that shares its positions with a masked twin (FarView and FarView_Shaking) is dropped, so the opaque copy does not paint the punched sky black. `scripts/check_models.py` prints one block per material and says `textured` or `flat` for that material, then the shape names. A flat material also prints `flat fallback`. The summary counts shapes that received an image and shapes that used the flat colour. It does not call an actor textured because one of its materials was. The block still lists the sampler names, the texture each one references, which one was used as the albedo, the `Tex/` path, whether it decoded (format, size, swizzle, block height), the alpha mode, and the render-state word. A missing `Tex/` file (`Cloth_Kokiri_Interior_A_Alb`, `Tree_Kokiri_GraphicVine_A_01_Alb`, `Rock_Kokiri_FieldProp_J_Alb`) and a bake-only or water-only material stay flat.
 
 ## Build-time actors
 
@@ -41,7 +41,13 @@ An After the Ocarina recipe that places an actor (the `stones:` list, or any oth
 
 Areas, fog, triggers, sensors, collision, and anything else that is not a real mesh and is 8 metres or larger on an axis are drawn as an edge outline with a very faint fill. The fill does not write depth, so it cannot hide the meshes inside it. The outliner has a Volumes chip that hides every outline at once, plus a chip per category. The stage-bar Show / Lock / Hide for Areas and System is unchanged.
 
-The cache key is a hash of the source bytes plus a version prefix (`models-5`). Older glTF in that folder is left unused. Files live in `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`.
+The cache key is a hash of the source bytes plus a version prefix (`models-6`). Older glTF in that folder is left unused. Files live in `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`.
+
+## Companion bancs
+
+Opening a scene also loads its sibling: `_Static` with `_Dynamic`, same folder and the same age. The scene name in the bar gains “with Dynamic” or “with Static”. Those actors are drawn slightly dimmed, on by default. **Companion banc** hides them. **Pick companions** (on by default) lets you select them; off, they stay visible and clicks pass through. Selecting one switches the banc that Move, Rotate, and the properties panel write. The file you opened stays the host. Undo puts both diffs back.
+
+Kokiri Forest child is the case this is for. The houses are in `KokiriForest_Child_Dynamic` (42 of 43). The NPCs are in Static, with their feet near y = 117, which is the floor of those houses. Static alone looks like the characters are floating.
 
 `GET /api/models/<Gyaml>` returns `status` (`mesh` or `box`), `reason`, `source`, `triangles`, and `textures`. `GET /api/models/<Gyaml>/model.glb` is the file. Terrain uses `/api/terrain?banc=` and `/api/terrain/model.glb`.
 
@@ -52,6 +58,7 @@ The properties panel shows the reason.
 - No pack, and no `Model/<Project>.<Fmdb>.bfres.zs` or `Model/<Gyaml>.<Gyaml>.bfres.zs`. The properties panel lists the paths it tried.
 - The pack is not a SARC, or the bfres is truncated or not a Switch `FRES` file.
 - `.bfres.mc` (mesh codec). This viewer does not decode that stream.
+- FSHP flag `0x10` (flags word `0x12`). The vertex buffer is not an FVTX and the mesh count is 0. The box uses the shape’s center and extent. The reason is `geometry format not decoded (FSHP flag 0x10)`. The layout after the GPU buffer is not documented as a meshlet or `.bfres.mc` block, so it is not decoded.
 - The GPU buffer is an external section past the end of the file (the HasExternalGPU flag).
 - A vertex format this reader does not know.
 - The glTF request failed in the browser. The box comes back and the reason is the load error.

@@ -11,10 +11,13 @@ otherwise the first scene in the dump.
 
 The script prints one block you can paste back: a summary, every actor
 that stayed a box, then every mesh with its source path, triangle count
-and texture count. Under each mesh, one block per material: sampler names, the texture each
-one references, the albedo that was used, the Tex path, the decode result
+and texture count. The summary counts shapes that got an image and shapes
+that used the flat colour. Under each mesh, one block per material says
+textured or flat, then the shape names, sampler names, the texture each one
+references, the albedo that was used, the Tex path, the decode result
 (format, size, swizzle, block height), the alpha mode, and the render-state
-word when the file has one. The same conversion the editor uses, including Tex/.
+word when the file has one. A flat material also prints "flat fallback".
+The same conversion the editor uses, including Tex/.
 """
 
 from __future__ import annotations
@@ -71,12 +74,20 @@ def main(argv: list[str]) -> int:
     terrain = describe_terrain(dump, banc)
     mesh = [row for row in rows if row[2]["status"] == "mesh"]
     boxes = [row for row in rows if row[2]["status"] != "mesh"]
-    textured = [row for row in mesh if row[2].get("textures")]
+    shape_textured = 0
+    shape_flat = 0
+    for _gyaml, _count, info in mesh:
+        for entry in info.get("textureLog") or []:
+            amount = len(entry.get("shapes") or [])
+            if entry.get("textured"):
+                shape_textured += amount
+            elif entry.get("flat"):
+                shape_flat += amount
     print(banc)
     print(
         f"instances {sum(by_gyaml.values())}  unique {len(by_gyaml)}  "
-        f"mesh {len(mesh)}  textured {len(textured)}  "
-        f"untextured {len(mesh) - len(textured)}  box {len(boxes)}"
+        f"mesh {len(mesh)}  box {len(boxes)}  "
+        f"shapes textured {shape_textured}  flat fallback {shape_flat}"
     )
     _print_terrain(terrain)
     print()
@@ -132,7 +143,13 @@ def _print_textures(log: list, label: str = "") -> None:
         found = entry.get("found") or "not found"
         state = entry.get("renderState") or ""
         state_bit = f"  render state {state}" if state else ""
-        print(f"{prefix}material {material}  alpha {alpha}  {sided}{state_bit}")
+        kind = "textured" if entry.get("textured") else "flat"
+        print(f"{prefix}material {material}  {kind}  alpha {alpha}  {sided}{state_bit}")
+        shapes = entry.get("shapes") or []
+        if shapes:
+            print(f"{prefix}  shapes {', '.join(shapes)}")
+        if entry.get("flat"):
+            print(f"{prefix}  flat fallback")
         print(f"{prefix}  samplers {shown}")
         print(f"{prefix}  albedo texture {albedo}")
         print(f"{prefix}  tried {tried}")

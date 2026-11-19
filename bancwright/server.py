@@ -21,7 +21,7 @@ from bancwright.importers.ato import import_scenes
 from bancwright.models import actor_glb, describe_actor, describe_terrain, terrain_glb
 from bancwright.project import Project
 from bancwright.recipes import recipe_actors
-from bancwright.scene import apply_command, replace_diff, scene_view
+from bancwright.scene import apply_command, replace_diff, scene_view, sibling_bancs
 
 app = FastAPI(title="Bancwright", version=__version__)
 app.add_middleware(
@@ -230,6 +230,34 @@ def scene_change_list(banc: str):
     return scene_changes(dump, project, banc)
 
 
+def _attach_companions(view: dict, banc: str, dump: Dump) -> dict:
+    """Sibling Static/Dynamic actors, kept separate so the host diff stays the host."""
+    try:
+        known = {scene["path"] for scene in dump.list_scenes()}
+    except BancError:
+        return view
+    companions = []
+    for path in sibling_bancs(banc, known):
+        try:
+            document, _dict_id, _raw = dump.read_byml(path)
+        except BancError:
+            continue
+        other = scene_view(document, _diff_for(path))
+        other["banc"] = path
+        other = _attach_recipes(other, path)
+        companions.append(
+            {
+                "banc": path,
+                "actors": other.get("actors") or [],
+                "removed": other.get("removed") or [],
+                "diff": other.get("diff") or {"actors": {}},
+            }
+        )
+    if companions:
+        view["companions"] = companions
+    return view
+
+
 def _attach_recipes(view: dict, banc: str) -> dict:
     config = load_config()
     if not config.get("project"):
@@ -250,7 +278,8 @@ def get_scene(banc: str):
     diff = _diff_for(banc)
     view = scene_view(document, diff)
     view["banc"] = banc
-    return _attach_recipes(view, banc)
+    view = _attach_recipes(view, banc)
+    return _attach_companions(view, banc, dump)
 
 
 @app.post("/api/scene/edit")

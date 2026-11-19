@@ -361,6 +361,10 @@ def test_version_10_reads_every_material_and_skips_runtime_names(tmp_path, monke
     assert by_name["Mt_TerraMaterial_A"]["wanted"] == ""
     assert "string pool" not in (by_name["Mt_TerraMaterial_A"].get("error") or "")
     assert "MaterialAlb" not in (by_name["Mt_TerraMaterial_A"].get("wanted") or "")
+    assert by_name["Mt_Tree_KokiriBarkBlend_A"]["textured"] is True
+    assert by_name["Mt_Tree_KokiriBarkBlend_A"]["shapes"] == ["Bark"]
+    assert by_name["Mt_TerraMaterial_A"]["flat"] is True
+    assert by_name["Mt_TerraMaterial_A"]["shapes"] == ["Water"]
 
 
 def test_v10_render_state_drops_the_opaque_twin():
@@ -711,3 +715,97 @@ def test_check_models_script(tmp_path, monkeypatch):
     assert "alpha " in result.stdout
     assert "Obj_Tree" in result.stdout
     assert "mesh" in result.stdout
+    assert "shapes textured" in result.stdout
+    assert "flat fallback" in result.stdout
+
+
+def test_v10_material_dictionary_is_at_0x40_and_count_cross_checks():
+    import struct
+
+    from bancwright.formats.bfres import sample_v10_bfres
+
+    materials = [
+        {"name": "Bark", "samplers": [("_a0", "Tree_Alb")], "mode": "mask", "cull": "both"},
+        {"name": "Leaf", "samplers": [("_a0", "Leaf_Alb")], "mode": "opaque", "cull": "front"},
+    ]
+    decoy = bytearray(
+        sample_v10_bfres("Tree", materials, shapes=[{"name": "Bark", "material": 0}, {"name": "Leaf", "material": 1}], decoy_dict=True)
+    )
+    fmdl = decoy.find(b"FMDL")
+    assert fmdl > 0
+    # A one-name dictionary sits at +0x48. The material count is zero, so a
+    # reader that uses that pointer cannot recover the second material.
+    struct.pack_into("<H", decoy, fmdl + 0x6C, 0)
+    model = parse(bytes(decoy))[0]
+    assert [item.name for item in model.materials] == ["Bark", "Leaf"]
+    assert model.materials[0].alpha == "mask"
+    assert struct.unpack_from("<H", decoy, decoy.find(b"FMAT") + 0xA0)[0] == 1
+
+    counted = bytearray(sample_v10_bfres("Tree", materials))
+    fmdl = counted.find(b"FMDL")
+    struct.pack_into("<Q", counted, fmdl + 0x40, 0)
+    again = parse(bytes(counted))[0]
+    assert [item.name for item in again.materials] == ["Bark", "Leaf"]
+
+
+def test_flag_0x10_exact_file_is_a_bounds_box_not_a_sibling(tmp_path, monkeypatch):
+    import struct
+
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.sarc import pack
+    from bancwright.formats.zsio import compress
+
+    outside = bytearray(
+        sample_v10_bfres("Outside", [{"name": "Wall", "samplers": []}], shapes=[{"name": "House", "material": 0}])
+    )
+    shape = outside.find(b"FSHP")
+    struct.pack_into("<I", outside, shape + 4, 0x12)
+    struct.pack_into("<Q", outside, shape + 0x10, 0)
+    outside[shape + 0x5B] = 0
+    bounds_at = len(outside)
+    outside.extend(struct.pack("<6f", 1.0, 2.0, 3.0, 4.0, 0.5, 2.0))
+    struct.pack_into("<Q", outside, shape + 0x38, bounds_at)
+    parsed = parse(bytes(outside))[0]
+    assert parsed.parts == []
+    assert parsed.notes == ["geometry format not decoded (FSHP flag 0x10)"]
+    assert parsed.shape_bounds["min"] == [-3.0, 1.5, 1.0]
+    assert parsed.shape_bounds["max"] == [5.0, 2.5, 5.0]
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    gyaml = "Land_Kokiri_House_Outside_C_00"
+    info = dumps({"FmdbName": gyaml, "ModelProjectName": "Land_Kokiri_House"})
+    archive = pack(
+        {
+            f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps({"Name": gyaml}),
+            f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info,
+        }
+    )
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dicts, level=3))
+    (dump.romfs / "Model" / "Land_Kokiri_House.Land_Kokiri_House_Outside_C_00.bfres.zs").write_bytes(
+        compress(bytes(outside), 1, dicts, level=3)
+    )
+    inside = sample_bfres(
+        "Inside",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        bytes([40, 40, 40, 255]) * 4,
+        2,
+        2,
+    )
+    (dump.romfs / "Model" / "Land_Kokiri_House.Land_Kokiri_House_Inside_C_03.bfres.zs").write_bytes(
+        compress(inside, 1, dicts, level=3)
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    resolved = describe_actor(dump, gyaml)
+    assert resolved["status"] == "box"
+    assert resolved["reason"] == "geometry format not decoded (FSHP flag 0x10)"
+    assert resolved["bounds"]["min"] == [-3.0, 1.5, 1.0]
+    assert resolved["bounds"]["max"] == [5.0, 2.5, 5.0]
+    assert resolved["source"].endswith("Land_Kokiri_House.Land_Kokiri_House_Outside_C_00.bfres.zs")
+    assert "Inside" not in resolved["source"]

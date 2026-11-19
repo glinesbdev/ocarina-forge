@@ -209,6 +209,10 @@ def test_api_sample_edit_and_export(tmp_path, monkeypatch):
     assert scene.status_code == 200
     body = scene.json()
     assert len([actor for actor in body["actors"] if actor["status"] != "hidden"]) == 12
+    companions = body["companions"]
+    assert companions[0]["banc"] == "Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs"
+    assert any(actor["gyaml"] == "Land_Kokiri_House_01" for actor in companions[0]["actors"])
+    assert all(actor["gyaml"] != "Land_Kokiri_House_01" for actor in body["actors"])
     fado = next(actor for actor in body["actors"] if actor["gyaml"] == "Npc_Kokiri_F_01")
     assert fado["category"] == "npc"
     assert fado["name"] == "Fado"
@@ -261,3 +265,14 @@ def test_sample_project_ids_exist_in_the_fixture(tmp_path):
     for ident, record in sample["actors"].items():
         if record["state"] != "added":
             assert ident in present
+
+
+def test_sibling_bancs_swap_static_and_dynamic():
+    from bancwright.scene import sibling_bancs
+
+    static = "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs"
+    dynamic = "Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs"
+    known = {static, dynamic, "Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs"}
+    assert sibling_bancs(static, known) == [dynamic]
+    assert sibling_bancs(dynamic, known) == [static]
+    assert sibling_bancs("Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs", known) == []

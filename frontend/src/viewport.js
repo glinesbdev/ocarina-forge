@@ -215,9 +215,9 @@ export function createViewport(host, hooks) {
             side: THREE.DoubleSide,
           })
         : new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 });
-      if (!volume && (actor.status === "hidden" || recipe)) {
+      if (!volume && (actor.status === "hidden" || recipe || actor.companion)) {
         material.transparent = true;
-        material.opacity = actor.status === "hidden" ? 0.18 : 0.72;
+        material.opacity = actor.status === "hidden" ? 0.18 : actor.companion ? 0.55 : 0.72;
         material.depthWrite = true;
       }
       const mesh = new THREE.Mesh(boxGeometry, material);
@@ -250,7 +250,9 @@ export function createViewport(host, hooks) {
         category: actor.category,
         status: actor.status,
         volume,
-        locked: categories[actor.category] === "lock",
+        companion: Boolean(actor.companion),
+        pickable: actor.pickable !== false,
+        locked: categories[actor.category] === "lock" || (actor.companion && actor.pickable === false),
         color,
         pivot,
         mesh,
@@ -260,9 +262,11 @@ export function createViewport(host, hooks) {
         model: null,
         modelMeta: metaCache.get(actor.gyaml) || null,
         label: null,
-        labelText: recipe
-          ? `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`
-          : actor.name || actor.gyaml,
+        labelText: actor.companion
+          ? `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`
+          : recipe
+            ? `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`
+            : actor.name || actor.gyaml,
       });
     });
     if (selected && !entries.has(selected)) selected = null;
@@ -287,6 +291,18 @@ export function createViewport(host, hooks) {
     }
   }
 
+  function fitBounds(entry, bounds) {
+    if (!entry || !bounds || !bounds.min || !bounds.max) return;
+    const size = [0, 1, 2].map((axis) => Math.max(Math.abs(bounds.max[axis] - bounds.min[axis]), 0.05));
+    const center = [0, 1, 2].map((axis) => (bounds.min[axis] + bounds.max[axis]) / 2);
+    entry.mesh.scale.set(size[0], size[1], size[2]);
+    entry.mesh.position.set(center[0], center[1], center[2]);
+    if (entry.edges) {
+      entry.edges.scale.copy(entry.mesh.scale);
+      entry.edges.position.copy(entry.mesh.position);
+    }
+  }
+
   function report(info) {
     if (hooks.onProgress) hooks.onProgress(info);
     if (info.finished && hooks.onModels) hooks.onModels();
@@ -305,6 +321,7 @@ export function createViewport(host, hooks) {
         const meta = metaCache.get(entry.gyaml);
         if (!meta) continue;
         entry.modelMeta = meta;
+        if (meta.status !== "mesh") fitBounds(entry, meta.bounds);
         if (meta.status === "mesh" && meta.url) {
           ensureTemplate(meta.url)
             .then((template) => {
@@ -312,7 +329,18 @@ export function createViewport(host, hooks) {
               const current = entries.get(entry.key);
               if (current) attachModel(current, template);
             })
-            .catch(() => {});
+            .catch((error) => {
+              if (token !== generation) return;
+              const current = entries.get(entry.key);
+              const message = (error && error.message) || "The glTF did not load.";
+              console.error(`${entry.gyaml}: ${message}`);
+              if (current) {
+                current.modelMeta = { ...(current.modelMeta || {}), status: "box", reason: message };
+                current.mesh.visible = true;
+                fitBounds(current, current.modelMeta.bounds);
+              }
+              if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
+            });
         }
       }
     };
@@ -341,15 +369,21 @@ export function createViewport(host, hooks) {
         for (const entry of entries.values()) {
           if (entry.gyaml !== gyaml) continue;
           entry.modelMeta = meta;
+          if (meta.status !== "mesh") fitBounds(entry, meta.bounds);
           if (meta.status !== "mesh" || !meta.url) continue;
           try {
             const template = await ensureTemplate(meta.url);
             if (token !== generation) return;
             attachModel(entry, template);
           } catch (error) {
-            entry.modelMeta = { status: "box", reason: error.message || "The glTF did not load.", source: meta.source || "" };
+            const message = error.message || "The glTF did not load.";
+            console.error(`${gyaml}: ${message}`);
+            entry.modelMeta = { status: "box", reason: message, source: meta.source || "", bounds: meta.bounds || null };
             entry.mesh.visible = true;
+            fitBounds(entry, meta.bounds);
+            if (hooks.onModelError) hooks.onModelError(gyaml, message);
           }
+          if (meta.status !== "mesh") fitBounds(entry, meta.bounds);
         }
         done += 1;
         report({
@@ -403,6 +437,14 @@ export function createViewport(host, hooks) {
     model.traverse((child) => {
       child.userData.actorId = entry.id;
     });
+    if (entry.companion) {
+      model.traverse((child) => {
+        if (!child.isMesh || !child.material) return;
+        child.material.transparent = true;
+        child.material.opacity = 0.82;
+        child.material.color.multiplyScalar(0.82);
+      });
+    }
     if (entry.status === "recipe") {
       model.traverse((child) => {
         if (!child.isMesh || !child.material) return;
@@ -487,7 +529,7 @@ export function createViewport(host, hooks) {
       const hiddenByStatus = entry.status === "hidden" && !showHidden;
       const hiddenByCategory = categories[entry.category] === "hide";
       const hiddenByVolume = entry.volume && hideVolumes;
-      entry.locked = categories[entry.category] === "lock";
+      entry.locked = categories[entry.category] === "lock" || (entry.companion && entry.pickable === false);
       entry.pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
     }
     attach();

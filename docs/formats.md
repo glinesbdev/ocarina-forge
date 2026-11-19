@@ -20,7 +20,7 @@ mods/<name>/romfs/...
 
 `GameBancParam` `.bgyml` files are per-area settings, not placement files, and are not listed as scenes.
 
-A scene name looks like `KokiriForest_Child_Static` or `HyruleField_Adult_Dynamic`. Static and Dynamic are separate bancs.
+A scene name looks like `KokiriForest_Child_Static` or `HyruleField_Adult_Dynamic`. Static and Dynamic are separate bancs. The editor opens one of them as the file it writes, and draws the other (same folder, same age, `_Static` swapped with `_Dynamic`) as a companion overlay. Kokiri houses live in the Dynamic banc; the NPCs in Static stand on them.
 
 ## BYML
 
@@ -83,6 +83,19 @@ Category colors use the pack-name prefix: `Npc_` / `Shop_`, `Enemy_`, `Animal_`,
 
 Actor meshes are Switch BFRES plus embedded BNTX. The reader, the cache, and what still falls back to a box are in [models.md](models.md).
 
+## BFRES models (version 10)
+
+Version 9 FMDL keeps an 8-byte reserved slot between the material array (`+0x38`) and the material dictionary (`+0x48`). Version 10 does not. On these files:
+
+| Offset | Field |
+| --- | --- |
+| `+0x38` | material array |
+| `+0x40` | material dictionary |
+| `+0x48` | a different pointer. It is not the dictionary |
+| `+0x68` | u16 vertex count, u16 shape count, u16 material count |
+
+Reading `+0x48` as the dictionary returns one material, because that pointer is not the name list. The u16 at `+0x6C` is a second copy of the material count. When it is larger than the dictionary and that many `FMAT` blocks are present, the array length wins.
+
 ## BFRES materials (version 10)
 
 Version 9 FMAT blocks are `0xA8` bytes and keep the Wexos field order (texture names at `+0x30`, sampler dictionary at `+0x48`, counts at `+0x9C` / `+0x9D`). Version 10, which is what the Switch 2 dump reports, is `0xB0` bytes:
@@ -92,12 +105,18 @@ Version 9 FMAT blocks are `0xA8` bytes and keep the Wexos field order (texture n
 | `+0x08` | name pointer |
 | `+0x20` | texture-name pointer array (one u64 string per texture) |
 | `+0x38` | sampler-name dictionary (`_a0`, `_n0`, `_rgh0`, `bake0`, … in the same order as the textures) |
-| `+0x40` | render-state string array |
-| `+0xA0` | u16 render-state count |
+| `+0x40` | render-state string pointer array |
+| `+0xA0` | u16, 0 or 1 on these files. Not the length of that array |
 | `+0xA2` | u8 sampler count |
 | `+0xA3` | u8 texture count |
 
-The render-state array is fixed-order strings, not the version-9 `gsys_*` records. Index 10 is cull (`front` or `both`), index 11 is the alpha mode (`opaque`, `mask`, `translucent`, `custom`), and index 15 is the alpha test (`true` on a mask). Albedo is `_a0`, then `_a1` or `_a2`. A material whose samplers are only `tc` / `ta` (runtime names `MaterialAlb` / `MaterialCmb`) has no albedo.
+The render-state array is 31 fixed slots of string pointers, not the version-9 `gsys_*` records. The walk stops at a null pointer or a pointer that is not a BFRES string (u16 length, bytes, NUL). An empty string is a real slot and does not stop the walk. Index 10 is cull (`front` or `both`), index 11 is the alpha mode (`opaque`, `mask`, `translucent`, `custom`), and index 15 is the alpha test (`true` on a mask). Albedo is `_a0`, then `_a1` or `_a2`. A material whose samplers are only `tc` / `ta` (runtime names `MaterialAlb` / `MaterialCmb`) has no albedo.
+
+## FSHP flag 0x10
+
+Public Switch 1 notes give FSHP `+0x04` two bits that matter here: `0x02` means the shape has a vertex buffer. Kokiri and Deku files also set `0x10`, so the flags word is `0x12` (`Obj_Kokiri_Door_A_*`, `Fence_A_03`, `RoofFence_A_01`, `StoneGate_A_01`, `Stone_A_06`, `Land_Deku_CaveProp_A_*`, `ProceduralIvy_*`, `House_Outside_C_00`, and the rest of that set: 69 of 526 models in those two areas). On those shapes the FVTX pointer lands in zeroed memory and the mesh-count byte is 0. Bytes after the GPU buffer base (`0x7000` on the files that were inspected) include the u32s `0x40` and `0x7c`, which is the sort of header a meshlet or mesh-codec block would have.
+
+Wexos, BfresLibrary, and Switch Toolbox do not document that bit or a meshlet layout inside FSHP. `.bfres.mc` is a separate stream (`MCPK` / `FMSH`) and is still refused. There is not enough public structure to turn those bytes into indices, so this reader does not guess a decoder. The shape’s bounding record (center and extent, six floats at the pointer in FSHP `+0x38`) becomes the actor’s box, and the reason is `geometry format not decoded (FSHP flag 0x10)`. A file that also contains ordinary shapes still draws those.
 
 ## BNTX
 

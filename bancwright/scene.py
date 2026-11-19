@@ -205,6 +205,36 @@ def _shadow(document: dict, actors: list[dict]) -> dict:
     return shadow
 
 
+def sibling_bancs(banc: str, available: set[str]) -> list[str]:
+    """The other age-matched banc: Static beside Dynamic, and the reverse.
+
+    ``Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs`` pairs with
+    ``KokiriForest_Child_Dynamic`` in the same folder. Names that do not end
+    in ``_Static`` or ``_Dynamic`` have no sibling.
+    """
+    if not banc or ".." in banc.split("/"):
+        return []
+    folder, _, name = banc.rpartition("/")
+    stem = name
+    ext = ""
+    for suffix in (".bcett.byml.zs", ".bcett.byml"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            ext = suffix
+            break
+    if not ext:
+        return []
+    for source, dest in (("Static", "Dynamic"), ("Dynamic", "Static")):
+        token = f"_{source}"
+        if not stem.endswith(token):
+            continue
+        other = stem[: -len(token)] + f"_{dest}"
+        candidate = f"{folder}/{other}{ext}" if folder else f"{other}{ext}"
+        if candidate in available and candidate != banc:
+            return [candidate]
+    return []
+
+
 def scene_view(document: dict, diff: dict) -> dict:
     actors, statuses, removed, warnings, gone = compose(document, diff, drop_hidden=False)
     warnings = warnings + reference_warnings(_shadow(document, actors), gone)

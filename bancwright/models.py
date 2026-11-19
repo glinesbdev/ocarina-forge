@@ -26,6 +26,14 @@ from pathlib import Path
 
 from bancwright.errors import BancError
 from bancwright.formats.bfres import FresError, base_color_name, parse, texture_rank
+
+
+class UndecodedGeometry(Exception):
+    """The bfres is real, but its shapes are a mesh codec this reader does not decode."""
+
+    def __init__(self, bounds: dict | None):
+        super().__init__("geometry format not decoded (FSHP flag 0x10)")
+        self.bounds = bounds
 from bancwright.formats.bntx import BntxError, image_names, textures as read_bntx
 from bancwright.formats.byml import loads
 from bancwright.formats.gltf import Primitive, png_rgba, to_glb
@@ -35,7 +43,7 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-5\0"
+_CACHE_VERSION = b"models-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
 _TERRAIN = (0.36, 0.45, 0.28, 1.0)
@@ -115,7 +123,7 @@ def terrain_glb(dump, banc: str) -> Path | None:
     return _cached_glb(info["digest"])
 
 
-def _box(gyaml: str, reason: str) -> dict:
+def _box(gyaml: str, reason: str, bounds: dict | None = None) -> dict:
     return {
         "gyaml": gyaml,
         "status": "box",
@@ -123,7 +131,7 @@ def _box(gyaml: str, reason: str) -> dict:
         "source": "",
         "triangles": 0,
         "textures": 0,
-        "bounds": None,
+        "bounds": bounds,
         "url": None,
         "digest": "",
         "textureLog": [],
@@ -150,6 +158,10 @@ def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrai
             first = source
         try:
             digest, info = _convert_cached(blob, dump, hint=f"{label} {source}", terrain=terrain)
+        except UndecodedGeometry as exc:
+            result = _box(label, str(exc), exc.bounds)
+            result["source"] = source
+            return result
         except (FresError, BntxError, ValueError, struct.error, IndexError, OSError) as exc:
             errors.append(f"{source}: {exc}")
             continue
@@ -200,6 +212,11 @@ def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False) ->
     if blob[:4] in (b"MCPK", b"FMSH"):
         raise FresError("this is a mesh-codec .bfres.mc stream, which this viewer does not decode")
     models = parse(blob)
+    if models and not any(model.parts for model in models):
+        flagged = [model for model in models if any(note.startswith("geometry format not decoded") for note in model.notes)]
+        if flagged:
+            bounds = next((model.shape_bounds for model in flagged if model.shape_bounds), None)
+            raise UndecodedGeometry(bounds)
     _fill_texture_names(models, dump)
     external, log, raws = _resolve_materials(dump, models, hint, terrain)
     digest = hashlib.sha256(_CACHE_VERSION + blob + _texture_key(raws)).hexdigest()
@@ -333,6 +350,14 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 if key not in remembered:
                     remembered[key] = _choose_material(dump, model, material, hints, terrain, external, raws)
                 choice = remembered[key]
+                shapes = [
+                    part.name
+                    for part in model.parts
+                    if 0 <= part.material_index < len(model.materials) and model.materials[part.material_index] is material
+                ]
+                choice["entry"]["shapes"] = list(dict.fromkeys(shapes))
+                choice["entry"]["textured"] = choice.get("image") is not None and not choice.get("proxy")
+                choice["entry"]["flat"] = not choice["entry"]["textured"] and bool(choice["entry"]["shapes"])
                 log.append(choice["entry"])
                 for part in model.parts:
                     if part.material_index < 0 or part.material_index >= len(model.materials):
@@ -482,6 +507,9 @@ def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
         "alpha": _alpha_label(found.get("alpha") or part.alpha, found.get("cutoff") or part.cutoff) if found.get("image") is not None else "opaque",
         "doubleSided": part.double_sided,
         "error": found.get("error") or "",
+        "shapes": [part.name] if part.name else [],
+        "textured": found.get("image") is not None,
+        "flat": found.get("image") is None,
     }
     if found.get("image") is not None:
         _fill_image_log(entry, found)
@@ -962,8 +990,14 @@ def _actor_plan(dump, gyaml: str) -> tuple[list, list[str]]:
 
     listing = _model_listing(dump)
     for project, fmdb in pairs:
-        add_file(f"Model/{project}.{fmdb}.bfres.zs")
-        add_file(f"Model/{project}.{fmdb}.bfres")
+        exact = [f"Model/{project}.{fmdb}.bfres.zs", f"Model/{project}.{fmdb}.bfres"]
+        for relative in exact:
+            add_file(relative)
+        # A present exact file that cannot be decoded must not be replaced by
+        # another fmdb in the same project (the inside of a house drawn at
+        # the outside actor).
+        if any((dump.romfs / relative).is_file() for relative in exact):
+            continue
         for extra in _project_files(listing, project):
             add_file(extra)
     add_file(f"Model/{gyaml}.{gyaml}.bfres.zs")

@@ -18,6 +18,8 @@ const state = {
   history: { undo: [], redo: [] },
   showHidden: false,
   showLabels: true,
+  showCompanions: true,
+  companionPick: true,
   categories: { area: "show", system: "show" },
   hideVolumes: false,
   terrain: null,
@@ -43,6 +45,17 @@ const viewport = createViewport($("viewport"), {
     box.hidden = Boolean(info.finished);
   },
   onModels: () => renderProps(),
+  onModelError: (gyaml, message) => {
+    const warnings = $("warnings");
+    if (!warnings) return;
+    warnings.hidden = false;
+    const line = `${gyaml}: ${message}`;
+    if ([...warnings.querySelectorAll("p")].some((item) => item.textContent === line)) return;
+    const p = document.createElement("p");
+    p.textContent = line;
+    warnings.append(p);
+    console.error(line);
+  },
   onTerrain: (meta) => {
     state.terrain = meta;
   },
@@ -51,6 +64,7 @@ const viewport = createViewport($("viewport"), {
     viewport.select(id);
     renderOutliner();
     renderProps();
+    noteCompanion();
     if (id && window.matchMedia("(max-width: 980px)").matches) showTab("props");
   },
   onPreview: (id, translate, rotate) => {
@@ -92,6 +106,14 @@ $("show-hidden").addEventListener("change", (event) => {
 $("show-labels").addEventListener("change", (event) => {
   state.showLabels = event.target.checked;
   viewport.setFlags({ labels: state.showLabels });
+});
+$("show-companions").addEventListener("change", (event) => {
+  state.showCompanions = event.target.checked;
+  if (state.raw) applyView(state.raw, { select: state.selected });
+});
+$("companion-pick").addEventListener("change", (event) => {
+  state.companionPick = event.target.checked;
+  if (state.raw) applyView(state.raw, { select: state.selected });
 });
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 document.querySelectorAll("[data-cat]").forEach((button) => {
@@ -579,8 +601,6 @@ async function openScene(banc, options = {}) {
     if (!options.keepHistory) state.history = { undo: [], redo: [] };
     const interesting = view.actors.find((actor) => actor.status === "edited" || actor.status === "added");
     applyView(view, { frame: Boolean(options.frame), select: interesting ? interesting.id : null });
-    const scene = state.scenes.find((item) => item.path === banc);
-    $("scene-name").textContent = scene ? pretty(scene.name) : pretty(banc.split("/").pop() || banc);
     renderScenes();
     updateHistoryButtons();
   } catch (error) {
@@ -590,12 +610,79 @@ async function openScene(banc, options = {}) {
   }
 }
 
+function bancKind(banc) {
+  const name = (banc || "").split("/").pop() || "";
+  if (name.includes("_Dynamic")) return "Dynamic";
+  if (name.includes("_Static")) return "Static";
+  return "companion";
+}
+
+function composeView(view) {
+  if (!view) return view;
+  const host = view.banc || state.banc;
+  const actors = (view.actors || [])
+    .filter((actor) => !actor.companion)
+    .map((actor) => ({ ...actor, banc: actor.banc || host, companion: false }));
+  if (state.showCompanions !== false) {
+    for (const extra of view.companions || []) {
+      const label = bancKind(extra.banc);
+      for (const actor of extra.actors || []) {
+        if (!actor.id) continue;
+        actors.push({
+          ...actor,
+          companion: true,
+          banc: extra.banc,
+          placementId: actor.placementId || actor.id,
+          id: String(actor.id).includes("::") ? actor.id : `${extra.banc}::${actor.id}`,
+          companionLabel: label,
+          pickable: state.companionPick !== false,
+        });
+      }
+    }
+  }
+  return { ...view, actors };
+}
+
+function commandTarget(command) {
+  const id = command.id || state.selected;
+  const actor = actorRecord(id);
+  const forced = command.banc || "";
+  const rest = { ...command };
+  delete rest.banc;
+  const banc = forced || (actor && actor.banc) || state.banc;
+  const placement = actor && actor.placementId;
+  return {
+    banc,
+    command: placement ? { ...rest, id: placement } : rest,
+    select: id,
+  };
+}
+
+function actorRecord(id) {
+  return ((state.view && state.view.actors) || []).find((actor) => actor.id === id) || null;
+}
+
+function noteCompanion() {
+  const scene = state.scenes.find((item) => item.path === state.banc);
+  const base = scene ? pretty(scene.name) : pretty((state.banc || "").split("/").pop() || "");
+  const extras = (state.raw && state.raw.companions) || [];
+  const kinds = extras.map((item) => bancKind(item.banc));
+  const actor = actorRecord(state.selected);
+  let suffix = "";
+  if (state.showCompanions !== false && kinds.length) suffix = ` · with ${kinds.join(", ")}`;
+  if (actor && actor.companion) suffix += ` · editing ${actor.companionLabel}`;
+  const node = $("scene-name");
+  if (node) node.textContent = base + suffix;
+}
+
 function applyView(view, { frame = false, select } = {}) {
-  state.view = view;
+  state.raw = view;
+  const composed = composeView(view);
+  state.view = composed;
   if (select !== undefined) state.selected = select;
   else if (view.focus) state.selected = view.focus;
-  else if (state.selected && !view.actors.some((actor) => actor.id === state.selected)) state.selected = null;
-  viewport.setActors(view.actors, { frame, banc: view.banc });
+  if (state.selected && !composed.actors.some((actor) => actor.id === state.selected)) state.selected = null;
+  viewport.setActors(composed.actors, { frame, banc: view.banc });
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
   const warnings = $("warnings");
@@ -611,12 +698,19 @@ function applyView(view, { frame = false, select } = {}) {
   loadChanges(view.banc || state.banc);
   if (state.banc) state.modified.add(state.banc);
   if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
+  for (const extra of view.companions || []) {
+    const touched = extra.diff && Object.keys(extra.diff.actors || {}).length;
+    if (touched) state.modified.add(extra.banc);
+    else state.modified.delete(extra.banc);
+  }
+  noteCompanion();
 }
 
 function snapshot() {
-  const actors = structuredClone((state.view && state.view.diff && state.view.diff.actors) || {});
+  const raw = state.raw || state.view || {};
+  const actors = structuredClone((raw.diff && raw.diff.actors) || {});
   const recipes = ((state.view && state.view.actors) || [])
-    .filter((actor) => actor.status === "recipe")
+    .filter((actor) => actor.status === "recipe" && !actor.companion)
     .map((actor) => ({
       id: actor.id,
       gyaml: actor.gyaml,
@@ -627,7 +721,26 @@ function snapshot() {
       params: actor.params,
       recipe: actor.recipe,
     }));
-  return { actors, recipes };
+  return {
+    actors,
+    recipes,
+    companions: (raw.companions || []).map((item) => ({
+      banc: item.banc,
+      actors: structuredClone((item.diff && item.diff.actors) || {}),
+      recipes: (item.actors || [])
+        .filter((actor) => actor.status === "recipe")
+        .map((actor) => ({
+          id: actor.placementId || actor.id,
+          gyaml: actor.gyaml,
+          name: actor.name,
+          translate: actor.translate,
+          rotate: actor.rotate,
+          scale: actor.scale,
+          params: actor.params,
+          recipe: actor.recipe,
+        })),
+    })),
+  };
 }
 
 async function edit(command) {
@@ -637,12 +750,26 @@ async function edit(command) {
     openProjectDialog();
     return;
   }
+  const target = commandTarget(command);
   const before = snapshot();
   state.history.undo.push(before);
   state.history.redo = [];
   try {
-    const view = await api.edit(state.banc, command);
-    applyView(view, { select: view.focus || state.selected });
+    const view = await api.edit(target.banc, target.command);
+    if (target.banc !== state.banc && state.raw) {
+      const companions = (state.raw.companions || []).map((item) =>
+        item.banc === target.banc
+          ? { banc: item.banc, actors: view.actors, removed: view.removed, diff: view.diff }
+          : item,
+      );
+      const focus = view.focus ? `${target.banc}::${view.focus}` : target.select;
+      applyView({ ...state.raw, companions }, { select: focus });
+    } else {
+      applyView(
+        { ...view, companions: (state.raw && state.raw.companions) || [] },
+        { select: view.focus || state.selected },
+      );
+    }
     renderScenes();
   } catch (error) {
     state.history.undo.pop();
@@ -673,9 +800,13 @@ async function restore(shot) {
   const hadRecipes = ((state.view && state.view.actors) || []).some((actor) => actor.status === "recipe");
   try {
     await api.putDiff(state.banc, actors);
-    const view = recipes && (recipes.length || hadRecipes)
-      ? await api.putRecipes(state.banc, recipes)
-      : await api.scene(state.banc);
+    if (recipes && (recipes.length || hadRecipes)) await api.putRecipes(state.banc, recipes);
+    for (const item of shot.companions || []) {
+      if (!item.banc) continue;
+      await api.putDiff(item.banc, item.actors || {});
+      if (Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
+    }
+    const view = await api.scene(state.banc);
     applyView(view, { select: state.selected });
     renderScenes();
   } catch (error) {
@@ -750,6 +881,27 @@ function renderOutliner() {
     row.append(text, badge, restore);
     list.append(row);
   }
+  for (const extra of (state.raw && state.raw.companions) || []) {
+    if (state.showCompanions === false) continue;
+    const label = bancKind(extra.banc);
+    for (const removed of extra.removed || []) {
+      const row = document.createElement("div");
+      row.className = "actor-row";
+      const text = document.createElement("span");
+      text.className = "grow";
+      text.textContent = `${removed.gyaml || "Removed"} · ${label}`;
+      const badge = document.createElement("span");
+      badge.className = "badge removed";
+      badge.textContent = "removed";
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "ghost";
+      restore.textContent = "Restore";
+      restore.addEventListener("click", () => edit({ command: "revert", id: removed.id, banc: extra.banc }));
+      row.append(text, badge, restore);
+      list.append(row);
+    }
+  }
 }
 
 function actorRow(actor) {
@@ -763,7 +915,9 @@ function actorRow(actor) {
   const text = document.createElement("span");
   text.className = "grow";
   const strong = document.createElement("strong");
-  strong.textContent = actor.name || actor.gyaml;
+  strong.textContent = actor.companion
+    ? `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`
+    : actor.name || actor.gyaml;
   const small = document.createElement("small");
   small.textContent = actor.status === "recipe" ? (actor.recipe && actor.recipe.note) || "added by build" : actor.name ? actor.gyaml : actor.category;
   text.append(strong, small);
@@ -779,6 +933,7 @@ function actorRow(actor) {
     viewport.select(actor.id);
     renderOutliner();
     renderProps();
+    noteCompanion();
     showTab("props");
   });
   button.addEventListener("dblclick", () => viewport.frame(actor.id));
