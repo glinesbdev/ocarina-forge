@@ -252,7 +252,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
                 image_view = view(prim.png)
                 mime = "image/jpeg" if prim.png[:2] == b"\xff\xd8" else "image/png"
                 images.append({"bufferView": image_view, "mimeType": mime})
-                textures.append({"source": len(images) - 1})
+                textures.append({"sampler": 0, "source": len(images) - 1})
                 image_of[prim.png] = len(images) - 1
             image_index = image_of[prim.png]
         color = [float(channel) for channel in prim.base_color[:4]]
@@ -318,6 +318,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
     }
     if images:
         document["images"] = images
+        document["samplers"] = [{"wrapS": 10497, "wrapT": 10497}]
         document["textures"] = textures
     if used_unlit:
         document["extensionsUsed"] = ["KHR_materials_unlit"]

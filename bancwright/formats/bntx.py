@@ -152,6 +152,29 @@ def textures(data: bytes) -> list[Texture]:
     return found
 
 
+def texture_layer(data: bytes, index: int, *, flatten_alpha: bool = False) -> Texture:
+    """Decode one array layer of the first BRTI.
+
+    The array count is the u32 at BRTI+0x30. The image byte size is the u32
+    at BRTI+0x50, and layer ``index`` starts at
+    ``image_offset + index * (image_size / count)``. Only mip 0 of that layer
+    is decoded. A count of 1 is the whole image, so layer 0 matches
+    ``textures``. ``flatten_alpha`` forces every alpha byte to 255.
+    """
+    if len(data) < 0x40 or data[:4] != b"BNTX":
+        raise BntxError("not a BNTX texture container")
+    if data[0x0C:0x0E] != b"\xff\xfe":
+        raise BntxError("only little-endian BNTX is supported")
+    count = _i32(data, 0x24)
+    table = _u64(data, 0x28)
+    if count <= 0 or table <= 0 or table + 8 > len(data):
+        raise BntxError("BNTX has no textures")
+    brti = _u64(data, table)
+    if not brti:
+        raise BntxError("BNTX has no textures")
+    return _texture(data, brti, layer=index, flatten_alpha=flatten_alpha)
+
+
 def image_names(data: bytes) -> list[str]:
     """Texture names in a BNTX, without decoding the images."""
     if len(data) < 0x40 or data[:4] != b"BNTX":
@@ -180,7 +203,7 @@ def _identity(data: bytes, at: int) -> tuple[str, int]:
         return "", 0
 
 
-def _texture(data: bytes, at: int) -> Texture:
+def _texture(data: bytes, at: int, *, layer: int | None = None, flatten_alpha: bool = False) -> Texture:
     if at + 0x80 > len(data) or data[at : at + 4] != b"BRTI":
         raise BntxError(f"texture header at {at:#x} is not BRTI")
     tile = _u16(data, at + 0x12)
@@ -198,7 +221,34 @@ def _texture(data: bytes, at: int) -> Texture:
     if info is None:
         raise BntxError(f"{name or 'texture'}: texture format 0x{fmt:04X} is not decoded")
     codec, block_w, block_h, bytes_per = info
+    array_count = _u32(data, at + 0x30) if at + 0x34 <= len(data) else 1
+    if array_count <= 0 or array_count > 4096:
+        array_count = 1
+    layer_index = 0 if layer is None else layer
+    if layer_index < 0 or layer_index >= array_count:
+        raise BntxError(f"{name or 'texture'}: array layer {layer_index} is outside 0..{array_count - 1}")
     mip_bytes = _mip0_bytes(data, at, image)
+    if image <= 0 or image >= len(data):
+        raise BntxError(f"{name or 'texture'}: image data is missing")
+    layer_note = ""
+    if array_count > 1:
+        image_size = _u32(data, at + 0x50) if at + 0x54 <= len(data) else 0
+        if image_size <= 0 and at + 0x58 <= len(data):
+            wide = _u64(data, at + 0x50)
+            if 0 < wide <= len(data):
+                image_size = wide
+        if image_size <= 0 or image_size % array_count != 0:
+            raise BntxError(f"{name or 'texture'}: array of {array_count} has no per-layer size")
+        stride = image_size // array_count
+        if mip_bytes <= 0 or mip_bytes > stride:
+            mip_bytes = stride
+        start = image + layer_index * stride
+        if start < 0 or start + mip_bytes > len(data):
+            raise BntxError(f"{name or 'texture'}: array layer {layer_index} is past the image")
+        raw = data[start : start + mip_bytes]
+        layer_note = f"array layer {layer_index} of {array_count}"
+    else:
+        raw = data[image:]
     log2 = block_log2(
         height,
         block_h,
@@ -208,12 +258,17 @@ def _texture(data: bytes, at: int) -> Texture:
         bytes_per=bytes_per,
         mip_bytes=mip_bytes,
     )
-    if image <= 0 or image >= len(data):
-        raise BntxError(f"{name or 'texture'}: image data is missing")
-    raw = data[image:]
     rgba, note, log2 = _decode_swizzle(
         codec, width, height, block_w, block_h, bytes_per, tile, log2, raw, fmt, channels
     )
+    if flatten_alpha and rgba:
+        buf = bytearray(rgba)
+        for pixel in range(3, len(buf), 4):
+            buf[pixel] = 255
+        rgba = bytes(buf)
+        layer_note = f"{layer_note}. alpha forced opaque".strip(". ")
+    if layer_note:
+        note = f"{note}. {layer_note}".strip(". ")
     if family_note:
         note = f"{note}. {family_note}".strip(". ")
     block_height = 1 << max(0, log2)

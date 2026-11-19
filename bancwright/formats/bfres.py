@@ -68,6 +68,11 @@ class Part:
     stand_in: str = ""
     # 0 is the near mesh. A higher value is a farther BFRES LOD of the same shape.
     lod: int = 0
+    # Helper shapes (water volume, bake, fade, inner mesh, eye cards) are not drawn.
+    omit: bool = False
+    omit_reason: str = ""
+    # "repeat" writes a glTF sampler with wrap REPEAT. Terra UVs tile past 1.
+    wrap: str = ""
 
 
 @dataclass
@@ -501,7 +506,42 @@ class _File:
         else:
             alpha, cutoff, sided = _alpha_state({}, {}, "", name)
             mode = ""
-        return Material(name, binds, albedo, alpha, cutoff, sided, None, "", render_state=mode)
+        note = self._render_info_note(at)
+        return Material(name, binds, albedo, alpha, cutoff, sided, None, "", note, render_state=mode)
+
+    def _render_info_note(self, at: int) -> str:
+        """Why a v10 material has no render-info keys.
+
+        Version 9 stores that dictionary beside the texture list. On version 10
+        those offsets are the texture names, and this reader does not treat
+        them as render info. Other qwords in the 0xB0 header are checked for a
+        real BFRES string dictionary (root reference 0xFFFFFFFF). A dictionary
+        whose keys do not decode is reported. Anything else stays blank, and
+        the sand material then uses a labeled layer guess.
+        """
+        slots = (0x10, 0x18, 0x28, 0x30, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98)
+        saw_empty = False
+        try:
+            for slot in slots:
+                ptr = self.u64(at + slot)
+                if not ptr or ptr + 24 > len(self.data):
+                    continue
+                if self.u32(ptr + 8) != 0xFFFFFFFF:
+                    continue
+                count = self.i32(ptr + 4)
+                if count <= 0 or count > 64:
+                    continue
+                keys = self.dict_keys(ptr)
+                usable = [key for key in keys if key and _RENDER_KEY.match(key)]
+                if usable:
+                    return "render info: " + ", ".join(usable[:8])
+                if not any(keys):
+                    saw_empty = True
+        except (FresError, struct.error, IndexError, ValueError):
+            return ""
+        if saw_empty:
+            return "render info keys empty"
+        return ""
 
     def _state_strings(self, at: int, count: int) -> list[str]:
         """Fixed render-state slots. Stop at a null or a pointer that is not a string."""
@@ -1058,6 +1098,8 @@ _SKIP = {
     "blend",
     "splat",
     "height",
+    "fx",
+    "ind",
 }
 _TEX_NAME = re.compile(r"[A-Za-z0-9_./+-]{1,120}")
 _COLOR_PARAM = re.compile(r"(const_color|albedo_color|base_color|diffuse_color|material_color|color0|gsys_color)", re.I)
@@ -1087,6 +1129,7 @@ _PRIMARY_SAMPLER = {
 _EXTRA_SAMPLER = {"alb1", "alb2", "alb3", "albedo1", "albedo2", "albedo3"}
 _POOL = re.compile(rb"([A-Za-z][A-Za-z0-9_]{3,80})\x00")
 _POOL_SKIP = {"FRES", "FMDL", "FMAT", "FSHP", "FVTX", "FSKL", "BNTX", "BRTI", "Body"}
+_RENDER_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,48}$")
 
 
 _TEXTURE_IN_FILE = re.compile(
@@ -1161,6 +1204,8 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     When the material names its samplers, only ``_a0`` then ``_a1`` / ``_a2``
     are albedo. A normal, roughness, bake, or runtime slot (``tc``, ``ta``,
     ``MaterialAlb``) is not a fallback, and neither is the string pool.
+    ``Mt_TerraMaterial_NNN`` is the exception, and the model loader reads
+    layer NNN of ``MaterialAlb`` itself rather than treating that name as albedo.
     A texture whose name is a normal, mask, or blend map is skipped even
     when the slot is ``_a0``.
     A material with no sampler names still ranks texture names, which is

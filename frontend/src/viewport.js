@@ -93,6 +93,7 @@ export function createViewport(host, hooks) {
   const categories = { area: "show", system: "show" };
   let hideVolumes = false;
   let showGround = false;
+  let showWater = true;
   let generation = 0;
   let loadQueue = null;
   const loadDelta = new THREE.Vector3();
@@ -148,6 +149,12 @@ export function createViewport(host, hooks) {
   function applyGround() {
     if (groundGrid) groundGrid.visible = showGround;
     if (terrainRoot) terrainRoot.visible = showGround;
+  }
+
+  function applyWater() {
+    for (const batch of batches) {
+      if (batch.water) batch.mesh.visible = showWater;
+    }
   }
 
   function clearActors() {
@@ -505,6 +512,8 @@ export function createViewport(host, hooks) {
     material.metalness = 0;
     material.roughness = 0.85;
     if (material.map) {
+      material.map.wrapS = THREE.RepeatWrapping;
+      material.map.wrapT = THREE.RepeatWrapping;
       material.map.generateMipmaps = true;
       material.map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
       material.map.needsUpdate = true;
@@ -721,6 +730,12 @@ export function createViewport(host, hooks) {
       mesh.frustumCulled = false;
       mesh.perObjectFrustumCulled = true;
       mesh.sortObjects = Boolean(group.material.transparent);
+      const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
+      const water = tag === "water";
+      if (water) {
+        mesh.renderOrder = 2;
+        mesh.visible = showWater;
+      }
       const geomIds = new Map();
       let built = true;
       for (const [uuid, geometry] of group.geometries) {
@@ -762,7 +777,7 @@ export function createViewport(host, hooks) {
       mesh.raycast = raycastBatch;
       mesh.computeBoundingSphere();
       scene.add(mesh);
-      batches.push({ mesh, ids });
+      batches.push({ mesh, ids, water });
     }
     syncBatchVisibility();
   }
@@ -973,11 +988,12 @@ export function createViewport(host, hooks) {
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
     if (ground !== undefined) showGround = Boolean(ground);
+    if (water !== undefined) showWater = Boolean(water);
     if (next) Object.assign(categories, next);
     for (const entry of entries.values()) {
       const hiddenByStatus = entry.status === "hidden" && !showHidden;
@@ -989,6 +1005,7 @@ export function createViewport(host, hooks) {
     }
     syncBatchVisibility();
     applyGround();
+    applyWater();
     attach();
     syncLabels();
     requestRender();

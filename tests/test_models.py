@@ -1086,7 +1086,330 @@ def test_warm_cache_does_not_decode_textures_again(tmp_path, monkeypatch):
 
     path = dump.romfs / "Tex" / "CacheRock_Alb.bntx.zs"
     path.write_bytes(compress(write_rgba("CacheRock_Alb", 2, 2, red), 1, dump.dicts(), level=3))
-    os.utime(path, None)
+    stamped = path.stat()
+    os.utime(path, ns=(stamped.st_atime_ns, stamped.st_mtime_ns + 2_000_000_000))
+    folder = path.parent
+    folder_st = folder.stat()
+    os.utime(folder, ns=(folder_st.st_atime_ns, folder_st.st_mtime_ns + 2_000_000_000))
     changed = describe_actor(dump, "Obj_CacheRock")
     assert changed["digest"] != first["digest"]
     assert calls["n"] >= 1
+
+
+def _array_rgba(name: str, colors: list[bytes]) -> bytes:
+    """One BNTX whose first BRTI is an array of 2x2 images, one colour per layer."""
+    import struct
+
+    from bancwright.formats.bntx import write_rgba
+
+    width = height = 2
+    stride = width * height * 4
+    blob = bytearray(write_rgba(name, width, height, colors[0] * (width * height), swizzled=False))
+    for color in colors[1:]:
+        blob.extend(color * (width * height))
+    at = blob.find(b"BRTI")
+    assert at > 0
+    struct.pack_into("<I", blob, at + 0x30, len(colors))
+    struct.pack_into("<I", blob, at + 0x50, stride * len(colors))
+    return bytes(blob)
+
+
+def _png_pixel(glb: bytes) -> tuple[int, int, int, int]:
+    import struct
+    from io import BytesIO
+
+    from PIL import Image
+
+    doc = _document(glb)
+    json_len = struct.unpack_from("<I", glb, 12)[0]
+    data = glb[20 + json_len + 8 :]
+    view = doc["bufferViews"][doc["images"][0]["bufferView"]]
+    start = view.get("byteOffset", 0)
+    raw = data[start : start + view["byteLength"]]
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    image = Image.open(BytesIO(raw))
+    return image.getpixel((0, 0))
+
+
+def test_texture_layer_reads_one_slice_and_forces_alpha():
+    from bancwright.formats.bntx import BntxError, texture_layer, textures
+
+    red = bytes((200, 20, 30, 10))
+    green = bytes((20, 140, 40, 0))
+    stored = _array_rgba("MaterialAlb", [red, green])
+    layer0 = texture_layer(stored, 0, flatten_alpha=True)
+    layer1 = texture_layer(stored, 1, flatten_alpha=True)
+    assert layer0.rgba[:3] == red[:3]
+    assert layer0.rgba[3] == 255
+    assert layer1.rgba[:3] == green[:3]
+    assert layer1.rgba[3] == 255
+    assert "array layer 1 of 2" in (layer1.note or "")
+    assert "alpha forced opaque" in (layer1.note or "")
+    whole = textures(stored)[0]
+    assert whole.rgba[:3] == red[:3]
+    try:
+        texture_layer(stored, 2)
+    except BntxError as exc:
+        assert "outside" in str(exc)
+    else:
+        raise AssertionError("layer 2 should be rejected")
+    single = __import__("bancwright.formats.bntx", fromlist=["write_rgba"]).write_rgba("Flat", 2, 2, red * 4, swizzled=False)
+    assert texture_layer(single, 0).rgba == textures(single)[0].rgba
+
+
+def test_terra_array_sand_guess_and_helper_shapes(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres, texture_rank
+
+    red = bytes((200, 20, 30, 10))
+    green = bytes((20, 140, 40, 0))
+    sand = bytes((186, 154, 96, 40))
+    layers = [red] * 16 + [sand]
+    array = _array_rgba("MaterialAlb", [red, green])
+    sand_array = _array_rgba("MaterialAlb", layers)
+    rock = bytes((90, 80, 70, 255))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    _install(
+        dump,
+        "Tm_Terra",
+        sample_v10_bfres(
+            "Tm_Terra",
+            [{"name": "Mt_TerraMaterial_001", "samplers": [("tc", "MaterialCmb"), ("ta", "MaterialAlb")], "mode": "opaque"}],
+            shapes=[{"name": "CoverGround", "material": 0}],
+        ),
+        {"MaterialAlb": array},
+    )
+    _install(
+        dump,
+        "Tm_Volume",
+        sample_v10_bfres(
+            "Tm_Volume",
+            [{"name": "Mt_WaterVolume_A", "samplers": [], "mode": "opaque"}],
+            shapes=[{"name": "WaterVolume_Box", "material": 0}],
+            pool_name="Water__Common_A_2_Fx",
+        ),
+    )
+    _install(
+        dump,
+        "Tm_Gate",
+        sample_v10_bfres(
+            "Tm_Gate",
+            [
+                {"name": "Mt_Rock", "samplers": [("_a0", "Gate_Rock_Alb")], "mode": "opaque"},
+                {"name": "Mt_BakeShadowProxy", "samplers": [], "mode": "opaque"},
+            ],
+            shapes=[{"name": "Rock", "material": 0}, {"name": "BakeShadowProxy", "material": 1}],
+        ),
+        {"Gate_Rock_Alb": __import__("bancwright.formats.bntx", fromlist=["write_rgba"]).write_rgba("Gate_Rock_Alb", 2, 2, rock * 4)},
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    assert texture_rank("Water__Common_A_2_Fx") == 2
+    assert texture_rank("Pond_Flow_Ind") == 2
+    assert texture_rank("Leaf_Msk") == 2
+    assert texture_rank("Leaf_Alb") == 0
+
+    def fail_full(blob):
+        raise AssertionError("the terra array must not be decoded as one image")
+
+    real = model_mod.read_bntx
+    model_mod.read_bntx = fail_full
+    try:
+        terra = describe_actor(dump, "Tm_Terra")
+    finally:
+        model_mod.read_bntx = real
+    assert terra["status"] == "mesh"
+    assert terra["textures"] == 1
+    row = terra["textureLog"][0]
+    assert row["wanted"] == "MaterialAlb#1"
+    assert row["alpha"] == "opaque"
+    assert "layer 1" in (row.get("error") or "")
+    glb = (tmp_path / "cache" / terra["digest"][:2] / f"{terra['digest']}.glb").read_bytes()
+    doc = _document(glb)
+    assert doc["samplers"][0]["wrapS"] == 10497
+    assert doc["samplers"][0]["wrapT"] == 10497
+    assert doc["materials"][0].get("alphaMode", "OPAQUE") == "OPAQUE"
+    pixel = _png_pixel(glb)
+    assert pixel[0] < 80 and pixel[1] > 100 and pixel[3] == 255
+
+    _install(
+        dump,
+        "Tm_Sand",
+        sample_v10_bfres(
+            "Tm_Sand",
+            [{"name": "Mt_Sand_Kokiri_Cliff", "samplers": [("ta", "MaterialAlb")], "mode": "opaque"}],
+            shapes=[{"name": "Cliff", "material": 0}],
+        ),
+        {"MaterialAlb": sand_array},
+    )
+    model_mod._TEX_INDEX.clear()
+    sand_info = describe_actor(dump, "Tm_Sand")
+    sand_row = sand_info["textureLog"][0]
+    assert sand_row["wanted"] == "MaterialAlb#16"
+    assert "layer 16 is a guess" in (sand_row.get("error") or "")
+    assert "render-info" in (sand_row.get("error") or "") or "keys are empty" in (sand_row.get("error") or "")
+    sand_pixel = _png_pixel((tmp_path / "cache" / sand_info["digest"][:2] / f"{sand_info['digest']}.glb").read_bytes())
+    assert sand_pixel[0] > 150 and sand_pixel[2] < 140
+
+    volume = describe_actor(dump, "Tm_Volume")
+    assert volume["status"] == "box"
+    assert "water volume" in (volume["reason"] or "")
+
+    gate = describe_actor(dump, "Tm_Gate")
+    assert gate["status"] == "mesh"
+    assert gate["triangles"] == 1
+    names = [mesh["name"] for mesh in _document((tmp_path / "cache" / gate["digest"][:2] / f"{gate['digest']}.glb").read_bytes())["meshes"]]
+    assert any("Rock" in name for name in names)
+    assert not any("Bake" in name or "Shadow" in name for name in names)
+
+
+def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    _install(
+        dump,
+        "Tm_Pond",
+        sample_v10_bfres(
+            "Tm_Pond",
+            [
+                {"name": "Mt_Water_Back_Flowmap", "samplers": [], "mode": "custom"},
+                {"name": "Mt_Water_Front_Flowmap", "samplers": [], "mode": "custom"},
+            ],
+            shapes=[{"name": "Back", "material": 0}, {"name": "Front", "material": 1}],
+        ),
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    info = describe_actor(dump, "Tm_Pond")
+    assert info["status"] == "mesh"
+    assert info["triangles"] == 1
+    assert "water stand-in" in (info["reason"] or "")
+    doc = _document((tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes())
+    names = [mesh["name"] for mesh in doc["meshes"]]
+    assert any("Front" in name for name in names)
+    assert not any("Back" in name for name in names)
+    factor = doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert abs(factor[0] - 0.35) < 0.02
+    assert abs(factor[1] - 0.55) < 0.02
+    assert abs(factor[2] - 0.55) < 0.02
+    assert abs(factor[3] - 0.2) < 0.02
+    assert doc["materials"][0]["alphaMode"] == "BLEND"
+    assert doc["materials"][0]["extras"]["banc"] == "water"
+
+
+def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.bntx import write_rgba
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    borrowed = bytes((40, 80, 120, 255))
+    face = bytes((210, 170, 140, 255))
+    _install(
+        dump,
+        "Tm_FieldProp",
+        sample_v10_bfres(
+            "Tm_FieldProp",
+            [{"name": "Mt_Rock", "samplers": [("_a0", "Rock_Kokiri_FieldProp_J_Alb")], "mode": "opaque"}],
+            shapes=[{"name": "Rock", "material": 0}],
+        ),
+        {"Rock_Kokiri_FieldProp_I_Alb": write_rgba("Rock_Kokiri_FieldProp_I_Alb", 2, 2, borrowed * 4)},
+    )
+    _install(
+        dump,
+        "Tm_Cloth",
+        sample_v10_bfres(
+            "Tm_Cloth",
+            [{"name": "Mt_Cloth", "samplers": [("_a0", "Cloth_Kokiri_Interior_A_Alb")], "mode": "opaque"}],
+            shapes=[{"name": "Cloth", "material": 0}],
+        ),
+    )
+    _install(
+        dump,
+        "Tm_Vine",
+        sample_v10_bfres(
+            "Tm_Vine",
+            [{"name": "Mt_Vine", "samplers": [("_a0", "Tree_Kokiri_GraphicVine_A_01_Alb")], "mode": "mask"}],
+            shapes=[{"name": "Vine", "material": 0}],
+        ),
+    )
+    _install(
+        dump,
+        "Tm_Saria",
+        sample_v10_bfres(
+            "Tm_Saria",
+            [
+                {"name": "Mt_Face", "samplers": [("_a0", "Face_Alb")], "mode": "opaque"},
+                {"name": "Mt_Eyebrow", "samplers": [("_a0", "Face_Alb")], "mode": "opaque"},
+                {"name": "Mt_Eye_Outer", "samplers": [("_a0", "Face_Alb")], "mode": "translucent"},
+            ],
+            shapes=[
+                {"name": "Face", "material": 0},
+                {"name": "Brow", "material": 1},
+                {"name": "EyeOuter", "material": 2},
+            ],
+        ),
+        {"Face_Alb": write_rgba("Face_Alb", 2, 2, face * 4)},
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+
+    rock = describe_actor(dump, "Tm_FieldProp")
+    assert rock["textures"] == 1
+    assert "borrowed Rock_Kokiri_FieldProp_I_Alb" in (rock["textureLog"][0].get("error") or "")
+
+    cloth = describe_actor(dump, "Tm_Cloth")
+    assert cloth["textures"] == 0
+    assert "flat cloth colour" in (cloth["textureLog"][0].get("error") or "")
+    cloth_factor = _document((tmp_path / "cache" / cloth["digest"][:2] / f"{cloth['digest']}.glb").read_bytes())["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert abs(cloth_factor[0] - 0.55) < 0.02
+    assert abs(cloth_factor[1] - 0.42) < 0.02
+    assert abs(cloth_factor[2] - 0.28) < 0.02
+
+    vine = describe_actor(dump, "Tm_Vine")
+    assert "flat vine colour" in (vine["textureLog"][0].get("error") or "")
+    vine_factor = _document((tmp_path / "cache" / vine["digest"][:2] / f"{vine['digest']}.glb").read_bytes())["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert abs(vine_factor[1] - 0.42) < 0.02
+    assert vine_factor[1] > vine_factor[0]
+
+    saria = describe_actor(dump, "Tm_Saria")
+    assert saria["triangles"] == 2
+    doc = _document((tmp_path / "cache" / saria["digest"][:2] / f"{saria['digest']}.glb").read_bytes())
+    names = [mesh["name"] for mesh in doc["meshes"]]
+    assert any("Face" in name for name in names)
+    assert any("Brow" in name for name in names)
+    assert not any("Eye" in name for name in names)
+    brow = next(mesh for mesh in doc["meshes"] if "Brow" in mesh["name"])
+    material = doc["materials"][brow["primitives"][0]["material"]]
+    assert "baseColorTexture" not in material["pbrMetallicRoughness"]
+    factor = material["pbrMetallicRoughness"]["baseColorFactor"]
+    assert factor[0] < 0.4 and factor[1] < 0.3 and factor[2] < 0.2
+
+
+def test_empty_mask_alpha_stays_a_cutout_and_bc4_is_not_colour():
+    from bancwright.formats.bntx import Texture
+    from bancwright.models import _accept
+
+    rgba = bytearray()
+    for x in range(4):
+        light = x < 2
+        rgba.extend((220, 210, 180, 0) if light else (0, 0, 0, 0))
+    beard = Texture(name="Beard", width=4, height=1, rgba=bytes(rgba), fmt=0x1A01, codec="bc1")
+    accepted, mode, cutoff, note = _accept(beard, "mask", 0.5)
+    assert mode == "mask"
+    assert cutoff < 0.5
+    assert "cutout uses the colour" in note
+    assert accepted.rgba[3] > 40
+    assert accepted.rgba[8 + 3] == 0
+    noise = Texture(name="Fx", width=1, height=1, rgba=bytes((80, 80, 80, 255)), fmt=0x1D01, codec="bc4")
+    rejected, _mode, _cutoff, why = _accept(noise, "opaque", 0.5)
+    assert rejected is None
+    assert "BC4" in why

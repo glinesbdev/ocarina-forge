@@ -23,6 +23,7 @@ const state = {
   categories: { area: "show", system: "show" },
   hideVolumes: false,
   showGround: false,
+  showWater: true,
   terrain: null,
   nav: "orbit",
   gizmo: "translate",
@@ -135,6 +136,10 @@ $("show-stats").addEventListener("change", (event) => {
 $("show-ground").addEventListener("change", (event) => {
   state.showGround = event.target.checked;
   viewport.setFlags({ ground: state.showGround });
+});
+$("show-water").addEventListener("change", (event) => {
+  state.showWater = event.target.checked;
+  viewport.setFlags({ water: state.showWater });
 });
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 document.querySelectorAll("[data-cat]").forEach((button) => {

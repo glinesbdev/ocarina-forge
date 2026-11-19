@@ -45,13 +45,18 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-9\0"
+_CACHE_VERSION = b"models-10\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
 _TERRAIN = (0.36, 0.45, 0.28, 1.0)
 # Unlit translucent water when the shader cannot be reproduced.
-_WATER = (0.16, 0.42, 0.40, 0.5)
+_WATER = (0.35, 0.55, 0.55, 0.2)
+_ROCK = (0.45, 0.40, 0.34, 1.0)
+_VINE = (0.28, 0.42, 0.22, 1.0)
+_CLOTH = (0.55, 0.42, 0.28, 1.0)
+_BROW = (0.25, 0.16, 0.10, 1.0)
+_TERRA_LAYER = re.compile(r"terra[_]?material[^\d]*(\d+)", re.IGNORECASE)
 _WATER_TOKENS = {"water", "lake", "waterfall", "ocean", "pond", "sea", "river"}
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
@@ -404,6 +409,44 @@ def _decode_bntx_cached(blob: bytes) -> list:
     return decoded
 
 
+_BLOB_KEYS: dict[tuple, bytes] = {}
+
+
+def _blob_key(blob: bytes) -> bytes:
+    """Hash a BNTX once per process. A 59MB array is not rehashed for every layer."""
+    ident = (len(blob), blob[:48], blob[-48:] if len(blob) > 48 else b"")
+    found = _BLOB_KEYS.get(ident)
+    if found is not None:
+        return found
+    digest = hashlib.sha256(blob).digest()
+    if len(_BLOB_KEYS) > 64:
+        _BLOB_KEYS.clear()
+    _BLOB_KEYS[ident] = digest
+    return digest
+
+
+def _decode_layer_cached(blob: bytes, index: int, *, flatten_alpha: bool) -> object:
+    """One array layer, cached on its own so the rest of the stack is not decoded."""
+    from bancwright.formats.bntx import texture_layer
+
+    token = hashlib.sha256(
+        _BNTX_VERSION + b"layer\0" + _blob_key(blob) + struct.pack("<IB", index & 0xFFFFFFFF, 1 if flatten_alpha else 0)
+    ).hexdigest()
+    cached = _BNTX_MEM.get(token)
+    if cached:
+        _touch_bntx(token)
+        return cached[0]
+    path = cache_dir() / "bntx" / token[:2] / f"{token}.bwtx"
+    loaded = _read_bwtx(path)
+    if loaded:
+        _remember_bntx(token, loaded)
+        return loaded[0]
+    image = texture_layer(blob, index, flatten_alpha=flatten_alpha)
+    _write_bwtx(path, [image])
+    _remember_bntx(token, [image])
+    return image
+
+
 def _touch_bntx(key: str) -> None:
     if key in _BNTX_ORDER:
         _BNTX_ORDER.remove(key)
@@ -625,12 +668,134 @@ def _looks_blank(rgba: bytes) -> bool:
     return lum > 200 and chroma < 28
 
 
+def _terra_layer(material) -> tuple[int, str] | None:
+    """Layer of MaterialAlb for a terra material, or the sand-cliff guess.
+
+    Version-10 FMAT does not keep the version-9 render-info dictionary.
+    ``+0x18`` and ``+0x20`` are the texture list, so those keys come back
+    empty. A numbered ``Mt_TerraMaterial_NNN`` uses layer NNN. The sand
+    cliff has no number, so it uses layer 16 and says so.
+    """
+    name = getattr(material, "name", "") or ""
+    numbered = _TERRA_LAYER.search(name)
+    if numbered:
+        return int(numbered.group(1)), ""
+    low = name.lower()
+    if "sand" in low and "cliff" in low:
+        info = (getattr(material, "note", "") or "").strip()
+        if not info:
+            info = (
+                "v10 FMAT has no render-info dictionary "
+                "(version-9 offsets +0x18 and +0x20 are the texture list, so the keys are empty)"
+            )
+        return 16, f"layer 16 is a guess; {info}"
+    return None
+
+
+def _eyebrow_face(material_name: str, texture_name: str) -> bool:
+    return "eyebrow" in (material_name or "").lower() and "face" in (texture_name or "").lower()
+
+
+def _category_color(name: str) -> tuple[tuple[float, float, float, float], str] | None:
+    low = (name or "").lower()
+    if any(word in low for word in ("rock", "stone")):
+        return _ROCK, "rock"
+    if any(word in low for word in ("vine", "leaf", "ivy")):
+        return _VINE, "vine"
+    if any(word in low for word in ("cloth", "wood", "plank", "fabric")):
+        return _CLOTH, "cloth"
+    return None
+
+
+def _letter_siblings(name: str) -> list[str]:
+    """``FieldProp_J`` borrows ``FieldProp_I`` and ``FieldProp_K``."""
+    stem = _stem(name)
+    parts = stem.split("_")
+    found = []
+    for index, part in enumerate(parts):
+        if len(part) != 1 or not part.isalpha():
+            continue
+        base = ord(part.upper())
+        for delta in (-1, 1):
+            nxt = base + delta
+            if nxt < ord("A") or nxt > ord("Z"):
+                continue
+            letter = chr(nxt)
+            clone = parts[:]
+            clone[index] = letter if part.isupper() else letter.lower()
+            sibling = "_".join(clone)
+            if sibling not in found:
+                found.append(sibling)
+    return found
+
+
+def _borrow_sibling(dump, model, sources, hints, material, external, raws):
+    for sampler, name in sources:
+        if not name:
+            continue
+        for sibling in _letter_siblings(name):
+            found = _load_named(dump, model, sibling, hints, material.alpha, material.cutoff, external, raws)
+            if found.get("image") is not None:
+                return sampler, sibling, found, name
+    return None
+
+
+def _omit_reason(shape: str, material: str) -> str:
+    compact = f"{shape} {material}".lower().replace("_", "").replace(" ", "")
+    if "watervolume" in compact:
+        return "water volume is not drawn"
+    if "bakeshadowproxy" in compact:
+        return "bake shadow proxy is not drawn"
+    if "fadeblack" in compact:
+        return "fade black is not drawn"
+    if "innermesh" in compact:
+        return "inner mesh is not drawn"
+    if "eyeouter" in compact or "eyeshadow" in compact:
+        return "eye overlay is not drawn"
+    return ""
+
+
+def _mark_omitted(models) -> None:
+    """Drop helper shapes, and the back water sheet when a front sheet exists."""
+    for model in models:
+        materials = model.materials or []
+
+        def label(part) -> str:
+            if 0 <= part.material_index < len(materials):
+                return materials[part.material_index].name
+            return part.material or ""
+
+        labeled = [(part, label(part)) for part in model.parts]
+        front = any(
+            "front" in f"{part.name} {name}".lower() and ("water" in f"{part.name} {name}".lower() or "flow" in f"{part.name} {name}".lower())
+            for part, name in labeled
+        )
+        for part, name in labeled:
+            reason = _omit_reason(part.name, name)
+            low = f"{part.name} {name}".lower()
+            if not reason and front and "back" in low and ("water" in low or "flow" in low):
+                reason = "back water layer is not drawn"
+            if reason:
+                part.omit = True
+                part.omit_reason = reason
+
+
+def _luma_alpha(rgba: bytes) -> bytes:
+    """Put the colour into alpha so a BC1 mask with an empty alpha still cuts out."""
+    out = bytearray(rgba)
+    for at in range(0, len(out) - 3, 4):
+        luma = int(0.2126 * out[at] + 0.7152 * out[at + 1] + 0.0722 * out[at + 2])
+        out[at + 3] = luma
+    return bytes(out)
+
+
 def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[bytes, dict]:
     log = log if log is not None else []
     by_wanted = {}
     for entry in log:
         if entry.get("wanted") and entry["wanted"] not in by_wanted:
             by_wanted[entry["wanted"]] = entry
+    _mark_omitted(models)
     primitives: list[Primitive] = []
     notes: list[str] = []
     triangles = 0
@@ -641,6 +806,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
         notes.extend(model.notes)
         png_for: dict[int, bytes] = {}
         for part in model.parts:
+            if part.omit:
+                continue
             image = None
             if part.texture:
                 image = model.images.get(part.texture) or external.get(part.texture) or external.get(part.texture.lower())
@@ -654,7 +821,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             elif image is not None:
                 png = png_for.get(id(image))
                 if png is None:
-                    png = _encode_cached(image, part.alpha)
+                    # A terra array layer is stored as PNG. Opaque JPEG is for ordinary albedos.
+                    png = _encode_cached(image, "png" if part.wrap == "repeat" else part.alpha)
                     png_for[id(image)] = png
                     if id(image) not in seen_images:
                         texture_count += 1
@@ -674,13 +842,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     notes.append(f"{reason} This mesh uses a flat colour.")
             unlit = False
             kind = ""
-            if water and image is None:
-                color = part.base_color or _WATER
-                alpha = "blend"
-                unlit = True
-                kind = "water"
-            elif water:
-                color = (1.0, 1.0, 1.0, 0.72)
+            if water:
+                color = _WATER
                 alpha = "blend"
                 unlit = True
                 kind = "water"
@@ -728,7 +891,12 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             triangles += len(part.indices) // 3
             positions.extend(part.positions)
     if not primitives:
-        raise FresError("the model has no triangles")
+        reasons = []
+        for model in models:
+            for part in model.parts:
+                if part.omit_reason and part.omit_reason not in reasons:
+                    reasons.append(part.omit_reason)
+        raise FresError("; ".join(reasons) if reasons else "the model has no triangles")
     glb = to_glb(primitives)
     bounds = None
     if positions:
@@ -793,6 +961,10 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                     part.albedo_sampler = choice["sampler"]
                     part.alpha = choice["alpha"]
                     part.cutoff = choice["cutoff"]
+                    if choice.get("wrap"):
+                        part.wrap = choice["wrap"]
+                    if choice.get("base_color") and choice.get("image") is None:
+                        part.base_color = choice["base_color"]
                     if choice.get("proxy"):
                         part.proxy = True
                         part.base_color = _TERRAIN
@@ -830,8 +1002,47 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
     misses = []
     winner = None
     tried: list[str] = []
+    wrap = ""
+    flat_color = None
     last = {"image": None, "error": "", "tried": [], "found": "", "alpha": material.alpha, "cutoff": material.cutoff, "images": 0}
+    terra = _terra_layer(material)
+    if terra is not None:
+        layer, guess = terra
+        found = _load_named(
+            dump,
+            model,
+            "MaterialAlb",
+            hints,
+            "opaque",
+            material.cutoff,
+            external,
+            raws,
+            layer=layer,
+            flatten_alpha=True,
+        )
+        last = found
+        for path in found.get("tried") or []:
+            if path not in tried:
+                tried.append(path)
+        if found["image"] is not None:
+            winner = ("ta", f"MaterialAlb#{layer}", found)
+            wrap = "repeat"
+            if guess:
+                found["error"] = f"{guess}. {found.get('error') or ''}".strip(". ")
+            else:
+                extra = f"MaterialAlb layer {layer}"
+                found["error"] = f"{extra}. {found.get('error') or ''}".strip(". ")
+        elif found.get("error"):
+            misses.append(f"MaterialAlb layer {layer}: {found['error']}")
+        else:
+            misses.append(f"MaterialAlb layer {layer}: no Tex file matched")
     for sampler, name in sources:
+        if winner is not None:
+            break
+        if _eyebrow_face(material.name, name):
+            misses.append(f"{name}: eyebrow does not use the face texture")
+            flat_color = _BROW
+            continue
         found = _load_named(dump, model, name, hints, material.alpha, material.cutoff, external, raws)
         last = found
         for path in found.get("tried") or []:
@@ -858,11 +1069,30 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
                 pool_note = f"no albedo name matched; used {hinted}"
             elif found["error"]:
                 misses.append(f"terrain {stem}: {found['error']}")
+    if winner is None and dump is not None and sources and flat_color is None:
+        borrowed = _borrow_sibling(dump, model, sources, hints, material, external, raws)
+        if borrowed is not None:
+            sampler, sibling, found, missing = borrowed
+            winner = (sampler, sibling, found)
+            last = found
+            for path in found.get("tried") or []:
+                if path not in tried:
+                    tried.append(path)
+            note = f"borrowed {sibling} because {missing} is missing"
+            found["error"] = f"{note}. {found.get('error') or ''}".strip(". ")
+    if winner is None and flat_color is None:
+        label = " ".join(name for _sampler, name in sources) or material.name
+        category = _category_color(label)
+        if category is not None:
+            flat_color, kind = category
+            misses.append(f"no Tex file; flat {kind} colour")
     if winner is not None:
         sampler, wanted, found = winner
     else:
         sampler, wanted, found = "", (sources[0][1] if sources else ""), dict(last)
         found["tried"] = tried or found.get("tried") or []
+        if flat_color == _BROW:
+            wanted = ""
     error = found.get("error") or ""
     if proxy and winner is None:
         sampler, wanted = "", ""
@@ -891,8 +1121,8 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         entry["wanted"] = ""
         entry["error"] = "terrain proxy"
         entry["decoded"] = False
-    return _consider_water(
-        [material.name, getattr(material, "shader", "")],
+    result = _consider_water(
+        [material.name, getattr(material, "shader", ""), *[tex for _slot, tex in sources]],
         list(material.binds),
         {
             "entry": entry,
@@ -902,8 +1132,14 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             "cutoff": cutoff,
             "image": None if proxy and winner is None else found.get("image"),
             "proxy": proxy and winner is None,
+            "wrap": wrap,
+            "base_color": None if (proxy and winner is None) or found.get("image") is not None else flat_color,
         },
     )
+    if wrap and result.get("image") is not None:
+        result["alpha"] = "opaque"
+        result["entry"]["alpha"] = "opaque"
+    return result
 
 
 def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
@@ -1009,7 +1245,19 @@ def _alpha_label(mode: str, cutoff: float) -> str:
     return "opaque"
 
 
-def _load_named(dump, model, name, hints, alpha, cutoff, external, raws, forced: str = "") -> dict:
+def _load_named(
+    dump,
+    model,
+    name,
+    hints,
+    alpha,
+    cutoff,
+    external,
+    raws,
+    forced: str = "",
+    layer: int | None = None,
+    flatten_alpha: bool = False,
+) -> dict:
     result = {"image": None, "error": "", "tried": [], "found": "", "alpha": alpha, "cutoff": cutoff, "images": 0}
     if not name and not forced:
         result["error"] = "material has no texture names"
@@ -1017,7 +1265,7 @@ def _load_named(dump, model, name, hints, alpha, cutoff, external, raws, forced:
     embedded = None
     if model is not None and name:
         embedded = model.images.get(name) or model.images.get(name.lower())
-    if embedded is not None:
+    if embedded is not None and layer is None:
         result["tried"] = ["embedded in the bfres"]
         result["found"] = "embedded"
         result["images"] = 1
@@ -1056,13 +1304,27 @@ def _load_named(dump, model, name, hints, alpha, cutoff, external, raws, forced:
         result["found"] = relative
         result["error"] = f"{relative} is not a BNTX"
         return result
+    result["found"] = relative
+    if layer is not None:
+        try:
+            picked = _decode_layer_cached(blob, layer, flatten_alpha=flatten_alpha)
+        except BntxError as exc:
+            result["error"] = str(exc)
+            return result
+        result["images"] = 1
+        image, mode, used_cut, note = _accept(picked, "opaque" if flatten_alpha else alpha, cutoff)
+        if flatten_alpha:
+            mode = "opaque"
+        result["alpha"] = mode
+        result["cutoff"] = used_cut
+        result["image"] = image
+        result["error"] = note or ""
+        return result
     try:
         decoded = _decode_bntx_cached(blob)
     except BntxError as exc:
-        result["found"] = relative
         result["error"] = str(exc)
         return result
-    result["found"] = relative
     result["images"] = len(decoded)
     picked, why = pick_image(decoded, name)
     if picked is None:
@@ -1117,6 +1379,8 @@ def pick_image(decoded, wanted: str):
 def _accept(image, alpha: str, cutoff: float):
     if image is None or not image.rgba:
         return None, alpha, cutoff, (image.note if image is not None else "") or "texture did not decode"
+    if (getattr(image, "codec", "") or "").lower().startswith("bc4"):
+        return None, alpha, cutoff, "BC4 is a single channel and is not a colour"
     fraction = _magenta_fraction(image.rgba)
     if fraction >= 0.85:
         return None, alpha, cutoff, "decoded image is a magenta placeholder"
@@ -1133,8 +1397,10 @@ def _accept(image, alpha: str, cutoff: float):
     if mode == "mask":
         _low, high = _alpha_span(rgba)
         if high < 8:
-            mode = "opaque"
-            note = f"{note}. alpha channel is empty, so cutout was not applied".strip(". ")
+            rgba = _luma_alpha(rgba)
+            if cutoff >= 0.5:
+                cutoff = 0.08
+            note = f"{note}. alpha was empty, so the cutout uses the colour".strip(". ")
     if rgba is not image.rgba or (note and note != image.note):
         image = replace(image, rgba=rgba, note=note)
     return image, mode, cutoff, note
