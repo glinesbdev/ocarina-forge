@@ -69,6 +69,7 @@ export function createViewport(host, hooks) {
   const templateCache = new Map();
   const metaCache = new Map();
   const categories = { area: "show", system: "show" };
+  let hideVolumes = false;
   let generation = 0;
   let terrainRoot = null;
   let lastClick = null;
@@ -123,8 +124,12 @@ export function createViewport(host, hooks) {
 
   function paint(entry) {
     const on = entry.key === selected;
-    entry.material.emissive.set(on ? entry.color : 0x000000);
-    entry.material.emissiveIntensity = on ? 0.45 : 0;
+    if (entry.material.emissive) {
+      entry.material.emissive.set(on ? entry.color : 0x000000);
+      entry.material.emissiveIntensity = on ? 0.45 : 0;
+    } else if (entry.volume) {
+      entry.material.opacity = on ? 0.08 : 0.03;
+    }
     const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
     entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.volume ? entry.color : 0x101612);
     entry.mesh.visible = !entry.model;
@@ -200,18 +205,28 @@ export function createViewport(host, hooks) {
       const recipe = actor.status === "recipe";
       const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
       const volume = Boolean(actor.volume);
-      const material = new THREE.MeshStandardMaterial({
-        color,
-        roughness: 0.7,
-        metalness: 0.05,
-      });
-      if (actor.status === "hidden" || volume || recipe) {
+      const material = volume
+        ? new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.03,
+            depthWrite: false,
+            depthTest: true,
+            side: THREE.DoubleSide,
+          })
+        : new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 });
+      if (!volume && (actor.status === "hidden" || recipe)) {
         material.transparent = true;
-        material.opacity = actor.status === "hidden" ? 0.18 : recipe ? 0.72 : 0.07;
-        material.depthWrite = recipe;
+        material.opacity = actor.status === "hidden" ? 0.18 : 0.72;
+        material.depthWrite = true;
       }
       const mesh = new THREE.Mesh(boxGeometry, material);
-      const edgeMaterial = new THREE.LineBasicMaterial({ color: volume ? color : 0x101612 });
+      const edgeMaterial = new THREE.LineBasicMaterial({
+        color: volume ? color : 0x101612,
+        transparent: volume,
+        opacity: volume ? 0.9 : 1,
+        depthWrite: !volume,
+      });
       const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
       const pivot = new THREE.Group();
       pivot.add(mesh);
@@ -225,7 +240,8 @@ export function createViewport(host, hooks) {
       pivot.userData.actorId = actor.id;
       const hiddenByStatus = actor.status === "hidden" && !showHidden;
       const hiddenByCategory = categories[actor.category] === "hide";
-      pivot.visible = !hiddenByStatus && !hiddenByCategory;
+      const hiddenByVolume = volume && hideVolumes;
+      pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
       scene.add(pivot);
       entries.set(key, {
         key,
@@ -430,7 +446,7 @@ export function createViewport(host, hooks) {
 
   function attach() {
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id || !entry.pivot.visible || entry.locked || entry.status === "recipe") {
+    if (!entry || !entry.id || !entry.pivot.visible || entry.locked) {
       transform.detach();
       return;
     }
@@ -455,15 +471,17 @@ export function createViewport(host, hooks) {
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function setFlags({ hidden, labels, categories: next }) {
+  function setFlags({ hidden, labels, categories: next, volumes }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
+    if (volumes !== undefined) hideVolumes = volumes;
     if (next) Object.assign(categories, next);
     for (const entry of entries.values()) {
       const hiddenByStatus = entry.status === "hidden" && !showHidden;
       const hiddenByCategory = categories[entry.category] === "hide";
+      const hiddenByVolume = entry.volume && hideVolumes;
       entry.locked = categories[entry.category] === "lock";
-      entry.pivot.visible = !hiddenByStatus && !hiddenByCategory;
+      entry.pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
     }
     attach();
     syncLabels();
@@ -623,7 +641,7 @@ export function createViewport(host, hooks) {
       return;
     }
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id || entry.status === "recipe") return;
+    if (!entry || !entry.id) return;
     const p = entry.pivot.position;
     const r = entry.pivot.rotation;
     hooks.onTransform(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);

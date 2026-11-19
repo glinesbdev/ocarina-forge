@@ -19,6 +19,7 @@ const state = {
   showHidden: false,
   showLabels: true,
   categories: { area: "show", system: "show" },
+  hideVolumes: false,
   terrain: null,
   nav: "orbit",
   gizmo: "translate",
@@ -62,9 +63,15 @@ const viewport = createViewport($("viewport"), {
     fillNumber("rz", deg(rotate[2]));
   },
   onTransform: (id, translate, rotate) => {
-    const actor = state.actors.find((item) => item.id === id);
-    if (actor && actor.status === "recipe") return;
-    edit({ command: "transform", id, translate: translate.map(round4), rotate: rotate.map(round4) });
+    const actor = selectedActor();
+    const scale = actor && actor.id === id ? actor.scale : undefined;
+    edit({
+      command: "transform",
+      id,
+      translate: translate.map(round4),
+      rotate: rotate.map(round4),
+      ...(scale ? { scale } : {}),
+    });
   },
 });
 
@@ -89,13 +96,8 @@ $("show-labels").addEventListener("change", (event) => {
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 document.querySelectorAll("[data-cat]").forEach((button) => {
   button.addEventListener("click", () => {
-    const cat = button.dataset.cat;
-    const mode = button.dataset.mode;
-    state.categories[cat] = mode;
-    document.querySelectorAll(`[data-cat="${cat}"]`).forEach((item) => {
-      item.classList.toggle("is-on", item.dataset.mode === mode);
-    });
-    viewport.setFlags({ categories: { [cat]: mode } });
+    setCategory(button.dataset.cat, button.dataset.mode);
+    renderOutliner();
   });
 });
 $("tab-outliner").addEventListener("click", () => showTab("outliner"));
@@ -146,12 +148,14 @@ window.addEventListener("keydown", (event) => {
     setGizmo("rotate");
   } else if (event.key === "h" && state.selected) {
     const actor = selectedActor();
-    if (!actor || actor.status === "recipe") return;
-    edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: state.selected });
+    if (!actor) return;
+    if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: state.selected });
   } else if (event.key === "Delete" && state.selected) {
     const actor = selectedActor();
-    if (!actor || actor.status === "recipe") return;
-    edit({ command: "remove", id: state.selected });
+    if (!actor) return;
+    if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: "remove", id: state.selected });
   } else if (event.key === "Escape") {
     state.selected = null;
     viewport.select(null);
@@ -609,6 +613,23 @@ function applyView(view, { frame = false, select } = {}) {
   if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
 }
 
+function snapshot() {
+  const actors = structuredClone((state.view && state.view.diff && state.view.diff.actors) || {});
+  const recipes = ((state.view && state.view.actors) || [])
+    .filter((actor) => actor.status === "recipe")
+    .map((actor) => ({
+      id: actor.id,
+      gyaml: actor.gyaml,
+      name: actor.name,
+      translate: actor.translate,
+      rotate: actor.rotate,
+      scale: actor.scale,
+      params: actor.params,
+      recipe: actor.recipe,
+    }));
+  return { actors, recipes };
+}
+
 async function edit(command) {
   if (!state.banc) return;
   if (!projectReady()) {
@@ -616,7 +637,7 @@ async function edit(command) {
     openProjectDialog();
     return;
   }
-  const before = structuredClone((state.view && state.view.diff && state.view.diff.actors) || {});
+  const before = snapshot();
   state.history.undo.push(before);
   state.history.redo = [];
   try {
@@ -634,21 +655,27 @@ async function edit(command) {
 
 async function undo() {
   if (!state.history.undo.length || !state.banc) return;
-  state.history.redo.push(structuredClone(state.view.diff.actors || {}));
+  state.history.redo.push(snapshot());
   const previous = state.history.undo.pop();
   await restore(previous);
 }
 
 async function redo() {
   if (!state.history.redo.length || !state.banc) return;
-  state.history.undo.push(structuredClone(state.view.diff.actors || {}));
+  state.history.undo.push(snapshot());
   const next = state.history.redo.pop();
   await restore(next);
 }
 
-async function restore(actors) {
+async function restore(shot) {
+  const actors = shot && shot.actors ? shot.actors : shot || {};
+  const recipes = shot && Array.isArray(shot.recipes) ? shot.recipes : null;
+  const hadRecipes = ((state.view && state.view.actors) || []).some((actor) => actor.status === "recipe");
   try {
-    const view = await api.putDiff(state.banc, actors);
+    await api.putDiff(state.banc, actors);
+    const view = recipes && (recipes.length || hadRecipes)
+      ? await api.putRecipes(state.banc, recipes)
+      : await api.scene(state.banc);
     applyView(view, { select: state.selected });
     renderScenes();
   } catch (error) {
@@ -657,12 +684,40 @@ async function restore(actors) {
   updateHistoryButtons();
 }
 
+function removeRecipe(actor) {
+  const file = (actor.recipe && actor.recipe.file) || "the recipe";
+  const label = actor.name || actor.gyaml;
+  if (!window.confirm(`Remove ${label} from ${file}? The build will no longer place it.`)) return;
+  edit({ command: "remove", id: actor.id });
+}
+
+const CATEGORY_FILTERS = [
+  ["npc", "NPC"],
+  ["enemy", "Enemy"],
+  ["object", "Object"],
+  ["land", "Land"],
+  ["effect", "Effect"],
+  ["animal", "Animal"],
+  ["area", "Area"],
+  ["system", "System"],
+  ["other", "Other"],
+];
+
+function setCategory(cat, mode) {
+  state.categories[cat] = mode;
+  document.querySelectorAll(`[data-cat="${cat}"]`).forEach((item) => {
+    item.classList.toggle("is-on", item.dataset.mode === mode);
+  });
+  viewport.setFlags({ categories: { [cat]: mode } });
+}
+
 function updateHistoryButtons() {
   $("undo").disabled = state.history.undo.length === 0;
   $("redo").disabled = state.history.redo.length === 0;
 }
 
 function renderOutliner() {
+  renderFilters();
   const list = $("outliner");
   list.replaceChildren();
   if (!state.view) {
@@ -730,6 +785,44 @@ function actorRow(actor) {
   return button;
 }
 
+function renderFilters() {
+  const host = $("outliner-filters");
+  if (!host) return;
+  host.replaceChildren();
+  if (!state.view) return;
+  const volumes = document.createElement("button");
+  volumes.type = "button";
+  volumes.className = state.hideVolumes ? "is-off" : "";
+  volumes.textContent = "Volumes";
+  volumes.title = state.hideVolumes ? "Show volume outlines" : "Hide every volume outline";
+  volumes.addEventListener("click", () => {
+    state.hideVolumes = !state.hideVolumes;
+    viewport.setFlags({ volumes: state.hideVolumes });
+    renderOutliner();
+  });
+  host.append(volumes);
+  const present = new Set(state.view.actors.map((actor) => actor.category));
+  for (const [id, label] of CATEGORY_FILTERS) {
+    if (!present.has(id) && state.categories[id] !== "hide") continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = state.categories[id] === "hide" ? "is-off" : "";
+    button.textContent = label;
+    const hidden = state.categories[id] === "hide";
+    button.title = hidden ? `Show ${label}` : `Hide ${label}`;
+    button.addEventListener("click", () => {
+      if (!state.categoryMemory) state.categoryMemory = {};
+      if (hidden) setCategory(id, state.categoryMemory[id] || "show");
+      else {
+        state.categoryMemory[id] = state.categories[id] || "show";
+        setCategory(id, "hide");
+      }
+      renderOutliner();
+    });
+    host.append(button);
+  }
+}
+
 function renderProps() {
   const panel = $("props-panel");
   panel.replaceChildren();
@@ -760,11 +853,7 @@ function renderProps() {
   }
   head.append(title, gyaml, hash, meta);
   panel.append(head);
-  if (actor.status === "recipe") {
-    panel.append(recipeNote(actor));
-    panel.append(modelBlock(actor));
-    return;
-  }
+  if (actor.status === "recipe") panel.append(recipeNote(actor));
   panel.append(modelBlock(actor));
 
   if (!actor.id || actor.status === "locked") return;
@@ -775,13 +864,22 @@ function renderProps() {
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  actions.append(
-    action("Duplicate", () => edit({ command: "duplicate", id: actor.id })),
-    action(actor.status === "hidden" ? "Show" : "Hide", () => edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: actor.id })),
-    action("Delete", () => edit({ command: "remove", id: actor.id })),
-    action("Change actor", () => openAdd("replace")),
-  );
-  if (actor.status !== "vanilla") actions.append(action("Revert", () => edit({ command: "revert", id: actor.id })));
+  if (actor.status === "recipe") {
+    actions.append(
+      action("Duplicate", () => edit({ command: "duplicate", id: actor.id })),
+      action("Hide", () => removeRecipe(actor)),
+      action("Delete", () => removeRecipe(actor)),
+      action("Revert", () => edit({ command: "revert", id: actor.id })),
+    );
+  } else {
+    actions.append(
+      action("Duplicate", () => edit({ command: "duplicate", id: actor.id })),
+      action(actor.status === "hidden" ? "Show" : "Hide", () => edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: actor.id })),
+      action("Delete", () => edit({ command: "remove", id: actor.id })),
+      action("Change actor", () => openAdd("replace")),
+    );
+    if (actor.status !== "vanilla") actions.append(action("Revert", () => edit({ command: "revert", id: actor.id })));
+  }
   panel.append(actions);
 
   const nameField = document.createElement("div");
@@ -827,12 +925,14 @@ function recipeNote(actor) {
   if (actor.recipe && actor.recipe.flag) {
     const flag = document.createElement("p");
     flag.className = "muted";
-    flag.textContent = `Present while ${actor.recipe.flag} is set. The build places this actor. The banc file is unchanged.`;
+    flag.textContent = `Present while ${actor.recipe.flag} is set. Edits are written to the recipe file. The vanilla banc stays as it is until you build.`;
+    wrap.append(flag);
+  } else {
+    const flag = document.createElement("p");
+    flag.className = "muted";
+    flag.textContent = "Edits are written to the recipe file. The vanilla banc stays as it is until you build.";
     wrap.append(flag);
   }
-  const where = document.createElement("p");
-  where.textContent = `Position ${actor.translate.map((value) => formatNum(value)).join(", ")}`;
-  wrap.append(where);
   return wrap;
 }
 

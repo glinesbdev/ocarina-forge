@@ -47,6 +47,8 @@ class DisplayStone:
     rotate: tuple[float, float, float] | None
     vanilla_entry: int
     source: str
+    scale: tuple[float, float, float] | None = None
+    params: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -76,18 +78,23 @@ def load_stones(path: Path | None = None) -> StonePlacement:
     for index, row in enumerate(rows, start=1):
         if not isinstance(row, dict):
             raise ModError(f"{path.name}: stone {index} must be a mapping")
-        extra = set(row) - {"gyaml", "name", "banc", "translate", "y_offset", "rotate", "vanilla_entry"}
+        extra = set(row) - {"gyaml", "name", "banc", "translate", "y_offset", "rotate", "vanilla_entry", "scale", "params"}
         if extra:
             raise ModError(f"{path.name}: stone {index} has unknown keys: {', '.join(sorted(extra))}")
         gyaml = _line(row.get("gyaml"), path.name, index, "gyaml")
-        if gyaml in seen:
-            raise ModError(f"{path.name}: {gyaml} is listed twice")
-        seen.add(gyaml)
+        name = _line(row.get("name"), path.name, index, "name")
+        if name in seen:
+            raise ModError(f"{path.name}: {name} is listed twice")
+        seen.add(name)
         banc = _rel_path(row.get("banc"), path, index, "banc", suffix=".byml.zs")
         if not banc.endswith("_Static.bcett.byml.zs"):
             raise ModError(f"{path.name}: stone {index} banc must be a Static placement")
         translate = _vec(row.get("translate"), path.name, index, "translate")
         rotate = _vec(row.get("rotate"), path.name, index, "rotate") if "rotate" in row else None
+        scale = _vec(row.get("scale"), path.name, index, "scale") if "scale" in row else None
+        params = row.get("params")
+        if params is not None and not isinstance(params, dict):
+            raise ModError(f"{path.name}: stone {index} params must be a mapping")
         offset = row.get("y_offset", 0)
         if isinstance(offset, bool) or not isinstance(offset, (int, float)):
             raise ModError(f"{path.name}: stone {index} y_offset must be a number")
@@ -97,13 +104,15 @@ def load_stones(path: Path | None = None) -> StonePlacement:
         stones.append(
             DisplayStone(
                 gyaml=gyaml,
-                name=_line(row.get("name"), path.name, index, "name"),
+                name=name,
                 banc=banc,
                 translate=translate,
                 y_offset=float(offset),
                 rotate=rotate,
                 vanilla_entry=entry,
                 source=path.name,
+                scale=scale,
+                params=dict(params) if params else None,
             )
         )
     return StonePlacement(flag=TITLE_EVENT, template=template, stones=tuple(stones), source=path.name)
@@ -149,6 +158,8 @@ def place_stones(
                 f"{stone.banc}: already has {stone.name}. Build from a vanilla placement."
             )
         placed, dropped = _display_actor(source, stone, source_hashes, byml)
+        if isinstance(placed.get("Hash"), int):
+            source_hashes.add(int(placed["Hash"]))
         _require_dependencies(placed, romfs, stone.gyaml)
         dest_actors.append(placed)
         y = stone.translate[1] + stone.y_offset
@@ -242,6 +253,8 @@ def _altar(byml, gyaml: str, name: str, hash_value, door) -> dict:
 
 def _display_actor(source: dict, stone: DisplayStone, source_hashes: set[int], byml) -> tuple[dict, list[str]]:
     actor = copy.deepcopy(source)
+    if stone.params:
+        _merge_params(actor, stone.params)
     dropped: list[str] = []
     if "Links" in actor:
         dropped.append("Links")
@@ -258,6 +271,8 @@ def _display_actor(source: dict, stone: DisplayStone, source_hashes: set[int], b
     actor["Translate"] = [float(x), float(y + stone.y_offset), float(z)]
     if stone.rotate is not None:
         actor["Rotate"] = [float(part) for part in stone.rotate]
+    if stone.scale is not None:
+        actor["Scale"] = [float(part) for part in stone.scale]
     phive = actor.get("Phive")
     if not isinstance(phive, dict):
         phive = {}
@@ -270,6 +285,16 @@ def _display_actor(source: dict, stone: DisplayStone, source_hashes: set[int], b
     actor["Presence"] = {"GameDataName": TITLE_EVENT, "IsInverted": False, "IsLazy": False}
     _retarget_hashes(actor, old_hash, new_hash, others, dropped)
     return actor, dropped
+
+
+def _merge_params(actor: dict, params: dict) -> None:
+    for key, value in params.items():
+        if key in {"Hash", "SRTHash", "Gyaml"}:
+            continue
+        if isinstance(value, dict) and isinstance(actor.get(key), dict):
+            _merge_params(actor[key], value)
+        else:
+            actor[key] = copy.deepcopy(value)
 
 
 def _retarget_hashes(node: object, old: int, new: int, others: set[int], dropped: list[str], key: str = "") -> None:

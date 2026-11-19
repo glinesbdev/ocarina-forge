@@ -24,7 +24,7 @@ import threading
 from pathlib import Path
 
 from bancwright.errors import BancError
-from bancwright.formats.bfres import FresError, parse
+from bancwright.formats.bfres import FresError, base_color_name, parse
 from bancwright.formats.bntx import BntxError, textures as read_bntx
 from bancwright.formats.byml import loads
 from bancwright.formats.gltf import Primitive, png_rgba, to_glb
@@ -34,9 +34,10 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-2\0"
+_CACHE_VERSION = b"models-3\0"
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
+_TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
 
 _cache_dir: Path | None = None
 
@@ -121,6 +122,7 @@ def _box(gyaml: str, reason: str) -> dict:
         "bounds": None,
         "url": None,
         "digest": "",
+        "textureLog": [],
     }
 
 
@@ -143,7 +145,7 @@ def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str]) -> dic
         if not first:
             first = source
         try:
-            digest, info = _convert_cached(blob, dump)
+            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}")
         except (FresError, BntxError, ValueError, struct.error, IndexError, OSError) as exc:
             errors.append(f"{source}: {exc}")
             continue
@@ -158,6 +160,7 @@ def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str]) -> dic
             "bounds": info["bounds"],
             "url": url,
             "digest": digest,
+            "textureLog": info.get("textureLog") or [],
         }
     reason = errors[0] if len(errors) == 1 else " ".join(errors[:3])
     result = _box(label, reason or _missing(label, tried))
@@ -189,11 +192,12 @@ def _cached_glb(digest: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def _convert_cached(blob: bytes, dump) -> tuple[str, dict]:
+def _convert_cached(blob: bytes, dump, hint: str = "") -> tuple[str, dict]:
     if blob[:4] in (b"MCPK", b"FMSH"):
         raise FresError("this is a mesh-codec .bfres.mc stream, which this viewer does not decode")
     models = parse(blob)
-    textures = _texture_payloads(dump, models)
+    _fill_texture_names(models)
+    textures, log = _texture_payloads(dump, models, hint)
     digest = hashlib.sha256(_CACHE_VERSION + blob + _texture_key(textures)).hexdigest()
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"
@@ -201,7 +205,7 @@ def _convert_cached(blob: bytes, dump) -> tuple[str, dict]:
     with _LOCK:
         if glb_path.is_file() and meta_path.is_file():
             return digest, json.loads(meta_path.read_text(encoding="utf-8"))
-    glb, info = _assemble(models, textures)
+    glb, info = _assemble(models, textures, log)
     encoded = json.dumps(info)
     with _LOCK:
         if not (glb_path.is_file() and meta_path.is_file()):
@@ -215,20 +219,51 @@ def _texture_key(textures: list[tuple[str, str, bytes]]) -> bytes:
     return b"".join(name.encode("utf-8", "replace") + b"\0" + blob for name, _path, blob in textures)
 
 
-def _assemble(models, textures: list[tuple[str, str, bytes]]) -> tuple[bytes, dict]:
+def _assemble(models, textures: list[tuple[str, str, bytes]], log: list[dict] | None = None) -> tuple[bytes, dict]:
+    log = log if log is not None else []
+    by_wanted = {entry["wanted"]: entry for entry in log}
     external: dict[str, object] = {}
-    for name, _relative, blob in textures:
+    for name, relative, blob in textures:
+        entry = by_wanted.get(name)
         if not blob.startswith(b"BNTX"):
+            if entry is not None:
+                entry["error"] = f"{relative} is not a BNTX"
             continue
         try:
             decoded = list(read_bntx(blob))
-        except BntxError:
+        except BntxError as exc:
+            if entry is not None:
+                entry["found"] = relative
+                entry["error"] = str(exc)
             continue
         if not decoded:
+            if entry is not None:
+                entry["found"] = relative
+                entry["error"] = "BNTX has no images"
             continue
-        chosen = next((image for image in decoded if image.name == name or image.name.lower() == name.lower()), decoded[0])
+        chosen = next(
+            (image for image in decoded if image.name == name or image.name.lower() == name.lower()),
+            None,
+        )
+        if chosen is None:
+            chosen = next((image for image in decoded if "alb" in (image.name or "").lower()), decoded[0])
         external[name] = chosen
-        external.setdefault(chosen.name, chosen)
+        for image in decoded:
+            if image.name:
+                external.setdefault(image.name, image)
+                external.setdefault(image.name.lower(), image)
+        if entry is not None:
+            entry["found"] = relative
+            entry["decoded"] = True
+            entry["format"] = chosen.codec or f"0x{chosen.fmt:04X}"
+            entry["size"] = f"{chosen.width}x{chosen.height}"
+            entry["swizzle"] = chosen.swizzle
+            entry["image"] = chosen.name
+            entry["images"] = len(decoded)
+            if chosen.name and chosen.name != name and chosen.name.lower() != name.lower():
+                entry["error"] = f"used image {chosen.name} from a {len(decoded)}-image bundle"
+            elif chosen.note:
+                entry["error"] = chosen.note
     primitives: list[Primitive] = []
     notes: list[str] = []
     triangles = 0
@@ -239,7 +274,7 @@ def _assemble(models, textures: list[tuple[str, str, bytes]]) -> tuple[bytes, di
         notes.extend(model.notes)
         png_for: dict[int, bytes] = {}
         for part in model.parts:
-            image = model.images.get(part.texture) or external.get(part.texture)
+            image = model.images.get(part.texture) or external.get(part.texture) or external.get((part.texture or "").lower())
             if image is None and len(model.images) == 1 and not external:
                 image = next(iter(model.images.values()))
             png = None
@@ -254,9 +289,9 @@ def _assemble(models, textures: list[tuple[str, str, bytes]]) -> tuple[bytes, di
                     if image.note:
                         notes.append(image.note)
             elif part.texture:
-                notes.append(
-                    f"Base color “{part.texture}” was not in the bfres or in Tex/, so this mesh is untextured."
-                )
+                detail = by_wanted.get(part.texture) or {}
+                why = detail.get("error") or "not in the bfres or in Tex/"
+                notes.append(f"Base color “{part.texture}” {why}, so this mesh is untextured.")
             elif not model.images and not external:
                 notes.append("No base-color texture was embedded in this bfres or found in Tex/, so the mesh is untextured.")
             primitives.append(Primitive(part.positions, part.indices, part.uvs, png=png))
@@ -272,31 +307,175 @@ def _assemble(models, textures: list[tuple[str, str, bytes]]) -> tuple[bytes, di
             "max": [max(point[axis] for point in positions) for axis in range(3)],
         }
     unique_notes = list(dict.fromkeys(notes))
-    return glb, {"triangles": triangles, "textures": texture_count, "bounds": bounds, "notes": unique_notes}
+    return glb, {
+        "triangles": triangles,
+        "textures": texture_count,
+        "bounds": bounds,
+        "notes": unique_notes,
+        "textureLog": log,
+    }
 
 
-def _texture_payloads(dump, models) -> list[tuple[str, str, bytes]]:
+def _fill_texture_names(models) -> None:
+    for model in models:
+        extras = [name for name in model.extra_textures if name]
+        if not extras:
+            continue
+        chosen = base_color_name(extras)
+        for part in model.parts:
+            if not part.texture:
+                part.texture = chosen
+
+
+def _texture_payloads(dump, models, hint: str = "") -> tuple[list[tuple[str, str, bytes]], list[dict]]:
     if dump is None:
-        return []
+        return [], []
+    hints = _hint_tokens(hint)
     found: list[tuple[str, str, bytes]] = []
+    log: list[dict] = []
     seen: set[str] = set()
     for model in models:
         for part in model.parts:
             name = part.texture
-            if not name or name in model.images or name in seen:
+            if not name or name in seen:
+                continue
+            if name in model.images:
+                seen.add(name)
+                image = model.images[name]
+                log.append(
+                    {
+                        "wanted": name,
+                        "tried": ["embedded in the bfres"],
+                        "found": "embedded",
+                        "decoded": True,
+                        "format": image.codec or f"0x{image.fmt:04X}",
+                        "size": f"{image.width}x{image.height}",
+                        "swizzle": image.swizzle,
+                        "image": image.name,
+                        "images": 1,
+                        "error": image.note,
+                    }
+                )
                 continue
             seen.add(name)
-            for relative in _tex_candidates(name):
-                if not (dump.romfs / relative).is_file():
-                    continue
-                try:
-                    blob, _dict_id = dump.read_file(relative)
-                except BancError:
-                    continue
-                if blob[:4] == b"BNTX":
-                    found.append((name, relative, blob))
-                    break
-    return found
+            relative, tried = _resolve_tex(dump, name, hints)
+            entry = {
+                "wanted": name,
+                "tried": tried,
+                "found": relative,
+                "decoded": False,
+                "format": "",
+                "size": "",
+                "swizzle": "",
+                "image": "",
+                "images": 0,
+                "error": "" if relative else "no Tex file matched",
+            }
+            log.append(entry)
+            if not relative:
+                continue
+            try:
+                blob, _dict_id = dump.read_file(relative)
+            except BancError as exc:
+                entry["error"] = exc.message
+                continue
+            if blob[:4] != b"BNTX":
+                entry["error"] = f"{relative} is not a BNTX"
+                continue
+            found.append((name, relative, blob))
+    return found, log
+
+
+def _hint_tokens(hint: str) -> list[str]:
+    tokens: list[str] = []
+    for piece in hint.replace("\\", "/").split():
+        name = piece.rsplit("/", 1)[-1]
+        for suffix in (".bfres.zs", ".bfres.mc", ".bfres", ".pack.zs", ".bcett.byml.zs"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        for token in name.split("."):
+            if token and token not in tokens and token not in ("Model", "Tex"):
+                tokens.append(token)
+    return tokens
+
+
+def _stem(name: str) -> str:
+    text = name.strip().replace("\\", "/").lstrip("/")
+    if text.startswith("Work/"):
+        text = text[5:]
+    stem = text.rsplit("/", 1)[-1]
+    for suffix in (".bntx.zs", ".bntx"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return stem
+
+
+def _tex_index(dump) -> dict[str, str]:
+    folder = dump.romfs / "Tex"
+    if not folder.is_dir():
+        return {}
+    try:
+        stamp = folder.stat().st_mtime_ns
+    except OSError:
+        return {}
+    key = str(folder)
+    cached = _TEX_INDEX.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    index: dict[str, str] = {}
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return {}
+    for path in entries:
+        if not path.is_file():
+            continue
+        index.setdefault(_stem(path.name).lower(), f"Tex/{path.name}")
+    _TEX_INDEX[key] = (stamp, index)
+    return index
+
+
+def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
+    tried: list[str] = []
+    for relative in _tex_candidates(name):
+        tried.append(relative)
+        if (dump.romfs / relative).is_file():
+            return relative, tried
+    index = _tex_index(dump)
+    stem = _stem(name).lower()
+    keys = [stem]
+    if stem.endswith("_alb"):
+        keys.append(stem[: -len("_alb")])
+    elif stem.endswith("_albedo"):
+        keys.append(stem[: -len("_albedo")])
+    else:
+        keys.append(f"{stem}_alb")
+    for key in keys:
+        path = index.get(key)
+        if path and path not in tried:
+            tried.append(path)
+            if (dump.romfs / path).is_file():
+                return path, tried
+    for hint in hints:
+        key = hint.lower()
+        if len(key) < 4:
+            continue
+        path = index.get(key)
+        if path and path not in tried:
+            tried.append(path)
+            if (dump.romfs / path).is_file():
+                return path, tried
+        hits = [item for stem_key, item in index.items() if key in stem_key and "alb" in stem_key]
+        hits = list(dict.fromkeys(hits))
+        hits.sort(key=lambda item: (0 if item.lower().endswith(".bntx.zs") else 1, len(item)))
+        for path in hits[:4]:
+            if path not in tried:
+                tried.append(path)
+        if hits and (dump.romfs / hits[0]).is_file():
+            return hits[0], tried
+    return "", tried
 
 
 def _tex_candidates(name: str) -> list[str]:

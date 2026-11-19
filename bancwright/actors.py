@@ -46,23 +46,30 @@ def category(gyaml: str) -> str:
     return "other"
 
 
-def is_volume(gyaml: str, scale: list[float] | None = None) -> bool:
-    """Large areas, triggers, and system actors are volumes, not solid props.
+# Names that are regions, not props. They are drawn as outlines.
+_VOLUME_WORDS = ("area", "volume", "fog", "trigger", "sensor", "collision", "collider", "airwall")
 
-    A land actor whose scale reaches 8 metres on any axis is treated the same
-    way: the sample ground slab, and real terrain slabs, would otherwise win
-    every click that lands inside them.
+
+def is_volume(gyaml: str, scale: list[float] | None = None) -> bool:
+    """Areas, fog, triggers, and other regions are volumes, not solid props.
+
+    Anything whose placeholder box would be 8 metres or more on an axis is
+    treated the same way. A solid box that large hides the meshes inside it.
+    A real mesh still replaces the outline once it loads.
     """
     name = gyaml or ""
     kind = category(name)
     if kind in ("area", "system"):
         return True
-    if "Trigger" in name or name.startswith("AirWall"):
+    lowered = name.lower()
+    if any(word in lowered for word in _VOLUME_WORDS):
         return True
     axes = scale or [1.0, 1.0, 1.0]
-    if kind == "land" and max(abs(float(axis)) for axis in axes[:3]) >= 8:
-        return True
-    return False
+    try:
+        reach = max(abs(float(axis)) for axis in list(axes)[:3])
+    except (TypeError, ValueError):
+        reach = 1.0
+    return reach >= 8
 
 
 def format_hash(value: int) -> str:

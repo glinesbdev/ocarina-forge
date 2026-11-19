@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 bancwright.local.yaml
 projects/
+.bancwright/
 fixtures/dump/
 frontend/node_modules/
 frontend/dist/

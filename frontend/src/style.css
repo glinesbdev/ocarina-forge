@@ -261,6 +261,9 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; min-height: 34px; }
 .hint { color: var(--faint); font-size: 12px; margin-left: auto; }
 .cat-toggle span { padding: 0 8px; color: var(--muted); font-size: 12px; align-self: center; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+.filters button { background: #243029; color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; min-height: 28px; font-size: 12px; }
+.filters button.is-off { opacity: 0.45; text-decoration: line-through; }
 .model-progress {
   position: absolute;
   left: 12px;

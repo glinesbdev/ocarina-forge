@@ -260,9 +260,20 @@ def edit_scene(body: dict):
         raise BancError("Which scene? Open one from the list.", "edit")
     dump = _open_dump()
     project = _open_project()
+    command = body.get("command") or {}
+    ident = str(command.get("id") or "")
+    if ident.startswith("recipe:") or command.get("command") in ("recipe_restore",):
+        from bancwright.recipes import apply_recipe_command
+
+        focus = apply_recipe_command(project, banc, command)
+        document, _dict_id, _raw = dump.read_byml(banc)
+        view = scene_view(document, project.load_scene_diff(banc))
+        view["banc"] = banc
+        view["focus"] = focus
+        return _attach_recipes(view, banc)
     document, _dict_id, _raw = dump.read_byml(banc)
     diff = project.load_scene_diff(banc)
-    updated, focus = apply_command(document, diff, body.get("command") or {})
+    updated, focus = apply_command(document, diff, command)
     project.save_scene_diff(updated)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
@@ -280,6 +291,22 @@ def put_diff(body: dict):
     document, _dict_id, _raw = dump.read_byml(banc)
     updated = replace_diff(document, banc, (body.get("actors") or {}))
     project.save_scene_diff(updated)
+    view = scene_view(document, project.load_scene_diff(banc))
+    view["banc"] = banc
+    return _attach_recipes(view, banc)
+
+
+@app.put("/api/scene/recipes")
+def put_recipes(body: dict):
+    banc = body.get("banc")
+    if not banc:
+        raise BancError("Which scene?", "edit")
+    dump = _open_dump()
+    project = _open_project()
+    from bancwright.recipes import replace_recipes
+
+    replace_recipes(project, banc, body.get("recipes") or [])
+    document, _dict_id, _raw = dump.read_byml(banc)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
     return _attach_recipes(view, banc)

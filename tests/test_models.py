@@ -121,7 +121,12 @@ def test_volume_flags():
     assert ground["volume"] is True
     pot = view_actor({"Gyaml": "Obj_Pot", "Hash": 4, "Translate": [0, 0, 0]}, "vanilla")
     assert pot["volume"] is False
+    fog = view_actor({"Gyaml": "VolumeFogArea", "Hash": 5, "Translate": [0, 0, 0], "Scale": [100, 40, 100]}, "vanilla")
+    assert fog["volume"] is True
+    huge = view_actor({"Gyaml": "Obj_Pot", "Hash": 6, "Translate": [0, 0, 0], "Scale": [30, 1, 1]}, "vanilla")
+    assert huge["volume"] is True
     assert is_volume("Obj_TriggerBox", [1, 1, 1]) is True
+    assert is_volume("SensorTag", [1, 1, 1]) is True
 
 
 def test_modelinfo_names_the_real_bfres_and_tex(tmp_path, monkeypatch):
@@ -231,6 +236,114 @@ def test_spirit_stone_is_a_read_only_ghost():
     assert abs(fire[0]["rotate"][1] + 1.8) < 1e-6
 
 
+def test_version_10_still_reads_the_albedo_name():
+    import struct
+
+    rgba = bytes([255, 0, 0, 255]) * 4
+    blob = bytearray(
+        sample_bfres(
+            "Tree",
+            [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+            [0, 1, 2],
+            [(0, 0), (1, 0), (0, 1)],
+            rgba,
+            2,
+            2,
+            texture_name="DekuTree_Alb",
+            embed_texture=False,
+        )
+    )
+    struct.pack_into("<I", blob, 0x08, 0x000A0000)
+    model = parse(bytes(blob))[0]
+    assert model.parts[0].texture == "DekuTree_Alb"
+
+
+def test_alb_suffix_and_bundle_resolve(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bntx import write_rgba
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.sarc import pack
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    gyaml = "Obj_Tree"
+    info = dumps({"FmdbName": gyaml, "ModelProjectName": "Obj_Tree"})
+    archive = pack(
+        {
+            f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps({"Name": gyaml}),
+            f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info,
+        }
+    )
+    dicts = dump.dicts()
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dicts, level=3))
+    rgba = bytes([10, 140, 40, 255]) * 4
+    mesh = sample_bfres(
+        gyaml,
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        rgba,
+        2,
+        2,
+        texture_name="Bark",
+        embed_texture=False,
+    )
+    (dump.romfs / "Model" / "Obj_Tree.Obj_Tree.bfres.zs").write_bytes(compress(mesh, 1, dicts, level=3))
+    image = write_rgba("Bark_Alb", 2, 2, rgba, swizzled=True)
+    (dump.romfs / "Tex" / "Bark_Alb.bntx.zs").write_bytes(compress(image, 1, dicts, level=3))
+    resolved = describe_actor(dump, gyaml)
+    assert resolved["textures"] == 1
+    log = resolved["textureLog"]
+    assert log[0]["wanted"] == "Bark"
+    assert log[0]["decoded"] is True
+    assert log[0]["found"].endswith("Bark_Alb.bntx.zs")
+    assert "deswizzled" in (log[0]["swizzle"] or "")
+
+
+def test_recipe_edits_round_trip_and_keep_comments(tmp_path):
+    import shutil
+
+    from bancwright.changes import scene_changes
+    from bancwright.dump import Dump
+    from bancwright.fixtures import build_fixture
+    from bancwright.project import Project
+    from bancwright.recipes import apply_recipe_command, recipe_actors
+
+    source = Path(__file__).resolve().parents[1] / "examples" / "after-the-ocarina"
+    root = tmp_path / "project"
+    shutil.copytree(source, root)
+    project = Project(root)
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    ident = recipe_actors(project, KOKIRI_STATIC)[0]["id"]
+    focus = apply_recipe_command(
+        project,
+        KOKIRI_STATIC,
+        {"command": "transform", "id": ident, "translate": [90.0, 121.0, -27.0], "rotate": [0.0, 0.5, 0.0], "scale": [1.0, 1.0, 1.0]},
+    )
+    assert focus == ident
+    text = (root / "scenes" / "m6-stones.yaml").read_text(encoding="utf-8")
+    assert "In front of the Deku Tree" in text
+    assert "Display Spiritual Stones" in text
+    assert "90.0" in text or "90" in text
+    moved = recipe_actors(project, KOKIRI_STATIC)[0]
+    assert moved["translate"][0] == 90.0
+    assert abs(moved["translate"][1] - 121.0) < 1e-6
+    fire = recipe_actors(project, "Banc/GoronCity/GoronCity_Child_Static.bcett.byml.zs")[0]
+    assert abs(fire["rotate"][1] + 1.8) < 1e-6
+    report = scene_changes(dump, project, KOKIRI_STATIC)
+    moved_rows = [entry for group in report["groups"] for entry in group["entries"] if entry["kind"] == "moved" and entry["source"] == "recipe"]
+    assert moved_rows and moved_rows[0]["revertable"] is True
+    apply_recipe_command(project, KOKIRI_STATIC, {"command": "revert_part", "id": ident, "part": "translate", "path": ""})
+    restored = recipe_actors(project, KOKIRI_STATIC)[0]
+    assert restored["translate"] == [84.0, 120.3, -27.0]
+    dup = apply_recipe_command(project, KOKIRI_STATIC, {"command": "duplicate", "id": ident})
+    names = [item["name"] for item in recipe_actors(project, KOKIRI_STATIC)]
+    assert "AtO_SpiritStone_Forest_2" in names
+    apply_recipe_command(project, KOKIRI_STATIC, {"command": "remove", "id": dup})
+    assert [item["name"] for item in recipe_actors(project, KOKIRI_STATIC)] == ["AtO_SpiritStone_Forest"]
+    assert "In front of the Deku Tree" in (root / "scenes" / "m6-stones.yaml").read_text(encoding="utf-8")
+
+
 def test_check_models_script(tmp_path, monkeypatch):
     import subprocess
     import sys
@@ -247,5 +360,7 @@ def test_check_models_script(tmp_path, monkeypatch):
     assert result.returncode == 0, result.stderr
     assert "Model/KokiriForest_01.KokiriForest_01.bfres.zs" in result.stdout
     assert "Npc_Kokiri_F_01" in result.stdout
+    assert "texture " in result.stdout
+    assert "decoded" in result.stdout
     assert "Obj_Tree" in result.stdout
     assert "mesh" in result.stdout

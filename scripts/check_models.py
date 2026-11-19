@@ -92,6 +92,13 @@ def main(argv: list[str]) -> int:
         print(f"  {gyaml} x{count}  {info.get('source') or ''}  {info.get('triangles') or 0} tris  {texture}")
         if info.get("reason"):
             print(f"    {info['reason']}")
+        _print_textures(info.get("textureLog") or [])
+    print()
+    _print_textures(terrain.get("textureLog") or [], "terrain")
+    missed = _missed_names(rows, terrain)
+    if missed:
+        print()
+        _print_tex_sample(dump, missed)
     return 0
 
 
@@ -101,6 +108,67 @@ def _default_banc(dump: Dump) -> str:
         if scene["path"] == KOKIRI:
             return KOKIRI
     return scenes[0]["path"] if scenes else ""
+
+
+def _print_textures(log: list, label: str = "") -> None:
+    prefix = f"{label} " if label else "    "
+    for entry in log:
+        wanted = entry.get("wanted") or "(no name)"
+        tried = ", ".join(entry.get("tried") or []) or "nothing"
+        found = entry.get("found") or "not found"
+        if entry.get("decoded"):
+            detail = f"{entry.get('format') or '?'} {entry.get('size') or ''} {entry.get('swizzle') or ''}".strip()
+            image = entry.get("image") or ""
+            extra = f" image {image}" if image and image != wanted else ""
+            count = entry.get("images") or 0
+            bundle = f" ({count} in the bntx)" if count > 1 else ""
+            print(f"{prefix}texture {wanted}")
+            print(f"{prefix}  tried {tried}")
+            print(f"{prefix}  found {found}{bundle}{extra}  decoded {detail}")
+        else:
+            print(f"{prefix}texture {wanted}")
+            print(f"{prefix}  tried {tried}")
+            print(f"{prefix}  found {found}  {entry.get('error') or 'not decoded'}")
+        if entry.get("decoded") and entry.get("error"):
+            print(f"{prefix}  note {entry['error']}")
+
+
+def _missed_names(rows, terrain: dict) -> list[str]:
+    names = []
+    for _gyaml, _count, info in rows:
+        for entry in info.get("textureLog") or []:
+            if not entry.get("decoded") and entry.get("wanted"):
+                names.append(entry["wanted"])
+    for entry in terrain.get("textureLog") or []:
+        if not entry.get("decoded") and entry.get("wanted"):
+            names.append(entry["wanted"])
+    if any(row[2].get("status") == "mesh" and not row[2].get("textures") and not (row[2].get("textureLog")) for row in rows):
+        names.append(rows[0][0] if rows else "")
+    return [name for name in dict.fromkeys(names) if name]
+
+
+def _print_tex_sample(dump: Dump, needles: list[str]) -> None:
+    folder = dump.romfs / "Tex"
+    if not folder.is_dir():
+        print("Tex/ is not in this dump.")
+        return
+    names = sorted(path.name for path in folder.iterdir() if path.is_file())
+    print(f"Tex/ has {len(names)} files. Closest names:")
+    shown: list[str] = []
+    for needle in needles:
+        low = needle.lower()
+        for name in names:
+            if low in name.lower() and name not in shown:
+                shown.append(name)
+            if len(shown) >= 16:
+                break
+        if len(shown) >= 16:
+            break
+    if not shown:
+        shown = names[:12]
+        print("  (no filename contained the texture name; first files in Tex/)")
+    for name in shown:
+        print(f"  Tex/{name}")
 
 
 def _print_terrain(info: dict) -> None:

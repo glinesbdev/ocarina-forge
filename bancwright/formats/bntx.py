@@ -78,6 +78,9 @@ class Texture:
     rgba: bytes
     fmt: int
     note: str = ""
+    codec: str = ""
+    tile: int = 0
+    swizzle: str = ""
 
 
 def _u16(data: bytes, at: int) -> int:
@@ -150,7 +153,18 @@ def _texture(data: bytes, at: int) -> Texture:
     linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw)
     rgba, note = _decode(codec, width, height, linear, fmt)
     rgba = _channels(rgba, width, height, channels)
-    return Texture(name=name, width=width, height=height, rgba=rgba, fmt=fmt, note=note)
+    swizzle = "linear" if tile == 1 else f"deswizzled tile {tile}"
+    return Texture(
+        name=name,
+        width=width,
+        height=height,
+        rgba=rgba,
+        fmt=fmt,
+        note=note,
+        codec=codec,
+        tile=tile,
+        swizzle=swizzle,
+    )
 
 
 def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tuple[bytes, str]:

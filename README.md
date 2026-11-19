@@ -2,7 +2,7 @@
 
 Bancwright is a local workbench for placing actors in the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
 
-This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Actor meshes come from `Model/<Project>.<Fmdb>.bfres.zs` and base colors from `Tex/`, loaded at runtime (bind pose, no animation) and cached under `~/.cache/bancwright/models`. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches, and a recipe that places an actor (the Spiritual Stones) is drawn as a read-only ghost. The build still produces those files. Dialog editing, event-flow graphs, and a desktop package are later stages.
+This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Actor meshes come from `Model/<Project>.<Fmdb>.bfres.zs` and base colors from `Tex/`, loaded at runtime (bind pose, no animation) and cached under `~/.cache/bancwright/models`. Areas and other volumes are outlines, not solid boxes. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches, and a recipe that places an actor (the Spiritual Stones) can be moved like any actor, with the new transform written back to the recipe YAML. The build still produces those files. Dialog editing, event-flow graphs, and a desktop package are later stages.
 
 Bancwright reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
 

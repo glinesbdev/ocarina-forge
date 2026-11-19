@@ -35,6 +35,7 @@ export const api = {
   projectChanges: () => request("/api/changes"),
   edit: (banc, command) => request("/api/scene/edit", { method: "POST", body: JSON.stringify({ banc, command }) }),
   putDiff: (banc, actors) => request("/api/scene/diff", { method: "PUT", body: JSON.stringify({ banc, actors }) }),
+  putRecipes: (banc, recipes) => request("/api/scene/recipes", { method: "PUT", body: JSON.stringify({ banc, recipes }) }),
   actors: (q) => request(`/api/actors?q=${encodeURIComponent(q)}`),
   model: (gyaml) => request(`/api/models/${encodeURIComponent(gyaml)}`),
   terrain: (banc) => request(`/api/terrain?banc=${encodeURIComponent(banc)}`),

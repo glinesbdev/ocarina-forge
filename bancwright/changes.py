@@ -79,6 +79,11 @@ def _build_report(dump, project) -> dict:
             for banc in own or file_bancs:
                 by_banc.setdefault(banc, []).append(_bind_patch(entry, banc, index))
 
+    from bancwright.recipes import recipe_change_entries
+
+    for banc, entry in recipe_change_entries(project):
+        by_banc.setdefault(banc, []).append(entry)
+
     maps = []
     for banc in sorted(by_banc):
         entries = by_banc[banc]
@@ -535,4 +540,7 @@ def _project_stamp(project) -> tuple:
         count += 1
         digest.update(path.relative_to(project.root).as_posix().encode())
         digest.update(path.read_bytes())
+    baseline = project.root / ".bancwright" / "recipe-baseline.json"
+    if baseline.is_file():
+        digest.update(baseline.read_bytes())
     return (str(project.root), count, digest.hexdigest())

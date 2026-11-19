@@ -15,6 +15,7 @@ Nothing in it comes from a game.
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass, field
 
@@ -59,6 +60,8 @@ class Model:
     parts: list[Part] = field(default_factory=list)
     images: dict[str, Texture] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    # Texture names found in the file but not tied to one shape (string pool).
+    extra_textures: list[str] = field(default_factory=list)
 
 
 def parse(data: bytes) -> list[Model]:
@@ -190,7 +193,10 @@ class _File:
         cursor += 8
         shape_dict = self.u64(cursor)
         cursor += 8
-        if self.major == 9:
+        if self.major >= 9:
+            # Version 9 and later keep an 8-byte reserved slot between the
+            # material array and its dictionary. Reading past it is what
+            # made every material texture name come back empty.
             mat_values = self.u64(cursor)
             cursor += 8
             maybe = self.u64(cursor)
@@ -204,8 +210,6 @@ class _File:
             cursor += 8
             mat_dict = self.u64(cursor)
             cursor += 8
-            if self.major >= 10:
-                cursor += 8
         cursor += 16  # user data
         cursor += 8  # user pointer
         cursor += 6  # vertex, shape, material counts
@@ -216,6 +220,10 @@ class _File:
         end = cursor
         bones = self._bones(skel) if skel else []
         materials = self._materials(mat_values, mat_dict)
+        if not any(materials):
+            scanned = self._scan_fmats()
+            if scanned:
+                materials = scanned
         shape_names = self.dict_keys(shape_dict)
         parts: list[Part] = []
         shape_at = shape_values
@@ -223,7 +231,13 @@ class _File:
             part, shape_at = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
             if part is not None:
                 parts.append(part)
-        model = Model(name or fallback, parts, images, list(getattr(self, "_image_notes", [])))
+        model = Model(
+            name or fallback,
+            parts,
+            images,
+            list(getattr(self, "_image_notes", [])),
+            _texture_strings(self.data),
+        )
         if not parts:
             model.notes.append(f"{model.name or fallback}: no drawable shape")
         return model, end
@@ -267,72 +281,64 @@ class _File:
 
     def _materials(self, values: int, dictionary: int) -> list[list[str]]:
         names = self.dict_keys(dictionary)
+        # Version 9 and later (including Switch 2 files that report a higher
+        # major) keep the texture-name array at a fixed offset. Walking a
+        # guessed version-10 header skips that array and the mesh stays grey.
+        if self.major >= 9 and values and self.data[values : values + 4] == b"FMAT":
+            count = len(names) or 1
+            found = []
+            for index in range(count):
+                at = values + index * 0xA8
+                if at + 0xA8 > len(self.data) or self.data[at : at + 4] != b"FMAT":
+                    break
+                found.append(self._fmat_names(at))
+            if found:
+                return found
         at = values
         found = []
         for _name in names:
             if not at or self.data[at : at + 4] != b"FMAT":
                 found.append([])
                 continue
-            cursor = at + 4
-            if self.major >= 9:
-                cursor += 4
-            else:
-                cursor += 12
-            cursor += 8  # material name
-            if self.major >= 10:
-                texture_at, texture_count, cursor = self._material_v10(cursor)
-            else:
-                texture_at, texture_count, cursor = self._material_v9(cursor)
-            tex_names = []
-            for index in range(texture_count):
-                if texture_at and texture_at + (index + 1) * 8 <= len(self.data):
-                    tex_names.append(self.string(self.u64(texture_at + index * 8)))
-            found.append(tex_names)
-            at = cursor
+            found.append(self._fmat_names(at))
+            at += 0xB8 if self.major < 9 else 0xA8
         return found
 
-    def _material_v9(self, cursor: int) -> tuple[int, int, int]:
-        cursor += 16  # render info
-        cursor += 8  # shader assign
-        cursor += 8  # runtime texture pointers
-        texture_at = self.u64(cursor)
-        cursor += 8
-        cursor += 8  # sampler array
-        cursor += 16  # samplers
-        cursor += 16  # shader params
-        cursor += 8  # param data
-        cursor += 16  # user data
-        cursor += 8  # volatile
-        cursor += 8  # user pointer
-        cursor += 16  # slots
-        if self.major < 9:
-            cursor += 4
-        cursor += 4  # section index and render-info count
-        cursor += 1  # sampler count
-        texture_count = self.data[cursor]
-        cursor += 1
-        cursor += 10  # five uint16 tails
-        if self.major < 9:
-            cursor += 4
-        return texture_at, texture_count, cursor
+    def _fmat_names(self, at: int) -> list[str]:
+        if self.major >= 9:
+            if at + 0x9E > len(self.data):
+                return []
+            texture_at = self.u64(at + 0x30)
+            texture_count = self.data[at + 0x9D]
+        else:
+            if at + 0xAA > len(self.data):
+                return []
+            texture_at = self.u64(at + 0x38)
+            texture_count = self.data[at + 0xA9]
+        if texture_count > 64 or not texture_at:
+            return []
+        names = []
+        for index in range(texture_count):
+            slot = texture_at + index * 8
+            if slot + 8 > len(self.data):
+                break
+            text = self.string(self.u64(slot))
+            if text:
+                names.append(text)
+        return names
 
-    def _material_v10(self, cursor: int) -> tuple[int, int, int]:
-        cursor += 80  # ShaderInfo header
-        cursor += 8  # runtime texture pointers
-        texture_at = self.u64(cursor)
-        cursor += 8
-        cursor += 8  # sampler array
-        cursor += 16  # samplers
-        cursor += 8 * 5  # render-info tables and shader-param offsets
-        cursor += 8  # reserved
-        cursor += 16  # user data
-        cursor += 8 * 4  # volatile, user, sampler slot, texture slot
-        cursor += 2  # section index
-        cursor += 1  # sampler count
-        texture_count = self.data[cursor]
-        cursor += 1
-        cursor += 2 + 2 + 2 + 2 + 4
-        return texture_at, texture_count, cursor
+    def _scan_fmats(self) -> list[list[str]]:
+        found = []
+        start = 0
+        while True:
+            at = self.data.find(b"FMAT", start)
+            if at < 0:
+                break
+            names = self._fmat_names(at)
+            if names:
+                found.append(names)
+            start = at + 4
+        return found
 
     def _shape(self, at: int, name: str, bones, materials: list[list[str]]) -> tuple[Part | None, int]:
         if self.data[at : at + 4] != b"FSHP":
@@ -674,6 +680,21 @@ def _apply(matrix, point) -> tuple[float, float, float]:
 
 _ALBEDO = {"alb", "albedo", "basecolor", "diffuse", "diff"}
 _SKIP = {"nrm", "nml", "normal", "norm", "spm", "spc", "spec", "rgh", "rough", "emm", "emit", "mtl", "orm", "msk", "mask"}
+
+
+_TEXTURE_IN_FILE = re.compile(
+    rb"([A-Za-z][A-Za-z0-9_]{2,80}(?:_Alb|_Albedo|_BaseColor|_Diffuse|_Col)[A-Za-z0-9_]*)\x00"
+)
+
+
+def _texture_strings(data: bytes) -> list[str]:
+    """Names sitting in the string pool when the material table is unreadable."""
+    found = []
+    for match in _TEXTURE_IN_FILE.finditer(data):
+        text = match.group(1).decode("ascii", errors="ignore")
+        if text and text not in found:
+            found.append(text)
+    return found
 
 
 def base_color_name(names: list[str]) -> str:
