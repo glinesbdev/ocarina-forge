@@ -31,7 +31,7 @@ def pow2_round_up(value: int) -> int:
 
 
 def default_block_log2(height: int, block_height: int) -> int:
-    """The block height a texture of this size is usually swizzled with."""
+    """The block height a Switch 1 texture of this size is usually swizzled with."""
     blocks = div_up(max(height, 1), max(block_height, 1))
     height_blocks = pow2_round_up(max(1, blocks // 8))
     if height_blocks > 16:
@@ -39,15 +39,74 @@ def default_block_log2(height: int, block_height: int) -> int:
     return max(0, height_blocks.bit_length() - 1)
 
 
-def block_log2(height: int, pixel_block_height: int, layout: bytes) -> int:
-    """Prefer the log2 stored in the BNTX texture layout when it is in range.
+def surface_bytes(width: int, height: int, block_w: int, block_h: int, bytes_per: int, log2: int) -> int:
+    """Byte size of one mip after the block-linear pitch and GOB padding."""
+    blocks_x = max(1, div_up(width, max(block_w, 1)))
+    blocks_y = max(1, div_up(height, max(block_h, 1)))
+    pitch = round_up(blocks_x * bytes_per, 64)
+    rows = round_up(blocks_y, (1 << max(0, min(log2, 5))) * 8)
+    return pitch * rows
 
-    Byte 4 of the 8-byte layout is that log2 on files this reader writes, and
-    on the textures where the stored value is 0..5. Otherwise the height rule
-    above is what the hardware uses for the base level.
+
+def _stored_log2(layout: bytes) -> int | None:
+    """Block-height log2 from the BRTI layout bytes.
+
+    On these Switch 2 textures the value is the low 3 bits of layout byte 0
+    (BRTI+0x34). Byte 4 is 0xC9 and is not a log2. Files this reader writes
+    still store the log2 at byte 4 and leave byte 0 at 0.
     """
-    if len(layout) >= 5 and layout[4] <= 5:
-        return layout[4]
+    if not layout:
+        return None
+    legacy = layout[4] if len(layout) >= 5 else 0xFF
+    if layout[0] == 0 and legacy <= 5:
+        return legacy
+    low = layout[0] & 7
+    if low <= 5:
+        return low
+    if legacy <= 5:
+        return legacy
+    return None
+
+
+def _log2_matching_mip(width: int, height: int, block_w: int, block_h: int, bytes_per: int, mip_bytes: int) -> int | None:
+    matches = [
+        log2
+        for log2 in range(6)
+        if surface_bytes(width, height, block_w, block_h, bytes_per, log2) == mip_bytes
+    ]
+    return matches[0] if matches else None
+
+
+def block_log2(
+    height: int,
+    pixel_block_height: int,
+    layout: bytes,
+    *,
+    width: int = 0,
+    block_width: int = 1,
+    bytes_per: int = 0,
+    mip_bytes: int = 0,
+) -> int:
+    """Block height for the base mip.
+
+    Prefer layout byte 0. When that value's padded surface does not match the
+    mip-table size, use the log2 that does. Files written here keep the old
+    byte-4 field, and a texture with no usable stored value falls back to the
+    Switch 1 height rule.
+    """
+    stored = _stored_log2(layout)
+    if mip_bytes > 0 and width > 0 and bytes_per > 0:
+        stored_size = (
+            surface_bytes(width, height, block_width, pixel_block_height, bytes_per, stored)
+            if stored is not None
+            else None
+        )
+        if stored is None or stored_size != mip_bytes:
+            derived = _log2_matching_mip(width, height, block_width, pixel_block_height, bytes_per, mip_bytes)
+            if derived is not None:
+                return derived
+    if stored is not None:
+        return stored
     return default_block_log2(height, pixel_block_height)
 
 

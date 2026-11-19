@@ -11,9 +11,10 @@ otherwise the first scene in the dump.
 
 The script prints one block you can paste back: a summary, every actor
 that stayed a box, then every mesh with its source path, triangle count
-and texture count. Under each mesh, one block per material: sampler
-names, the albedo that was used, the Tex path, decode result, and alpha
-mode. The same conversion the editor uses, including Tex/.
+and texture count. Under each mesh, one block per material: sampler names, the texture each
+one references, the albedo that was used, the Tex path, the decode result
+(format, size, swizzle, block height), the alpha mode, and the render-state
+word when the file has one. The same conversion the editor uses, including Tex/.
 """
 
 from __future__ import annotations
@@ -129,12 +130,16 @@ def _print_textures(log: list, label: str = "") -> None:
         albedo = f"{sampler} {wanted}".strip()
         tried = ", ".join(entry.get("tried") or []) or "nothing"
         found = entry.get("found") or "not found"
-        print(f"{prefix}material {material}  alpha {alpha}  {sided}")
+        state = entry.get("renderState") or ""
+        state_bit = f"  render state {state}" if state else ""
+        print(f"{prefix}material {material}  alpha {alpha}  {sided}{state_bit}")
         print(f"{prefix}  samplers {shown}")
         print(f"{prefix}  albedo texture {albedo}")
         print(f"{prefix}  tried {tried}")
         if entry.get("decoded"):
-            detail = f"{entry.get('format') or '?'} {entry.get('size') or ''} {entry.get('swizzle') or ''}".strip()
+            height = entry.get("blockHeight") or 0
+            height_bit = f" block height {height}" if height else ""
+            detail = f"{entry.get('format') or '?'} {entry.get('size') or ''} {entry.get('swizzle') or ''}{height_bit}".strip()
             image = entry.get("image") or ""
             extra = f" image {image}" if image and image != wanted else ""
             count = entry.get("images") or 0

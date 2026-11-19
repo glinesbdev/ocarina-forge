@@ -35,8 +35,10 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-4\0"
+_CACHE_VERSION = b"models-5\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
+# Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
+_TERRAIN = (0.36, 0.45, 0.28, 1.0)
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
 _TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
@@ -256,12 +258,18 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             else:
                 detail = by_wanted.get(part.texture) or {}
                 why = detail.get("error") or ""
-                if part.texture:
+                if part.proxy:
+                    if "terrain proxy" not in notes:
+                        notes.append("terrain proxy")
+                elif part.texture:
                     notes.append(f"Base color “{part.texture}” {why or 'was not usable'}, so this mesh uses a flat colour.")
                 elif not model.images and not external:
                     reason = why or "No albedo sampler was usable and no Tex file matched."
                     notes.append(f"{reason} This mesh uses a flat colour.")
-            color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
+            if part.proxy and image is None:
+                color = _TERRAIN
+            else:
+                color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
             alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
             primitives.append(
                 Primitive(
@@ -299,6 +307,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
 def _fill_texture_names(models, dump) -> None:
     index = _tex_index(dump) if dump is not None else {}
     for model in models:
+        if any(slot for material in model.materials for slot, _tex in material.binds):
+            continue
         pooled = _pool_albedo(model.string_pool or model.extra_textures, index)
         if not pooled:
             pooled = base_color_name([name for name in model.extra_textures if texture_rank(name) < 2])
@@ -333,6 +343,10 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                     part.albedo_sampler = choice["sampler"]
                     part.alpha = choice["alpha"]
                     part.cutoff = choice["cutoff"]
+                    if choice.get("proxy"):
+                        part.proxy = True
+                        part.base_color = _TERRAIN
+                        part.texture = ""
                     if choice.get("image") is not None:
                         external[choice["wanted"]] = choice["image"]
         else:
@@ -348,8 +362,13 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
 
 def _choose_material(dump, model, material, hints, terrain, external, raws) -> dict:
     sources = list(material.albedo)
+    has_samplers = any(slot for slot, _tex in material.binds)
     pool_note = ""
-    if not sources:
+    # A material that names samplers and has no _a0/_a1/_a2 stays flat.
+    # The string pool is what painted later shapes magenta. Dummy terrain
+    # (no textures, no UVs) is a solid colour, not a Tex lookup.
+    proxy = bool(terrain and not sources and not has_samplers)
+    if not sources and not has_samplers and not proxy:
         pooled = _pool_albedo(model.string_pool or model.extra_textures, _tex_index(dump) if dump is not None else {})
         if not pooled:
             pooled = base_color_name([name for name in model.extra_textures if texture_rank(name) < 2])
@@ -373,7 +392,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             misses.append(f"{sampler or 'texture'} {name}: {found['error']}")
         elif name:
             misses.append(f"{sampler or 'texture'} {name}: no Tex file matched")
-    if winner is None and terrain and dump is not None:
+    if winner is None and terrain and dump is not None and sources and not proxy:
         hinted = _hint_alb_path(dump, hints)
         if hinted:
             stem = _stem(hinted)
@@ -393,7 +412,10 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         sampler, wanted, found = "", (sources[0][1] if sources else ""), dict(last)
         found["tried"] = tried or found.get("tried") or []
     error = found.get("error") or ""
-    if misses and winner is not None:
+    if proxy and winner is None:
+        sampler, wanted = "", ""
+        error = "terrain proxy"
+    elif misses and winner is not None:
         error = "; ".join(misses + ([error] if error else []))
     elif misses and winner is None:
         error = "; ".join(misses)
@@ -407,11 +429,25 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         error = f"{pool_note}. {error}".strip() if error and winner is None else (pool_note if not error else f"{error}. {pool_note}")
     alpha = found.get("alpha", material.alpha) if found.get("image") is not None else material.alpha
     cutoff = found.get("cutoff", material.cutoff)
+    if proxy and winner is None:
+        wanted = ""
     entry = _log_entry(material, sampler, wanted, found, alpha, cutoff, material.double_sided, error if not (found.get("image") is not None and not error) else error)
-    if found.get("image") is not None:
+    if found.get("image") is not None and not proxy:
         entry["decoded"] = True
         _fill_image_log(entry, found)
-    return {"entry": entry, "wanted": wanted if (found.get("image") is not None or wanted) else "", "sampler": sampler, "alpha": alpha if found.get("image") is not None else ("blend" if material.alpha == "blend" else "opaque"), "cutoff": cutoff, "image": found.get("image")}
+    if proxy and winner is None:
+        entry["wanted"] = ""
+        entry["error"] = "terrain proxy"
+        entry["decoded"] = False
+    return {
+        "entry": entry,
+        "wanted": "" if proxy and winner is None else (wanted if (found.get("image") is not None or wanted) else ""),
+        "sampler": "" if proxy and winner is None else sampler,
+        "alpha": alpha if found.get("image") is not None else ("blend" if material.alpha == "blend" else "opaque"),
+        "cutoff": cutoff,
+        "image": None if proxy and winner is None else found.get("image"),
+        "proxy": proxy and winner is None,
+    }
 
 
 def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
@@ -439,8 +475,10 @@ def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
         "format": "",
         "size": "",
         "swizzle": "",
+        "blockHeight": 0,
         "image": "",
         "images": 0,
+        "renderState": "",
         "alpha": _alpha_label(found.get("alpha") or part.alpha, found.get("cutoff") or part.cutoff) if found.get("image") is not None else "opaque",
         "doubleSided": part.double_sided,
         "error": found.get("error") or "",
@@ -469,6 +507,8 @@ def _log_entry(material, sampler, wanted, found, alpha, cutoff, sided, error) ->
         "images": 0,
         "alpha": _alpha_label(alpha, cutoff) if decoded or alpha == "blend" else _alpha_label(alpha, cutoff),
         "doubleSided": sided,
+        "renderState": getattr(material, "render_state", "") or "",
+        "blockHeight": 0,
         "error": error or "",
     }
 
@@ -479,9 +519,11 @@ def _fill_image_log(entry: dict, found: dict) -> None:
         return
     entry["decoded"] = True
     entry["found"] = found.get("found") or entry.get("found") or ""
-    entry["format"] = image.codec or (f"0x{image.fmt:04X}" if image.fmt else "")
+    fmt = f"0x{image.fmt:04X}" if image.fmt else ""
+    entry["format"] = " ".join(part for part in (image.codec, fmt) if part)
     entry["size"] = f"{image.width}x{image.height}" if image.width else ""
     entry["swizzle"] = image.swizzle
+    entry["blockHeight"] = getattr(image, "block_height", 0) or 0
     entry["image"] = image.name
     entry["images"] = found.get("images") or 1
     if image.note and not entry.get("error"):

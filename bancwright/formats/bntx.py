@@ -10,7 +10,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from bancwright.formats.swizzle import block_log2, deswizzle
+from bancwright.formats.swizzle import block_log2, deswizzle, div_up
 
 try:
     import texture2ddecoder
@@ -61,12 +61,14 @@ _FORMATS: dict[int, tuple[str, int, int, int]] = {
     0x3506: ("astc10x5", 10, 5, 16),
     0x3601: ("astc10x6", 10, 6, 16),
     0x3606: ("astc10x6", 10, 6, 16),
-    0x3701: ("astc10", 10, 10, 16),
-    0x3706: ("astc10", 10, 10, 16),
-    0x3801: ("astc12x10", 12, 10, 16),
-    0x3806: ("astc12x10", 12, 10, 16),
-    0x3901: ("astc12", 12, 12, 16),
-    0x3906: ("astc12", 12, 12, 16),
+    0x3701: ("astc10x8", 10, 8, 16),
+    0x3706: ("astc10x8", 10, 8, 16),
+    0x3801: ("astc10", 10, 10, 16),
+    0x3806: ("astc10", 10, 10, 16),
+    0x3901: ("astc12x10", 12, 10, 16),
+    0x3906: ("astc12x10", 12, 10, 16),
+    0x3A01: ("astc12", 12, 12, 16),
+    0x3A06: ("astc12", 12, 12, 16),
 }
 
 
@@ -81,6 +83,7 @@ class Texture:
     codec: str = ""
     tile: int = 0
     swizzle: str = ""
+    block_height: int = 0
 
 
 def _u16(data: bytes, at: int) -> int:
@@ -179,13 +182,23 @@ def _texture(data: bytes, at: int) -> Texture:
     if info is None:
         raise BntxError(f"{name or 'texture'}: texture format 0x{fmt:04X} is not decoded")
     codec, block_w, block_h, bytes_per = info
-    log2 = block_log2(height, block_h, layout)
+    mip_bytes = _mip0_bytes(data, at, image)
+    log2 = block_log2(
+        height,
+        block_h,
+        layout,
+        width=width,
+        block_width=block_w,
+        bytes_per=bytes_per,
+        mip_bytes=mip_bytes,
+    )
     if image <= 0 or image >= len(data):
         raise BntxError(f"{name or 'texture'}: image data is missing")
     raw = data[image:]
     linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw)
     rgba, note = _decode(codec, width, height, linear, fmt)
     rgba = _channels(rgba, width, height, channels)
+    block_height = 1 << max(0, log2)
     swizzle = "linear" if tile == 1 else f"deswizzled tile {tile}"
     return Texture(
         name=name,
@@ -197,7 +210,33 @@ def _texture(data: bytes, at: int) -> Texture:
         codec=codec,
         tile=tile,
         swizzle=swizzle,
+        block_height=block_height,
     )
+
+
+def _mip0_bytes(data: bytes, at: int, image: int) -> int:
+    """Size of mip 0 from the offset table, or through EOF for a one-mip file."""
+    if at + 0x78 > len(data):
+        return 0
+    table = _u64(data, at + 0x70)
+    offsets = []
+    if table:
+        for index in range(17):
+            slot = table + index * 8
+            if slot + 8 > len(data):
+                break
+            value = _u64(data, slot)
+            if value <= 0 or value > len(data):
+                break
+            if offsets and value <= offsets[-1]:
+                break
+            offsets.append(value)
+    if len(offsets) >= 2:
+        return offsets[1] - offsets[0]
+    start = offsets[0] if offsets else image
+    if start and 0 < start < len(data):
+        return len(data) - start
+    return 0
 
 
 def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tuple[bytes, str]:
@@ -228,6 +267,7 @@ def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tup
         "astc8": (8, 8),
         "astc10x5": (10, 5),
         "astc10x6": (10, 6),
+        "astc10x8": (10, 8),
         "astc10": (10, 10),
         "astc12x10": (12, 10),
         "astc12": (12, 12),
@@ -236,6 +276,7 @@ def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tup
         decoder = getattr(texture2ddecoder, "decode_bc2", None) or getattr(texture2ddecoder, "decode_bc3", None)
     if codec in astc:
         bw, bh = astc[codec]
+        linear = _repair_astc_partial_gob(linear, width, height, bw, bh)
         bgra = texture2ddecoder.decode_astc(linear, width, height, bw, bh)
     elif decoder is None:
         raise BntxError(f"texture format 0x{fmt:04X} has no decoder in texture2ddecoder")
@@ -244,7 +285,68 @@ def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tup
     if not bgra:
         raise BntxError(f"texture format 0x{fmt:04X} did not decode")
     rgba = _bgra_to_rgba(bytes(bgra), width, height)
+    if codec == "bc1":
+        rgba = _bc1_punch(linear, width, height, rgba)
     return rgba, ""
+
+
+def _repair_astc_partial_gob(linear: bytes, width: int, height: int, block_w: int, block_h: int) -> bytes:
+    """Copy the block above into an all-zero block on the last partial GOB row.
+
+    A height that is not a multiple of 8 block-rows leaves the tail of that
+    GOB unwritten. Those blocks decode as empty (the odd columns on the last
+    rows of a house albedo). The block directly above is the same texel row
+    the hardware was padding.
+    """
+    blocks_x = max(1, div_up(width, block_w))
+    blocks_y = max(1, div_up(height, block_h))
+    if blocks_y % 8 == 0:
+        return linear
+    bpp = 16
+    need = blocks_x * blocks_y * bpp
+    out = bytearray(linear[:need]).ljust(need, b"\0")
+    start = (blocks_y // 8) * 8
+    for y in range(max(start, 1), blocks_y):
+        for x in range(blocks_x):
+            at = (y * blocks_x + x) * bpp
+            above = ((y - 1) * blocks_x + x) * bpp
+            if out[at : at + bpp] == b"\0" * bpp and out[above : above + bpp] != b"\0" * bpp:
+                out[at : at + bpp] = out[above : above + bpp]
+    if len(linear) > need:
+        return bytes(out) + linear[need:]
+    return bytes(out)
+
+
+def _bc1_punch(linear: bytes, width: int, height: int, rgba: bytes) -> bytes:
+    """BC1 blocks with color0 <= color1 use index 3 as punch-through alpha.
+
+    texture2ddecoder leaves that index opaque. The sky above a FarView card
+    is this case, and an opaque alpha draws it black.
+    """
+    blocks_x = max(1, div_up(width, 4))
+    blocks_y = max(1, div_up(height, 4))
+    out = bytearray(rgba)
+    for by in range(blocks_y):
+        for bx in range(blocks_x):
+            block_at = (by * blocks_x + bx) * 8
+            if block_at + 8 > len(linear):
+                continue
+            color0 = linear[block_at] | (linear[block_at + 1] << 8)
+            color1 = linear[block_at + 2] | (linear[block_at + 3] << 8)
+            if color0 > color1:
+                continue
+            bits = int.from_bytes(linear[block_at + 4 : block_at + 8], "little")
+            for index in range(16):
+                if ((bits >> (2 * index)) & 3) != 3:
+                    continue
+                px = bx * 4 + (index & 3)
+                py = by * 4 + (index >> 2)
+                if px >= width or py >= height:
+                    continue
+                dest = (py * width + px) * 4 + 3
+                if dest < len(out):
+                    out[dest] = 0
+    return bytes(out)
 
 
 def _bgra_to_rgba(bgra: bytes, width: int, height: int) -> bytes:
@@ -280,7 +382,17 @@ def _channels(rgba: bytes, width: int, height: int, channels: bytes) -> bytes:
     return bytes(out)
 
 
-def write_rgba(name: str, width: int, height: int, rgba: bytes, *, swizzled: bool = False, log2: int | None = None) -> bytes:
+def write_rgba(
+    name: str,
+    width: int,
+    height: int,
+    rgba: bytes,
+    *,
+    swizzled: bool = False,
+    log2: int | None = None,
+    layout0: int | None = None,
+    layout4: int | None = None,
+) -> bytes:
     """A one-texture BNTX. Tests and the sample dump use this. It is not a game file."""
     if len(rgba) < width * height * 4:
         raise BntxError("rgba buffer is shorter than the image")
@@ -333,7 +445,9 @@ def write_rgba(name: str, width: int, height: int, rgba: bytes, *, swizzled: boo
     struct.pack_into("<i", blob, brti_at + 0x28, height)
     struct.pack_into("<i", blob, brti_at + 0x2C, 1)
     struct.pack_into("<I", blob, brti_at + 0x30, 1)
-    blob[brti_at + 0x34 + 4] = chosen & 0xFF
+    blob[brti_at + 0x34 + 4] = (chosen if layout4 is None else layout4) & 0xFF
+    if layout0 is not None:
+        blob[brti_at + 0x34] = layout0 & 0xFF
     blob[brti_at + 0x58 : brti_at + 0x5C] = bytes((2, 3, 4, 5))
     struct.pack_into("<Q", blob, brti_at + 0x60, name_at)
     align(8)

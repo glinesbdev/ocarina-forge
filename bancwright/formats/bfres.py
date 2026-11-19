@@ -62,6 +62,7 @@ class Part:
     cutoff: float = 0.5
     double_sided: bool = True
     base_color: tuple[float, float, float, float] | None = None
+    proxy: bool = False
 
 
 @dataclass
@@ -75,6 +76,8 @@ class Material:
     base_color: tuple[float, float, float, float] | None = None
     shader: str = ""
     note: str = ""
+    # v10 render-state string at index 11 (opaque, mask, translucent, custom).
+    render_state: str = ""
 
 
 @dataclass
@@ -258,6 +261,7 @@ class _File:
             part, shape_at = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
             if part is not None:
                 parts.append(part)
+        parts = _drop_opaque_twins(parts)
         model = Model(
             name or fallback,
             parts,
@@ -310,10 +314,16 @@ class _File:
 
     def _materials(self, values: int, dictionary: int) -> list[Material]:
         names = self.dict_keys(dictionary)
-        # Version 9 and later (including Switch 2 files that report a higher
-        # major) keep the texture-name array at a fixed offset. Walking a
-        # guessed version-10 header skips that array and the mesh stays grey.
-        stride = 0xA8 if self.major >= 9 else 0xB8
+        # Version 9 materials are 0xA8 bytes. Version 10 (the Switch 2 files)
+        # are 0xB0: the texture array, sampler dictionary, and counts moved.
+        # A shorter stride lands in the padding of material 0, so every later
+        # shape is left with no material.
+        if self.major >= 10:
+            stride = 0xB0
+        elif self.major >= 9:
+            stride = 0xA8
+        else:
+            stride = 0xB8
         if self.major >= 9 and values and self.data[values : values + 4] == b"FMAT":
             count = len(names) or 1
             found = []
@@ -335,6 +345,8 @@ class _File:
         return found
 
     def _read_material(self, at: int, fallback: str) -> Material:
+        if self.major >= 10:
+            return self._read_material_v10(at, fallback)
         if self.major >= 9:
             if at + 0xA8 > len(self.data):
                 return Material(fallback)
@@ -403,6 +415,58 @@ class _File:
         albedo = rank_albedo(binds)
         alpha, cutoff, sided = _alpha_state(render, options, shader, name)
         return Material(name, binds, albedo, alpha, cutoff, sided, color, shader)
+
+    def _read_material_v10(self, at: int, fallback: str) -> Material:
+        """Switch 2 FMAT. Offsets are from the FMAT magic, and the block is 0xB0 bytes.
+
+        +0x08 name, +0x20 texture-name pointer array, +0x38 sampler-name
+        dictionary, +0x40 render-state string array, +0xA0 render-state count,
+        +0xA2 sampler count, +0xA3 texture count. Sampler names and texture
+        names are in the same order.
+        """
+        if at + 0xB0 > len(self.data) or self.data[at : at + 4] != b"FMAT":
+            return Material(fallback)
+        name = self.string(self.u64(at + 0x08)) or fallback
+        texture_at = self.u64(at + 0x20)
+        sampler_dict = self.u64(at + 0x38)
+        state_at = self.u64(at + 0x40)
+        render_count = self.u16(at + 0xA0)
+        sampler_count = self.data[at + 0xA2]
+        texture_count = self.data[at + 0xA3]
+        textures = self._name_list(texture_at, texture_count)
+        if not textures and sampler_count:
+            textures = self._name_list(texture_at, sampler_count)
+        try:
+            sampler_names = self.dict_keys(sampler_dict) if sampler_dict else []
+        except FresError:
+            sampler_names = []
+        states = self._state_strings(state_at, render_count)
+        binds: list[tuple[str, str]] = []
+        count = max(len(textures), len(sampler_names), texture_count, sampler_count)
+        for index in range(min(count, 64)):
+            texture = textures[index] if index < len(textures) else ""
+            sampler = sampler_names[index] if index < len(sampler_names) else ""
+            if not texture and not sampler:
+                continue
+            binds.append((sampler, texture))
+        albedo = rank_albedo(binds)
+        if len(states) > 11:
+            alpha, cutoff, sided, mode = _alpha_from_render_strings(states)
+        else:
+            alpha, cutoff, sided = _alpha_state({}, {}, "", name)
+            mode = ""
+        return Material(name, binds, albedo, alpha, cutoff, sided, None, "", render_state=mode)
+
+    def _state_strings(self, at: int, count: int) -> list[str]:
+        if not at or count <= 0 or count > 64:
+            return []
+        found = []
+        for index in range(count):
+            slot = at + index * 8
+            if slot + 8 > len(self.data):
+                break
+            found.append(self.string(self.u64(slot)))
+        return found
 
     def _name_list(self, at: int, count: int) -> list[str]:
         if not at or count <= 0 or count > 64:
@@ -960,13 +1024,20 @@ def _sampler_rank(name: str) -> int | None:
     return None
 
 
+_LOCKED_EXTRA = {"a1", "a2", "alb1", "alb2", "albedo1", "albedo2"}
+
+
 def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     """Albedo slots first. ``_a0`` wins even when it is not sampler 0.
 
-    A normal, specular, or blend slot is left out, including when its
-    texture name does not say ``_Nrm``. The caller draws a flat colour
-    instead of that map.
+    When the material names its samplers, only ``_a0`` then ``_a1`` / ``_a2``
+    are albedo. A normal, roughness, bake, or runtime slot (``tc``, ``ta``,
+    ``MaterialAlb``) is not a fallback, and neither is the string pool.
+    A material with no sampler names still ranks texture names, which is
+    how the version-9 samples are written.
     """
+    if any(sampler for sampler, _texture in binds):
+        return _rank_locked_samplers(binds)
     ranked = []
     for index, (sampler, texture) in enumerate(binds):
         if not texture:
@@ -986,6 +1057,23 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
         ranked.append((key, sampler, texture))
     ranked.sort(key=lambda item: item[0])
     return [(sampler, texture) for _key, sampler, texture in ranked]
+
+
+def _rank_locked_samplers(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    ranked = []
+    for index, (sampler, texture) in enumerate(binds):
+        if not texture:
+            continue
+        token = "".join(char for char in sampler.lower() if char.isalnum())
+        if token in _PRIMARY_SAMPLER:
+            key = 0
+        elif token in _LOCKED_EXTRA:
+            key = 1
+        else:
+            continue
+        ranked.append((key, index, sampler, texture))
+    ranked.sort()
+    return [(sampler, texture) for _key, _index, sampler, texture in ranked]
 
 
 def base_color_name(names: list[str]) -> str:
@@ -1080,6 +1168,57 @@ def _sane_color(values) -> tuple[float, float, float, float] | None:
     if red > 0.9 and green < 0.15 and blue > 0.9:
         return None
     return (red, green, blue, alpha)
+
+
+def _alpha_from_render_strings(states: list[str]) -> tuple[str, float, bool, str]:
+    """v10 render state is a fixed string array, not the named gsys records.
+
+    Index 10 is cull (``front`` / ``both``), 11 is the alpha mode
+    (``opaque`` / ``mask`` / ``translucent`` / ``custom``), and 15 is the
+    alpha test (``true`` on a mask).
+    """
+
+    def at(index: int) -> str:
+        if index >= len(states) or not states[index]:
+            return ""
+        return states[index].strip().lower()
+
+    cull = at(10)
+    mode = at(11)
+    test = at(15)
+    sided = True
+    if cull:
+        if any(token in cull for token in ("both", "double", "none", "frontandback")):
+            sided = True
+        elif "front" in cull or "back" in cull:
+            sided = False
+    alpha = "opaque"
+    if "translucen" in mode or mode == "blend":
+        alpha = "blend"
+    elif any(token in mode for token in ("mask", "clip", "cutout")) or test in {"true", "1", "yes"}:
+        alpha = "mask"
+    return alpha, 0.5, sided, mode
+
+
+def _shape_key(part: Part) -> tuple:
+    points = tuple((round(x, 4), round(y, 4), round(z, 4)) for x, y, z in part.positions)
+    triangles = []
+    for index in range(0, len(part.indices) - 2, 3):
+        triangles.append(tuple(sorted(part.indices[index : index + 3])))
+    return points, tuple(sorted(triangles))
+
+
+def _drop_opaque_twins(parts: list[Part]) -> list[Part]:
+    """Drop an opaque shape that sits on the same vertices as a masked one.
+
+    FarView cards are stored twice: an opaque material and a masked twin
+    (the shaking card). The opaque copy draws the punch-through sky as black.
+    """
+    masked = {_shape_key(part) for part in parts if part.alpha == "mask" and part.positions}
+    if not masked:
+        return parts
+    kept = [part for part in parts if not (part.alpha == "opaque" and _shape_key(part) in masked)]
+    return kept or parts
 
 
 def _alpha_state(render: dict, options: dict, shader: str, material_name: str) -> tuple[str, float, bool]:
@@ -1386,5 +1525,234 @@ def sample_bfres(
     struct.pack_into("<Q", blob, 0xC0, ext_dict)
     struct.pack_into("<H", blob, 0xDC, 1)
     struct.pack_into("<H", blob, 0xEC, ext_count)
+    struct.pack_into("<I", blob, 0x1C, len(blob))
+    return bytes(blob)
+
+
+def sample_v10_bfres(
+    name: str,
+    materials: list[dict],
+    *,
+    shapes: list[dict] | None = None,
+    positions: list[tuple[float, float, float]] | None = None,
+    indices: list[int] | None = None,
+    with_uvs: bool = True,
+    pool_name: str = "",
+) -> bytes:
+    """A version-10 BFRES with stride-0xB0 materials. Synthetic, for tests.
+
+    Each material dict may set ``name``, ``samplers`` (``(slot, texture)`` in
+    file order), ``mode`` (``opaque`` / ``mask`` / ``translucent``), and
+    ``cull`` (``front`` / ``both``). Shapes are ``{name, material}`` and share
+    one triangle unless ``positions`` is passed. ``with_uvs`` false writes only
+    ``_p0``, which is the dummy terrain layout.
+    """
+    if not materials:
+        raise FresError("a v10 sample needs at least one material")
+    if positions is None:
+        positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+    if indices is None:
+        indices = [0, 1, 2]
+    if shapes is None:
+        shapes = [{"name": str(item.get("name") or f"shape{index}"), "material": index} for index, item in enumerate(materials)]
+    uvs = [(0.0, 0.0) for _ in positions] if with_uvs else []
+    if with_uvs and len(uvs) >= 3:
+        uvs[1] = (1.0, 0.0)
+        uvs[2] = (0.0, 1.0)
+
+    blob = bytearray(0x100)
+    blob[:8] = b"FRES    "
+    struct.pack_into("<I", blob, 0x08, 0x000A0000)
+    blob[0x0C:0x0E] = b"\xff\xfe"
+
+    def align(n: int) -> None:
+        while len(blob) % n:
+            blob.append(0)
+
+    def add_string(text: str) -> int:
+        align(2)
+        at = len(blob)
+        raw = text.encode()
+        blob.extend(struct.pack("<H", len(raw)) + raw + b"\0")
+        align(2)
+        return at
+
+    def add_dict(key_at: list[int]) -> int:
+        align(8)
+        at = len(blob)
+        blob.extend(struct.pack("<II", 0, len(key_at)))
+        blob.extend(struct.pack("<IHHQ", 0xFFFFFFFF, 1, 1, 0))
+        for key in key_at:
+            blob.extend(struct.pack("<IHHQ", 0, 0, 0, key))
+        return at
+
+    model_name = add_string(name)
+    file_name = add_string(name)
+    if pool_name:
+        add_string(pool_name)
+    pos_name = add_string("_p0")
+    uv_name = add_string("_u0") if with_uvs else 0
+    shape_names = [add_string(str(item.get("name") or f"shape{index}")) for index, item in enumerate(shapes)]
+    mat_names = [add_string(str(item.get("name") or f"material{index}")) for index, item in enumerate(materials)]
+
+    prepared = []
+    for item, mat_name in zip(materials, mat_names):
+        pairs = list(item.get("samplers") or [])
+        tex_offs = [add_string(str(texture)) for _slot, texture in pairs]
+        samp_offs = [add_string(str(slot)) for slot, _texture in pairs]
+        mode = str(item.get("mode") or "opaque")
+        cull = str(item.get("cull") or "both")
+        words = [""] * 16
+        words[10] = cull
+        words[11] = mode
+        words[15] = "true" if mode == "mask" else "false"
+        state_offs = [add_string(word) for word in words]
+        prepared.append((mat_name, pairs, tex_offs, samp_offs, state_offs))
+
+    align(8)
+    attr_at = len(blob)
+    blob.extend(struct.pack("<Q", pos_name) + struct.pack(">H", _F32_3) + b"\0\0" + struct.pack("<HH", 0, 0))
+    if with_uvs:
+        blob.extend(struct.pack("<Q", uv_name) + struct.pack(">H", _F32_2) + b"\0\0" + struct.pack("<HH", 12, 0))
+        attr_dict = add_dict([pos_name, uv_name])
+        attr_count = 2
+        stride = 20
+    else:
+        attr_dict = add_dict([pos_name])
+        attr_count = 1
+        stride = 12
+
+    vertex = bytearray()
+    if with_uvs:
+        for (x, y, z), (u, v) in zip(positions, uvs):
+            vertex += struct.pack("<3f2f", x, y, z, u, v)
+    else:
+        for x, y, z in positions:
+            vertex += struct.pack("<3f", x, y, z)
+    index_blob = b"".join(struct.pack("<H", index) for index in indices)
+
+    align(8)
+    stride_at = len(blob)
+    blob.extend(struct.pack("<I", stride) + b"\0" * 12)
+    size_at = len(blob)
+    blob.extend(struct.pack("<II", len(vertex), 0) + b"\0" * 8)
+
+    align(8)
+    fvtx_at = len(blob)
+    blob.extend(b"FVTX")
+    blob.extend(struct.pack("<I", 0))
+    blob.extend(struct.pack("<QQ", attr_at, attr_dict))
+    blob.extend(struct.pack("<QQQ", 0, 0, 0))
+    blob.extend(struct.pack("<QQ", size_at, stride_at))
+    blob.extend(struct.pack("<Q", 0))
+    fvtx_buffer_hole = len(blob)
+    blob.extend(struct.pack("<i", 0))
+    blob.extend(bytes((attr_count, 1)))
+    blob.extend(struct.pack("<H", 0))
+    blob.extend(struct.pack("<I", len(positions)))
+    blob.extend(struct.pack("<HH", 1, 1))
+
+    align(8)
+    sub_at = len(blob)
+    blob.extend(struct.pack("<II", 0, len(indices)))
+    index_info = len(blob)
+    blob.extend(struct.pack("<II", len(index_blob), 0) + b"\0" * 40)
+
+    align(8)
+    mesh_at = len(blob)
+    blob.extend(struct.pack("<QQQQ", sub_at, 0, 0, index_info))
+    blob.extend(struct.pack("<IIIII", 0, 3, 1, len(indices), 0))
+    blob.extend(struct.pack("<HH", 1, 0))
+
+    align(8)
+    shape_at = len(blob)
+    for index, item in enumerate(shapes):
+        material_index = int(item.get("material", index))
+        blob.extend(b"FSHP")
+        blob.extend(struct.pack("<I", 0))
+        blob.extend(struct.pack("<Q", shape_names[index]))
+        blob.extend(struct.pack("<Q", fvtx_at))
+        blob.extend(struct.pack("<Q", mesh_at))
+        blob.extend(struct.pack("<Q", 0))
+        blob.extend(struct.pack("<QQ", 0, 0))
+        blob.extend(struct.pack("<QQQ", 0, 0, 0))
+        blob.extend(struct.pack("<HHHH", 0, material_index, 0, 0))
+        blob.extend(struct.pack("<H", 0))
+        blob.extend(bytes((1, 1, 0, 0)))
+        blob.extend(b"\0\0")
+    shape_dict = add_dict(shape_names)
+
+    built = []
+    for mat_name, pairs, tex_offs, samp_offs, state_offs in prepared:
+        align(8)
+        tex_ptr = 0
+        if tex_offs:
+            tex_ptr = len(blob)
+            for off in tex_offs:
+                blob.extend(struct.pack("<Q", off))
+        state_ptr = 0
+        if state_offs:
+            align(8)
+            state_ptr = len(blob)
+            for off in state_offs:
+                blob.extend(struct.pack("<Q", off))
+        sampler_dict = add_dict(samp_offs) if samp_offs else 0
+        built.append((mat_name, tex_ptr, sampler_dict, state_ptr, len(samp_offs), len(tex_offs), len(state_offs)))
+
+    align(8)
+    mat_at = len(blob)
+    for mat_name, tex_ptr, sampler_dict, state_ptr, sampler_count, texture_count, state_count in built:
+        header = bytearray(0xB0)
+        header[0:4] = b"FMAT"
+        struct.pack_into("<I", header, 0x04, 1)
+        struct.pack_into("<Q", header, 0x08, mat_name)
+        struct.pack_into("<Q", header, 0x20, tex_ptr)
+        struct.pack_into("<Q", header, 0x38, sampler_dict)
+        struct.pack_into("<Q", header, 0x40, state_ptr)
+        struct.pack_into("<H", header, 0xA0, state_count)
+        header[0xA2] = sampler_count & 0xFF
+        header[0xA3] = texture_count & 0xFF
+        blob.extend(header)
+    mat_dict = add_dict(mat_names)
+
+    align(8)
+    fmdl_at = len(blob)
+    blob.extend(b"FMDL")
+    blob.extend(struct.pack("<I", 0))
+    blob.extend(struct.pack("<Q", model_name))
+    blob.extend(struct.pack("<Q", file_name))
+    blob.extend(struct.pack("<Q", 0))
+    blob.extend(struct.pack("<Q", fvtx_at))
+    blob.extend(struct.pack("<QQ", shape_at, shape_dict))
+    blob.extend(struct.pack("<QQQ", mat_at, 0, mat_dict))
+    blob.extend(struct.pack("<QQ", 0, 0))
+    blob.extend(struct.pack("<Q", 0))
+    blob.extend(struct.pack("<HHH", 1, len(shapes), len(materials)))
+    blob.extend(struct.pack("<HHH", 0, 0, 0))
+    blob.extend(struct.pack("<I", 0))
+    model_dict = add_dict([model_name])
+
+    align(8)
+    info_at = len(blob)
+    blob.extend(struct.pack("<II", 0, len(index_blob) + len(vertex)))
+    info_hole = len(blob)
+    blob.extend(struct.pack("<q", 0))
+    blob.extend(b"\0" * 16)
+
+    align(8)
+    gpu_at = len(blob)
+    blob.extend(index_blob)
+    align(8)
+    vert_at = len(blob)
+    blob.extend(vertex)
+    struct.pack_into("<i", blob, fvtx_buffer_hole, vert_at - gpu_at)
+    struct.pack_into("<q", blob, info_hole, gpu_at)
+
+    struct.pack_into("<I", blob, 0x10, file_name + 2)
+    struct.pack_into("<Q", blob, 0x20, file_name)
+    struct.pack_into("<Q", blob, 0x28, fmdl_at)
+    struct.pack_into("<Q", blob, 0x30, model_dict)
+    struct.pack_into("<Q", blob, 0xB0, info_at)
+    struct.pack_into("<H", blob, 0xDC, 1)
     struct.pack_into("<I", blob, 0x1C, len(blob))
     return bytes(blob)

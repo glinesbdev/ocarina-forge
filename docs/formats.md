@@ -82,3 +82,25 @@ Everything else (`Dynamic`, `Links`, `Presence`, `Bakeable`, `Phive`, …) is a 
 Category colors use the pack-name prefix: `Npc_` / `Shop_`, `Enemy_`, `Animal_`, `Eft`, `Land_`, `Area_` / `Area`, `Obj_` / `FldObj_` / `Item_` / `Weapon_` / `Dm_`, and system names (`StartPos`, `Player`, `Sound`, `AirWall`, `Ground`, anything with `Anchor` or ending in `Actor`).
 
 Actor meshes are Switch BFRES plus embedded BNTX. The reader, the cache, and what still falls back to a box are in [models.md](models.md).
+
+## BFRES materials (version 10)
+
+Version 9 FMAT blocks are `0xA8` bytes and keep the Wexos field order (texture names at `+0x30`, sampler dictionary at `+0x48`, counts at `+0x9C` / `+0x9D`). Version 10, which is what the Switch 2 dump reports, is `0xB0` bytes:
+
+| Offset | Field |
+| --- | --- |
+| `+0x08` | name pointer |
+| `+0x20` | texture-name pointer array (one u64 string per texture) |
+| `+0x38` | sampler-name dictionary (`_a0`, `_n0`, `_rgh0`, `bake0`, … in the same order as the textures) |
+| `+0x40` | render-state string array |
+| `+0xA0` | u16 render-state count |
+| `+0xA2` | u8 sampler count |
+| `+0xA3` | u8 texture count |
+
+The render-state array is fixed-order strings, not the version-9 `gsys_*` records. Index 10 is cull (`front` or `both`), index 11 is the alpha mode (`opaque`, `mask`, `translucent`, `custom`), and index 15 is the alpha test (`true` on a mask). Albedo is `_a0`, then `_a1` or `_a2`. A material whose samplers are only `tc` / `ta` (runtime names `MaterialAlb` / `MaterialCmb`) has no albedo.
+
+## BNTX
+
+BRTI layout byte 0 (offset `+0x34`), low 3 bits, is the block-height log2. Byte 4 is `0xC9` on these files and is not that field. When the stored height does not match the mip-0 size in the offset table, the size wins. Pitch is the block row rounded up to 64 bytes; the surface is that pitch times the block rows rounded up to `block_height * 8`.
+
+ASTC format ids `0x37`, `0x38`, `0x39`, and `0x3A` (UNORM `xx01` and sRGB `xx06`) are 10×8, 10×10, 12×10, and 12×12. BC1 blocks with color0 ≤ color1 use index 3 as alpha 0. An ASTC block that is all zeros on a trailing GOB row (the height in blocks is not a multiple of 8) is filled from the block above it.

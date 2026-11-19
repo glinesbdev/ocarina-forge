@@ -67,6 +67,60 @@ def test_bc1_block_decodes_red():
     rgba, _note = _decode("bc1", 4, 4, block, 0x1A01)
     assert rgba[0] > 180
     assert rgba[2] < 40
+    assert rgba[3] == 255
+
+
+def test_bc1_punch_through_is_transparent():
+    try:
+        import texture2ddecoder  # noqa: F401
+    except ImportError:
+        return
+    # color0 <= color1, pixel 0 is index 0 and the other 15 pixels are index 3.
+    block = bytes([0x00, 0x00, 0xFF, 0xFF, 0xFC, 0xFF, 0xFF, 0xFF])
+    rgba, _note = _decode("bc1", 4, 4, block, 0x1A01)
+    assert rgba[3] == 255
+    assert rgba[7] == 0
+    assert rgba[-1] == 0
+
+
+def test_astc_ids_and_partial_gob_row():
+    from bancwright.formats.bntx import _FORMATS, _repair_astc_partial_gob
+
+    assert _FORMATS[0x3701][1:3] == (10, 8)
+    assert _FORMATS[0x3801][1:3] == (10, 10)
+    assert _FORMATS[0x3901][1:3] == (12, 10)
+    assert _FORMATS[0x3A01][1:3] == (12, 12)
+    assert _FORMATS[0x3706][0] == "astc10x8"
+    blocks_x, blocks_y, bpp = 2, 9, 16
+    linear = bytearray(blocks_x * blocks_y * bpp)
+    above = (7 * blocks_x + 1) * bpp
+    linear[above : above + bpp] = b"\xab" * bpp
+    filled = _repair_astc_partial_gob(bytes(linear), 8, 36, 4, 4)
+    tail = (8 * blocks_x + 1) * bpp
+    assert filled[tail : tail + bpp] == b"\xab" * bpp
+    even = (8 * blocks_x) * bpp
+    assert filled[even : even + bpp] == b"\0" * bpp
+
+
+def test_block_height_uses_layout_low_bits_and_mip_size():
+    from bancwright.formats.bntx import textures, write_rgba
+
+    width, height = 20, 20
+    rgba = bytearray([40, 40, 40, 255] * width * height)
+    for y in range(height):
+        rgba[(y * width) * 4 : (y * width) * 4 + 4] = bytes((220, 10, 10, 255))
+        rgba[(y * width + width - 1) * 4 : (y * width + width - 1) * 4 + 4] = bytes((10, 10, 220, 255))
+    stored = write_rgba("Edge", width, height, bytes(rgba), swizzled=True, log2=0, layout0=0, layout4=0xC9)
+    image = textures(stored)[0]
+    assert image.block_height == 1
+    assert image.rgba[0] > 180 and image.rgba[2] < 40
+    assert image.rgba[(width - 1) * 4 + 2] > 180
+    # A stored log2 that disagrees with the mip size is replaced by the size.
+    overridden = write_rgba("Edge", width, height, bytes(rgba), swizzled=True, log2=0, layout0=4, layout4=0xC9)
+    fixed = textures(overridden)[0]
+    assert fixed.block_height == 1
+    assert fixed.rgba[0] > 180
+    assert fixed.rgba[(width - 1) * 4 + 2] > 180
 
 
 def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
@@ -239,26 +293,163 @@ def test_spirit_stone_is_a_read_only_ghost():
     assert abs(fire[0]["rotate"][1] + 1.8) < 1e-6
 
 
-def test_version_10_still_reads_the_albedo_name():
+def test_version_10_reads_every_material_and_skips_runtime_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.bntx import write_rgba
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.sarc import pack
+    from bancwright.formats.zsio import compress
+
+    bark = [
+        ("_a0", "Tree_KokiriBark_A_Alb"),
+        ("_a1", "Tree_KokiriHouse_A_Alb"),
+        ("_n0", "Tree_KokiriBark_A_Nrm"),
+        ("_n1", "Tree_KokiriHouse_A_Nrm"),
+        ("_rgh0", "Tree_KokiriBark_A_Rgh"),
+        ("_rgh1", "Tree_KokiriHouse_A_Rgh"),
+        ("bake0", "CmnTex_BakeDefault"),
+        ("bake1", "CmnTex_BakeDefault"),
+    ]
+    data = sample_v10_bfres(
+        "OuterTree",
+        [
+            {"name": "Mt_Tree_KokiriBarkBlend_A", "samplers": bark, "mode": "opaque", "cull": "both"},
+            {"name": "Mt_TerraMaterial_A", "samplers": [("tc", "MaterialAlb"), ("ta", "MaterialCmb")], "mode": "opaque", "cull": "front"},
+        ],
+        shapes=[{"name": "Bark", "material": 0}, {"name": "Water", "material": 1}],
+        pool_name="Pool_Alb",
+    )
+    model = parse(data)[0]
+    assert [item.name for item in model.materials] == ["Mt_Tree_KokiriBarkBlend_A", "Mt_TerraMaterial_A"]
+    assert model.materials[0].albedo[0] == ("_a0", "Tree_KokiriBark_A_Alb")
+    assert model.materials[0].albedo[1][0] == "_a1"
+    assert model.materials[1].albedo == []
+    assert [part.material_index for part in model.parts] == [0, 1]
+    assert model.parts[0].texture == "Tree_KokiriBark_A_Alb"
+    assert model.parts[1].texture == ""
+    assert "Pool_Alb" not in {part.texture for part in model.parts}
+    assert rank_albedo([("tc", "MaterialAlb"), ("ta", "MaterialCmb")]) == []
+    assert rank_albedo([("_a3", "Extra"), ("_a0", "Main")]) == [("_a0", "Main")]
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    gyaml = "Obj_Tree"
+    info = dumps({"FmdbName": gyaml, "ModelProjectName": "Obj_Tree"})
+    archive = pack(
+        {
+            f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps({"Name": gyaml}),
+            f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info,
+        }
+    )
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dicts, level=3))
+    (dump.romfs / "Model" / "Obj_Tree.Obj_Tree.bfres.zs").write_bytes(compress(data, 1, dicts, level=3))
+    green = bytes([20, 90, 30, 255]) * 4
+    magenta = bytes([255, 0, 255, 255]) * 4
+    (dump.romfs / "Tex" / "Tree_KokiriBark_A_Alb.bntx.zs").write_bytes(compress(write_rgba("Tree_KokiriBark_A_Alb", 2, 2, green), 1, dicts, level=3))
+    (dump.romfs / "Tex" / "MaterialAlb.bntx.zs").write_bytes(compress(write_rgba("MaterialAlb", 2, 2, magenta), 1, dicts, level=3))
+    (dump.romfs / "Tex" / "Pool_Alb.bntx.zs").write_bytes(compress(write_rgba("Pool_Alb", 2, 2, magenta), 1, dicts, level=3))
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    resolved = describe_actor(dump, gyaml)
+    assert resolved["textures"] == 1
+    by_name = {row["material"]: row for row in resolved["textureLog"]}
+    assert by_name["Mt_Tree_KokiriBarkBlend_A"]["wanted"] == "Tree_KokiriBark_A_Alb"
+    assert by_name["Mt_Tree_KokiriBarkBlend_A"]["sampler"] == "_a0"
+    assert by_name["Mt_TerraMaterial_A"]["wanted"] == ""
+    assert "string pool" not in (by_name["Mt_TerraMaterial_A"].get("error") or "")
+    assert "MaterialAlb" not in (by_name["Mt_TerraMaterial_A"].get("wanted") or "")
+
+
+def test_v10_render_state_drops_the_opaque_twin():
+    from bancwright.formats.bfres import sample_v10_bfres
+
+    data = sample_v10_bfres(
+        "FarView",
+        [
+            {
+                "name": "Mt_Tree_Kokiri_FarView_A",
+                "samplers": [("_a0", "Tree_Kokiri_FarView_A_Alb")],
+                "mode": "opaque",
+                "cull": "front",
+            },
+            {
+                "name": "Mt_Tree_Kokiri_FarView_A_Shaking",
+                "samplers": [("_a0", "Tree_Kokiri_FarView_A_Alb")],
+                "mode": "mask",
+                "cull": "both",
+            },
+        ],
+        shapes=[
+            {"name": "FarView_A_03", "material": 0},
+            {"name": "FarView_A_03_Shaking", "material": 1},
+        ],
+    )
+    model = parse(data)[0]
+    assert len(model.parts) == 1
+    part = model.parts[0]
+    assert part.name == "FarView_A_03_Shaking"
+    assert part.alpha == "mask"
+    assert part.double_sided is True
+    assert part.texture == "Tree_Kokiri_FarView_A_Alb"
+    shaking = model.materials[1]
+    assert shaking.render_state == "mask"
+    assert shaking.alpha == "mask"
+    assert model.materials[0].render_state == "opaque"
+    assert model.materials[0].double_sided is False
+
+
+def test_dummy_terrain_is_an_earth_green_proxy(tmp_path, monkeypatch):
+    import json
     import struct
 
-    rgba = bytes([255, 0, 0, 255]) * 4
-    blob = bytearray(
-        sample_bfres(
-            "Tree",
-            [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
-            [0, 1, 2],
-            [(0, 0), (1, 0), (0, 1)],
-            rgba,
-            2,
-            2,
-            texture_name="DekuTree_Alb",
-            embed_texture=False,
-        )
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.bntx import write_rgba
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    data = sample_v10_bfres(
+        "KokiriForest_01",
+        [{"name": "dummy_material", "samplers": []}],
+        shapes=[{"name": "Ground", "material": 0}],
+        with_uvs=False,
+        pool_name="KokiriForest_01_Alb",
     )
-    struct.pack_into("<I", blob, 0x08, 0x000A0000)
-    model = parse(bytes(blob))[0]
-    assert model.parts[0].texture == "DekuTree_Alb"
+    parsed = parse(data)[0]
+    assert parsed.parts[0].uvs in (None, [])
+    assert parsed.parts[0].texture == ""
+    relative = dump.romfs / "Model" / "KokiriForest_01.KokiriForest_01.bfres.zs"
+    relative.write_bytes(compress(data, 1, dicts, level=3))
+    green = bytes([20, 90, 30, 255]) * 4
+    (dump.romfs / "Tex" / "KokiriForest_01_Alb.bntx.zs").write_bytes(
+        compress(write_rgba("KokiriForest_01_Alb", 2, 2, green), 1, dicts, level=3)
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    info = describe_terrain(dump, KOKIRI_STATIC)
+    assert info["status"] == "mesh"
+    assert info["textures"] == 0
+    assert "terrain proxy" in (info.get("reason") or "")
+    assert info["textureLog"][0]["error"] == "terrain proxy"
+    assert info["textureLog"][0]["wanted"] == ""
+    glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
+    document = json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
+    factor = document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert factor[1] > factor[0] and factor[1] > factor[2]
+    assert abs(factor[1] - 0.45) < 1e-6
+    assert "baseColorTexture" not in document["materials"][0]["pbrMetallicRoughness"]
+    primitive = document["meshes"][0]["primitives"][0]
+    assert "NORMAL" in primitive["attributes"]
+    normal_view = document["bufferViews"][document["accessors"][primitive["attributes"]["NORMAL"]]["bufferView"]]
+    start = normal_view["byteOffset"]
+    nx, ny, nz = struct.unpack_from("<3f", glb, 20 + struct.unpack_from("<I", glb, 12)[0] + 8 + start)
+    assert abs(nz) > 0.9
 
 
 def test_alb_suffix_and_bundle_resolve(tmp_path, monkeypatch):
