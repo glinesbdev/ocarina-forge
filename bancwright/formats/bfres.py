@@ -64,6 +64,8 @@ class Part:
     double_sided: bool = True
     base_color: tuple[float, float, float, float] | None = None
     proxy: bool = False
+    # 0 is the near mesh. A higher value is a farther BFRES LOD of the same shape.
+    lod: int = 0
 
 
 @dataclass
@@ -277,12 +279,14 @@ class _File:
         undecoded: list[dict] = []
         shape_at = shape_values
         for index, shape_name in enumerate(shape_names):
-            part, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
-            if part is not None:
-                parts.append(part)
+            made, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
+            if made:
+                parts.extend(made)
             elif info.get("flags", 0) & 0x10:
                 undecoded.append(info)
-        parts = _drop_opaque_twins(parts)
+        near = [part for part in parts if part.lod == 0]
+        far = [part for part in parts if part.lod]
+        parts = _drop_opaque_twins(near) + far
         bounds = _union_bounds([item["bounds"] for item in undecoded if item.get("bounds")])
         model = Model(
             name or fallback,
@@ -633,7 +637,7 @@ class _File:
             start = at + 4
         return found
 
-    def _shape(self, at: int, name: str, bones, materials: list[Material]) -> tuple[Part | None, int, dict]:
+    def _shape(self, at: int, name: str, bones, materials: list[Material]) -> tuple[list[Part], int, dict]:
         if self.data[at : at + 4] != b"FSHP":
             raise FresError(f"expected a shape at {at:#x}")
         flags = self.u32(at + 4) if self.major >= 9 else 0
@@ -677,13 +681,13 @@ class _File:
         if not standard:
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
-            return None, end, info
+            return [], end, info
         fvtx = self._fvtx(vtx)
         lod = self._lod(mesh_at)
         if fvtx is None or lod is None:
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
-            return None, end, info
+            return [], end, info
         positions, uvs = self._vertices(fvtx, lod)
         if skin_count == 0 and bones:
             positions = _rigid(positions, bones, bone_index)
@@ -691,8 +695,36 @@ class _File:
         if not positions or not lod["indices"]:
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
-            return None, end, info
-        return _part_from(name, positions, lod["indices"], uvs, material, material_index), end, info
+            return [], end, info
+        made = [_part_from(name, positions, lod["indices"], uvs, material, material_index, 0)]
+        # LOD meshes are a contiguous array of 0x38-byte headers. Drawing every
+        # level at once stacks the coarse mesh on the fine one. Keep LOD 0 for
+        # near, and the coarsest smaller level for far.
+        if mesh_count > 1:
+            best = None
+            best_level = 0
+            for level in range(1, min(mesh_count, 4)):
+                try:
+                    coarser = self._lod(mesh_at + level * 0x38)
+                except (FresError, struct.error, IndexError, OSError):
+                    break
+                if not coarser or not coarser["indices"]:
+                    continue
+                if len(coarser["indices"]) >= len(lod["indices"]):
+                    continue
+                try:
+                    far_positions, far_uvs = self._vertices(fvtx, coarser)
+                except (FresError, struct.error, IndexError, OSError):
+                    continue
+                if skin_count == 0 and bones:
+                    far_positions = _rigid(far_positions, bones, bone_index)
+                if not far_positions:
+                    continue
+                best = (far_positions, far_uvs, coarser["indices"])
+                best_level = level
+            if best is not None:
+                made.append(_part_from(name, best[0], best[2], best[1], material, material_index, best_level))
+        return made, end, info
 
     def _shape_bounds(self, at: int) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
         """One shape AABB. Version 9+ stores center and extent at the +0x38 pointer."""
@@ -1182,7 +1214,7 @@ def base_color_name(names: list[str]) -> str:
     return chosen[0][1] if chosen else ""
 
 
-def _part_from(name, positions, indices, uvs, material: Material | None, material_index: int) -> Part:
+def _part_from(name, positions, indices, uvs, material: Material | None, material_index: int, lod: int = 0) -> Part:
     sampler, texture = ("", "")
     if material and material.albedo:
         sampler, texture = material.albedo[0]
@@ -1201,6 +1233,7 @@ def _part_from(name, positions, indices, uvs, material: Material | None, materia
         material.cutoff if material else 0.5,
         material.double_sided if material else True,
         material.base_color if material else None,
+        lod=lod,
     )
 
 
@@ -1643,6 +1676,7 @@ def sample_v10_bfres(
     with_uvs: bool = True,
     pool_name: str = "",
     decoy_dict: bool = False,
+    far_lod: bool = False,
 ) -> bytes:
     """A version-10 BFRES with stride-0xB0 materials. Synthetic, for tests.
 
@@ -1765,9 +1799,14 @@ def sample_v10_bfres(
 
     align(8)
     mesh_at = len(blob)
-    blob.extend(struct.pack("<QQQQ", sub_at, 0, 0, index_info))
-    blob.extend(struct.pack("<IIIII", 0, 3, 1, len(indices), 0))
-    blob.extend(struct.pack("<HH", 1, 0))
+    lod_levels = 2 if far_lod and len(indices) > 3 else 1
+    for level in range(lod_levels):
+        count = len(indices) if level == 0 else 3
+        # The near mesh uses its submesh range. The far mesh has no submesh
+        # list, so the reader takes the shorter index count on the header.
+        blob.extend(struct.pack("<QQQQ", sub_at, 0, 0, index_info))
+        blob.extend(struct.pack("<IIIII", 0, 3, 1, count, 0))
+        blob.extend(struct.pack("<HH", 1 if level == 0 else 0, 0))
 
     align(8)
     shape_at = len(blob)
@@ -1783,7 +1822,7 @@ def sample_v10_bfres(
         blob.extend(struct.pack("<QQQ", 0, 0, 0))
         blob.extend(struct.pack("<HHHH", 0, material_index, 0, 0))
         blob.extend(struct.pack("<H", 0))
-        blob.extend(bytes((1, 1, 0, 0)))
+        blob.extend(bytes((1, lod_levels, 0, 0)))
         blob.extend(b"\0\0")
     shape_dict = add_dict(shape_names)
 

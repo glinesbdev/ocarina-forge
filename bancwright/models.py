@@ -36,14 +36,14 @@ class UndecodedGeometry(Exception):
         self.bounds = bounds
 from bancwright.formats.bntx import BntxError, image_names, textures as read_bntx
 from bancwright.formats.byml import loads
-from bancwright.formats.gltf import Primitive, png_rgba, to_glb
+from bancwright.formats.gltf import Primitive, cluster_lod, encode_albedo, to_glb
 from bancwright.formats.sarc import Sarc
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-6\0"
+_CACHE_VERSION = b"models-7\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
 _TERRAIN = (0.36, 0.45, 0.28, 1.0)
@@ -265,7 +265,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             if image is not None:
                 png = png_for.get(id(image))
                 if png is None:
-                    png = png_rgba(image.width, image.height, image.rgba)
+                    png, _mime = encode_albedo(image.width, image.height, image.rgba, part.alpha)
                     png_for[id(image)] = png
                     if id(image) not in seen_images:
                         texture_count += 1
@@ -298,8 +298,27 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     cutoff=part.cutoff,
                     double_sided=part.double_sided,
                     base_color=color,
+                    lod=part.lod,
+                    name=f"{part.name}:{part.material_index}",
                 )
             )
+            if part.lod == 0:
+                coarser = cluster_lod(part.positions, part.indices, part.uvs)
+                if coarser and not any(other.name == part.name and other.lod for other in model.parts):
+                    primitives.append(
+                        Primitive(
+                            coarser[0],
+                            coarser[1],
+                            coarser[2],
+                            png=png,
+                            alpha=alpha,
+                            cutoff=part.cutoff,
+                            double_sided=part.double_sided,
+                            base_color=color,
+                            lod=1,
+                            name=f"{part.name}:{part.material_index}",
+                        )
+                    )
             triangles += len(part.indices) // 3
             positions.extend(part.positions)
     if not primitives:

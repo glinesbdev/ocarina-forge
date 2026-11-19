@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -24,6 +25,7 @@ from bancwright.recipes import recipe_actors
 from bancwright.scene import apply_command, replace_diff, scene_view, sibling_bancs
 
 app = FastAPI(title="Bancwright", version=__version__)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -3,8 +3,14 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
 import { chooseHit } from "./pick.js";
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 export const CATEGORY_COLOR = {
   npc: 0xe0b15a,
@@ -65,6 +71,17 @@ export function createViewport(host, hooks) {
   const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
+  const batches = [];
+  const parsedTemplates = new Map();
+  const templateOrder = [];
+  const statsEl = document.createElement("div");
+  statsEl.className = "view-stats";
+  statsEl.hidden = true;
+  host.appendChild(statsEl);
+  let showStats = false;
+  let naiveDraws = 0;
+  let running = true;
+  let frameHandle = 0;
   const loader = new GLTFLoader();
   const templateCache = new Map();
   const metaCache = new Map();
@@ -97,20 +114,13 @@ export function createViewport(host, hooks) {
     entry.pivot.removeFromParent();
     entry.material.dispose();
     entry.edgeMaterial.dispose();
-    if (entry.model) {
-      entry.model.traverse((child) => {
-        const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
-        materials.forEach((material) => material.dispose());
-      });
-    }
     if (entry.label) entry.label.element.remove();
   }
 
   function clearTerrain() {
     if (!terrainRoot) return;
     terrainRoot.traverse((child) => {
-      const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
-      materials.forEach((material) => material.dispose());
+      if (child.geometry) child.geometry.dispose();
     });
     terrainRoot.removeFromParent();
     terrainRoot = null;
@@ -118,28 +128,21 @@ export function createViewport(host, hooks) {
 
   function clearActors() {
     transform.detach();
+    clearBatches();
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
   }
 
   function paint(entry) {
     const on = entry.key === selected;
-    if (entry.material.emissive) {
-      entry.material.emissive.set(on ? entry.color : 0x000000);
-      entry.material.emissiveIntensity = on ? 0.45 : 0;
-    } else if (entry.volume) {
-      entry.material.opacity = on ? 0.08 : 0.03;
-    }
     const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
-    entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.volume ? entry.color : 0x101612);
-    entry.mesh.visible = !entry.model;
-    entry.edges.visible = !entry.model && (entry.volume || on || marked || entry.status === "hidden");
-    if (!entry.model) return;
-    entry.model.traverse((child) => {
-      if (!child.isMesh || !child.material || !child.material.emissive) return;
-      child.material.emissive.set(on ? 0x3a2a10 : 0x000000);
-      child.material.emissiveIntensity = on ? 0.35 : 0;
-    });
+    const ghost = !entry.parts || !entry.parts.length;
+    entry.material.opacity = on ? 0.1 : entry.status === "hidden" ? 0.02 : 0.04;
+    entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.color);
+    entry.edgeMaterial.opacity = on ? 1 : 0.82;
+    entry.mesh.visible = ghost;
+    entry.edges.visible = ghost;
+    tintInstance(entry);
   }
 
   function ensureLabel(entry) {
@@ -155,8 +158,16 @@ export function createViewport(host, hooks) {
   }
 
   function syncLabels() {
+    const wanted = new Set();
+    if (selected) wanted.add(selected);
+    if (hovered) wanted.add(hovered);
+    if (showLabels) {
+      const ranked = [...entries.values()].filter((entry) => entry.pivot.visible && entry.key !== selected && entry.key !== hovered);
+      ranked.sort((a, b) => camera.position.distanceToSquared(a.pivot.position) - camera.position.distanceToSquared(b.pivot.position));
+      for (const entry of ranked.slice(0, 24)) wanted.add(entry.key);
+    }
     for (const entry of entries.values()) {
-      const show = entry.pivot.visible && (showLabels || entry.key === selected || entry.key === hovered);
+      const show = entry.pivot.visible && wanted.has(entry.key);
       if (!show) {
         if (entry.label) entry.label.visible = false;
         continue;
@@ -180,6 +191,7 @@ export function createViewport(host, hooks) {
     camera.far = Math.max(2000, radius * 40);
     camera.updateProjectionMatrix();
     orbit.update();
+    requestRender();
   }
 
   function rebuildGrid() {
@@ -205,27 +217,20 @@ export function createViewport(host, hooks) {
       const recipe = actor.status === "recipe";
       const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
       const volume = Boolean(actor.volume);
-      const material = volume
-        ? new THREE.MeshBasicMaterial({
-            color,
-            transparent: true,
-            opacity: 0.03,
-            depthWrite: false,
-            depthTest: true,
-            side: THREE.DoubleSide,
-          })
-        : new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.05 });
-      if (!volume && (actor.status === "hidden" || recipe || actor.companion)) {
-        material.transparent = true;
-        material.opacity = actor.status === "hidden" ? 0.18 : actor.companion ? 0.55 : 0.72;
-        material.depthWrite = true;
-      }
+      const material = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.04,
+        depthWrite: false,
+        depthTest: true,
+        side: THREE.DoubleSide,
+      });
       const mesh = new THREE.Mesh(boxGeometry, material);
       const edgeMaterial = new THREE.LineBasicMaterial({
-        color: volume ? color : 0x101612,
-        transparent: volume,
-        opacity: volume ? 0.9 : 1,
-        depthWrite: !volume,
+        color,
+        transparent: true,
+        opacity: 0.82,
+        depthWrite: false,
       });
       const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
       const pivot = new THREE.Group();
@@ -251,6 +256,9 @@ export function createViewport(host, hooks) {
         status: actor.status,
         volume,
         companion: Boolean(actor.companion),
+        parts: null,
+        farNames: null,
+        slots: [],
         pickable: actor.pickable !== false,
         locked: categories[actor.category] === "lock" || (actor.companion && actor.pickable === false),
         color,
@@ -279,6 +287,7 @@ export function createViewport(host, hooks) {
       rebuildGrid();
     }
     syncLabels();
+    requestRender();
     loadModels(token, actors);
     if (options.banc !== undefined) {
       const banc = options.banc;
@@ -327,7 +336,7 @@ export function createViewport(host, hooks) {
             .then((template) => {
               if (token !== generation) return;
               const current = entries.get(entry.key);
-              if (current) attachModel(current, template);
+              if (current) attachModel(current, template, meta.url);
             })
             .catch((error) => {
               if (token !== generation) return;
@@ -374,7 +383,7 @@ export function createViewport(host, hooks) {
           try {
             const template = await ensureTemplate(meta.url);
             if (token !== generation) return;
-            attachModel(entry, template);
+            attachModel(entry, template, meta.url);
           } catch (error) {
             const message = error.message || "The glTF did not load.";
             console.error(`${gyaml}: ${message}`);
@@ -395,7 +404,7 @@ export function createViewport(host, hooks) {
         });
       }
     }
-    const workers = Math.min(3, queue.length);
+    const workers = Math.min(4, queue.length);
     if (workers) Promise.all(Array.from({ length: workers }, () => worker()));
   }
 
@@ -410,53 +419,230 @@ export function createViewport(host, hooks) {
     return pending;
   }
 
-  function cloneModel(template) {
-    const clone = template.clone(true);
-    clone.traverse((child) => {
-      if (!child.isMesh || !child.material) return;
-      const sources = Array.isArray(child.material) ? child.material : [child.material];
-      const materials = sources.map((source) => {
-        const material = source.clone();
-        material.metalness = 0;
-        material.roughness = 0.85;
-        if (material.alphaTest > 0) {
-          material.alphaToCoverage = true;
-          material.transparent = false;
-          material.depthWrite = true;
-        }
-        return material;
-      });
-      child.material = materials.length === 1 ? materials[0] : materials;
-    });
-    return clone;
+  function lodOf(object) {
+    let current = object;
+    while (current) {
+      const match = /^lod(\d+):(.*)$/.exec(current.name || "");
+      if (match) return { lod: Number(match[1]) || 0, family: match[2] || current.uuid };
+      current = current.parent;
+    }
+    return { lod: 0, family: object.uuid };
   }
 
-  function attachModel(entry, template) {
-    if (entry.model) return;
-    const model = cloneModel(template);
-    model.traverse((child) => {
-      child.userData.actorId = entry.id;
+  function prepareMaterial(material) {
+    if (!material || material.userData.bancPrepared) return material;
+    material.metalness = 0;
+    material.roughness = 0.85;
+    if (material.map) {
+      material.map.generateMipmaps = true;
+      material.map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+      material.map.needsUpdate = true;
+    }
+    if (material.alphaTest > 0) {
+      material.alphaToCoverage = true;
+      material.transparent = false;
+      material.depthWrite = true;
+    }
+    material.userData.bancPrepared = true;
+    return material;
+  }
+
+  function partsFromTemplate(template, url) {
+    const parts = [];
+    let index = 0;
+    template.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      const identity = lodOf(child);
+      const geometry = child.geometry;
+      if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+      if (!geometry.boundsTree) geometry.computeBoundsTree();
+      const source = Array.isArray(child.material) ? child.material[0] : child.material;
+      if (!source) return;
+      parts.push({
+        lod: identity.lod,
+        family: identity.family,
+        geometry,
+        material: prepareMaterial(source),
+        radius: geometry.boundingSphere ? geometry.boundingSphere.radius : 1,
+        key: `${url}|${identity.lod}|${identity.family}|${index}`,
+      });
+      index += 1;
     });
-    if (entry.companion) {
-      model.traverse((child) => {
-        if (!child.isMesh || !child.material) return;
-        child.material.transparent = true;
-        child.material.opacity = 0.82;
-        child.material.color.multiplyScalar(0.82);
-      });
+    return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
+  }
+
+  function rememberTemplate(url, parsed) {
+    parsedTemplates.set(url, parsed);
+    const existing = templateOrder.indexOf(url);
+    if (existing >= 0) templateOrder.splice(existing, 1);
+    templateOrder.push(url);
+    while (templateOrder.length > 48) {
+      const old = templateOrder.shift();
+      if ([...entries.values()].some((entry) => entry.templateUrl === old)) {
+        templateOrder.push(old);
+        break;
+      }
+      parsedTemplates.delete(old);
+      templateCache.delete(old);
     }
-    if (entry.status === "recipe") {
-      model.traverse((child) => {
-        if (!child.isMesh || !child.material) return;
-        child.material.color.set(0xc9b6f2);
-        child.material.transparent = true;
-        child.material.opacity = 0.92;
-      });
+  }
+
+  function clearBatches() {
+    for (const batch of batches) {
+      batch.mesh.removeFromParent();
+      batch.mesh.dispose();
     }
-    entry.pivot.add(model);
-    entry.model = model;
+    batches.length = 0;
+    for (const entry of entries.values()) entry.slots = [];
+  }
+
+  const tint = new THREE.Color();
+
+  function instanceTint(entry, target) {
+    if (entry.status === "recipe") target.setHex(0xc9b6f2);
+    else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
+    else target.setRGB(1, 1, 1);
+    if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
+    return target;
+  }
+
+  function tintInstance(entry) {
+    if (!entry.slots) return;
+    for (const slot of entry.slots) {
+      slot.mesh.setColorAt(slot.index, instanceTint(entry, tint));
+      if (slot.mesh.instanceColor) slot.mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  function syncInstanceMatrix(entry) {
+    if (!entry.slots || !entry.slots.length) return;
+    entry.pivot.updateWorldMatrix(true, false);
+    for (const slot of entry.slots) {
+      slot.mesh.setMatrixAt(slot.index, entry.pivot.matrixWorld);
+      slot.mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  function projectedPixels(radius, distance) {
+    const fov = (camera.fov * Math.PI) / 180;
+    const height = renderer.domElement.height || 1;
+    return (radius / Math.max(distance, 0.25)) * (height / (2 * Math.tan(fov / 2)));
+  }
+
+  function cellOf(position) {
+    return `${Math.floor(position.x / 64)}:${Math.floor(position.z / 64)}`;
+  }
+
+  function rebuildBatches() {
+    clearBatches();
+    const groups = new Map();
+    naiveDraws = 0;
+    for (const entry of entries.values()) {
+      const ghost = !entry.parts || !entry.parts.length;
+      entry.mesh.visible = ghost && entry.pivot.visible;
+      entry.edges.visible = ghost && entry.pivot.visible;
+      if (!entry.pivot.visible || ghost) continue;
+      naiveDraws += entry.parts.filter((part) => part.lod === 0).length;
+      entry.pivot.updateWorldMatrix(true, false);
+      const distance = camera.position.distanceTo(entry.pivot.position);
+      const scale = Math.max(entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z, 0.001);
+      const useFar = distance > 80;
+      for (const part of entry.parts) {
+        const radius = part.radius * scale;
+        if (radius < 8 && projectedPixels(radius, distance) < 1.4) continue;
+        const reduced = entry.farNames && entry.farNames.has(part.family);
+        if (useFar && reduced && part.lod === 0) continue;
+        if (part.lod > 0 && (!useFar || !reduced)) continue;
+        const key = `${part.key}|${cellOf(entry.pivot.position)}`;
+        let group = groups.get(key);
+        if (!group) {
+          group = { part, records: [] };
+          groups.set(key, group);
+        }
+        group.records.push(entry);
+      }
+    }
+    for (const group of groups.values()) {
+      const mesh = new THREE.InstancedMesh(group.part.geometry, group.part.material, group.records.length);
+      mesh.frustumCulled = true;
+      mesh.count = group.records.length;
+      const ids = new Array(group.records.length);
+      group.records.forEach((entry, index) => {
+        mesh.setMatrixAt(index, entry.pivot.matrixWorld);
+        mesh.setColorAt(index, instanceTint(entry, tint));
+        ids[index] = entry.key;
+        entry.slots.push({ mesh, index });
+      });
+      mesh.instanceMatrix.needsUpdate = true;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.computeBoundingSphere();
+      scene.add(mesh);
+      batches.push({ mesh, ids });
+    }
+  }
+
+  let rebuildQueued = false;
+  function queueRebuild() {
+    if (rebuildQueued) return;
+    rebuildQueued = true;
+    requestAnimationFrame(() => {
+      rebuildQueued = false;
+      rebuildBatches();
+      requestRender();
+    });
+  }
+
+  function attachModel(entry, template, url) {
+    if (entry.parts) return;
+    let parsed = parsedTemplates.get(url);
+    if (!parsed) {
+      parsed = partsFromTemplate(template, url);
+      rememberTemplate(url, parsed);
+    }
+    entry.parts = parsed.parts;
+    entry.farNames = parsed.farNames;
+    entry.templateUrl = url;
     entry.volume = false;
-    paint(entry);
+    queueRebuild();
+  }
+
+  function mergeStatic(template) {
+    const byMaterial = new Map();
+    template.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      const source = Array.isArray(child.material) ? child.material[0] : child.material;
+      if (!source) return;
+      const material = prepareMaterial(source);
+      const geometry = child.geometry.clone();
+      child.updateWorldMatrix(true, false);
+      geometry.applyMatrix4(child.matrixWorld);
+      const list = byMaterial.get(material) || { material, geometries: [] };
+      list.geometries.push(geometry);
+      byMaterial.set(material, list);
+    });
+    const root = new THREE.Group();
+    for (const group of byMaterial.values()) {
+      let geometry = group.geometries[0];
+      if (group.geometries.length > 1) {
+        try {
+          geometry = mergeGeometries(group.geometries, false);
+          group.geometries.forEach((item) => item.dispose());
+        } catch {
+          for (const item of group.geometries) {
+            const mesh = new THREE.Mesh(item, group.material);
+            mesh.raycast = () => {};
+            root.add(mesh);
+          }
+          continue;
+        }
+      }
+      if (!geometry) continue;
+      if (!geometry.boundsTree) geometry.computeBoundsTree();
+      const mesh = new THREE.Mesh(geometry, group.material);
+      mesh.raycast = () => {};
+      root.add(mesh);
+    }
+    return root;
   }
 
   async function loadTerrain(token, banc) {
@@ -479,13 +665,14 @@ export function createViewport(host, hooks) {
         else setTimeout(resolve, 0);
       });
       if (token !== generation) return;
-      terrainRoot = cloneModel(template);
+      terrainRoot = mergeStatic(template);
       terrainRoot.name = "terrain";
       terrainRoot.raycast = () => {};
       terrainRoot.traverse((child) => {
         child.raycast = () => {};
       });
       scene.add(terrainRoot);
+      requestRender();
     } catch (error) {
       if (token === generation && hooks.onTerrain) {
         hooks.onTerrain({ status: "box", reason: error.message || "The map glTF did not load.", source: meta.source || "" });
@@ -507,6 +694,8 @@ export function createViewport(host, hooks) {
     for (const entry of entries.values()) paint(entry);
     attach();
     syncLabels();
+    for (const entry of entries.values()) tintInstance(entry);
+    requestRender();
   }
 
   function setNav(mode) {
@@ -532,6 +721,7 @@ export function createViewport(host, hooks) {
       entry.locked = categories[entry.category] === "lock" || (entry.companion && entry.pickable === false);
       entry.pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
     }
+    queueRebuild();
     attach();
     syncLabels();
   }
@@ -573,10 +763,19 @@ export function createViewport(host, hooks) {
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
     const roots = [];
+    for (const batch of batches) roots.push(batch.mesh);
     for (const entry of entries.values()) {
-      if (entry.pivot.visible && !entry.locked) roots.push(entry.pivot);
+      if (entry.pivot.visible && !entry.locked && (!entry.parts || !entry.parts.length)) roots.push(entry.pivot);
     }
     return classify(roots.length ? raycaster.intersectObjects(roots, true) : []);
+  }
+
+  function idOfHit(hit) {
+    if (hit.instanceId !== undefined) {
+      const batch = batches.find((item) => item.mesh === hit.object);
+      if (batch) return batch.ids[hit.instanceId] || null;
+    }
+    return idOf(hit.object);
   }
 
   function classify(hits) {
@@ -585,10 +784,10 @@ export function createViewport(host, hooks) {
     const edges = [];
     for (const hit of hits) {
       if (!hit.object.visible) continue;
-      const id = idOf(hit.object);
+      const id = idOfHit(hit);
       const entry = id ? entries.get(id) : null;
       if (!entry || entry.locked || !entry.pivot.visible) continue;
-      if (entry.volume && !entry.model) {
+      if (entry.volume && (!entry.parts || !entry.parts.length)) {
         if (!volumes.includes(id)) volumes.push(id);
         if (nearEdge(hit, entry) && !edges.includes(id)) edges.push(id);
       } else if (!solids.includes(id)) {
@@ -642,6 +841,7 @@ export function createViewport(host, hooks) {
       const forward = new THREE.Vector3();
       camera.getWorldDirection(forward);
       orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+      requestRender();
       return;
     }
     if (lastPointer && event.buttons === 1) {
@@ -658,6 +858,7 @@ export function createViewport(host, hooks) {
     if (key !== hovered) {
       hovered = key;
       syncLabels();
+      requestRender();
     }
   });
 
@@ -681,6 +882,8 @@ export function createViewport(host, hooks) {
     const p = entry.pivot.position;
     const r = entry.pivot.rotation;
     hooks.onPreview(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
+    syncInstanceMatrix(entry);
+    requestRender();
   });
 
   transform.addEventListener("dragging-changed", (event) => {
@@ -699,12 +902,13 @@ export function createViewport(host, hooks) {
   window.addEventListener("keydown", (event) => {
     if (isTyping(event)) return;
     keys.add(event.key.toLowerCase());
+    requestRender();
   });
   window.addEventListener("keyup", (event) => keys.delete(event.key.toLowerCase()));
   window.addEventListener("blur", () => keys.clear());
 
   function updateFly(dt) {
-    if (nav !== "fly") return;
+    if (nav !== "fly") return false;
     const speed = (keys.has("shift") ? 32 : 10) * dt;
     const forward = new THREE.Vector3();
     camera.getWorldDirection(forward);
@@ -716,10 +920,11 @@ export function createViewport(host, hooks) {
     if (keys.has("a")) move.sub(right);
     if (keys.has("e")) move.y += 1;
     if (keys.has("q")) move.y -= 1;
-    if (move.lengthSq() === 0) return;
+    if (move.lengthSq() === 0) return false;
     move.normalize().multiplyScalar(speed);
     camera.position.add(move);
     orbit.target.add(move);
+    return true;
   }
 
   function resize() {
@@ -729,18 +934,50 @@ export function createViewport(host, hooks) {
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
     labels.setSize(width, height);
+    requestRender();
   }
 
   const observer = new ResizeObserver(resize);
   observer.observe(host);
   resize();
 
-  let running = true;
+  const lastCull = new THREE.Vector3(1e9, 1e9, 1e9);
+  let lastCullAt = 0;
+  const frameTimes = [];
+  let fps = 0;
+
+  function requestRender() {
+    if (!running || frameHandle) return;
+    frameHandle = requestAnimationFrame(tick);
+  }
+
+  function writeStats() {
+    if (!showStats) return;
+    const now = performance.now();
+    frameTimes.push(now);
+    while (frameTimes.length && now - frameTimes[0] > 500) frameTimes.shift();
+    if (frameTimes.length >= 4) {
+      fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
+    }
+    const info = renderer.info.render;
+    const tris = info.triangles >= 1000 ? `${Math.round(info.triangles / 100) / 10}k` : String(info.triangles);
+    const rate = fps ? `${fps} fps` : "idle";
+    statsEl.textContent = `${rate} · ${info.calls} draws · ${naiveDraws} model draws if each copy was separate · ${tris} tris`;
+  }
+
   function tick() {
+    frameHandle = 0;
     if (!running) return;
     const dt = Math.min(clock.getDelta(), 0.05);
-    updateFly(dt);
-    if (nav === "orbit") orbit.update();
+    const flying = updateFly(dt);
+    const damped = nav === "orbit" ? orbit.update() : false;
+    const now = performance.now();
+    if (now - lastCullAt > 180 && camera.position.distanceTo(lastCull) > 3) {
+      lastCullAt = now;
+      lastCull.copy(camera.position);
+      rebuildBatches();
+      syncLabels();
+    }
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
       const distance = camera.position.distanceTo(entry.pivot.position);
@@ -748,9 +985,12 @@ export function createViewport(host, hooks) {
     }
     renderer.render(scene, camera);
     labels.render(scene, camera);
-    requestAnimationFrame(tick);
+    writeStats();
+    if (flying || damped || looking || transform.dragging) requestRender();
   }
-  tick();
+  orbit.addEventListener("start", () => requestRender());
+  orbit.addEventListener("change", () => requestRender());
+  requestRender();
 
   return {
     setActors,
@@ -762,8 +1002,15 @@ export function createViewport(host, hooks) {
     frame,
     spawnPoint,
     resize,
+    setShowStats(on) {
+      showStats = Boolean(on);
+      statsEl.hidden = !showStats;
+      requestRender();
+    },
     destroy() {
       running = false;
+      if (frameHandle) cancelAnimationFrame(frameHandle);
+      statsEl.remove();
       generation += 1;
       observer.disconnect();
       clearActors();

@@ -809,3 +809,48 @@ def test_flag_0x10_exact_file_is_a_bounds_box_not_a_sibling(tmp_path, monkeypatc
     assert resolved["bounds"]["max"] == [5.0, 2.5, 5.0]
     assert resolved["source"].endswith("Land_Kokiri_House.Land_Kokiri_House_Outside_C_00.bfres.zs")
     assert "Inside" not in resolved["source"]
+
+
+def test_only_the_near_lod_is_the_full_mesh_and_images_shrink():
+    import json
+    import struct
+
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.gltf import encode_albedo, limit_rgba, to_glb
+    from bancwright.formats.gltf import Primitive
+
+    positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)]
+    data = sample_v10_bfres(
+        "Tree",
+        [{"name": "Bark", "samplers": [("_a0", "Bark")]}],
+        shapes=[{"name": "Canopy", "material": 0}],
+        positions=positions,
+        indices=[0, 1, 2, 0, 2, 3],
+        far_lod=True,
+    )
+    model = parse(data)[0]
+    near = [part for part in model.parts if part.lod == 0]
+    far = [part for part in model.parts if part.lod]
+    assert len(near) == 1 and len(far) == 1
+    assert len(near[0].indices) == 6
+    assert len(far[0].indices) == 3
+    assert far[0].name == near[0].name
+
+    wide = bytes([10, 140, 40, 255]) * (8 * 4)
+    small_w, small_h, shrunk = limit_rgba(8, 4, wide, 2)
+    assert small_w == 2 and small_h == 1 and len(shrunk) == 8
+    jpeg, mime = encode_albedo(4, 4, bytes([20, 90, 30, 255]) * 16, "opaque")
+    assert mime == "image/jpeg" and jpeg[:2] == b"\xff\xd8"
+    cutout, cutout_mime = encode_albedo(2, 2, bytes([20, 90, 30, 10]) * 4, "mask")
+    assert cutout_mime == "image/png" and cutout.startswith(b"\x89PNG")
+
+    glb = to_glb(
+        [
+            Primitive(positions[:3], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], png=jpeg, name="Canopy:0"),
+            Primitive(positions[:3], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], png=jpeg, name="Canopy:0", lod=1),
+        ]
+    )
+    document = json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
+    names = [node["name"] for node in document["nodes"]]
+    assert names == ["lod0:Canopy:0", "lod1:Canopy:0"]
+    assert document["images"][0]["mimeType"] == "image/jpeg"

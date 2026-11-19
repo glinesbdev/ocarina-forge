@@ -19,6 +19,114 @@ class Primitive:
     cutoff: float = 0.5
     double_sided: bool = True
     base_color: tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0)
+    lod: int = 0
+    name: str = ""
+
+
+def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
+    """Box-filter an image so the long edge is at most ``limit`` pixels."""
+    if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return width, height, rgba
+    if width <= limit and height <= limit:
+        return width, height, rgba
+    scale = limit / max(width, height)
+    nw = max(1, int(width * scale))
+    nh = max(1, int(height * scale))
+    out = bytearray(nw * nh * 4)
+    for y in range(nh):
+        y0 = int(y / scale)
+        y1 = min(height, max(y0 + 1, int((y + 1) / scale)))
+        for x in range(nw):
+            x0 = int(x / scale)
+            x1 = min(width, max(x0 + 1, int((x + 1) / scale)))
+            acc = [0, 0, 0, 0]
+            count = 0
+            for yy in range(y0, y1):
+                row = yy * width
+                for xx in range(x0, x1):
+                    pixel = (row + xx) * 4
+                    acc[0] += rgba[pixel]
+                    acc[1] += rgba[pixel + 1]
+                    acc[2] += rgba[pixel + 2]
+                    acc[3] += rgba[pixel + 3]
+                    count += 1
+            if count <= 0:
+                continue
+            dest = (y * nw + x) * 4
+            for channel in range(4):
+                out[dest + channel] = acc[channel] // count
+    return nw, nh, bytes(out)
+
+
+def encode_albedo(width: int, height: int, rgba: bytes, alpha: str = "opaque") -> tuple[bytes, str]:
+    """Cap the long edge at 1024. Opaque images become JPEG; cutouts stay PNG."""
+    width, height, rgba = limit_rgba(width, height, rgba, 1024)
+    opaque = alpha == "opaque" and not any(rgba[index] < 250 for index in range(3, len(rgba), 4))
+    if opaque:
+        jpeg = _jpeg(width, height, rgba)
+        if jpeg:
+            return jpeg, "image/jpeg"
+    return png_rgba(width, height, rgba), "image/png"
+
+
+def _jpeg(width: int, height: int, rgba: bytes) -> bytes | None:
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+    except ImportError:
+        return None
+    image = Image.frombytes("RGBA", (width, height), rgba).convert("RGB")
+    out = BytesIO()
+    image.save(out, format="JPEG", quality=82, optimize=True)
+    return out.getvalue()
+
+
+def cluster_lod(
+    positions: list[tuple[float, float, float]],
+    indices: list[int],
+    uvs: list[tuple[float, float]] | None,
+    ratio: float = 0.35,
+) -> tuple[list, list, list | None] | None:
+    """A far mesh: quantize vertices onto a grid and drop degenerate triangles."""
+    if len(indices) < 6000 or len(positions) < 80:
+        return None
+    xs = [point[0] for point in positions]
+    ys = [point[1] for point in positions]
+    zs = [point[2] for point in positions]
+    span = max(max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs), 1e-4)
+    cells = max(2, int(round(max(24, len(positions) * ratio) ** (1 / 3))))
+    step = span / cells
+    origin = (min(xs), min(ys), min(zs))
+    vertex_of: dict[tuple[int, int, int], int] = {}
+    remap: dict[int, int] = {}
+    new_pos: list[tuple[float, float, float]] = []
+    new_uv: list[tuple[float, float]] = []
+    for index, point in enumerate(positions):
+        cell = (
+            int((point[0] - origin[0]) / step),
+            int((point[1] - origin[1]) / step),
+            int((point[2] - origin[2]) / step),
+        )
+        slot = vertex_of.get(cell)
+        if slot is None:
+            slot = len(new_pos)
+            vertex_of[cell] = slot
+            new_pos.append(point)
+            if uvs is not None and index < len(uvs):
+                new_uv.append(uvs[index])
+        remap[index] = slot
+    new_idx: list[int] = []
+    for index in range(0, len(indices) - 2, 3):
+        a = remap.get(indices[index])
+        b = remap.get(indices[index + 1])
+        c = remap.get(indices[index + 2])
+        if a is None or b is None or c is None or a == b or b == c or a == c:
+            continue
+        new_idx.extend((a, b, c))
+    if len(new_idx) < 3 or len(new_idx) >= len(indices) * 0.85:
+        return None
+    return new_pos, new_idx, new_uv if uvs is not None else None
 
 
 def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
@@ -69,7 +177,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
     images = []
     textures = []
     materials = []
-    gl_primitives = []
+    grouped: dict[int, list] = {}
     image_of: dict[bytes, int] = {}
     material_of: dict[tuple, int] = {}
 
@@ -128,7 +236,8 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if prim.png:
             if prim.png not in image_of:
                 image_view = view(prim.png)
-                images.append({"bufferView": image_view, "mimeType": "image/png"})
+                mime = "image/jpeg" if prim.png[:2] == b"\xff\xd8" else "image/png"
+                images.append({"bufferView": image_view, "mimeType": mime})
                 textures.append({"source": len(images) - 1})
                 image_of[prim.png] = len(images) - 1
             image_index = image_of[prim.png]
@@ -154,18 +263,25 @@ def to_glb(primitives: list[Primitive]) -> bytes:
                 material["alphaMode"] = "BLEND"
             materials.append(material)
             material_of[key] = len(materials) - 1
-        gl_primitives.append(
-            {"attributes": attributes, "indices": index_accessor, "material": material_of[key]}
+        label = prim.name or f"part{len(grouped)}"
+        grouped.setdefault(1 if prim.lod else 0, []).append(
+            (label, {"attributes": attributes, "indices": index_accessor, "material": material_of[key]})
         )
 
-    if not gl_primitives:
+    if not grouped:
         raise ValueError("the model has no triangles")
+    nodes = []
+    meshes = []
+    for lod in sorted(grouped):
+        for label, primitive in grouped[lod]:
+            meshes.append({"name": f"lod{lod}:{label}", "primitives": [primitive]})
+            nodes.append({"name": f"lod{lod}:{label}", "mesh": len(meshes) - 1})
     document = {
         "asset": {"version": "2.0", "generator": "bancwright"},
         "scene": 0,
-        "scenes": [{"nodes": [0]}],
-        "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": gl_primitives}],
+        "scenes": [{"nodes": list(range(len(nodes)))}],
+        "nodes": nodes,
+        "meshes": meshes,
         "buffers": [{"byteLength": len(bin_blob)}],
         "bufferViews": buffer_views,
         "accessors": accessors,

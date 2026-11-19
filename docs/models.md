@@ -41,7 +41,21 @@ An After the Ocarina recipe that places an actor (the `stones:` list, or any oth
 
 Areas, fog, triggers, sensors, collision, and anything else that is not a real mesh and is 8 metres or larger on an axis are drawn as an edge outline with a very faint fill. The fill does not write depth, so it cannot hide the meshes inside it. The outliner has a Volumes chip that hides every outline at once, plus a chip per category. The stage-bar Show / Lock / Hide for Areas and System is unchanged.
 
-The cache key is a hash of the source bytes plus a version prefix (`models-6`). Older glTF in that folder is left unused. Files live in `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`.
+The cache key is a hash of the source bytes plus a version prefix (`models-7`). Older glTF in that folder is left unused. Files live in `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`.
+
+## Drawing
+
+Every placeholder is an outline. A missing model, an FSHP flag `0x10` shape, a volume, a recipe that has not loaded, and a companion that has not loaded use the same box: an edge line plus a very faint fill, both with depth write off. A real mesh hides that box. Nothing in the placeholder path uses a solid material.
+
+Repeated meshes are instanced. Actors that share a glTF submesh and material in the same 64 m cell become one `InstancedMesh`, so one draw covers every copy. The instance id maps back to the actor for picking, and that actor’s matrix and color update when you move it, select it, or hide it. Cells carry their own bounds, so a cell outside the camera is frustum-culled. A prop whose on-screen size is under about a pixel and whose radius is under 8 m is left out until you move closer. **Stats** in the stage bar shows fps, the draw count, how many draws the same actors would cost without instancing, and the triangle count.
+
+A BFRES shape’s LOD list is an array of 0x38-byte mesh headers (`FSHP+0x5B` is the count). The glTF keeps LOD 0 and, when a later level has fewer triangles, that coarser level under a `lod1:` node. The view draws one of them: LOD 0 inside 80 m, the coarse mesh past that. Shapes with no second level and more than about 2,000 triangles get a grid-quantized far mesh in the same cache. Submeshes of a single level are one mesh, not stacked LODs.
+
+The view renders when the camera moves, the selection or a transform changes, or a model arrives. Orbit damping finishes the frame it needs and then the loop stops. Labels are the selection, the actor under the cursor, and the nearest 24 when **All labels** is on. Picking uses a BVH (`three-mesh-bvh`) on the mesh, including each instance. The static map is merged per material and is not pickable. Companion actors share the same instance batches; their color is dimmed, and **Pick companions** only changes whether the ray keeps the hit.
+
+Albedo images are capped at 1024 on the long edge. An opaque image is stored as JPEG, a cutout stays PNG, and the GPU builds mipmaps. The API gzips glTF and JSON responses over 1 KB. Model fetches run four at a time, and a converted glTF is reused from the cache. `EXT_meshopt_compression` is not applied: the encoder is a separate toolchain, and the draw-call and LOD cuts are the part that moves frame time.
+
+A native shell (Tauri or Electron around this same three.js view, or a native engine) would not change the Kokiri cost. The time goes to draw submissions and to full-detail meshes in the distance, which is the same work on either side of a webview. The editor stays a browser page.
 
 ## Companion bancs
 
@@ -61,7 +75,7 @@ The properties panel shows the reason.
 - FSHP flag `0x10` (flags word `0x12`). The vertex buffer is not an FVTX and the mesh count is 0. The box uses the shape’s center and extent. The reason is `geometry format not decoded (FSHP flag 0x10)`. The layout after the GPU buffer is not documented as a meshlet or `.bfres.mc` block, so it is not decoded.
 - The GPU buffer is an external section past the end of the file (the HasExternalGPU flag).
 - A vertex format this reader does not know.
-- The glTF request failed in the browser. The box comes back and the reason is the load error.
+- The glTF request failed in the browser. The outline comes back and the reason is the load error. The warning strip shows that error.
 
 ## Picking
 

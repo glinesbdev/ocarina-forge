@@ -115,6 +115,9 @@ $("companion-pick").addEventListener("change", (event) => {
   state.companionPick = event.target.checked;
   if (state.raw) applyView(state.raw, { select: state.selected });
 });
+$("show-stats").addEventListener("change", (event) => {
+  viewport.setShowStats(event.target.checked);
+});
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 document.querySelectorAll("[data-cat]").forEach((button) => {
   button.addEventListener("click", () => {
