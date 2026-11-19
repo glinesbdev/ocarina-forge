@@ -61,6 +61,26 @@ def test_importer_copies_yaml_only(tmp_path):
     assert not (dest / "stolen.bfres").exists()
 
 
+def test_compare_script_prefers_the_checkout_venv(tmp_path, capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("compare_romfs", ROOT / "scripts" / "compare_romfs.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ato = tmp_path / "ato"
+    python = ato / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    python.chmod(0o755)
+    assert module.ato_python(ato) == python
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert module.ato_python(bare) == Path(module.sys.executable)
+    err = capsys.readouterr().err
+    assert "requirements.txt" in err
+    assert "evfl" in err
+
+
 def test_size_rule_matches_the_vendored_pipeline():
     import sys
 

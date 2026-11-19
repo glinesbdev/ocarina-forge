@@ -15,9 +15,10 @@ pip install -r requirements.txt
 python scripts/import_ato.py ~/Work/after-the-ocarina examples/after-the-ocarina
 
 # config.toml in the After the Ocarina checkout must point romfs (or pristine_romfs)
-# at the 1.1.1 dump. The script runs, inside that checkout:
-#   python scripts/build.py --no-install
-# which writes ~/Work/after-the-ocarina/build/romfs
+# at the 1.1.1 dump. The script runs that checkout's scripts/build.py --no-install
+# with ~/Work/after-the-ocarina/.venv/bin/python when the virtualenv exists.
+# Without it, the current interpreter is used and the script says to install
+# that checkout's requirements.txt. The build writes build/romfs there.
 python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 ```
 

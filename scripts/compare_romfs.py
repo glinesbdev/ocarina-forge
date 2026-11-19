@@ -6,11 +6,12 @@ After the Ocarina config.toml:
 
     python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 
-That runs ``python scripts/build.py --no-install`` inside the checkout
-(it writes ``build/romfs``) and builds ``examples/after-the-ocarina`` with
-the same romfs. The two trees are compared file by file. Compressed files
-are unpacked first. BYML, event flows and SARC members are compared by
-value when the bytes differ.
+That runs ``scripts/build.py --no-install`` inside the checkout with that
+checkout's ``.venv/bin/python`` when the virtualenv exists, and otherwise
+with the current interpreter. It writes ``build/romfs``. This script then
+builds ``examples/after-the-ocarina`` with the same romfs. The two trees
+are compared file by file. Compressed files are unpacked first. BYML,
+event flows and SARC members are compared by value when the bytes differ.
 
 Exit 0 when every file is byte-identical. Exit 3 when the only differences
 are explained (same payload, different compression, or the same parsed
@@ -61,6 +62,29 @@ def _ato_romfs(ato: Path) -> Path:
     return path
 
 
+def ato_python(ato: Path) -> Path:
+    """The interpreter that should run the checkout's ``scripts/build.py``.
+
+    The checkout's own virtualenv has evfl, ainb, zstandard, and PyYAML.
+    This repo's interpreter often does not, and launching ``build.py`` with
+    it then fails with ``ModuleNotFoundError: evfl``.
+    """
+    names = (".venv/Scripts/python.exe", ".venv/bin/python") if sys.platform == "win32" else (".venv/bin/python",)
+    for name in names:
+        python = ato / name
+        if python.is_file():
+            return python
+    pip = ".venv\\Scripts\\pip.exe" if sys.platform == "win32" else ".venv/bin/pip"
+    print(
+        f"{ato}/.venv was not found, so scripts/build.py will run with {sys.executable}.\n"
+        "That interpreter needs After the Ocarina's dependencies (evfl, ainb, zstandard, PyYAML).\n"
+        "From the checkout, install its requirements.txt:\n"
+        f"  python -m venv .venv && {pip} install -r requirements.txt",
+        file=sys.stderr,
+    )
+    return Path(sys.executable)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ato", type=Path, required=True, help="After the Ocarina checkout")
@@ -79,9 +103,10 @@ def main(argv: list[str] | None = None) -> int:
     if romfs.name != "romfs" and (romfs / "romfs").is_dir():
         romfs = romfs / "romfs"
     if not args.skip_ato_build:
-        print(f"building After the Ocarina with scripts/build.py --no-install ({romfs})")
+        python = ato_python(ato)
+        print(f"building After the Ocarina with {python} scripts/build.py --no-install ({romfs})")
         completed = subprocess.run(
-            [sys.executable, "scripts/build.py", "--no-install"],
+            [str(python), "scripts/build.py", "--no-install"],
             cwd=ato,
             check=False,
         )
