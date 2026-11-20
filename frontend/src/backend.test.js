@@ -74,6 +74,16 @@ test("the default viewport still builds a WebGLRenderer", () => {
   assert.match(backend, /WebGPU \(WebGL2 fallback\)/);
   assert.match(backend, /backendLabel\(gpuRenderer\)/);
   assert.match(viewport, /attachTerrainColor\(material\)/);
+  assert.match(viewport, /attachCutout\(material\)/);
+  assert.match(viewport, /groupGeometryDraws\(mesh\)/);
+  assert.match(viewport, /patchBatchedDraw\(renderer\.backend\)/);
+  assert.doesNotMatch(viewport, /geometry\.uuid\}`/);
+  assert.match(viewport, /!material\.userData\.terrainNode/);
+  const cutout = readFileSync(new URL("./cutout-node.js", import.meta.url), "utf8");
+  assert.match(cutout, /alphaTestNode/);
+  assert.match(cutout, /hasAttribute\("uv"\)/);
+  assert.match(cutout, /\.discard\(\)/);
+  assert.match(cutout, /alphaToCoverage = false/);
   assert.match(viewport, /createBackendRenderer\(THREE/);
   assert.match(html, /id="use-webgpu"/);
   assert.match(html, /src="\/src\/boot.js"/);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, collapseSameGeometryDraw } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw } from "./instance.js";
 
 const open = { area: "show", system: "show", object: "show" };
 
@@ -116,20 +116,89 @@ test("a batched mesh has no instanceMatrix and the drag must not touch it", () =
   assert.equal(mesh.instanceMatrix.needsUpdate, true);
 });
 
-test("one geometry of copies collapses to a single WebGPU draw", () => {
+test("consecutive geometries become one instanced draw each", () => {
   const mesh = {
+    userData: {},
     _multiDrawCount: 400,
     _multiDrawStarts: new Int32Array(400).fill(0),
     _multiDrawCounts: new Int32Array(400).fill(36),
     _multiDrawInstances: null,
   };
-  assert.equal(collapseSameGeometryDraw(mesh), 1);
+  assert.equal(groupGeometryDraws(mesh), 1);
   assert.equal(mesh._multiDrawCount, 1);
   assert.equal(mesh._multiDrawInstances[0], 400);
-  mesh._multiDrawStarts[3] = 90;
-  mesh._multiDrawCount = 4;
-  assert.equal(collapseSameGeometryDraw(mesh), 4);
-  assert.equal(mesh._multiDrawCount, 4);
+  assert.equal(mesh.userData.batchFirst[0], 0);
+  const mixed = {
+    userData: {},
+    _multiDrawCount: 5,
+    _multiDrawStarts: Int32Array.from([0, 0, 0, 90, 90]),
+    _multiDrawCounts: Int32Array.from([36, 36, 36, 12, 12]),
+  };
+  assert.equal(groupGeometryDraws(mixed), 2);
+  assert.equal(mixed._multiDrawInstances[0], 3);
+  assert.equal(mixed._multiDrawInstances[1], 2);
+  assert.equal(mixed.userData.batchFirst[0], 0);
+  assert.equal(mixed.userData.batchFirst[1], 3);
+  const interleaved = {
+    userData: {},
+    _multiDrawCount: 4,
+    _multiDrawStarts: Int32Array.from([0, 90, 0, 90]),
+    _multiDrawCounts: Int32Array.from([36, 12, 36, 12]),
+  };
+  assert.equal(groupGeometryDraws(interleaved), 4);
+});
+
+test("a later geometry run keeps its own first instance", () => {
+  const calls = [];
+  const pass = {
+    drawIndexed(...args) {
+      calls.push(args);
+    },
+  };
+  const backend = {
+    get() {
+      return { currentPass: pass };
+    },
+    draw(renderObject) {
+      const object = renderObject.object;
+      for (let i = 0; i < object._multiDrawCount; i += 1) {
+        const count = object._multiDrawInstances[i];
+        const first = count > 1 ? 0 : i;
+        this.get().currentPass.drawIndexed(object._multiDrawCounts[i], count, object._multiDrawStarts[i], 0, first);
+      }
+    },
+  };
+  patchBatchedDraw(backend);
+  backend.draw({
+    context: {},
+    object: {
+      _multiDrawCount: 2,
+      _multiDrawStarts: [0, 100],
+      _multiDrawCounts: [6, 6],
+      _multiDrawInstances: [3, 2],
+      userData: { batchFirst: [0, 3] },
+    },
+  });
+  assert.deepEqual(calls, [
+    [6, 3, 0, 0, 0],
+    [6, 2, 100, 0, 3],
+  ]);
+});
+
+test("a mapped geometry without uv loses only its own map", () => {
+  const shared = {
+    map: { id: 1 },
+    clone() {
+      return { map: this.map, needsUpdate: false, userData: {} };
+    },
+  };
+  const bare = { name: "grass-card", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+  const textured = { name: "trunk", geometry: { hasAttribute: () => true }, material: shared, children: [] };
+  const names = dropMapWithoutUv({ children: [bare, textured] });
+  assert.deepEqual(names, ["grass-card"]);
+  assert.equal(bare.material.map, null);
+  assert.equal(textured.material.map.id, 1);
+  assert.equal(shared.map.id, 1);
 });
 
 test("copies that share an albedo share a batch key", () => {

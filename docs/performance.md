@@ -69,25 +69,33 @@ What is shared, so both backends should match:
 
 What differs on r170's WebGPU backend:
 
-- The lighting model is the node physical shader, not the WebGL standard chunks. The forest can read a little brighter or flatter. Water and alpha-tested leaves go through the node material's alpha test instead of the GLSL chunk.
+- The lighting model is the node physical shader, not the WebGL standard chunks. The forest can read a little brighter or flatter.
 - `info.render.calls` is how many times `render()` ran, not the draw count. **Stats** reads `drawCalls` on WebGPU, then adds each `BatchedMesh` draw, because r170 does not count those itself. `tris` still misses the forest. Do not compare `tris` across the two backends on this build.
-- `separate` is lod-0 parts that never received a `BatchedMesh` slot. A healthy Kokiri view stays near 0. It used to add every lod-0 part, so the line read `10461 separate` next to `10461 inst` even when those copies were already instances.
-- The WebGPU page is one three build. `boot.js` loads `main.js?three=webgpu`, and that graph resolves `three`, `three/webgpu`, `three/tsl`, the addons, and three-mesh-bvh to `three.webgpu.js`. Lights from the WebGL build are a different constructor, so `LightsNode` skipped them and the standard materials drew black. The default page still uses `three.module.js` and does not load the WebGPU build.
-- r170's WebGPU backend draws one call per `BatchedMesh` instance. Copies of a single geometry are folded into one instanced draw before that loop. WebGL keeps material batches and `WEBGL_multi_draw`.
-- The terrain node samples the atlas with its own uv. It does not read attribute `uv`, and geometries without `uv1`/`uv2`/`uv3` get a flat colour instead of a missing-attribute warning every frame.
-- The first WebGPU frames compile pipelines. Orbit once and let it settle before reading fps. A second "Multiple instances of Three.js" warning means the graph split again. If the device is lost, a toast says so and unchecking **WebGPU** reloads the WebGL editor.
+- `separate` is lod-0 parts that never received a `BatchedMesh` slot. A healthy Kokiri view stays near 0.
+- The WebGPU page is one three build. `boot.js` loads `main.js?three=webgpu`, and that graph resolves `three`, `three/webgpu`, `three/tsl`, the addons, and three-mesh-bvh to `three.webgpu.js`. The default page still uses `three.module.js`.
+- WebGL packs every geometry that shares a material into one `WEBGL_multi_draw`. WebGPU has no multi-draw: one indexed draw can cover one index range. Copies of that geometry are one instanced draw, and the first instance is the slot in the batch's indirect texture, not always 0. A material used by two meshes is two draws, not one per copy and not one per material.
+- Masked foliage keeps the map alpha in a colour node and discards below `alphaTest`. WebGL still uses `alphaToCoverage` and the GLSL alpha test.
+- The terrain node samples the atlas with its own uv and then clears `material.map`. The mesh does not put that map back, which was a request for attribute `uv`. A geometry that really has no `uv` gets its own material clone with the map removed, and one console warning names that object.
+- The first WebGPU frames compile pipelines. A later frame that is not loading a model should create none. `material.needsUpdate` increments `version` and does not by itself compile a pipeline. Orbit once and let it settle before reading fps. A second "Multiple instances of Three.js" warning means the graph split again. If the device is lost, a toast says so and unchecking **WebGPU** reloads the WebGL editor.
 - Labels are DOM on both. Shadows stay off.
 
-Kokiri on `7f9fdf2` with a real adapter, before this fix: `WebGPU · 32.1 ms · 129 draws · 10461 inst · 9424 culled · 10461 separate · 99.9k tris`. The view was black except labels, the gizmo, and a few speckles. The console repeated `Light node not found` for the hemisphere, directional, and ambient lights, `Vertex attribute "uv" not found`, and the two-three warning.
+Kokiri on `4bf5287`, same spot, camera moving, before this pass:
 
-A stand-in on this machine (headless Chrome 157, SwiftShader Dawn, `--enable-unsafe-webgpu --use-vulkan=swiftshader`), 4000 lit box copies in one batch, after the fix:
+| backend | line | while moving |
+| --- | --- | --- |
+| WebGPU | `WebGPU · idle · 66.3 ms · 315 draws · 10461 inst · 9436 culled · 0 separate · 99.7k tris` | about 6 fps |
+| WebGL | `WebGL · idle · 20.4 ms · 192 draws · 10461 inst · 9222 culled · 0 separate · 1.2M tris` | the editor |
 
-| path | draws inside the batch | frame | notes |
-| --- | --- | --- | --- |
-| WebGPU, folded | 1 | 66 ms | waited on the GPU queue. `HemisphereLightNode` resolved, `separate` 0, no light/uv/duplicate warnings, a center pixel read (4, 19, 4) |
-| WebGPU, one draw per copy | 4000 | 66 ms | same picture. This software adapter is not draw-call bound |
-| WebGL, same boxes | one multi-draw | 49 ms | one `three.module.js`, no duplicate warning. Each frame was flushed with `readPixels` |
+`idle` is the last frame after the camera stopped. The 66.3 ms is the moving frame. `separate` was already 0, so the copies were instances. `tris` on WebGPU still misses the forest.
 
-That is not Kokiri, and SwiftShader is not Bradyn's Vulkan GPU. WebGL stays the default. The fold is there so a real GPU is not asked for ten thousand draws.
+Counted on a SwiftShader WebGPU device, not on Kokiri: the first frame creates the pipelines (8 for a small scene). The next frame creates 0. Setting `needsUpdate` moved `version` from 1 to 2 and still created 0 pipelines. Culling calls `setVisibleAt` only when the bit changes, and that flag does not rebuild the draw list on a quiet frame. The 66 ms was not a per-frame recompile.
 
-Check: open Kokiri on WebGL, turn **Stats** on, orbit, and note fps, ms, and `inst`. Then check **WebGPU** (the page reloads). With an adapter, the line should start with `WebGPU`, `separate` should sit near 0, and the console should not repeat the light-node or missing-`uv` warnings. The field and the models should be lit, not black and not the warning stripes, unless **Tile colors** is on. Drag one copy of a repeated model: only that copy moves, during the drag and after release. Hide a category and those instances drop. Fly back: trees stay, and `inst` falls only by culling, not to zero. Uncheck **WebGPU** and confirm the line says `WebGL` again. Compare ms with the WebGL pass on the same orbit. Without an adapter, the line should start with `WebGPU (WebGL2 fallback)` and a toast says so.
+Three things were wrong:
+
+1. **Draws.** The WebGPU batch key appended `geometry.uuid`, so one albedo became one mesh per geometry (315 draws against WebGL's 192). That split existed because r170's batched draw restarts at instance 0 whenever a draw has more than one instance. Two geometries in one mesh would both read the first geometry's matrices. This build uses the WebGL material key, keeps copies of one geometry contiguous, folds each run, and passes that run's first slot. A two-geometry batch in the probe drew `[36 indices, 2 instances, first 0]` and `[6 indices, 1 instance, first 2]`, then the same list on the next frame with no new pipeline.
+2. **Grass sheets.** The node standard material multiplies a vec3 colour by the map, and that product's alpha is 0. With the alpha test live, the whole card is discarded. With the test not covering the draw and the target opaque, the grass colour is written for every pixel of the card. `prepareMaterial` had also turned on `alphaToCoverage`, which this backend enables only when the pass is multisampled. Cutout materials now sample the map in a colour node, keep the texel alpha, and discard below the cutoff. A probe card is green on the opaque half `(17, 160, 30)` and the clear colour `(17, 34, 51)` on the punched half.
+3. **`Vertex attribute "uv"`.** The grid, the gizmo, the helper boxes, and the terrain node do not ask for `uv`. The warning is some other geometry whose material still has a map. The walk clones that material, drops the map, and names the object once. In the probe that object was `sign-post`. Kokiri will name whatever mesh it actually is.
+
+WebGL stays the default. The SwiftShader box probe from the previous pass (66 ms either way, because that adapter is not draw-call bound) is not a Kokiri number.
+
+Check: open Kokiri on WebGL, turn **Stats** on, orbit the same spot, and note ms and draws (the last pass was about 20 ms and 192 draws). Check **WebGPU** and orbit that spot again. Grass and leaves should be cut out, not solid rectangles. The console should not say `Vertex attribute "uv"`; if a mesh had a map and no uv, one warning names it. `separate` stays 0. Draws should stay in the hundreds, not climb toward `inst`. After the models have loaded, a quiet frame should log `WebGPU profile: render calls 1, pipelines this frame 0, material versions stable`. Compare ms with the WebGL pass. Uncheck **WebGPU** and confirm the line says `WebGL` again. Without an adapter, the line should start with `WebGPU (WebGL2 fallback)`.

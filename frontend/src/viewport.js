@@ -12,7 +12,8 @@ import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } f
 import { shouldReloadTerrain } from "./terrain.js";
 import { createBackendRenderer, drawTotal } from "./backend.js";
 import { formatStats, keepRendering } from "./frame.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, collapseSameGeometryDraw } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw } from "./instance.js";
+import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { chooseHit } from "./pick.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -43,7 +44,13 @@ export async function createViewport(host, hooks) {
   const backendName = created.backend;
   const backendNote = created.note;
   let terrainNodes = null;
-  if (created.nodes) terrainNodes = await import("./terrain-node.js");
+  let mapNodes = null;
+  if (created.nodes) {
+    terrainNodes = await import("./terrain-node.js");
+    mapNodes = await import("./cutout-node.js");
+  }
+  if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
+  const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x141b16);
@@ -718,7 +725,7 @@ export async function createViewport(host, hooks) {
     return { lod: 0, family: object.uuid };
   }
 
-  function prepareMaterial(material) {
+  function prepareMaterial(material, role) {
     if (!material || material.userData.bancPrepared) return material;
     material.metalness = 0;
     material.roughness = 0.85;
@@ -741,6 +748,13 @@ export async function createViewport(host, hooks) {
       if (tag === "water") material.side = THREE.DoubleSide;
     }
     material.userData.bancPrepared = true;
+    if (
+      mapNodes
+      && role !== "terrain"
+      && !(material.userData && (material.userData.banc === "terrain" || material.userData.terrainShader))
+    ) {
+      mapNodes.attachCutout(material);
+    }
     return material;
   }
 
@@ -777,16 +791,15 @@ export async function createViewport(host, hooks) {
       parts.push({
         lod: identity.lod,
         family: identity.family,
+        name: child.name || "",
         geometry,
         material,
         sphere,
         radius: sphere.radius,
         key: `${url}|${identity.lod}|${identity.family}|${index}`,
-        // One geometry per WebGPU batch, so the same-geometry fold is one draw
-        // for every copy. WebGL keeps material batches and multi-draw.
-        batchKey: renderer.backend && renderer.backend.isWebGPUBackend === true
-          ? `${batchKeyFor(material, geometry)}|${geometry.uuid}`
-          : batchKeyFor(material, geometry),
+        // Same material key as WebGL. WebGPU groups copies of one geometry into
+        // one instanced draw inside that mesh instead of a mesh per geometry.
+        batchKey: batchKeyFor(material, geometry),
       });
       index += 1;
     });
@@ -984,11 +997,13 @@ export async function createViewport(host, hooks) {
         const probe = probes[i];
         const lod = resolveLod(wanted.get(slot.family), levels.get(slot.family));
         const show = probe.inFrustum && lod === slot.lod;
-        const wasHidden = slot.shown === false;
-        slot.shown = show;
-        if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
+        if (slot.shown !== show) {
+          const wasHidden = slot.shown === false;
+          slot.shown = show;
+          if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
+          slot.mesh.setVisibleAt(slot.index, show);
+        }
         if (show) visible += 1;
-        slot.mesh.setVisibleAt(slot.index, show);
       }
     }
     statInstances = instances;
@@ -1010,6 +1025,7 @@ export async function createViewport(host, hooks) {
   }
 
   function rebuildBatches() {
+    uvDirty = true;
     const previous = batches.slice();
     const nextBatches = [];
     for (const entry of entries.values()) entry.slots = [];
@@ -1059,11 +1075,17 @@ export async function createViewport(host, hooks) {
       // once the camera looks away from the origin.
       mesh.perObjectFrustumCulled = false;
       mesh.sortObjects = Boolean(group.material.transparent);
+      const label = group.records.map((record) => record.part.name).find(Boolean);
+      if (label) mesh.name = label;
       if (renderer.backend && renderer.backend.isWebGPUBackend === true) {
         const previous = mesh.onBeforeRender.bind(mesh);
-        mesh.onBeforeRender = function collapseDraws(...args) {
+        mesh.onBeforeRender = function groupDraws(...args) {
+          // A quiet frame leaves the grouped ranges in place. Grouping them
+          // again would treat each run as one instance and restart the next
+          // geometry at slot 1.
+          const dirty = mesh._visibilityChanged || mesh.perObjectFrustumCulled || mesh.sortObjects;
           previous(...args);
-          collapseSameGeometryDraw(mesh);
+          if (dirty) groupGeometryDraws(mesh);
         };
       }
       mesh.renderOrder = 1;
@@ -1092,6 +1114,13 @@ export async function createViewport(host, hooks) {
       const geometries = [];
       const spheres = [];
       let count = 0;
+      group.records.sort((a, b) => {
+        const left = a.part.geometry.uuid;
+        const right = b.part.geometry.uuid;
+        if (left < right) return -1;
+        if (left > right) return 1;
+        return 0;
+      });
       for (const record of group.records) {
         const geometryId = geomIds.get(record.part.geometry.uuid);
         if (geometryId === undefined) continue;
@@ -1135,6 +1164,7 @@ export async function createViewport(host, hooks) {
       batch.mesh.dispose();
     }
     syncBatchVisibility();
+    guardMissingUv();
   }
 
   function queueRebuild() {
@@ -1366,7 +1396,9 @@ uniform float terrainLayerMissing;`
       const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
       if (!material || !material.userData) return;
       const atlas = material.userData.terrainMap;
-      if (atlas && material.map !== atlas) material.map = atlas;
+      // The node colour samples terrainMap. Putting map back asks the standard
+      // node for attribute "uv", which terrain tiles do not have.
+      if (atlas && material.map !== atlas && !material.userData.terrainNode) material.map = atlas;
       const shader = material.userData.terrainShaderRef;
       if (!shader || !shader.uniforms) return;
       shader.uniforms.terrainCols = material.userData.terrainColsUniform;
@@ -1383,11 +1415,11 @@ uniform float terrainLayerMissing;`
       if (!child.isMesh || !child.geometry) return;
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
-      let material = prepareMaterial(source);
       const geometry = child.geometry.clone();
       const terrain =
         geometry.getAttribute("uv1") &&
-        (((material.userData && material.userData.banc) === "terrain") || (child.name || "").includes("terrain"));
+        (((source.userData && source.userData.banc) === "terrain") || (child.name || "").includes("terrain"));
+      let material = prepareMaterial(source, terrain ? "terrain" : "");
       if (geometry.getAttribute("color") || terrain) {
         material = material.clone();
         if (geometry.getAttribute("color")) material.vertexColors = true;
@@ -1464,6 +1496,7 @@ uniform float terrainLayerMissing;`
   }
 
   function showTerrain(nextRoot) {
+    uvDirty = true;
     const previous = terrainRoot;
     terrainRoot = nextRoot;
     if (nextRoot) scene.add(nextRoot);
@@ -1507,6 +1540,7 @@ uniform float terrainLayerMissing;`
         const box = measureTemplate(template);
         if (!terrainCurrent(token)) return;
         if (!box.isEmpty()) placeGround(box);
+        uvDirty = true;
         const previous = terrainRoot;
         terrainRoot = null;
         disposeTerrainObject(previous);
@@ -1941,6 +1975,13 @@ uniform float terrainLayerMissing;`
   let statQueued = 0;
   let statLoading = 0;
   let statLoaded = 0;
+  let uvDirty = true;
+
+  function guardMissingUv() {
+    if (!renderer.isWebGPURenderer || !uvDirty) return;
+    uvDirty = false;
+    dropMapWithoutUv(scene);
+  }
 
   function requestRender() {
     if (!running || frameHandle) return;
@@ -1995,6 +2036,7 @@ uniform float terrainLayerMissing;`
       syncLabels();
     }
     syncBatchVisibility();
+    guardMissingUv();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
       const distance = camera.position.distanceTo(entry.pivot.position);
@@ -2002,6 +2044,22 @@ uniform float terrainLayerMissing;`
     }
     if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
     renderer.render(scene, camera);
+    if (gpuProfile) {
+      const materials = [];
+      for (const batch of batches) materials.push(batch.mesh.material);
+      if (terrainRoot) {
+        terrainRoot.traverse((child) => {
+          if (!child.material) return;
+          materials.push(Array.isArray(child.material) ? child.material[0] : child.material);
+        });
+      }
+      const info = renderer.info && renderer.info.render;
+      sampleGpuFrame(gpuProfile, {
+        calls: info ? info.calls : 0,
+        materials,
+        loading: pendingLoads > 0,
+      });
+    }
     labels.render(scene, camera);
     const loading = pendingLoads > 0;
     const again = keepRendering({
