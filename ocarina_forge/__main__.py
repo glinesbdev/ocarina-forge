@@ -405,6 +405,21 @@ def _render_tex(report: dict) -> str:
             f"mip0 {int(header.get('mip0Size') or 0):#x}  "
             f"alignment shift {header.get('alignmentShift')} (BNTX+0x0E)"
         )
+        surface = header.get("surfaceBytes")
+        mip0 = int(header.get("mip0Size") or 0)
+        if surface:
+            match = "matches" if mip0 == surface else "does not match"
+            lines.append(
+                f"  mip0 {match} the layout surface {surface} bytes "
+                f"(log2 {header.get('blockHeightLog2')})"
+            )
+        default_log = header.get("defaultBlockHeightLog2")
+        surfaces = header.get("surfaces") or {}
+        if default_log is not None and default_log != header.get("blockHeightLog2"):
+            lines.append(
+                f"  usual block height for this size is log2 {default_log} "
+                f"({surfaces.get(default_log) or '?'} bytes)"
+            )
     for image in report.get("decoded") or []:
         lines.append(
             f"decoded {image.get('name') or '?'}  {image.get('width')}x{image.get('height')}  "

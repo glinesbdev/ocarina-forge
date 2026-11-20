@@ -10,7 +10,14 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from ocarina_forge.formats.swizzle import _stored_log2, block_log2, deswizzle, div_up, surface_bytes
+from ocarina_forge.formats.swizzle import (
+    _stored_log2,
+    block_log2,
+    default_block_log2,
+    deswizzle,
+    div_up,
+    surface_bytes,
+)
 
 try:
     import texture2ddecoder
@@ -204,14 +211,22 @@ def texture_headers(data: bytes) -> list[dict]:
         mip_table = _u64(data, brti + 0x70)
         if mip_table and mip_table + 8 <= len(data):
             image = _u64(data, mip_table)
+        width = _i32(data, brti + 0x24)
+        height = _i32(data, brti + 0x28)
+        mip0 = _mip0_bytes(data, brti, image)
+        surface = {}
+        if info is not None:
+            _codec, block_w, block_h, bytes_per = info
+            for log2 in range(6):
+                surface[log2] = surface_bytes(width, height, block_w, block_h, bytes_per, log2)
         found.append(
             {
                 "name": _string(data, _u64(data, brti + 0x60)),
                 "format": fmt,
                 "formatName": info[0] if info else "",
                 "formatNote": family_note,
-                "width": _i32(data, brti + 0x24),
-                "height": _i32(data, brti + 0x28),
+                "width": width,
+                "height": height,
                 "depth": _i32(data, brti + 0x2C) if brti + 0x30 <= len(data) else 0,
                 "mips": _mip_count(data, brti),
                 "tileMode": _u16(data, brti + 0x12),
@@ -220,7 +235,10 @@ def texture_headers(data: bytes) -> list[dict]:
                 "blockHeight": (1 << stored) if stored is not None else None,
                 "arrayCount": _u32(data, brti + 0x30) if brti + 0x34 <= len(data) else 0,
                 "imageSize": _u32(data, brti + 0x50) if brti + 0x54 <= len(data) else 0,
-                "mip0Size": _mip0_bytes(data, brti, image),
+                "mip0Size": mip0,
+                "surfaceBytes": surface.get(stored) if stored is not None else None,
+                "defaultBlockHeightLog2": default_block_log2(height, info[2]) if info else None,
+                "surfaces": surface,
                 "alignmentShift": alignment,
             }
         )
@@ -528,9 +546,10 @@ def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tup
     if not bgra:
         raise BntxError(f"texture format 0x{fmt:04X} did not decode")
     rgba = _bgra_to_rgba(bytes(bgra), width, height)
+    note = ""
     if codec == "bc1":
-        rgba = _bc1_punch(linear, width, height, rgba)
-    return rgba, ""
+        rgba, note = _bc1_punch(linear, width, height, rgba)
+    return rgba, note
 
 
 def _repair_astc_partial_gob(linear: bytes, width: int, height: int, block_w: int, block_h: int) -> bytes:
@@ -560,15 +579,30 @@ def _repair_astc_partial_gob(linear: bytes, width: int, height: int, block_w: in
     return bytes(out)
 
 
-def _bc1_punch(linear: bytes, width: int, height: int, rgba: bytes) -> bytes:
-    """BC1 blocks with color0 <= color1 use index 3 as punch-through alpha.
+def _expand_565(value: int) -> tuple[int, int, int]:
+    """RGB565 widened to 8 bits the way texture2ddecoder does, by repeating the top bits."""
+    red = (value >> 11) & 0x1F
+    green = (value >> 5) & 0x3F
+    blue = value & 0x1F
+    return ((red << 3) | (red >> 2), (green << 2) | (green >> 4), (blue << 3) | (blue >> 2))
 
-    texture2ddecoder leaves that index opaque. The sky above a FarView card
-    is this case, and an opaque alpha draws it black.
+
+def _bc1_punch(linear: bytes, width: int, height: int, rgba: bytes) -> tuple[bytes, str]:
+    """BC1 blocks with color0 <= color1.
+
+    Index 3 is transparent black in the DXT1 alpha mode, and texture2ddecoder
+    leaves that texel opaque black. A block whose texels are all index 3 is a
+    cutout, which is the sky on a FarView card, and stays transparent. A block
+    that also uses another index is an opaque albedo: index 3 is the average
+    of the two endpoints. Leaving it black draws the dotted grid on the castle
+    stone. 0x1A01 and 0x1A06 are the same BC1 codec (UNORM and sRGB); neither
+    is a no-alpha variant.
     """
     blocks_x = max(1, div_up(width, 4))
     blocks_y = max(1, div_up(height, 4))
     out = bytearray(rgba)
+    averaged = 0
+    punched = 0
     for by in range(blocks_y):
         for bx in range(blocks_x):
             block_at = (by * blocks_x + bx) * 8
@@ -579,17 +613,43 @@ def _bc1_punch(linear: bytes, width: int, height: int, rgba: bytes) -> bytes:
             if color0 > color1:
                 continue
             bits = int.from_bytes(linear[block_at + 4 : block_at + 8], "little")
+            texels = []
             for index in range(16):
-                if ((bits >> (2 * index)) & 3) != 3:
-                    continue
                 px = bx * 4 + (index & 3)
                 py = by * 4 + (index >> 2)
                 if px >= width or py >= height:
                     continue
-                dest = (py * width + px) * 4 + 3
-                if dest < len(out):
-                    out[dest] = 0
-    return bytes(out)
+                texels.append((px, py, (bits >> (2 * index)) & 3))
+            if not texels or all(code != 3 for _px, _py, code in texels):
+                continue
+            if all(code == 3 for _px, _py, code in texels):
+                for px, py, _code in texels:
+                    dest = (py * width + px) * 4
+                    if dest + 3 < len(out):
+                        out[dest + 3] = 0
+                        punched += 1
+                continue
+            left = _expand_565(color0)
+            right = _expand_565(color1)
+            average = tuple((left[channel] + right[channel]) // 2 for channel in range(3))
+            for px, py, code in texels:
+                if code != 3:
+                    continue
+                dest = (py * width + px) * 4
+                if dest + 3 >= len(out):
+                    continue
+                out[dest] = average[0]
+                out[dest + 1] = average[1]
+                out[dest + 2] = average[2]
+                out[dest + 3] = 255
+                averaged += 1
+    note = ""
+    if averaged or punched:
+        note = (
+            f"BC1 index 3 is the endpoint average on {averaged} texels; "
+            f"{punched} solid index-3 texels stay transparent"
+        )
+    return bytes(out), note
 
 
 def _bgra_to_rgba(bgra: bytes, width: int, height: int) -> bytes:

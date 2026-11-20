@@ -188,12 +188,28 @@ def test_bc1_punch_through_is_transparent():
         import texture2ddecoder  # noqa: F401
     except ImportError:
         return
-    # color0 <= color1, pixel 0 is index 0 and the other 15 pixels are index 3.
-    block = bytes([0x00, 0x00, 0xFF, 0xFF, 0xFC, 0xFF, 0xFF, 0xFF])
-    rgba, _note = _decode("bc1", 4, 4, block, 0x1A01)
-    assert rgba[3] == 255
-    assert rgba[7] == 0
+    # A block that is only index 3 is a cutout. color0 <= color1.
+    block = bytes([0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
+    rgba, note = _decode("bc1", 4, 4, block, 0x1A01)
+    assert rgba[3] == 0
     assert rgba[-1] == 0
+    assert "stay transparent" in note
+
+
+def test_bc1_mixed_index_3_is_the_endpoint_average_not_a_black_dot():
+    try:
+        import texture2ddecoder  # noqa: F401
+    except ImportError:
+        return
+    # color0 is blue, color1 is red, so this is 3-colour mode. Pixel 0 is
+    # index 0, pixel 1 is index 3. The old decode left pixel 1 opaque black.
+    block = bytes([0x1F, 0x00, 0x00, 0xF8, 0x0C, 0x00, 0x00, 0x00])
+    bare = texture2ddecoder.decode_bc1(block, 4, 4)
+    assert list(bare[4:8]) == [0, 0, 0, 255]
+    rgba, note = _decode("bc1", 4, 4, block, 0x1A06)
+    assert list(rgba[0:4]) == [0, 0, 255, 255]
+    assert list(rgba[4:8]) == [127, 0, 127, 255]
+    assert "endpoint average" in note
 
 
 def test_astc_ids_and_partial_gob_row():
@@ -246,6 +262,60 @@ def test_sparse_heightmap_is_a_few_files_inside_a_large_index():
     assert _sparse_heightmap([{"status": "drawn", "reason": ""}]) is False
 
 
+def test_a_455_wide_bc1_surface_roundtrips_and_log2_0_is_its_own_size():
+    """455 is 114 BC1 blocks, padded to 120. Log2 0 is a smaller surface than the usual 16.
+
+    A mip span of that smaller size is block height 1. Promoting it to the
+    usual height would deswizzle a different layout. The byte-wise GOB address
+    from the Tegra formula agrees with the block copy on both heights.
+    """
+    from ocarina_forge.formats.swizzle import default_block_log2, deswizzle, surface_bytes, swizzle
+
+    width = height = 455
+    assert default_block_log2(height, 4) == 4
+    assert surface_bytes(width, height, 4, 4, 8, 0) == 115200
+    assert surface_bytes(width, height, 4, 4, 8, 4) == 122880
+    blocks_x = (width + 3) // 4
+    blocks_y = (height + 3) // 4
+    tight = blocks_x * blocks_y * 8
+    pattern = bytes((index * 17 + (index // 8) * 3) & 0xFF for index in range(tight))
+    for log2, block_height in ((0, 1), (4, 16)):
+        packed = swizzle(width, height, 4, 4, 8, 0, log2, pattern)
+        assert len(packed) == surface_bytes(width, height, 4, 4, 8, log2)
+        assert deswizzle(width, height, 4, 4, 8, 0, log2, packed) == pattern
+        assert _bytewise_deswizzle(packed, blocks_x, blocks_y, 8, block_height) == pattern
+    from ocarina_forge.formats.swizzle import block_log2
+
+    layout = bytes([0, 0, 0, 0, 0xC9, 0, 0, 0])
+    assert block_log2(height, 4, layout, width=width, block_width=4, bytes_per=8, mip_bytes=115200) == 0
+
+
+def _bytewise_deswizzle(data: bytes, blocks_x: int, blocks_y: int, bytes_per: int, block_height: int) -> bytes:
+    """One byte at a time, the Tegra X1 GOB address. Independent of the block copy."""
+    out = bytearray(blocks_x * blocks_y * bytes_per)
+    width_bytes = blocks_x * bytes_per
+    width_in_gobs = (width_bytes + 63) // 64
+    block_size = 512 * block_height
+    for y in range(blocks_y):
+        for x_byte in range(width_bytes):
+            gob = (
+                (y // (8 * block_height)) * block_size * width_in_gobs
+                + (x_byte // 64) * block_size
+                + ((y % (8 * block_height)) // 8) * 512
+            )
+            offset = (
+                ((x_byte % 64) // 32) * 256
+                + ((y % 8) // 2) * 64
+                + ((x_byte % 32) // 16) * 32
+                + (y % 2) * 16
+                + (x_byte % 16)
+            )
+            pos = gob + offset
+            if pos < len(data):
+                out[y * width_bytes + x_byte] = data[pos]
+    return bytes(out)
+
+
 def test_converter_output_is_pinned_to_the_cache_version():
     """The converter sources are hashed into the cache key.
 
@@ -258,6 +328,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     assert [path.name for path in _converter_files()] == [
         "models.py",
         "bfres.py",
+        "bntx.py",
         "terrain.py",
         "gltf.py",
         "meshopt.py",
@@ -266,7 +337,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-33", "4e213f658526f62c16eb1616af9f0e4cb350581320198e6113971360db8d1dd9")
+    pinned = ("models-34", "70e1d69d1f760a5ee92052136e6119e9fabd5c89715239d582c784b834274db6")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
