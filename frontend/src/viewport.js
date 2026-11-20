@@ -80,15 +80,17 @@ export async function createViewport(host, hooks) {
   canvas.setAttribute("aria-label", "Scene view");
   let hoverTookFocus = false;
   host.addEventListener("pointerenter", () => {
-    if (!canHoverFocus(document.activeElement, Boolean(document.querySelector("dialog[open]")))) return;
-    if (document.activeElement === canvas) return;
+    const doc = host.ownerDocument;
+    if (!canHoverFocus(doc.activeElement, Boolean(doc.querySelector("dialog[open]")))) return;
+    if (doc.activeElement === canvas) return;
     canvas.focus({ preventScroll: true });
-    hoverTookFocus = document.activeElement === canvas;
+    hoverTookFocus = doc.activeElement === canvas;
   });
   host.addEventListener("pointerleave", () => {
     if (!hoverTookFocus) return;
     hoverTookFocus = false;
-    if (document.activeElement === canvas) canvas.blur();
+    const doc = host.ownerDocument;
+    if (doc.activeElement === canvas) canvas.blur();
   });
   canvas.addEventListener("pointerdown", () => {
     hoverTookFocus = false;
@@ -2411,13 +2413,34 @@ uniform float terrainLayerMissing;`
     hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot));
   });
 
-  window.addEventListener("keydown", (event) => {
-    if (isTyping(event) || document.querySelector("dialog[open]")) return;
+  let keyWindow = null;
+  function onFlyKey(event) {
+    const docs = [document];
+    if (event.view && event.view.document && event.view.document !== document) docs.push(event.view.document);
+    if (isTyping(event) || docs.some((doc) => doc.querySelector("dialog[open]"))) return;
     keys.add(event.key.toLowerCase());
     requestRender();
-  });
-  window.addEventListener("keyup", (event) => keys.delete(event.key.toLowerCase()));
-  window.addEventListener("blur", () => keys.clear());
+  }
+  function onFlyUp(event) {
+    keys.delete(event.key.toLowerCase());
+  }
+  function onFlyBlur() {
+    keys.clear();
+  }
+  function bindFlyKeys() {
+    const next = host.ownerDocument.defaultView || window;
+    if (next === keyWindow) return;
+    if (keyWindow) {
+      keyWindow.removeEventListener("keydown", onFlyKey);
+      keyWindow.removeEventListener("keyup", onFlyUp);
+      keyWindow.removeEventListener("blur", onFlyBlur);
+    }
+    keyWindow = next;
+    keyWindow.addEventListener("keydown", onFlyKey);
+    keyWindow.addEventListener("keyup", onFlyUp);
+    keyWindow.addEventListener("blur", onFlyBlur);
+  }
+  bindFlyKeys();
 
   function updateFly(dt) {
     const speed = (keys.has("shift") ? 32 : 10) * dt;
@@ -2438,7 +2461,14 @@ uniform float terrainLayerMissing;`
     return true;
   }
 
+  let observedDoc = host.ownerDocument;
   function resize() {
+    bindFlyKeys();
+    if (host.ownerDocument !== observedDoc) {
+      observedDoc = host.ownerDocument;
+      observer.disconnect();
+      observer.observe(host);
+    }
     const width = host.clientWidth || 1;
     const height = host.clientHeight || 1;
     camera.aspect = width / height;
@@ -2477,7 +2507,6 @@ uniform float terrainLayerMissing;`
   }
 
   function writeStats(rendering) {
-    if (!showStats) return;
     const now = performance.now();
     frameTimes.push(now);
     while (frameTimes.length && now - frameTimes[0] > 500) frameTimes.shift();
@@ -2485,7 +2514,7 @@ uniform float terrainLayerMissing;`
       fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
     }
     const info = renderer.info && renderer.info.render;
-    statsEl.textContent = formatStats({
+    const text = formatStats({
       backend: backendName,
       rendering,
       fps,
@@ -2505,6 +2534,8 @@ uniform float terrainLayerMissing;`
       loading: statLoading,
       loaded: statLoaded,
     });
+    if (showStats) statsEl.textContent = text;
+    if (hooks.onStats) hooks.onStats(text);
   }
 
   function tick() {
@@ -2608,6 +2639,12 @@ uniform float terrainLayerMissing;`
       running = false;
       if (rebuildTimer) clearTimeout(rebuildTimer);
       if (frameHandle) cancelAnimationFrame(frameHandle);
+      if (keyWindow) {
+        keyWindow.removeEventListener("keydown", onFlyKey);
+        keyWindow.removeEventListener("keyup", onFlyUp);
+        keyWindow.removeEventListener("blur", onFlyBlur);
+      }
+      observer.disconnect();
       statsEl.remove();
       generation += 1;
       observer.disconnect();

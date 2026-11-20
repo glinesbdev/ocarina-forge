@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, live validation, and opt-in hot reload in this build. Grid snap is not started. The behavior editor's read-only panel is in this build. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, live validation, and opt-in hot reload in this build. Grid snap is not started. The behavior editor edits fields on existing nodes, and the panels dock. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
@@ -24,9 +24,13 @@ Still later: snap to a grid.
 
 ## 4. Behavior editor
 
-In this build: the **Behavior** tab (or B) draws the selected actor's AINB AI graph, its schedule rows, and its event-flow hooks. **Friendly** uses the curated names. **Raw** shows every node, including ones that did not decode. Node, pin, and edge ids come from the dump file and stay put when the graph is drawn again. The panel does not edit. A later edit is a typed op (`add node`, `connect`, or `set field`) stored beside the base graph, not a replaced file. The mapping to the Longshot package is [longshot-mapping.md](longshot-mapping.md).
+In this build: the panels dock. **Window** shows and hides Viewport, Scenes, Actors, Inspector, Behavior, Edits, Problems, and Stats. A tab can be dragged onto another panel or beside it, and the splits resize. Double-click a tab, or **Max**, to fill the window. The layout is saved in this browser (`ocarinaforge.layout`). **Reset layout** puts a large behavior graph under the view. **Pop out Behavior** and **Pop out Inspector** open those panels in their own windows. The pop-out is the same page, so the selection, the edits, and undo stay in sync. Shortcuts are in [controls.md](controls.md).
 
-Still later: editing those nodes, custom graphs, a flags and quests picker, and live previews of schedules, event flows, and dialog.
+In this build: **Behavior** (or B) draws the selected actor's AINB AI graph, its schedule rows, and its event-flow hooks. **Friendly** uses the curated names. **Raw** shows every node, including ones that did not decode. Node, pin, and edge ids come from the dump file and stay put when the graph is drawn again. A field on a decoded node can be changed. Each change is a `set field` op stored beside the base graph, and undo uses the same history as a scene edit. A flag field picks names from GameData. Export writes the file only after a round trip. A schedule that lives in another actor's pack is labeled shared, and the inspector says which actors that edit changes. Connecting nodes and adding nodes are not in this build. The mapping to the Longshot package is [longshot-mapping.md](longshot-mapping.md).
+
+Graph layout, search, and meshopt decode stay on the main thread. A worker was slower than the decode, and the other two are already a few milliseconds. Texture decode, pack decompression, and terrain atlases stay on the server. The timings are in [performance.md](performance.md).
+
+Still later: connecting and adding nodes, custom graphs, a quests browser, and live previews of schedules, event flows, and dialog.
 
 ## 5. Asset library
 

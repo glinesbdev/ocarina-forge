@@ -24,7 +24,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "Alt-click, or click again", action: "Cycle overlapping actors" },
       { keys: "H", action: "Hide or show the selection" },
       { keys: "Delete", action: "Delete the selection" },
-      { keys: "B", action: "Open the behavior graph for the selection" },
+      { keys: "B", action: "Open the behavior graph for the selection. It sits in the large panel under the view" },
     ],
   },
   {
@@ -62,7 +62,19 @@ export const SHORTCUT_GROUPS = [
     label: "View toggles",
     items: [
       { keys: "Esc", action: "Close a dialog, release mouse look, or clear the selection" },
-      { keys: "Stats", action: "The overlay starts on. The toolbar checkbox hides it." },
+      { keys: "Stats", action: "The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line" },
+    ],
+  },
+  {
+    id: "windows",
+    label: "Windows",
+    items: [
+      { keys: "Window menu", action: "Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Edits, Problems, and Stats" },
+      { keys: "Drag a tab", action: "Dock that panel beside another, or drop it on a tab to share the group" },
+      { keys: "Drag a split", action: "Resize the panels" },
+      { keys: "Double-click a tab, or Max", action: "Fill the window with that group. Do it again to restore" },
+      { keys: "Window, Pop out Behavior", action: "Open the behavior graph in its own window. Inspector has the same command. Selection, edits, and undo stay in sync" },
+      { keys: "Window, Reset layout", action: "Put the panels back, with the behavior graph under the view. This browser remembers the layout" },
     ],
   },
 ];

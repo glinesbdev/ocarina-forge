@@ -50,6 +50,25 @@ Before: every terrain rebuild packed the cells. A 17-cell solid atlas took 16 ms
 
 Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene keeps the old field up until the new one's shader and atlas are ready, then swaps.
 
+## Workers
+
+The client was measured before moving work off the main thread. Nothing in that set was faster in a worker, so none of it moved.
+
+Meshopt decode uses three’s `MeshoptDecoder` on the main thread. A version-0 vertex buffer, the same encoding the glbs use, decoded in Chrome headless:
+
+| work | main thread | 4 workers |
+| --- | --- | --- |
+| 16 × 20k vertices (240 KB decoded each) | 1.7 ms | 7.9 ms |
+| 8 × 120k vertices (1.4 MB decoded each) | 10.6 ms | 25.4 ms |
+
+The worker path did yield the main thread, and the round trip was still slower than the decode. `useWorkers` stays off.
+
+Behavior layout is a depth walk. 160 nodes (the cap the panel draws) took 0.2 ms. 1,778 nodes took 2.7 ms. 4,000 nodes took 4.4 ms. Copying the graph into a worker would cost more than the walk. The cap is there because the DOM for a full retail graph is the slow part, not the positions.
+
+Search over 8,000 actors took 0.16 ms to list and 0.02 ms for a query. That stays on the keystroke.
+
+BC and ASTC decode, zstd, and pack reads run in the server process when a model or a scene is built. The browser receives PNG, JPEG, and meshopt glbs. A KTX2 client transcoder was already rejected (three r170 returns an empty image). Terrain atlases and LOD meshes are built at import and cached. There is no client-side copy of that work to move.
+
 ## Model loading
 
 Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`), and the view downloads up to 8 of those files at once, nearest to the camera first. A name that is not converted yet is `queued`: one of those 8 slots calls `GET /api/models/<name>`, which converts it, and only a real mesh then downloads the glb. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Conversions run in the `OCARINA_FORGE_WORKERS` process pool (4 unless you set it; `0` or `1` stays in the server process) and the handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.

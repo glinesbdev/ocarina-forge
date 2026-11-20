@@ -25,6 +25,10 @@
           <span id="project-name" class="muted"></span>
         </button>
         <div class="top-actions">
+          <details id="window-menu-root" class="window-menu">
+            <summary class="ghost">Window</summary>
+            <div id="window-menu" class="window-menu-list"></div>
+          </details>
           <button id="palette-open" type="button" class="ghost" title="Search actors, scenes, and commands (Ctrl+K)">Search</button>
           <button id="undo" type="button" class="ghost" title="Undo the last edit (Ctrl+Z)" disabled>Undo</button>
           <button id="redo" type="button" class="ghost" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>Redo</button>
@@ -37,7 +41,9 @@
       <div id="banner" class="banner" hidden></div>
 
       <div id="workspace" hidden>
-        <aside id="scene-pane" class="pane">
+        <div id="dock" class="dock-host"></div>
+        <div id="dock-sources" hidden>
+        <aside id="scene-pane" class="pane dock-panel">
           <div class="pane-head">
             <h2>Scenes</h2>
             <span id="scene-count" class="muted"></span>
@@ -51,7 +57,7 @@
           <div class="legend" aria-label="Helper boxes and labels"></div>
         </aside>
 
-        <main id="stage">
+        <main id="stage" class="dock-panel">
           <div id="warnings" class="warnings" hidden></div>
           <div id="viewport">
             <div id="viewport-empty">
@@ -107,15 +113,7 @@
           </div>
         </main>
 
-        <aside id="side-pane" class="pane">
-          <div class="tabs" role="tablist">
-            <button type="button" id="tab-outliner" class="is-on" role="tab" aria-selected="true">Outliner</button>
-            <button type="button" id="tab-props" role="tab" aria-selected="false">Properties</button>
-            <button type="button" id="tab-behavior" role="tab" aria-selected="false">Behavior</button>
-            <button type="button" id="tab-changes" role="tab" aria-selected="false">Changes <span id="change-count" class="badge" hidden></span></button>
-            <button type="button" id="tab-problems" role="tab" aria-selected="false">Problems <span id="problem-count" class="badge" hidden></span></button>
-          </div>
-          <div id="outliner-panel">
+          <div id="outliner-panel" class="dock-panel">
             <div class="pane-tools">
               <input id="actor-search" type="search" placeholder="Search this scene" autocomplete="off" />
               <button id="add-actor" type="button" class="primary">Add</button>
@@ -123,11 +121,19 @@
             <div id="outliner-filters" class="filters"></div>
             <div id="outliner" class="scroll" role="listbox" aria-label="Actors"></div>
           </div>
-          <div id="props-panel" class="scroll" hidden></div>
-          <div id="behavior-panel" class="scroll" hidden></div>
-          <div id="changes-panel" class="scroll" hidden></div>
-          <div id="problems-panel" class="scroll" hidden></div>
-        </aside>
+          <div id="props-panel" class="scroll dock-panel"></div>
+          <div id="behavior-panel" class="scroll dock-panel"></div>
+          <div id="changes-panel" class="scroll dock-panel"></div>
+          <div id="problems-panel" class="scroll dock-panel"></div>
+          <div id="stats-panel" class="scroll dock-panel">
+            <p class="muted">Draw calls, triangles, and streaming. The same line sits on the view while Stats is checked.</p>
+            <pre id="stats-readout">Waiting for a frame.</pre>
+          </div>
+        </div>
+        <div id="dock-badges" hidden>
+          <span id="change-count" class="badge"></span>
+          <span id="problem-count" class="badge"></span>
+        </div>
       </div>
 
       <section id="gate" class="gate" hidden></section>

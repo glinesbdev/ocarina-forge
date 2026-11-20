@@ -20,7 +20,7 @@ The editor shows this same list with ? or the Shortcuts button.
 - Alt-click, or click again: Cycle overlapping actors
 - H: Hide or show the selection
 - Delete: Delete the selection
-- B: Open the behavior graph for the selection
+- B: Open the behavior graph for the selection. It sits in the large panel under the view
 
 ## Gizmo
 
@@ -45,4 +45,13 @@ The editor shows this same list with ? or the Shortcuts button.
 ## View toggles
 
 - Esc: Close a dialog, release mouse look, or clear the selection
-- Stats: The overlay starts on. The toolbar checkbox hides it.
+- Stats: The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line
+
+## Windows
+
+- Window menu: Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Edits, Problems, and Stats
+- Drag a tab: Dock that panel beside another, or drop it on a tab to share the group
+- Drag a split: Resize the panels
+- Double-click a tab, or Max: Fill the window with that group. Do it again to restore
+- Window, Pop out Behavior: Open the behavior graph in its own window. Inspector has the same command. Selection, edits, and undo stay in sync
+- Window, Reset layout: Put the panels back, with the behavior graph under the view. This browser remembers the layout

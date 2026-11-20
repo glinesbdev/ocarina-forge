@@ -1,12 +1,44 @@
+import "dockview-core/dist/styles/dockview.css";
+
 import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
 import { renderBehavior } from "./behavior.js";
+import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { paletteRows } from "./palette.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
 
-const $ = (id) => document.getElementById(id);
+function $(id) {
+  const local = document.getElementById(id);
+  if (local) return local;
+  if (typeof globalThis.__ocarinaFind === "function") {
+    const parked = globalThis.__ocarinaFind(id);
+    if (parked) return parked;
+  }
+  const dockApi = globalThis.__ocarinaDock;
+  if (!dockApi || !dockApi.groups) return null;
+  for (const group of dockApi.groups) {
+    const popup = group.api.getWindow();
+    if (!popup || popup === window) continue;
+    const found = popup.document.getElementById(id);
+    if (found) return found;
+  }
+  return null;
+}
+
+let onShortcut = () => {};
+let viewport = null;
+const dock = createDock(document.getElementById("dock"), {
+  onWindow(popup) {
+    popup.addEventListener("keydown", (event) => onShortcut(event));
+    if (viewport) viewport.resize();
+  },
+  onChange() {
+    renderWindowMenu();
+    if (viewport) viewport.resize();
+  },
+});
 
 const state = {
   status: null,
@@ -52,7 +84,7 @@ const state = {
   addMode: "add",
 };
 
-const viewport = await createViewport($("viewport"), {
+viewport = await createViewport($("viewport"), {
   fetchModel: (gyaml) => api.model(gyaml),
   fetchModels: (names) => api.models(names),
   fetchTerrain: (banc) => api.terrain(banc),
@@ -130,6 +162,10 @@ const viewport = await createViewport($("viewport"), {
     fillNumber("rz", deg(rotate[2]));
   },
   onDeviceLost: (message) => toast(message),
+  onStats(text) {
+    const readout = $("stats-readout");
+    if (readout && readout.textContent !== text) readout.textContent = text;
+  },
   onTransform: (id, translate, rotate) => {
     const actor = selectedActor();
     const scale = actor && actor.id === id ? actor.scale : undefined;
@@ -147,8 +183,13 @@ $("undo").addEventListener("click", () => undo());
 $("redo").addEventListener("click", () => redo());
 $("build-open").addEventListener("click", () => $("build-dialog").showModal());
 $("project-chip").addEventListener("click", openProjectDialog);
-$("open-scenes").addEventListener("click", () => togglePane("scene-pane"));
-$("open-side").addEventListener("click", () => togglePane("side-pane"));
+$("open-scenes").addEventListener("click", () => showTab("scenes"));
+$("open-side").addEventListener("click", () => showTab("outliner"));
+document.addEventListener("click", (event) => {
+  const root = $("window-menu-root");
+  if (!root || !root.open || root.contains(event.target)) return;
+  root.open = false;
+});
 $("scene-search").addEventListener("input", renderScenes);
 $("actor-search").addEventListener("input", renderOutliner);
 $("add-actor").addEventListener("click", () => openAdd("add"));
@@ -217,11 +258,7 @@ document.querySelectorAll("[data-cat]").forEach((button) => {
     renderOutliner();
   });
 });
-$("tab-outliner").addEventListener("click", () => showTab("outliner"));
-$("tab-props").addEventListener("click", () => showTab("props"));
-$("tab-behavior").addEventListener("click", () => showTab("behavior"));
-$("tab-changes").addEventListener("click", () => showTab("changes"));
-$("tab-problems").addEventListener("click", () => showTab("problems"));
+renderWindowMenu();
 $("shortcuts-open").addEventListener("click", () => openShortcuts());
 const shortcutsDialog = $("shortcuts-dialog");
 if (shortcutsDialog) {
@@ -265,7 +302,7 @@ $("palette-form").addEventListener("submit", (event) => {
   runPalette(paletteCache[paletteIndex]);
 });
 
-window.addEventListener("keydown", (event) => {
+onShortcut = (event) => {
   const meta = event.metaKey || event.ctrlKey;
   if (meta && event.key.toLowerCase() === "k") {
     event.preventDefault();
@@ -311,7 +348,8 @@ window.addEventListener("keydown", (event) => {
     renderOutliner();
     renderProps();
   }
-});
+};
+window.addEventListener("keydown", (event) => onShortcut(event));
 
 boot();
 
@@ -331,6 +369,7 @@ async function boot() {
   }
   $("gate").hidden = true;
   $("workspace").hidden = false;
+  dock.fit();
   viewport.resize();
   syncPanes();
   await refreshScenes();
@@ -340,19 +379,7 @@ const mobileQuery = window.matchMedia("(max-width: 980px)");
 mobileQuery.addEventListener("change", syncPanes);
 
 function syncPanes() {
-  const mobile = mobileQuery.matches;
-  $("scene-pane").classList.toggle("shut", mobile);
-  $("side-pane").classList.toggle("shut", mobile);
-  viewport.resize();
-}
-
-function togglePane(id) {
-  const pane = $(id);
-  const other = $(id === "scene-pane" ? "side-pane" : "scene-pane");
-  const willOpen = pane.classList.contains("shut");
-  pane.classList.toggle("shut", !willOpen);
-  if (willOpen) other.classList.add("shut");
-  viewport.resize();
+  if (viewport) viewport.resize();
 }
 
 function dumpReady() {
@@ -1397,7 +1424,7 @@ function renderFilters() {
 }
 
 function renderProps() {
-  if (state.tab === "behavior") refreshBehavior();
+  if (dock.isOpen("behavior")) refreshBehavior();
   const panel = $("props-panel");
   panel.replaceChildren();
   const actor = selectedActor();
@@ -1955,6 +1982,7 @@ function renderProblems() {
   badge.hidden = !(errors || warnings);
   badge.textContent = errors ? String(errors) : String(warnings);
   badge.classList.toggle("removed", errors > 0);
+  syncDockTitles();
   if (!state.banc) {
     panel.append(empty("Open a scene to check it."));
     return;
@@ -2003,7 +2031,7 @@ function renderProblems() {
     box.addEventListener("change", () => {
       state.showProblemNotes = box.checked;
       renderProblems();
-      if (state.tab === "props") renderProps();
+      renderProps();
     });
     label.append(box, document.createTextNode(`Vanilla notes (${notes})`));
     tools.append(label);
@@ -2095,6 +2123,7 @@ function renderChanges() {
   const total = report && report.counts ? report.counts.total : 0;
   badge.hidden = !total;
   badge.textContent = total ? String(total) : "";
+  syncDockTitles();
   panel.append(sessionBlock());
   if (!state.banc) {
     panel.append(empty("Open a scene to see what the project changed."));
@@ -2452,26 +2481,62 @@ function runCommand(id) {
 
 function showTab(name) {
   state.tab = name;
-  $("outliner-panel").hidden = name !== "outliner";
-  $("props-panel").hidden = name !== "props";
-  $("behavior-panel").hidden = name !== "behavior";
-  $("changes-panel").hidden = name !== "changes";
-  $("problems-panel").hidden = name !== "problems";
-  $("tab-outliner").classList.toggle("is-on", name === "outliner");
-  $("tab-props").classList.toggle("is-on", name === "props");
-  $("tab-behavior").classList.toggle("is-on", name === "behavior");
-  $("tab-changes").classList.toggle("is-on", name === "changes");
-  $("tab-problems").classList.toggle("is-on", name === "problems");
-  $("tab-outliner").setAttribute("aria-selected", name === "outliner" ? "true" : "false");
-  $("tab-props").setAttribute("aria-selected", name === "props" ? "true" : "false");
-  $("tab-behavior").setAttribute("aria-selected", name === "behavior" ? "true" : "false");
-  $("tab-changes").setAttribute("aria-selected", name === "changes" ? "true" : "false");
-  $("tab-problems").setAttribute("aria-selected", name === "problems" ? "true" : "false");
+  dock.reveal(panelIdForTab(name));
   if (name === "behavior") refreshBehavior();
-  if (mobileQuery.matches) {
-    $("side-pane").classList.remove("shut");
-    $("scene-pane").classList.add("shut");
+  if (viewport) viewport.resize();
+}
+
+function syncDockTitles() {
+  const problems = $("problem-count");
+  const changes = $("change-count");
+  const problemText = problems && !problems.hidden && problems.textContent ? `Problems ${problems.textContent}` : "Problems";
+  const changeText = changes && !changes.hidden && changes.textContent ? `Edits ${changes.textContent}` : "Edits";
+  dock.setTitle("problems", problemText);
+  dock.setTitle("edits", changeText);
+}
+
+function renderWindowMenu() {
+  const menu = $("window-menu");
+  if (!menu) return;
+  menu.replaceChildren();
+  for (const panel of dock.panels) {
+    const open = dock.isOpen(panel.id);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-pressed", open ? "true" : "false");
+    button.textContent = `${open ? "Hide" : "Show"} ${panel.title}`;
+    button.addEventListener("click", () => {
+      if (open) dock.close(panel.id);
+      else showTab(tabForPanel(panel.id));
+    });
+    menu.append(button);
   }
+  const rule = () => {
+    const line = document.createElement("hr");
+    return line;
+  };
+  const command = (label, run) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      const root = $("window-menu-root");
+      if (root) root.open = false;
+      run();
+    });
+    return button;
+  };
+  menu.append(rule(), command("Pop out Behavior", () => popOutPanel("behavior")), command("Pop out Inspector", () => popOutPanel("inspector")), rule(), command("Reset layout", () => {
+    dock.reset();
+    toast("Layout reset. The behavior graph is under the view.");
+  }));
+}
+
+async function popOutPanel(id) {
+  showTab(tabForPanel(id));
+  const opened = await dock.popOut(id);
+  if (!opened) toast("The browser blocked the window. Allow pop-ups for this site, then try Pop out again.");
+  if (viewport) viewport.resize();
 }
 
 function refreshBehavior() {
