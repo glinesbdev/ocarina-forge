@@ -164,9 +164,11 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .change-row.is-redo { opacity: 0.55; }
 .change-row strong { white-space: normal; }
 .problem-notes { display: grid; gap: 6px; margin: 8px 0 12px; }
-.problem-error, .problem-warning { margin: 0; font-size: 13px; line-height: 1.4; }
+.problem-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 8px; }
+.problem-error, .problem-warning, .problem-info { margin: 0; font-size: 13px; line-height: 1.4; }
 .problem-error { color: var(--danger); }
 .problem-warning { color: #e0b15a; }
+.problem-info { color: var(--muted); }
 .change-actions { display: flex; align-items: center; }
 .map-change { margin: 8px 0; }
 .map-change summary { cursor: pointer; color: var(--text); }

@@ -18,6 +18,7 @@ const state = {
   changeToken: 0,
   problems: null,
   problemToken: 0,
+  showProblemNotes: false,
   hot: null,
   hotToken: 0,
   banc: null,
@@ -1745,16 +1746,47 @@ function actorProblems(actor) {
   return rows.filter((row) => row.actor && row.actor === actor.id);
 }
 
+function problemClass(severity) {
+  if (severity === "info") return "problem-info";
+  if (severity === "warning") return "problem-warning";
+  return "problem-error";
+}
+
 function problemNotes(rows) {
   const list = document.createElement("div");
   list.className = "problem-notes";
   for (const row of rows) {
+    if (row.severity === "info" && !state.showProblemNotes) continue;
     const line = document.createElement("p");
-    line.className = row.severity === "warning" ? "problem-warning" : "problem-error";
+    line.className = problemClass(row.severity);
     line.textContent = row.message;
     list.append(line);
   }
   return list;
+}
+
+function problemsMarkdown(report) {
+  const rows = (report && report.diagnostics) || [];
+  const counts = { error: 0, warning: 0, info: 0 };
+  for (const row of rows) counts[row.severity] = (counts[row.severity] || 0) + 1;
+  const summary = ["error", "warning", "info"].filter((key) => counts[key]).map((key) => `${counts[key]} ${key}`).join(", ");
+  const lines = [`# Problems for ${(report && report.banc) || "scene"}`, "", summary || "No problems.", ""];
+  for (const row of rows) {
+    lines.push(`- **${row.severity}** \`${row.code}\` ${row.message}`);
+    const where = [row.file, row.pointer || row.actor].filter(Boolean).join(" · ");
+    if (where) lines.push(`  ${where}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function downloadText(filename, text, type) {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
 async function loadProblems(banc) {
@@ -1793,7 +1825,8 @@ function renderProblems() {
   const report = state.problems;
   const rows = (report && report.diagnostics) || [];
   const errors = rows.filter((row) => row.severity === "error").length;
-  const warnings = rows.filter((row) => row.severity !== "error").length;
+  const warnings = rows.filter((row) => row.severity === "warning").length;
+  const notes = rows.filter((row) => row.severity === "info").length;
   badge.hidden = !(errors || warnings);
   badge.textContent = errors ? String(errors) : String(warnings);
   badge.classList.toggle("removed", errors > 0);
@@ -1809,19 +1842,62 @@ function renderProblems() {
     panel.append(empty(report.error));
     return;
   }
-  if (!rows.length) {
-    panel.append(empty("No problems in this scene."));
+  const tools = document.createElement("div");
+  tools.className = "problem-tools";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "ghost";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    const text = problemsMarkdown(report);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied the problem list.");
+    } catch {
+      downloadText("problems.md", text, "text/markdown");
+      toast("Clipboard is blocked here, so the list was downloaded instead.");
+    }
+  });
+  const asJson = document.createElement("button");
+  asJson.type = "button";
+  asJson.className = "ghost";
+  asJson.textContent = "JSON";
+  asJson.addEventListener("click", () => downloadText("problems.json", `${JSON.stringify(report, null, 2)}\n`, "application/json"));
+  const asMarkdown = document.createElement("button");
+  asMarkdown.type = "button";
+  asMarkdown.className = "ghost";
+  asMarkdown.textContent = "Markdown";
+  asMarkdown.addEventListener("click", () => downloadText("problems.md", problemsMarkdown(report), "text/markdown"));
+  tools.append(copy, asJson, asMarkdown);
+  if (notes) {
+    const label = document.createElement("label");
+    label.className = "check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = state.showProblemNotes;
+    box.addEventListener("change", () => {
+      state.showProblemNotes = box.checked;
+      renderProblems();
+      if (state.tab === "props") renderProps();
+    });
+    label.append(box, document.createTextNode(`Vanilla notes (${notes})`));
+    tools.append(label);
+  }
+  panel.append(tools);
+  const visible = rows.filter((row) => row.severity !== "info" || state.showProblemNotes);
+  if (!visible.length) {
+    panel.append(empty(notes ? "No errors. Vanilla notes are hidden." : "No problems in this scene."));
     return;
   }
   const list = document.createElement("div");
   list.className = "change-list";
-  for (const row of rows) {
+  for (const row of visible) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "change-row";
     const mark = document.createElement("span");
-    mark.className = row.severity === "warning" ? "badge" : "badge removed";
-    mark.textContent = row.severity === "warning" ? "warn" : "error";
+    mark.className = row.severity === "error" ? "badge removed" : "badge";
+    mark.textContent = row.severity === "error" ? "error" : row.severity === "info" ? "note" : "warn";
     const text = document.createElement("span");
     text.className = "grow";
     const strong = document.createElement("strong");
