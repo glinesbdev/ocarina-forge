@@ -65,10 +65,6 @@
           </div>
           <div class="stage-bar">
             <strong id="scene-name"></strong>
-            <div class="seg" role="group" aria-label="Camera">
-              <button type="button" data-nav="orbit" class="is-on">Orbit</button>
-              <button type="button" data-nav="fly">Fly</button>
-            </div>
             <div class="seg" role="group" aria-label="Gizmo">
               <button type="button" data-gizmo="translate" class="is-on">Move</button>
               <button type="button" data-gizmo="rotate">Rotate</button>
@@ -78,8 +74,7 @@
             <label class="check"><input id="show-labels" type="checkbox" checked /> All labels</label>
             <label class="check"><input id="show-companions" type="checkbox" checked /> Companion banc</label>
             <label class="check"><input id="companion-pick" type="checkbox" checked /> Pick companions</label>
-            <label class="check"><input id="show-stats" type="checkbox" /> Stats</label>
-            <label class="check" title="Experimental. WebGL stays the default. The Kokiri WebGPU trial stayed slower, so this path is shelved."><input id="use-webgpu" type="checkbox" /> WebGPU <span class="muted">experimental</span></label>
+            <label class="check"><input id="show-stats" type="checkbox" checked /> Stats</label>
             <span id="hot-status" class="hot-status" hidden></span>
             <label class="check" title="Auto uses the size rules. A metre cap also hides anything farther than that, except the selection.">Draw
               <select id="draw-distance">
@@ -106,7 +101,8 @@
               <button type="button" data-cat="system" data-mode="hide">Hide</button>
             </div>
             <button id="frame" type="button" class="ghost">Frame</button>
-            <span id="stage-hint" class="hint">Click a model to select. Alt-click, or click again, cycles overlaps. Placeholders are outlines.</span>
+            <button id="shortcuts-open" type="button" class="ghost" title="Keyboard and mouse shortcuts (?)">Shortcuts</button>
+            <span id="stage-hint" class="hint">Right-drag looks. WASD moves. Alt+left-drag orbits. Middle-drag pans. Scroll zooms.</span>
           </div>
         </main>
 
@@ -133,6 +129,17 @@
 
       <section id="gate" class="gate" hidden></section>
     </div>
+
+    <dialog id="shortcuts-dialog">
+      <form method="dialog" class="dialog-card wide" id="shortcuts-form">
+        <header>
+          <h2>Shortcuts</h2>
+          <button type="button" class="ghost" data-close>Close</button>
+        </header>
+        <p class="muted">Fly is the camera. Orbit and pan are modifiers. Esc or a click outside closes this list.</p>
+        <div id="shortcuts-list"></div>
+      </form>
+    </dialog>
 
     <dialog id="palette-dialog">
       <form method="dialog" class="dialog-card wide" id="palette-form">

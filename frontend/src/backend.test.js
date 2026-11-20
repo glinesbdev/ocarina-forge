@@ -2,17 +2,24 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, drawCount, drawTotal, rendererChoice, rendererSearch } from "./backend.js";
+import { backendLabel, drawCount, drawTotal, rendererChoice, rendererSearch, stripLegacyGpu } from "./backend.js";
 import { formatStats } from "./frame.js";
 
 test("WebGL is the default and WebGPU is opt-in", () => {
   assert.equal(rendererChoice(""), "webgl");
-  assert.equal(rendererChoice("?gpu=1"), "webgpu");
+  assert.equal(rendererChoice("?gpu=1"), "webgl");
+  assert.equal(rendererChoice("?webgpu=1"), "webgpu");
   assert.equal(rendererChoice("?renderer=webgpu"), "webgpu");
   assert.equal(rendererChoice("?gpu=0"), "webgl");
-  assert.equal(rendererChoice("?renderer=webgl&gpu=1"), "webgl");
-  assert.equal(rendererSearch("?scene=kokiri", "webgpu"), "?scene=kokiri&gpu=1");
+  assert.equal(rendererChoice("?webgpu=0"), "webgl");
+  assert.equal(rendererChoice("?renderer=webgl&webgpu=1"), "webgl");
+  assert.equal(rendererSearch("?scene=kokiri", "webgpu"), "?scene=kokiri&webgpu=1");
   assert.equal(rendererSearch("?gpu=1&scene=kokiri", "webgl"), "?scene=kokiri");
+  assert.equal(rendererSearch("?webgpu=1&scene=kokiri", "webgl"), "?scene=kokiri");
+  assert.equal(stripLegacyGpu("?gpu=1"), "");
+  assert.equal(stripLegacyGpu("?scene=kokiri&gpu=1"), "?scene=kokiri");
+  assert.equal(stripLegacyGpu("?webgpu=1"), null);
+  assert.equal(stripLegacyGpu(""), null);
 });
 
 test("draw counts come from the backend that actually records them", () => {
@@ -85,7 +92,10 @@ test("the default viewport still builds a WebGLRenderer", () => {
   assert.match(cutout, /\.discard\(\)/);
   assert.match(cutout, /alphaToCoverage = false/);
   assert.match(viewport, /createBackendRenderer\(THREE/);
-  assert.match(html, /id="use-webgpu"/);
+  assert.doesNotMatch(html, /id="use-webgpu"/);
+  assert.doesNotMatch(html, /data-nav=/);
+  assert.match(html, /id="shortcuts-open"/);
+  assert.match(html, /id="show-stats" type="checkbox" checked/);
   assert.match(html, /src="\/src\/boot.js"/);
   const node = readFileSync(new URL("./terrain-node.js", import.meta.url), "utf8");
   assert.match(node, /attribute\("uv1", "vec2"\)/);

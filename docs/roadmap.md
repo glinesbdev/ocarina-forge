@@ -8,7 +8,7 @@ Render on change, so an idle view does not redraw. Instance repeated models on t
 
 ## 2. WebGPU trial (shelved)
 
-The opt-in stays, labelled experimental, and WebGL stays the default. Three stays on r170. **WebGPU** in the stage bar, or `?gpu=1`, still reloads on `WebGPURenderer`. No adapter keeps that renderer on its WebGL2 backend, and the stats line says `WebGPU (WebGL2 fallback)`. On a real Kokiri GPU the frame stayed 3–12× slower than WebGL (the last pass was 247.9 ms and 338 draws, against WebGL under 30 ms). r170 has no multi-draw, so one shared material is still one draw per index range. The render-call loop (up to about 80 `render()` calls in a frame) and the remaining solid grass cards are unresolved. Revisit this on a newer three. The measurements are in [performance.md](performance.md).
+The opt-in stays behind `?webgpu=1` (or `?renderer=webgpu`), and WebGL stays the default. The stage-bar checkbox is gone, and a saved `?gpu=1` link loads WebGL. Three stays on r170. No adapter keeps that renderer on its WebGL2 backend, and the stats line says `WebGPU (WebGL2 fallback)`. On a real Kokiri GPU the frame stayed 3–12× slower than WebGL (the last pass was 247.9 ms and 338 draws, against WebGL under 30 ms). r170 has no multi-draw, so one shared material is still one draw per index range. The render-call loop (up to about 80 `render()` calls in a frame) and the remaining solid grass cards are unresolved. Revisit this on a newer three. The measurements are in [performance.md](performance.md).
 
 ## 3. Editing UX
 

@@ -6,7 +6,7 @@ Baseline on Bradyn’s PC, Kokiri Forest child Static+Dynamic, before this pass:
 
 `renderer.render` runs only from the animation frame requested by `requestRender`. Nothing calls `setAnimationLoop`. A frame schedules the next one only while the camera is moving (orbit damping, fly keys, or right-button look), the gizmo is dragging, or a model or terrain load is still in flight. Water does not animate, so it does not keep the loop. When that stops, the overlay reads `idle` and the last draw and triangle counts stay put.
 
-Check: turn **Stats** on, orbit, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead. The line starts with the backend (`WebGL` or `WebGPU`) and, once a run of frames has been measured, the frame time in milliseconds.
+Check: **Stats** starts on. Orbit or fly, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead. The line starts with the backend (`WebGL` or `WebGPU`) and, once a run of frames has been measured, the frame time in milliseconds.
 
 ## Instanced repeats
 
@@ -58,7 +58,7 @@ Opening a scene sends one `POST /api/models/batch` with every actor name. Cache 
 
 ## WebGPU trial (shelved)
 
-WebGL stays the default. The stage-bar checkbox is labelled **experimental**. Checking it still reloads with `?gpu=1` (`?renderer=webgpu` does the same). Unchecking, or `?gpu=0` / `?renderer=webgl`, reloads the WebGL editor. There is no further work on this path. It can be revisited when three is newer than r170 (`0.170.0`).
+WebGL stays the default. The stage-bar checkbox is gone. `?webgpu=1` or `?renderer=webgpu` still reloads on `WebGPURenderer`. `?gpu=0` / `?renderer=webgl` force WebGL. A saved `?gpu=1` link, the old checkbox flag, is stripped on boot and loads WebGL. There is no further work on this path. It can be revisited when three is newer than r170 (`0.170.0`).
 
 Bradyn's Kokiri pass on `515cd10`, real WebGPU, same spot the earlier passes used:
 
@@ -75,4 +75,4 @@ What r170 cannot do, and what is still unresolved:
 - **Render-call loop.** `info.render.calls` is how many times `render()` ran, not the draw count. A quiet editor frame is one call. The Kokiri console reached about 80 calls in a frame. That loop is not fixed.
 - **Cutouts.** Some grass cards still drew as solid sheets after the colour-node discard. The mask path is not reliable on this three.
 
-The checkbox remains so a later three can be compared without rebuilding the opt-in. On Linux Chrome, hardware WebGPU needs Unsafe WebGPU and Vulkan (`chrome://flags`, or `--enable-unsafe-webgpu --enable-features=Vulkan`). `chrome://gpu` should say WebGPU is hardware accelerated. No adapter keeps `WebGPURenderer` on its WebGL2 backend, and **Stats** then starts with `WebGPU (WebGL2 fallback)`. Do not use that line, or a WebGPU line, as a performance target until the trial is reopened.
+The `?webgpu=1` path remains so a later three can be compared without rebuilding the opt-in. On Linux Chrome, hardware WebGPU needs Unsafe WebGPU and Vulkan (`chrome://flags`, or `--enable-unsafe-webgpu --enable-features=Vulkan`). `chrome://gpu` should say WebGPU is hardware accelerated. No adapter keeps `WebGPURenderer` on its WebGL2 backend, and **Stats** then starts with `WebGPU (WebGL2 fallback)`. Do not use that line, or a WebGPU line, as a performance target until the trial is reopened.

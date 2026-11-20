@@ -1,8 +1,8 @@
 import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
-import { rendererChoice, rendererSearch } from "./backend.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { paletteRows } from "./palette.js";
+import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -37,7 +37,6 @@ const state = {
   terrainDebug: false,
   helperBoxes: null,
   terrain: null,
-  nav: "orbit",
   gizmo: "translate",
   tab: "outliner",
   addMode: "add",
@@ -160,23 +159,18 @@ $("companion-pick").addEventListener("change", (event) => {
   state.companionPick = event.target.checked;
   if (state.raw) applyView(state.raw, { select: state.selected });
 });
-$("show-stats").addEventListener("change", (event) => {
-  viewport.setShowStats(event.target.checked);
-});
-const gpuBox = $("use-webgpu");
-if (gpuBox) {
-  gpuBox.checked = rendererChoice(window.location.search) === "webgpu";
-  const gpuLabel = gpuBox.parentElement;
-  if (gpuLabel) {
-    gpuLabel.title = viewport.backend === "WebGPU"
-      ? "Experimental. This page is on WebGPU. Uncheck to reload WebGL. The Kokiri trial stayed slower, so this path is shelved."
-      : viewport.backend === "WebGPU (WebGL2 fallback)"
-        ? "Experimental. WebGPURenderer is on its WebGL2 backend, not a WebGPU device. Uncheck to reload the default WebGL renderer."
-        : "Experimental. WebGL stays the default. The Kokiri WebGPU trial stayed slower, so this path is shelved.";
-  }
-  gpuBox.addEventListener("change", () => {
-    const next = rendererSearch(window.location.search, gpuBox.checked ? "webgpu" : "webgl");
-    window.location.assign(`${window.location.pathname}${next}${window.location.hash}`);
+const statsBox = $("show-stats");
+if (statsBox) {
+  const statsOn = storedFlag("bancwright.stats", true);
+  statsBox.checked = statsOn;
+  viewport.setShowStats(statsOn);
+  statsBox.addEventListener("change", () => {
+    viewport.setShowStats(statsBox.checked);
+    try {
+      localStorage.setItem("bancwright.stats", statsBox.checked ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
   });
 }
 if (viewport.backendNote) toast(viewport.backendNote);
@@ -214,9 +208,13 @@ $("tab-outliner").addEventListener("click", () => showTab("outliner"));
 $("tab-props").addEventListener("click", () => showTab("props"));
 $("tab-changes").addEventListener("click", () => showTab("changes"));
 $("tab-problems").addEventListener("click", () => showTab("problems"));
-document.querySelectorAll("[data-nav]").forEach((button) => {
-  button.addEventListener("click", () => setNav(button.dataset.nav));
-});
+$("shortcuts-open").addEventListener("click", () => openShortcuts());
+const shortcutsDialog = $("shortcuts-dialog");
+if (shortcutsDialog) {
+  shortcutsDialog.addEventListener("click", (event) => {
+    if (event.target === shortcutsDialog) shortcutsDialog.close();
+  });
+}
 document.querySelectorAll("[data-gizmo]").forEach((button) => {
   button.addEventListener("click", () => setGizmo(button.dataset.gizmo));
 });
@@ -261,6 +259,11 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (isTyping(event)) return;
+  if (event.key === "?") {
+    event.preventDefault();
+    openShortcuts();
+    return;
+  }
   if (meta && event.key.toLowerCase() === "z" && !event.shiftKey) {
     event.preventDefault();
     undo();
@@ -2422,13 +2425,46 @@ function showTab(name) {
   }
 }
 
-function setNav(mode) {
-  state.nav = mode;
-  viewport.setNav(mode);
-  document.querySelectorAll("[data-nav]").forEach((button) => button.classList.toggle("is-on", button.dataset.nav === mode));
-  $("stage-hint").textContent = mode === "fly"
-    ? "WASD moves. Q and E go down and up. Right-drag looks, and the cursor hides until you release. Shift is faster."
-    : "Click a model to select. Alt-click, or click again, cycles overlaps. Volumes are the faint boxes.";
+function openShortcuts() {
+  const dialog = $("shortcuts-dialog");
+  const host = $("shortcuts-list");
+  if (!dialog || !host) return;
+  if (!host.childElementCount) fillShortcuts(host);
+  if (!dialog.open) dialog.showModal();
+}
+
+function fillShortcuts(host) {
+  host.replaceChildren();
+  for (const group of SHORTCUT_GROUPS) {
+    const section = document.createElement("section");
+    section.className = "shortcut-group";
+    const title = document.createElement("h3");
+    title.textContent = group.label;
+    section.append(title);
+    for (const item of group.items) {
+      const row = document.createElement("div");
+      row.className = "shortcut-row";
+      const keys = document.createElement("span");
+      keys.className = "shortcut-keys";
+      keys.textContent = item.keys;
+      const action = document.createElement("span");
+      action.textContent = item.action;
+      row.append(keys, action);
+      section.append(row);
+    }
+    host.append(section);
+  }
+}
+
+function storedFlag(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === "0") return false;
+    if (raw === "1") return true;
+  } catch {
+    /* private mode */
+  }
+  return fallback;
 }
 
 function setGizmo(mode) {

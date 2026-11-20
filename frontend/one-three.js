@@ -1,7 +1,7 @@
 /**
  * WebGPU and WebGL three builds each set `window.__THREE__`. Lights, materials,
  * and BatchedMesh only work when the renderer and the objects are the same copy.
- * `?gpu=1` loads a second module graph in which every `three` import is the
+ * `?webgpu=1` loads a second module graph in which every `three` import is the
  * WebGPU build. The default page keeps `three.module.js`.
  *
  * Prebundled addons inline the WebGL build, so the WebGPU graph loads the raw

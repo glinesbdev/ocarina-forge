@@ -42,7 +42,7 @@ The dump path and the open project are stored in `./bancwright.local.yaml` (giti
 
 - Browse `romfs/Banc/<Area>/*.bcett.byml.zs`, grouped by area.
 - See each actor as a labeled box at its translate, rotate, and scale. Color is the actor category (NPC, enemy, object, land, effect, animal, system).
-- Orbit (left drag, right drag pans, scroll zooms) or fly (WASD, Q/E, right-drag looks, Shift).
+- Fly the camera: hover the view to focus it (a click is not required, and a text field or an open dialog keeps focus). Right-drag looks, WASD moves, Q and E go down and up, Shift is faster. Alt+left-drag orbits the point under the cursor (or the selection). Middle-drag pans. Scroll zooms. **Shortcuts**, or `?`, lists every binding. The same list is [docs/controls.md](docs/controls.md).
 - Select an actor by clicking it or its row. Move and rotate with the gizmo, or type metres and degrees. Y is up. Yaw is the Y rotation. The file stores radians.
 - Edit the other BYML parameters as typed fields. Add an actor from the names in `Pack/Actor`. Duplicate, hide, delete, or revert.
 - Undo and redo cover the edits you make in this session. The project files are the lasting copy.

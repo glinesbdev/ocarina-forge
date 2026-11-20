@@ -9,6 +9,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
 import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
+import { canHoverFocus } from "./focus.js";
 import { shouldReloadTerrain } from "./terrain.js";
 import { createBackendRenderer, drawTotal } from "./backend.js";
 import { formatStats, keepRendering } from "./frame.js";
@@ -68,10 +69,28 @@ export async function createViewport(host, hooks) {
     const previousLost = renderer.onDeviceLost.bind(renderer);
     renderer.onDeviceLost = (info) => {
       previousLost(info);
-      if (hooks.onDeviceLost) hooks.onDeviceLost("The WebGPU device was lost. Uncheck WebGPU to reload on WebGL.");
+      if (hooks.onDeviceLost) hooks.onDeviceLost("The WebGPU device was lost. Reload without ?webgpu=1 to use WebGL.");
     };
   }
   host.appendChild(renderer.domElement);
+  const canvas = renderer.domElement;
+  canvas.tabIndex = 0;
+  canvas.setAttribute("aria-label", "Scene view");
+  let hoverTookFocus = false;
+  host.addEventListener("pointerenter", () => {
+    if (!canHoverFocus(document.activeElement, Boolean(document.querySelector("dialog[open]")))) return;
+    if (document.activeElement === canvas) return;
+    canvas.focus({ preventScroll: true });
+    hoverTookFocus = document.activeElement === canvas;
+  });
+  host.addEventListener("pointerleave", () => {
+    if (!hoverTookFocus) return;
+    hoverTookFocus = false;
+    if (document.activeElement === canvas) canvas.blur();
+  });
+  canvas.addEventListener("pointerdown", () => {
+    hoverTookFocus = false;
+  });
 
   const labels = new CSS2DRenderer();
   labels.domElement.className = "label-layer";
@@ -89,10 +108,11 @@ export async function createViewport(host, hooks) {
   orbit.dampingFactor = 0.08;
   orbit.target.set(0, 0, 0);
   orbit.maxPolarAngle = Math.PI * 0.49;
+  // Fly is the camera. Left-drag stays a click. Alt+left orbits, middle pans, the wheel zooms.
   orbit.mouseButtons = {
-    LEFT: THREE.MOUSE.ROTATE,
-    MIDDLE: THREE.MOUSE.DOLLY,
-    RIGHT: THREE.MOUSE.PAN,
+    LEFT: -1,
+    MIDDLE: THREE.MOUSE.PAN,
+    RIGHT: -1,
   };
 
   const transform = new TransformControls(camera, renderer.domElement);
@@ -108,9 +128,8 @@ export async function createViewport(host, hooks) {
   const templateOrder = [];
   const statsEl = document.createElement("div");
   statsEl.className = "view-stats";
-  statsEl.hidden = true;
   host.appendChild(statsEl);
-  let showStats = false;
+  let showStats = true;
   let naiveDraws = 0;
   let running = true;
   let frameHandle = 0;
@@ -158,8 +177,12 @@ export async function createViewport(host, hooks) {
   let hovered = null;
   let showLabels = false;
   let showHidden = false;
-  let nav = "orbit";
   let looking = false;
+  let orbitGesture = false;
+  let orbitArmed = false;
+  let orbitMoved = false;
+  let orbitSettle = 0;
+  const savedOrbitTarget = new THREE.Vector3();
   let lookLocked = false;
   let lastPointer = null;
   let gizmoUsed = false;
@@ -1740,10 +1763,31 @@ uniform float terrainLayerMissing;`
     requestRender();
   }
 
-  function setNav(mode) {
-    nav = mode;
-    orbit.enabled = mode === "orbit";
-    releaseLook();
+  function aimOrbit(event) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const roots = [];
+    if (terrainRoot) roots.push(terrainRoot);
+    for (const batch of batches) roots.push(batch.mesh);
+    for (const entry of entries.values()) {
+      if (entry.pivot.visible) roots.push(entry.pivot);
+    }
+    const hits = roots.length ? raycaster.intersectObjects(roots, true) : [];
+    const hit = hits.find((item) => item.point);
+    if (hit) {
+      orbit.target.copy(hit.point);
+      return;
+    }
+    const entry = selected ? entries.get(selected) : null;
+    if (entry) {
+      entry.pivot.getWorldPosition(orbit.target);
+      return;
+    }
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
   }
 
   function requestLookLock() {
@@ -1998,8 +2042,23 @@ uniform float terrainLayerMissing;`
     hooks.onSelect(id);
   }
 
+  renderer.domElement.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0 || !event.altKey || transform.dragging) return;
+      savedOrbitTarget.copy(orbit.target);
+      aimOrbit(event);
+      orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+      orbitArmed = true;
+      orbitMoved = false;
+      orbitSettle = 0;
+      requestRender();
+    },
+    true,
+  );
+
   renderer.domElement.addEventListener("pointerdown", (event) => {
-    if (event.button === 2 && nav === "fly") {
+    if (event.button === 2) {
       looking = true;
       lastPointer = { x: event.clientX, y: event.clientY };
       try {
@@ -2022,9 +2081,11 @@ uniform float terrainLayerMissing;`
       applyLook(event.movementX || 0, event.movementY || 0);
       return;
     }
+    if ((event.buttons & 2) !== 0) orbitMoved = true;
     if (lastPointer && event.buttons === 1) {
       const dx = event.clientX - lastPointer.x;
       const dy = event.clientY - lastPointer.y;
+      if (event.altKey && (dx !== 0 || dy !== 0)) orbitMoved = true;
       if (Math.hypot(dx, dy) > 4) lastPointer.moved = true;
     }
     if (transform.dragging) return;
@@ -2049,8 +2110,17 @@ uniform float terrainLayerMissing;`
       releaseLook();
       event.preventDefault();
     }
-    if (event.button === 0 && lastPointer && !lastPointer.moved && !gizmoUsed && !transform.dragging) pick(event);
-    if (nav === "orbit") orbit.enabled = true;
+    if (event.button === 0 && lastPointer && !lastPointer.moved && !orbitMoved && !gizmoUsed && !transform.dragging) pick(event);
+    const didOrbit = orbitMoved;
+    if (event.button === 0 && orbitArmed && !didOrbit) orbit.target.copy(savedOrbitTarget);
+    orbitArmed = false;
+    orbitMoved = false;
+    orbit.mouseButtons.LEFT = -1;
+    orbit.enabled = true;
+    if (orbitGesture) {
+      orbitGesture = false;
+      if (didOrbit || event.button === 1) orbitSettle = 24;
+    }
     gizmoUsed = false;
     lastPointer = null;
   }
@@ -2086,7 +2156,7 @@ uniform float terrainLayerMissing;`
   });
 
   transform.addEventListener("dragging-changed", (event) => {
-    orbit.enabled = !event.value && nav === "orbit";
+    orbit.enabled = !event.value;
     if (event.value) {
       gizmoUsed = true;
       return;
@@ -2099,7 +2169,7 @@ uniform float terrainLayerMissing;`
   });
 
   window.addEventListener("keydown", (event) => {
-    if (isTyping(event)) return;
+    if (isTyping(event) || document.querySelector("dialog[open]")) return;
     keys.add(event.key.toLowerCase());
     requestRender();
   });
@@ -2107,7 +2177,6 @@ uniform float terrainLayerMissing;`
   window.addEventListener("blur", () => keys.clear());
 
   function updateFly(dt) {
-    if (nav !== "fly") return false;
     const speed = (keys.has("shift") ? 32 : 10) * dt;
     const forward = new THREE.Vector3();
     camera.getWorldDirection(forward);
@@ -2203,7 +2272,8 @@ uniform float terrainLayerMissing;`
     lastTickAt = tickAt;
     const dt = Math.min(clock.getDelta(), 0.05);
     const flying = updateFly(dt);
-    const damped = nav === "orbit" ? orbit.update() : false;
+    const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
+    if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
     const now = performance.now();
     if (now - lastCullAt > 120 && camera.position.distanceTo(lastCull) > 2) {
       lastCullAt = now;
@@ -2249,7 +2319,24 @@ uniform float terrainLayerMissing;`
     writeStats(again);
     if (again) requestRender();
   }
-  orbit.addEventListener("start", () => requestRender());
+  renderer.domElement.addEventListener(
+    "wheel",
+    () => {
+      orbitSettle = 24;
+      requestRender();
+    },
+    { passive: true },
+  );
+  orbit.addEventListener("start", () => {
+    orbitGesture = true;
+    requestRender();
+  });
+  orbit.addEventListener("end", () => {
+    orbitGesture = false;
+    orbit.mouseButtons.LEFT = -1;
+    orbitSettle = 24;
+    requestRender();
+  });
   orbit.addEventListener("change", () => requestRender());
   requestRender();
 
@@ -2263,7 +2350,6 @@ uniform float terrainLayerMissing;`
       snapOn = Boolean(on);
     },
     select,
-    setNav,
     setGizmo,
     setFlags,
     modelInfo,
@@ -2297,5 +2383,5 @@ uniform float terrainLayerMissing;`
 
 function isTyping(event) {
   const tag = event.target && event.target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || (event.target && event.target.isContentEditable);
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (event.target && event.target.isContentEditable);
 }

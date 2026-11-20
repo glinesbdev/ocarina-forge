@@ -1,29 +1,45 @@
 /**
- * WebGL stays the default. WebGPU is opt-in (`?gpu=1` or `?renderer=webgpu`)
+ * WebGL stays the default. WebGPU is opt-in (`?webgpu=1` or `?renderer=webgpu`)
  * because r170's WebGPU backend is a trial, not a proven win on Kokiri.
- * No navigator.gpu at all still uses WebGLRenderer. A missing adapter keeps
- * WebGPURenderer on its WebGL2 backend and the stats line says so.
+ * The old `?gpu=1` checkbox flag is ignored. No navigator.gpu at all still
+ * uses WebGLRenderer. A missing adapter keeps WebGPURenderer on its WebGL2
+ * backend and the stats line says so.
  */
 
 export function rendererChoice(search) {
-  const raw = typeof search === "string" ? search : "";
-  const params = new URLSearchParams(raw.charAt(0) === "?" ? raw.slice(1) : raw);
+  const params = searchParams(search);
   const named = (params.get("renderer") || "").toLowerCase();
-  const gpu = params.get("gpu");
-  if (named === "webgl" || gpu === "0") return "webgl";
-  if (named === "webgpu" || gpu === "1") return "webgpu";
+  if (named === "webgl" || params.get("webgpu") === "0" || params.get("gpu") === "0") return "webgl";
+  if (named === "webgpu" || params.get("webgpu") === "1") return "webgpu";
   return "webgl";
 }
 
-/** Search string for a reload. Other query keys are kept. */
+/** Search string for a reload. Other query keys are kept. `gpu` is the retired flag. */
 export function rendererSearch(search, choice) {
-  const raw = typeof search === "string" ? search : "";
-  const params = new URLSearchParams(raw.charAt(0) === "?" ? raw.slice(1) : raw);
+  const params = searchParams(search);
   params.delete("renderer");
-  if (choice === "webgpu") params.set("gpu", "1");
-  else params.delete("gpu");
+  params.delete("gpu");
+  if (choice === "webgpu") params.set("webgpu", "1");
+  else params.delete("webgpu");
   const text = params.toString();
   return text ? `?${text}` : "";
+}
+
+/**
+ * `?gpu=1` was the stage-bar checkbox. Drop it so a saved link loads WebGL.
+ * Returns null when the search does not carry that flag.
+ */
+export function stripLegacyGpu(search) {
+  const params = searchParams(search);
+  if (params.get("gpu") !== "1") return null;
+  params.delete("gpu");
+  const text = params.toString();
+  return text ? `?${text}` : "";
+}
+
+function searchParams(search) {
+  const raw = typeof search === "string" ? search : "";
+  return new URLSearchParams(raw.charAt(0) === "?" ? raw.slice(1) : raw);
 }
 
 /**
