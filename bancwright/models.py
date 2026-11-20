@@ -52,7 +52,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # models.py, bfres.py, terrain.py, and gltf.py, so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-18\0"
+_CACHE_VERSION = b"models-19\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -2555,8 +2555,8 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         "each scene keeps its own finest tile, and the _sub overlay does not drop main cells. "
         "One atlas draw, skirts on tile edges. "
         "Height 0 is ground at the terrain origin; only a non-finite sample is a hole. "
-        "The partial last column is read from its packed GOB slot. The field is double-sided for this test. "
-        "Sub terrain hides the overlay"
+        "The partial last column is read from its packed GOB slot. The field is front-side; skirts stay. "
+        "Sub terrain starts off and shows the overlay"
     )
     notes.append("custom.extm is not decoded")
     reason = "terrain heightmap. " + " ".join(notes)
@@ -2664,7 +2664,7 @@ def _terrain_primitives(parts, images, layer_ids):
                     part.indices,
                     part.uvs,
                     alpha="opaque",
-                    double_sided=True,
+                    double_sided=False,
                     base_color=_EARTH,
                     name="terrain",
                     kind="terrain",
@@ -2738,7 +2738,7 @@ def _terrain_primitives(parts, images, layer_ids):
         merged_uv,
         png=png,
         alpha="opaque",
-        double_sided=True,
+        double_sided=False,
         base_color=(1.0, 1.0, 1.0, 1.0),
         name="terrain",
         kind="terrain",

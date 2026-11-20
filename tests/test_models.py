@@ -127,8 +127,8 @@ def test_converter_output_is_pinned_to_the_cache_version():
     """models.py, bfres.py, terrain.py, and gltf.py are hashed into the cache key.
 
     Changing any of them fails this test until `_CACHE_VERSION` is bumped and
-    the pin below is updated in the same edit. Reusing models-18 with a new
-    stamp is a failure: the prefix has to move so a reader can see the rebuild.
+    the pin below is updated in the same edit. Reusing the previous version with
+    a new stamp is a failure: the prefix has to move so a reader can see the rebuild.
     """
     from bancwright.models import _CACHE_VERSION, _cache_prefix, _converter_files, _converter_stamp
 
@@ -136,10 +136,10 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-18", "09c1f3eccf78c9640584991bc6f9dec23a3f0e0f02743ba56cc9b4e2228c4b42")
+    pinned = ("models-19", "d2e787c0c2d70f9ac57f5b27ccd833e397a86e6c52b7ce3e51953abdfcf9af3a")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
-        "replace this pin with the new version and stamp. Do not keep models-18."
+        "replace this pin with the new version and stamp. Do not keep the previous version."
     )
 
 
@@ -556,7 +556,7 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
     assert factor[0] == 1.0 and factor[1] == 1.0
     assert "baseColorTexture" in document["materials"][0]["pbrMetallicRoughness"]
     primitive = document["meshes"][0]["primitives"][0]
-    assert document["materials"][0]["doubleSided"] is True
+    assert document["materials"][0]["doubleSided"] is False
     assert "TEXCOORD_3" in primitive["attributes"]
     positions = _accessor_floats(document, blob, primitive["attributes"]["POSITION"], 3)
     assert min(point[0] for point in positions) < -7

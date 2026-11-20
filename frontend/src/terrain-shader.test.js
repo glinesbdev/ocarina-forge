@@ -46,6 +46,17 @@ test("the map replacement has no function definitions", () => {
   assert.ok(decls !== -1 && decls < inject && inject < maps, "helpers are injected after the uniforms and before the map chunk");
 });
 
+test("sub terrain starts off and the field is front-side", () => {
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+  const box = html.match(/<input id="show-sub"[^>]*>/);
+  assert.ok(box, "missing the Sub terrain checkbox");
+  assert.equal(box[0].includes("checked"), false);
+  assert.match(main, /showSub:\s*false/);
+  assert.match(source, /let showSub = false/);
+  assert.match(source, /material\.side = THREE\.FrontSide/);
+});
+
 test("the terrain shader compiles", async () => {
   const page = `<!doctype html>
 <meta charset="utf-8">

@@ -105,7 +105,7 @@ export function createViewport(host, hooks) {
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
-  let showSub = true;
+  let showSub = false;
   let showTerrainDebug = false;
   let generation = 0;
   let loadQueue = null;
@@ -1112,7 +1112,7 @@ uniform float terrainLayerMissing;`
           if (!material) continue;
           material.transparent = false;
           material.depthWrite = true;
-          material.side = THREE.DoubleSide;
+          material.side = THREE.FrontSide;
           if (material.userData && material.userData.terrainLayerUniform) {
             material.userData.terrainLayerUniform.value = layered ? 0 : 1;
           }
@@ -1120,7 +1120,7 @@ uniform float terrainLayerMissing;`
         }
       });
       if (missingLayer) {
-        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-18 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
+        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-19 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
         console.warn(message);
         if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
       }

@@ -24,7 +24,7 @@ const state = {
   hideVolumes: false,
   showGround: false,
   showWater: true,
-  showSub: true,
+  showSub: false,
   terrainDebug: false,
   helperBoxes: null,
   terrain: null,
