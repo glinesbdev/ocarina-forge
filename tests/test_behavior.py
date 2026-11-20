@@ -477,3 +477,75 @@ def test_set_field_saves_an_op_and_export_round_trips(tmp_path):
 
     cleared = set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=flag["id"], field="DataBool", value="Kokiri_FadoMet")
     assert cleared["ops"] == []
+
+
+def test_added_nodes_and_wires_keep_stable_ids_and_block_export(tmp_path):
+    from ocarina_forge.behavior import FADO_AI, make_op, node_type_catalog
+    from ocarina_forge.behavior_edit import STRUCTURE_EXPORT, add_node, connect_pins, disconnect_pins, export_behaviors, replace_ops
+    from ocarina_forge.project import Project
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    project = Project.create(tmp_path / "mod", name="kokiri-notes", title="Kokiri notes", author="Bradyn", version="0")
+    graph = load_actor_graph(dump, gyaml="Npc_Kokiri_F_01")
+    source = next(item for item in graph["sources"] if item["path"] == FADO_AI)
+    root = next(node for node in graph["nodes"] if node["name"] == "Command Root")
+    flow_out = next(pin for pin in root["pins"] if pin["dir"] == "out")
+    flag = next(node for node in graph["nodes"] if node["raw"] == "HoldGameDataGetBool")
+    bool_out = next(pin for pin in flag["pins"] if pin["type"] == "bool" and pin["dir"] == "out")
+
+    added = add_node(
+        dump,
+        project,
+        gyaml="Npc_Kokiri_F_01",
+        source=source["id"],
+        path=source["path"],
+        type_name="Element_Sequential",
+        name="Sequence",
+        kind="ainb",
+        pins=[{"dir": "in", "type": "flow", "name": "in"}, {"dir": "out", "type": "flow", "name": "out"}],
+    )
+    node = next(item for item in added["nodes"] if item.get("added"))
+    assert node["id"] == "node:1"
+    assert node["source"] == source["id"]
+    flow_in = next(pin for pin in node["pins"] if pin["dir"] == "in")
+    with pytest.raises(BancError, match="different types"):
+        connect_pins(dump, project, gyaml="Npc_Kokiri_F_01", path=source["path"], src=bool_out["id"], dst=flow_in["id"])
+    linked = connect_pins(dump, project, gyaml="Npc_Kokiri_F_01", path=source["path"], src=flow_out["id"], dst=flow_in["id"])
+    assert any(edge["from"] == flow_out["id"] and edge["to"] == flow_in["id"] for edge in linked["edges"])
+    saved = project.load_behavior_ops("Npc_Kokiri_F_01")
+    assert [op["op"] for op in saved] == ["add node", "connect"]
+    assert saved[0]["id"] == "node:1"
+    assert saved[1]["id"] == "edge:1"
+    text = project.behavior_path("Npc_Kokiri_F_01").read_text(encoding="utf-8")
+    assert "add node" in text and "connect" in text
+    redraw = replace_ops(dump, project, gyaml="Npc_Kokiri_F_01", ops=saved)
+    again = next(item for item in redraw["nodes"] if item.get("added"))
+    assert again["id"] == node["id"]
+    assert [pin["id"] for pin in again["pins"]] == [pin["id"] for pin in node["pins"]]
+
+    blocked = export_behaviors(project, dump, gyaml="Npc_Kokiri_F_01", out_root=tmp_path / "out")
+    assert blocked[0]["exported"] is False
+    assert blocked[0]["message"] == STRUCTURE_EXPORT
+    assert "round-trip a modified graph" in blocked[0]["message"]
+    assert not (tmp_path / "out" / FADO_AI).exists()
+
+    cut = disconnect_pins(dump, project, gyaml="Npc_Kokiri_F_01", path=source["path"], src=flow_out["id"], dst=flow_in["id"])
+    assert not any(edge["from"] == flow_out["id"] and edge["to"] == flow_in["id"] for edge in cut["edges"])
+    assert [op["op"] for op in cut["ops"]] == ["add node"]
+
+    base_edge = next(edge for edge in graph["edges"] if edge["from"].startswith(flag["id"]))
+    hidden = disconnect_pins(
+        dump, project, gyaml="Npc_Kokiri_F_01", path=source["path"], src=base_edge["from"], dst=base_edge["to"]
+    )
+    assert any(op["op"] == "disconnect" and op["from"] == base_edge["from"] for op in hidden["ops"])
+    assert not any(edge["from"] == base_edge["from"] and edge["to"] == base_edge["to"] for edge in hidden["edges"])
+    make_op("disconnect", **{"from": base_edge["from"], "to": base_edge["to"]})
+
+    catalog = node_type_catalog(dump)
+    custom = next(row for row in catalog if row["type"] == "CustomEvent")
+    assert custom["name"] == "Custom Event"
+    assert "flow" in custom["signature"]
+    known = next(row for row in catalog if row["type"] == "HoldGameDataGetBool")
+    assert known["count"] >= 1
+    assert known["pins"]
+    assert known["signature"]

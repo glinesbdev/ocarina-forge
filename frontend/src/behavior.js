@@ -108,7 +108,10 @@ export function visibleNodes(graph, options = {}) {
     };
   }
   const order = entry ? neighborhood(entry, members, edges) : members.map((node) => node.id);
-  const keep = new Set(order.slice(0, LAYOUT_CAP));
+  const added = members.filter((node) => node.added).map((node) => node.id);
+  const room = Math.max(LAYOUT_CAP - added.length, 1);
+  const keep = new Set(order.filter((id) => !added.includes(id)).slice(0, room));
+  for (const id of added) keep.add(id);
   return {
     source,
     entry,

@@ -16,7 +16,7 @@ from pathlib import Path
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import dumps, loads
 
-OPS = ("add node", "connect", "set field")
+OPS = ("add node", "connect", "disconnect", "set field")
 
 # Names the game uses, and the label the curated layer shows.
 _FRIENDLY = {
@@ -111,6 +111,8 @@ def make_op(op: str, **fields) -> dict:
         raise ValueError("add node needs an id minted once.")
     if op == "connect" and not (body.get("id") and body.get("from") and body.get("to")):
         raise ValueError("connect needs an id, from, and to.")
+    if op == "disconnect" and not (body.get("from") and body.get("to")):
+        raise ValueError("disconnect needs from and to.")
     if op == "set field" and not (body.get("id") and body.get("field")):
         raise ValueError("set field needs an id and a field.")
     return body
@@ -189,13 +191,74 @@ def schedule_builtin_label(name: str) -> str | None:
     return friendly_name(tail or base)[0]
 
 
-def audit_npc_behavior(dump) -> dict:
+def _catalog_label(node: dict) -> str:
+    """The builtin name a palette lists. UserDefined falls through to the node name."""
+    type_name = str(node.get("type") or "")
+    raw = str(node.get("raw") or "")
+    if type_name and type_name not in ("UserDefined", "undecoded") and not type_name.startswith("node "):
+        return type_name
+    if raw and raw not in ("undecoded",) and not raw.startswith("node ") and " " not in raw:
+        return raw
+    return ""
+
+
+def pin_signature(pins: list[dict]) -> str:
+    """One line a palette can show: direction, type, and name for each pin."""
+    parts = []
+    for pin in pins or []:
+        direction = "out" if pin.get("dir") == "out" else "in"
+        kind = str(pin.get("type") or "flow")
+        name = str(pin.get("name") or "")
+        parts.append(f"{direction} {kind} {name}".strip())
+    return " · ".join(parts)
+
+
+def _pin_brief(pin: dict) -> dict:
+    return {
+        "dir": "out" if pin.get("dir") == "out" else "in",
+        "type": str(pin.get("type") or "flow"),
+        "name": str(pin.get("name") or ""),
+    }
+
+
+CUSTOM_EVENT = {
+    "type": "CustomEvent",
+    "name": "Custom Event",
+    "count": 0,
+    "kind": "event",
+    "signature": "in flow in · out flow out",
+    "pins": [
+        {"dir": "in", "type": "flow", "name": "in"},
+        {"dir": "out", "type": "flow", "name": "out"},
+    ],
+    "custom": True,
+}
+
+
+def node_type_catalog(dump) -> list[dict]:
+    """Built-in node types from the NPC audit, plus Custom Event.
+
+    The scan is cached on the dump. Opening the palette again does not reread every pack.
+    """
+    cached = getattr(dump, "_behavior_type_catalog", None)
+    if cached is not None:
+        return cached
+    report = audit_npc_behavior(dump, progress=False)
+    rows = [row for row in report["catalog"] if row["type"] not in ("UserDefined", "undecoded") and not str(row["type"]).startswith("node ")]
+    if not any(row["type"] == "CustomEvent" for row in rows):
+        rows.append(dict(CUSTOM_EVENT))
+    dump._behavior_type_catalog = rows
+    return rows
+
+
+def audit_npc_behavior(dump, *, progress: bool = True) -> dict:
     """Count undecoded node types across every Npc_ pack."""
     packs = [name for name in dump.actor_names() if name.startswith("Npc_")]
     undecoded: dict[str, dict] = {}
     common: dict[str, dict] = {}
     errors = []
     node_total = 0
+    catalog_buckets: dict[str, dict] = {}
     for index, gyaml in enumerate(packs, start=1):
         try:
             graph = load_actor_graph(dump, gyaml=gyaml)
@@ -205,10 +268,24 @@ def audit_npc_behavior(dump) -> dict:
         for node in graph["nodes"]:
             node_total += 1
             label = node.get("type") or node.get("raw") or "undecoded"
-            bucket = common.setdefault(label, {"count": 0, "kind": node.get("kind") or "", "decoded": 0})
+            bucket = common.setdefault(label, {"count": 0, "kind": node.get("kind") or "", "decoded": 0, "pins": None, "name": ""})
             bucket["count"] += 1
             if node.get("decoded"):
                 bucket["decoded"] += 1
+            if bucket["pins"] is None and node.get("pins"):
+                bucket["pins"] = [_pin_brief(pin) for pin in node["pins"]]
+            if not bucket["name"]:
+                bucket["name"] = node.get("name") or friendly_name(label)[0]
+            catalog_label = _catalog_label(node)
+            if catalog_label:
+                row = catalog_buckets.setdefault(
+                    catalog_label, {"count": 0, "kind": node.get("kind") or "", "pins": None, "name": ""}
+                )
+                row["count"] += 1
+                if row["pins"] is None and node.get("pins"):
+                    row["pins"] = [_pin_brief(pin) for pin in node["pins"]]
+                if not row["name"]:
+                    row["name"] = node.get("name") or friendly_name(catalog_label)[0]
             if node.get("decoded"):
                 continue
             missed = undecoded.setdefault(
@@ -217,20 +294,33 @@ def audit_npc_behavior(dump) -> dict:
             missed["count"] += 1
             if gyaml not in missed["actors"] and len(missed["actors"]) < 5:
                 missed["actors"].append(gyaml)
-        if index == len(packs) or index % 25 == 0:
+        if progress and (index == len(packs) or index % 25 == 0):
             print(f"behavior-audit {index}/{len(packs)} {gyaml}", file=sys.stderr)
     missed_rows = [
         {"type": name, "count": row["count"], "kind": row["kind"], "actors": row["actors"]}
         for name, row in sorted(undecoded.items(), key=lambda pair: (-pair[1]["count"], pair[0]))
     ]
+    ranked = sorted(common.items(), key=lambda pair: (-pair[1]["count"], pair[0]))
     common_rows = [
         {
             "type": name,
             "count": row["count"],
             "decoded": row["decoded"],
             "kind": row["kind"],
+            "signature": pin_signature(row.get("pins") or []),
         }
-        for name, row in sorted(common.items(), key=lambda pair: (-pair[1]["count"], pair[0]))
+        for name, row in ranked
+    ]
+    catalog = [
+        {
+            "type": name,
+            "name": row["name"] or friendly_name(name)[0],
+            "count": row["count"],
+            "kind": row["kind"],
+            "signature": pin_signature(row.get("pins") or []),
+            "pins": list(row.get("pins") or []),
+        }
+        for name, row in sorted(catalog_buckets.items(), key=lambda pair: (-pair[1]["count"], pair[0]))[:240]
     ]
     return {
         "packs": len(packs),
@@ -239,6 +329,7 @@ def audit_npc_behavior(dump) -> dict:
         "undecoded": sum(row["count"] for row in missed_rows),
         "undecodedTypes": missed_rows[:40],
         "types": common_rows[:40],
+        "catalog": catalog,
         "errors": errors,
     }
 

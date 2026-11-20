@@ -653,6 +653,67 @@ def behavior(gyaml: str = "", banc: str = "", id: str = ""):
     return apply_ops(graph, ops)
 
 
+@app.get("/api/behavior/catalog")
+def behavior_catalog():
+    from ocarina_forge.behavior import node_type_catalog
+
+    return {"types": node_type_catalog(_open_dump())}
+
+
+@app.post("/api/behavior/node")
+def behavior_node(body: dict):
+    from ocarina_forge.behavior_edit import add_node
+
+    gyaml = str(body.get("gyaml") or "")
+    if not gyaml:
+        raise BancError("Which actor?", "behavior")
+    return add_node(
+        _open_dump(),
+        _open_project(),
+        gyaml=gyaml,
+        source=str(body.get("source") or ""),
+        path=str(body.get("path") or ""),
+        type_name=str(body.get("type") or ""),
+        name=str(body.get("name") or ""),
+        pins=body.get("pins") or [],
+        kind=str(body.get("kind") or ""),
+    )
+
+
+@app.post("/api/behavior/connect")
+def behavior_connect(body: dict):
+    from ocarina_forge.behavior_edit import connect_pins
+
+    gyaml = str(body.get("gyaml") or "")
+    if not gyaml:
+        raise BancError("Which actor?", "behavior")
+    return connect_pins(
+        _open_dump(),
+        _open_project(),
+        gyaml=gyaml,
+        path=str(body.get("path") or ""),
+        src=str(body.get("from") or ""),
+        dst=str(body.get("to") or ""),
+    )
+
+
+@app.post("/api/behavior/disconnect")
+def behavior_disconnect(body: dict):
+    from ocarina_forge.behavior_edit import disconnect_pins
+
+    gyaml = str(body.get("gyaml") or "")
+    if not gyaml:
+        raise BancError("Which actor?", "behavior")
+    return disconnect_pins(
+        _open_dump(),
+        _open_project(),
+        gyaml=gyaml,
+        path=str(body.get("path") or ""),
+        src=str(body.get("from") or ""),
+        dst=str(body.get("to") or ""),
+    )
+
+
 @app.post("/api/behavior/field")
 def behavior_field(body: dict):
     from ocarina_forge.behavior_edit import set_field

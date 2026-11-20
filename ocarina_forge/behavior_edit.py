@@ -1,8 +1,10 @@
-"""Apply ``set field`` ops to a behavior graph, and export the files that round-trip.
+"""Apply behavior ops and export the files that can round-trip.
 
 A format is exported only after parse → write with no ops → parse matches the
-original bytes or the same node, param, and entry signature. Editing is saved
-either way. Connecting and adding nodes are not ops this stage writes.
+original bytes or the same node, param, and entry signature. ``set field`` is
+written that way. ``add node``, ``connect``, and ``disconnect`` are saved in
+the project, and export refuses that file until an AINB writer can round-trip
+a graph whose nodes and wires changed.
 """
 
 from __future__ import annotations
@@ -10,35 +12,49 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from ocarina_forge.behavior import load_actor_graph
+from ocarina_forge.behavior import load_actor_graph, mint_id
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import dumps, loads
 from ocarina_forge.formats.zsio import compress, dict_id_for
 
+STRUCTURE_EXPORT = (
+    "Added nodes and wires are saved in the project. "
+    "Export stays blocked until the AINB writer can round-trip a modified graph."
+)
+_STRUCTURAL = {"add node", "connect", "disconnect"}
+
 
 def apply_ops(graph: dict, ops: list[dict]) -> dict:
-    """Overlay saved field values. Node ids stay the ones the dump minted."""
-    by_id = {node["id"]: node for node in graph.get("nodes") or []}
-    applied = []
-    for op in ops:
-        if op.get("op") != "set field":
-            continue
-        node = by_id.get(op.get("id") or "")
-        field_name = op.get("field") or ""
-        if node is None:
-            applied.append({**op, "missing": True})
-            continue
-        found = False
-        for field in node.get("fields") or []:
-            if field.get("name") != field_name:
-                continue
-            field["value"] = op.get("value")
-            field["edited"] = not _same(field.get("base"), op.get("value"), field.get("type") or "")
-            if field["edited"]:
-                node["edited"] = True
-            found = True
-        applied.append({**op, "missing": not found})
-    graph["ops"] = [op for op in applied if not op.get("missing")]
+    """Overlay saved ops. Dump ids stay put. Added nodes keep the ids the project minted."""
+    nodes = graph.setdefault("nodes", [])
+    edges = graph.setdefault("edges", [])
+    by_id = {node["id"]: node for node in nodes}
+    kept = []
+    fields = []
+    structure = []
+    for op in ops or []:
+        kind = op.get("op")
+        if kind == "add node":
+            _apply_add(graph, op, by_id)
+            structure.append({"op": "add node", "id": op.get("id"), "name": op.get("name") or op.get("type") or "Node", "type": op.get("type") or ""})
+            kept.append(op)
+        elif kind == "connect":
+            _apply_connect(edges, by_id, op)
+            structure.append({"op": "connect", "id": op.get("id"), "from": op.get("from"), "to": op.get("to")})
+            kept.append(op)
+        elif kind == "disconnect":
+            _apply_disconnect(edges, op)
+            structure.append({"op": "disconnect", "id": op.get("id"), "from": op.get("from"), "to": op.get("to")})
+            kept.append(op)
+        elif kind == "set field":
+            result = _apply_field(by_id, op)
+            fields.append(result)
+            if not result["missing"]:
+                kept.append({key: op[key] for key in ("op", "id", "field", "type", "value") if key in op or key == "op"})
+    for source in graph.get("sources") or []:
+        source["count"] = sum(1 for node in nodes if node.get("source") == source["id"])
+    graph["ops"] = kept
+    graph["structure"] = structure
     graph["diff"] = [
         {
             "id": op["id"],
@@ -47,9 +63,78 @@ def apply_ops(graph: dict, ops: list[dict]) -> dict:
             "value": op.get("value"),
             "missing": bool(op.get("missing")),
         }
-        for op in applied
+        for op in fields
     ]
     return graph
+
+
+def _apply_add(graph: dict, op: dict, by_id: dict) -> None:
+    node_id = str(op.get("id") or "")
+    if not node_id or node_id in by_id:
+        return
+    pins = []
+    for pin in op.get("pins") or []:
+        if not isinstance(pin, dict) or not pin.get("id"):
+            continue
+        pins.append(
+            {
+                "id": str(pin["id"]),
+                "dir": "out" if pin.get("dir") == "out" else "in",
+                "type": str(pin.get("type") or "flow"),
+                "name": str(pin.get("name") or ""),
+            }
+        )
+    node = {
+        "id": node_id,
+        "kind": str(op.get("kind") or "ainb"),
+        "index": 100000 + len(by_id),
+        "type": str(op.get("type") or ""),
+        "raw": str(op.get("type") or op.get("name") or "node"),
+        "name": str(op.get("name") or op.get("type") or "Node"),
+        "known": True,
+        "decoded": True,
+        "entry": False,
+        "fields": [],
+        "pins": pins,
+        "note": "",
+        "source": str(op.get("source") or graph.get("open") or ""),
+        "added": True,
+    }
+    graph["nodes"].append(node)
+    by_id[node_id] = node
+
+
+def _apply_connect(edges: list, by_id: dict, op: dict) -> None:
+    src = str(op.get("from") or "")
+    dst = str(op.get("to") or "")
+    if not src or not dst or _has_edge(edges, src, dst):
+        return
+    if _find_pin(by_id, src) is None or _find_pin(by_id, dst) is None:
+        return
+    edges.append({"id": str(op.get("id") or f"{src}>{dst}"), "from": src, "to": dst, "added": True})
+
+
+def _apply_disconnect(edges: list, op: dict) -> None:
+    src = str(op.get("from") or "")
+    dst = str(op.get("to") or "")
+    edges[:] = [edge for edge in edges if not (edge.get("from") == src and edge.get("to") == dst)]
+
+
+def _apply_field(by_id: dict, op: dict) -> dict:
+    node = by_id.get(op.get("id") or "")
+    field_name = op.get("field") or ""
+    if node is None:
+        return {**op, "missing": True}
+    found = False
+    for field in node.get("fields") or []:
+        if field.get("name") != field_name:
+            continue
+        field["value"] = op.get("value")
+        field["edited"] = not _same(field.get("base"), op.get("value"), field.get("type") or "")
+        if field["edited"]:
+            node["edited"] = True
+        found = True
+    return {**op, "missing": not found}
 
 
 def set_field(dump, project, *, gyaml: str, node_id: str, field: str, value, type_name: str = "") -> dict:
@@ -79,24 +164,194 @@ def set_field(dump, project, *, gyaml: str, node_id: str, field: str, value, typ
 
 def replace_ops(dump, project, *, gyaml: str, ops: list) -> dict:
     """Replace the saved ops. Undo and redo write the previous list back."""
-    clean = []
-    for op in ops or []:
-        if not isinstance(op, dict) or op.get("op") != "set field":
-            continue
-        if not (op.get("id") and op.get("field")):
-            continue
-        clean.append(
-            {
-                "op": "set field",
-                "id": str(op["id"]),
-                "field": str(op["field"]),
-                "type": str(op.get("type") or "string"),
-                "value": op.get("value"),
-            }
-        )
+    clean = [_clean_op(op) for op in ops or []]
+    clean = [op for op in clean if op]
     project.save_behavior_ops(gyaml, clean)
     graph = load_actor_graph(dump, gyaml=gyaml)
     return apply_ops(graph, clean)
+
+
+def add_node(dump, project, *, gyaml: str, source: str, path: str, type_name: str, name: str, pins: list, kind: str = "") -> dict:
+    """Mint one node id and store an ``add node`` op."""
+    if not path:
+        raise BancError("Which file should this node belong to?", "behavior")
+    graph = load_actor_graph(dump, gyaml=gyaml)
+    ops = list(project.load_behavior_ops(gyaml))
+    node_id = mint_id("node", _taken(graph, ops))
+    built = []
+    for index, pin in enumerate(pins or []):
+        if not isinstance(pin, dict):
+            continue
+        direction = "out" if pin.get("dir") == "out" else "in"
+        type_pin = str(pin.get("type") or "flow")
+        label = str(pin.get("name") or direction)
+        built.append({"id": f"{node_id}:{direction}:{type_pin}:{index}:{label}", "dir": direction, "type": type_pin, "name": label})
+    if not built:
+        built = [
+            {"id": f"{node_id}:in:flow:0:in", "dir": "in", "type": "flow", "name": "in"},
+            {"id": f"{node_id}:out:flow:1:out", "dir": "out", "type": "flow", "name": "out"},
+        ]
+    ops.append(
+        {
+            "op": "add node",
+            "id": node_id,
+            "source": source or graph.get("open") or "",
+            "path": path,
+            "type": type_name,
+            "name": name or type_name or "Node",
+            "kind": kind or "ainb",
+            "pins": built,
+        }
+    )
+    project.save_behavior_ops(gyaml, ops)
+    return apply_ops(graph, ops)
+
+
+def connect_pins(dump, project, *, gyaml: str, path: str, src: str, dst: str) -> dict:
+    """Store a ``connect`` op, or drop the ``disconnect`` that had cut this wire."""
+    graph = load_actor_graph(dump, gyaml=gyaml)
+    ops = list(project.load_behavior_ops(gyaml))
+    preview = apply_ops(graph, ops)
+    left = _find_pin({node["id"]: node for node in preview["nodes"]}, src)
+    right = _find_pin({node["id"]: node for node in preview["nodes"]}, dst)
+    if left is None or right is None:
+        raise BancError("Those pins are not on this graph.", "behavior")
+    if left["dir"] == right["dir"]:
+        raise BancError("Connect an output to an input.", "behavior")
+    output = left if left["dir"] == "out" else right
+    incoming = right if left["dir"] == "out" else left
+    if _pin_kind(output.get("type") or "") != _pin_kind(incoming.get("type") or ""):
+        raise BancError("Those pins are different types.", "behavior")
+    src_id = output["id"]
+    dst_id = incoming["id"]
+    ops = [op for op in ops if not (op.get("op") == "disconnect" and op.get("from") == src_id and op.get("to") == dst_id)]
+    base = load_actor_graph(dump, gyaml=gyaml)
+    already = _has_edge(base["edges"], src_id, dst_id) or any(
+        op.get("op") == "connect" and op.get("from") == src_id and op.get("to") == dst_id for op in ops
+    )
+    if not already:
+        edge_id = mint_id("edge", _taken(base, ops))
+        ops.append({"op": "connect", "id": edge_id, "from": src_id, "to": dst_id, "path": path})
+    project.save_behavior_ops(gyaml, ops)
+    return apply_ops(load_actor_graph(dump, gyaml=gyaml), ops)
+
+
+def disconnect_pins(dump, project, *, gyaml: str, path: str, src: str, dst: str) -> dict:
+    """Drop a ``connect`` op, or store a ``disconnect`` for a wire from the dump."""
+    graph = load_actor_graph(dump, gyaml=gyaml)
+    ops = list(project.load_behavior_ops(gyaml))
+    linked = [op for op in ops if op.get("op") == "connect" and op.get("from") == src and op.get("to") == dst]
+    if linked:
+        ops = [op for op in ops if op not in linked]
+    elif _has_edge(graph["edges"], src, dst) and not any(
+        op.get("op") == "disconnect" and op.get("from") == src and op.get("to") == dst for op in ops
+    ):
+        edge = next(item for item in graph["edges"] if item.get("from") == src and item.get("to") == dst)
+        ops.append({"op": "disconnect", "id": edge.get("id") or f"{src}>{dst}", "from": src, "to": dst, "path": path})
+    project.save_behavior_ops(gyaml, ops)
+    return apply_ops(graph, ops)
+
+
+def _clean_op(op) -> dict | None:
+    if not isinstance(op, dict):
+        return None
+    kind = op.get("op")
+    if kind == "set field":
+        if not (op.get("id") and op.get("field")):
+            return None
+        return {
+            "op": "set field",
+            "id": str(op["id"]),
+            "field": str(op["field"]),
+            "type": str(op.get("type") or "string"),
+            "value": op.get("value"),
+        }
+    if kind == "add node":
+        if not op.get("id"):
+            return None
+        pins = []
+        for pin in op.get("pins") or []:
+            if isinstance(pin, dict) and pin.get("id"):
+                pins.append(
+                    {
+                        "id": str(pin["id"]),
+                        "dir": "out" if pin.get("dir") == "out" else "in",
+                        "type": str(pin.get("type") or "flow"),
+                        "name": str(pin.get("name") or ""),
+                    }
+                )
+        return {
+            "op": "add node",
+            "id": str(op["id"]),
+            "source": str(op.get("source") or ""),
+            "path": str(op.get("path") or ""),
+            "type": str(op.get("type") or ""),
+            "name": str(op.get("name") or op.get("type") or "Node"),
+            "kind": str(op.get("kind") or "ainb"),
+            "pins": pins,
+        }
+    if kind in ("connect", "disconnect"):
+        if not (op.get("from") and op.get("to")):
+            return None
+        return {
+            "op": kind,
+            "id": str(op.get("id") or f"{op['from']}>{op['to']}"),
+            "from": str(op["from"]),
+            "to": str(op["to"]),
+            "path": str(op.get("path") or ""),
+        }
+    return None
+
+
+def _taken(graph: dict, ops: list[dict]) -> set[str]:
+    taken: set[str] = set()
+    for node in graph.get("nodes") or []:
+        taken.add(node["id"])
+        for pin in node.get("pins") or []:
+            taken.add(pin["id"])
+    for edge in graph.get("edges") or []:
+        if edge.get("id"):
+            taken.add(edge["id"])
+    for op in ops:
+        if op.get("id"):
+            taken.add(str(op["id"]))
+        for pin in op.get("pins") or []:
+            if isinstance(pin, dict) and pin.get("id"):
+                taken.add(str(pin["id"]))
+    return taken
+
+
+def _find_pin(by_id: dict, pin_id: str):
+    if not pin_id:
+        return None
+    for node in by_id.values():
+        for pin in node.get("pins") or []:
+            if pin.get("id") == pin_id:
+                return pin
+    return None
+
+
+def _has_edge(edges: list, src: str, dst: str) -> bool:
+    return any(edge.get("from") == src and edge.get("to") == dst for edge in edges)
+
+
+def _pin_kind(type_name: str) -> str:
+    text = (type_name or "").lower()
+    if text in ("ptr", "pointer", "actor"):
+        return "pointer"
+    if text in ("vec3", "vec3f", "vector"):
+        return "vec3"
+    if text in ("bool", "int", "float", "string"):
+        return text
+    return "flow"
+
+
+def _op_path(op: dict) -> str:
+    if op.get("path"):
+        return str(op["path"])
+    if op.get("op") in _STRUCTURAL:
+        return _path_of(str(op.get("from") or op.get("id") or ""))
+    return _path_of(str(op.get("id") or ""))
 
 
 def roundtrip_status(kind: str, data: bytes) -> tuple[bool, str]:
@@ -121,9 +376,11 @@ def export_behaviors(project, dump, *, gyaml: str = "", out_root: Path | None = 
             continue
         grouped: dict[str, list[dict]] = {}
         for op in ops:
-            path = _path_of(op["id"])
-            grouped.setdefault(path, []).append(op)
+            grouped.setdefault(_op_path(op), []).append(op)
         for path, file_ops in grouped.items():
+            if any(op.get("op") in _STRUCTURAL for op in file_ops):
+                results.append({"path": path, "exported": False, "message": STRUCTURE_EXPORT})
+                continue
             results.append(_export_one(dump, root, path, file_ops))
     return results
 
