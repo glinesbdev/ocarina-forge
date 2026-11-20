@@ -48,7 +48,11 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-17\0"
+# Bump this when the glb or texture output changes. The cache key also hashes
+# models.py, bfres.py, terrain.py, and gltf.py, so a forgotten bump still
+# misses old glbs. tests/test_models.py pins the stamp to this version and
+# fails until both move together.
+_CACHE_VERSION = b"models-18\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -64,6 +68,39 @@ _CLOTH = (0.55, 0.42, 0.28, 1.0)
 _BROW = (0.25, 0.16, 0.10, 1.0)
 _TERRA_LAYER = re.compile(r"terra[_]?material[^\d]*(\d+)", re.IGNORECASE)
 _WATER_TOKENS = {"water", "lake", "waterfall", "ocean", "pond", "sea", "river"}
+
+
+def _converter_files() -> tuple[Path, ...]:
+    """Sources that decide glTF and texture output. A change must miss the cache."""
+    root = Path(__file__).resolve().parent
+    return (
+        root / "models.py",
+        root / "formats" / "bfres.py",
+        root / "formats" / "terrain.py",
+        root / "formats" / "gltf.py",
+    )
+
+
+def _converter_stamp() -> bytes:
+    """sha256 of the converter sources, names first so a swap cannot collide."""
+    digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent.parent
+    for path in _converter_files():
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.digest()
+
+
+_CONVERTER_STAMP = _converter_stamp()
+
+
+def _cache_prefix() -> bytes:
+    """Human version plus the converter-source hash. Both go into every glb key."""
+    return _CACHE_VERSION + _CONVERTER_STAMP
+
+
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
 _TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
@@ -287,7 +324,7 @@ def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, co
         external, log, raws = _resolve_materials(dump, models, hint, terrain)
     finally:
         _FILES.reset(token)
-    digest = hashlib.sha256(_CACHE_VERSION + blob + _texture_key(raws)).hexdigest()
+    digest = hashlib.sha256(_cache_prefix() + blob + _texture_key(raws)).hexdigest()
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"
     meta_path = folder / f"{digest}.json"
@@ -315,7 +352,7 @@ def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, co
 
 def _source_id(blob: bytes, hint: str, terrain: bool) -> str:
     flag = b"t" if terrain else b"a"
-    return hashlib.sha256(_CACHE_VERSION + flag + hint.encode("utf-8", "replace") + b"\0" + blob).hexdigest()
+    return hashlib.sha256(_cache_prefix() + flag + hint.encode("utf-8", "replace") + b"\0" + blob).hexdigest()
 
 
 def _tex_token(dump) -> dict:
@@ -2245,7 +2282,7 @@ def _choose_tiles(tiles, scale, origin, clip):
 
 
 def _height_source(banc: str, tscb: str, extras: str = "") -> str:
-    blob = _CACHE_VERSION + b"height\0" + banc.encode("utf-8", "replace") + b"\0" + tscb.encode("utf-8", "replace")
+    blob = _cache_prefix() + b"height\0" + banc.encode("utf-8", "replace") + b"\0" + tscb.encode("utf-8", "replace")
     blob += b"\0" + extras.encode("utf-8", "replace")
     return hashlib.sha256(blob).hexdigest()
 
@@ -2543,7 +2580,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
     info["terrain"]["drawn"] = len(drawn)
     info["terrain"]["tiles"] = tile_count
     digest = hashlib.sha256(
-        _CACHE_VERSION + b"height-mesh\0" + _height_blob(loaded) + _texture_key(raws)
+        _cache_prefix() + b"height-mesh\0" + _height_blob(loaded) + _texture_key(raws)
     ).hexdigest()
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"

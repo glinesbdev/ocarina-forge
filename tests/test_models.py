@@ -123,6 +123,26 @@ def test_block_height_uses_layout_low_bits_and_mip_size():
     assert fixed.rgba[(width - 1) * 4 + 2] > 180
 
 
+def test_converter_output_is_pinned_to_the_cache_version():
+    """models.py, bfres.py, terrain.py, and gltf.py are hashed into the cache key.
+
+    Changing any of them fails this test until `_CACHE_VERSION` is bumped and
+    the pin below is updated in the same edit. Reusing models-18 with a new
+    stamp is a failure: the prefix has to move so a reader can see the rebuild.
+    """
+    from bancwright.models import _CACHE_VERSION, _cache_prefix, _converter_files, _converter_stamp
+
+    assert [path.name for path in _converter_files()] == ["models.py", "bfres.py", "terrain.py", "gltf.py"]
+    version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
+    stamp = _converter_stamp().hex()
+    assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
+    pinned = ("models-18", "09c1f3eccf78c9640584991bc6f9dec23a3f0e0f02743ba56cc9b4e2228c4b42")
+    assert (version, stamp) == pinned, (
+        "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
+        "replace this pin with the new version and stamp. Do not keep models-18."
+    )
+
+
 def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
     cache = tmp_path / "model-cache"
     monkeypatch.setenv("BANCWRIGHT_CACHE", str(cache))

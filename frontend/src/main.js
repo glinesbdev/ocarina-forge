@@ -61,6 +61,16 @@ const viewport = createViewport($("viewport"), {
     warnings.append(p);
     console.error(line);
   },
+  onTerrainWarn: (message) => {
+    const warnings = $("warnings");
+    if (!warnings) return;
+    warnings.hidden = false;
+    const line = `terrain: ${message}`;
+    if ([...warnings.querySelectorAll("p")].some((item) => item.textContent === line)) return;
+    const p = document.createElement("p");
+    p.textContent = line;
+    warnings.append(p);
+  },
   onTerrain: (meta) => {
     state.terrain = meta;
     const proxy = Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));

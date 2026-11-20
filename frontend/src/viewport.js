@@ -922,21 +922,26 @@ export function createViewport(host, hooks) {
       vec4 alongZ = terrainSample(vTerrainWorld.xy / terrainRepeat, slot);
       return alongX * blend.x + alongY * blend.y + alongZ * blend.z;
     }
-    if (terrainSub < 0.5 && vTerrainMark.y > 0.5) discard;
+    if (terrainLayerMissing < 0.5 && terrainSub < 0.5 && vTerrainMark.y > 0.5) discard;
     vec4 sampledDiffuseColor = mix(
       terrainTri(vTerrainLayer.x),
       terrainTri(vTerrainLayer.y),
       clamp(vTerrainShade.x, 0.0, 1.0)
     );
     if (terrainDebug > 0.5) {
-      float hue = vTerrainMark.x * 6.2831853;
-      vec3 ink = clamp(vec3(
-        0.55 + 0.45 * cos(hue),
-        0.55 + 0.45 * cos(hue + 2.094395),
-        0.55 + 0.45 * cos(hue + 4.188790)
-      ), 0.0, 1.0);
-      if (vTerrainMark.y > 0.5) ink = mix(ink, vec3(1.0), 0.45);
-      sampledDiffuseColor = vec4(ink, 1.0);
+      if (terrainLayerMissing > 0.5) {
+        float stripe = step(0.5, fract((vTerrainWorld.x + vTerrainWorld.z) * 0.15));
+        sampledDiffuseColor = vec4(mix(vec3(0.75, 0.2, 0.55), vec3(0.25, 0.12, 0.18), stripe), 1.0);
+      } else {
+        float hue = vTerrainMark.x * 6.2831853;
+        vec3 ink = clamp(vec3(
+          0.55 + 0.45 * cos(hue),
+          0.55 + 0.45 * cos(hue + 2.094395),
+          0.55 + 0.45 * cos(hue + 4.188790)
+        ), 0.0, 1.0);
+        if (vTerrainMark.y > 0.5) ink = mix(ink, vec3(1.0), 0.45);
+        sampledDiffuseColor = vec4(ink, 1.0);
+      }
     }
     diffuseColor *= sampledDiffuseColor;
   `;
@@ -952,6 +957,9 @@ export function createViewport(host, hooks) {
     if (!material.userData.terrainSubUniform) {
       material.userData.terrainSubUniform = { value: showSub ? 1 : 0 };
     }
+    if (!material.userData.terrainLayerUniform) {
+      material.userData.terrainLayerUniform = { value: 0 };
+    }
     if (material.map) {
       material.map.wrapS = THREE.ClampToEdgeWrapping;
       material.map.wrapT = THREE.ClampToEdgeWrapping;
@@ -964,6 +972,7 @@ export function createViewport(host, hooks) {
       shader.uniforms.terrainRepeat = { value: repeat };
       shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
       shader.uniforms.terrainSub = material.userData.terrainSubUniform;
+      shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <uv_pars_vertex>",
@@ -998,7 +1007,8 @@ varying vec2 vTerrainMark;
 uniform float terrainCols;
 uniform float terrainRepeat;
 uniform float terrainDebug;
-uniform float terrainSub;`
+uniform float terrainSub;
+uniform float terrainLayerMissing;`
         )
         .replace("#include <map_fragment>", TERRAIN_MAP);
     };
@@ -1088,20 +1098,31 @@ uniform float terrainSub;`
       terrainRoot.visible = showGround;
       terrainRoot.renderOrder = 0;
       terrainRoot.raycast = () => {};
+      let missingLayer = false;
       terrainRoot.traverse((child) => {
         child.raycast = () => {};
         child.castShadow = false;
         child.receiveShadow = false;
         child.renderOrder = 0;
+        const layered = Boolean(child.geometry && child.geometry.getAttribute("uv3"));
+        if (child.isMesh && child.geometry && !layered) missingLayer = true;
         const materials = Array.isArray(child.material) ? child.material : [child.material];
         for (const material of materials) {
           if (!material) continue;
           material.transparent = false;
           material.depthWrite = true;
           material.side = THREE.DoubleSide;
+          if (material.userData && material.userData.terrainLayerUniform) {
+            material.userData.terrainLayerUniform.value = layered ? 0 : 1;
+          }
           material.needsUpdate = true;
         }
       });
+      if (missingLayer) {
+        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-18 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
+        console.warn(message);
+        if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
+      }
       scene.add(terrainRoot);
       requestRender();
     } catch (error) {
