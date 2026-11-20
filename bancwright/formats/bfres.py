@@ -1178,10 +1178,15 @@ def texture_rank(name: str) -> int:
     if token:
         tokens.append("".join(token))
     bag = set(tokens)
-    if bag & _ALBEDO or any(item.startswith("alb") for item in bag):
-        return 0
     if bag & _SKIP or any(item.startswith(("nrm", "normal")) for item in bag):
         return 2
+    # BarkFx never splits into a token, so the Alb check used to win on
+    # TreeAlbFx. A separated _Fx / _Msk / _Ind is already in the bag above.
+    # "ind" is not a raw suffix: that would catch Wind.
+    if len(stem) > 2 and stem.endswith(("fx", "msk", "nrm")):
+        return 2
+    if bag & _ALBEDO or any(item.startswith("alb") for item in bag):
+        return 0
     return 1
 
 
@@ -1268,10 +1273,58 @@ def base_color_name(names: list[str]) -> str:
     return chosen[0][1] if chosen else ""
 
 
+def _close_uv_seams(positions, uvs, indices):
+    """Split a triangle whose UVs jump across the texture.
+
+    A trunk unwrap puts u=0.98 and u=0.02 on one triangle. The GPU then sees
+    a huge derivative, picks a coarse mip, and the mip averages the magenta
+    gutter into a line down the seam. Moving the wrapped corner by 1 makes
+    that triangle continuous. The other triangles keep the original vertex.
+    """
+    if not uvs or len(uvs) != len(positions) or len(indices) < 3:
+        return positions, uvs, indices
+    pos = list(positions)
+    uv = [(float(u), float(v)) for u, v in uvs]
+    idx = list(indices)
+    limit = 0.5 - 1e-4
+    for tri in range(0, len(idx) - 2, 3):
+        for axis in (0, 1):
+            ids = [idx[tri], idx[tri + 1], idx[tri + 2]]
+            vals = [uv[j][axis] for j in ids]
+            if max(vals) - min(vals) <= 0.5:
+                continue
+            med = sorted(vals)[1]
+            for slot, (vertex, value) in enumerate(zip(ids, vals)):
+                shifted = value
+                while shifted - med > limit:
+                    shifted -= 1.0
+                while med - shifted > limit:
+                    shifted += 1.0
+                if abs(shifted - value) <= 1e-6:
+                    continue
+                others = [item for index, item in enumerate(vals) if index != slot]
+                if abs(others[0] - others[1]) > 0.25:
+                    continue
+                moved = list(vals)
+                moved[slot] = shifted
+                if max(moved) - min(moved) < 0.02:
+                    continue
+                pos.append(pos[vertex])
+                pair = [uv[vertex][0], uv[vertex][1]]
+                pair[axis] = shifted
+                uv.append((pair[0], pair[1]))
+                idx[tri + slot] = len(pos) - 1
+                ids[slot] = idx[tri + slot]
+                vals[slot] = shifted
+    return pos, uv, idx
+
+
 def _part_from(name, positions, indices, uvs, material: Material | None, material_index: int, lod: int = 0) -> Part:
     sampler, texture = ("", "")
     if material and material.albedo:
         sampler, texture = material.albedo[0]
+    if uvs and indices:
+        positions, uvs, indices = _close_uv_seams(positions, uvs, indices)
     return Part(
         name,
         positions,

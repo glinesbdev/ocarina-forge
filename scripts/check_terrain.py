@@ -7,10 +7,12 @@ Usage, from the repo root:
     .venv/bin/python scripts/check_terrain.py <dump> [banc] --png out.png
 
 `--png` writes a 1024² top-down picture of the mesh that was emitted, in
-terrain-unit space (x to the right, z up, -1..1). Covered ground is bright.
-A black pixel is a place the mesh builder did not draw. `zeros` on a tile
-line is the count of exact 0 samples after the partial-column repair; on a
-retail tile that count should be about 0.
+terrain-unit space (x to the right, z up, -1..1). Main ground is red, the
+`_sub` overlay is blue, and a pixel under both is purple. Green is height.
+A black pixel is a place that layer did not draw. `zeros` on a tile line is
+the count of exact 0 samples after the partial-column repair; on a retail
+tile that count should be about 0. `layer main` and `layer sub` are separate
+meshes: sub does not drop main cells.
 
 <dump> is the Longshot folder that contains romfs/, or romfs/ itself.
 With no banc, Kokiri Forest child static is used when that file exists,
@@ -98,6 +100,19 @@ def main(argv: list[str]) -> int:
     drawn = [row for row in tiles if row.get("status") == "drawn"]
     skipped = [row for row in tiles if row.get("status") != "drawn"]
     print(f"tiles {len(tiles)}  drawn {len(drawn)}  skipped {len(skipped)}  triangles {info.get('triangles') or 0}")
+    print("layers: main is the walkable field. sub is a separate overlay and does not drop main cells.")
+    for label in ("main", "sub"):
+        group = [row for row in tiles if (row.get("layer") or "main") == label]
+        if label == "sub" and not group:
+            print("layer sub  (no _sub scene)")
+            continue
+        group_drawn = [row for row in group if row.get("status") == "drawn"]
+        zeros = sum(int(row.get("zeros") or 0) for row in group_drawn)
+        tris = sum(int(row.get("triangles") or 0) for row in group_drawn)
+        print(
+            f"layer {label}  tiles {len(group)}  drawn {len(group_drawn)}  "
+            f"skipped {len(group) - len(group_drawn)}  triangles {tris}  zeros {zeros}"
+        )
     for row in tiles:
         layers = ",".join(str(item) for item in row.get("layers") or []) or "-"
         where = row.get("path") or "(no file)"
@@ -108,7 +123,7 @@ def main(argv: list[str]) -> int:
         step = row.get("step") or "-"
         ao = row.get("ao") or ""
         print(
-            f"  {row.get('status')} {row.get('name')}  "
+            f"  {row.get('status')} {row.get('layer') or 'main'} {row.get('name')}  "
             f"dir {folder}  centre {row.get('center')}  edge {row.get('edge')}  "
             f"triangles {row.get('triangles') or 0}  step {step}  layers {layers}  "
             f"holes {row.get('holes') or 0}  zeros {row.get('zeros') or 0}  dropped {row.get('dropped') or 0}  "
@@ -130,10 +145,11 @@ def main(argv: list[str]) -> int:
         "filters: actor LOD, the small-prop distance cull, and InnerMesh / bake / fade / "
         "water-volume omission do not drop the heightmap. Path strips and moss mounds that "
         "already draw are actor models, not the field. .custom.extm is not decoded. "
-        "A .mate line is the material grid; the directory is the folder the .hght came from. "
+        "A .mate line is the material grid beside that tile's own .hght, not the other scene. "
         "holes is how many samples were non-finite (0 is ground, not a hole). "
         "zeros is how many samples are exact 0 after the partial-column repair; a retail tile should be near 0. "
-        "dropped is how many coarse cells were removed because a finer tile emitted a quad there."
+        "dropped is how many cells were removed because a finer tile of the same layer emitted a quad there. "
+        "The sub layer does not drop main cells."
     )
     if png_path:
         _write_png(info, png_path)
@@ -149,7 +165,7 @@ def _write_png(info: dict, png_path: str) -> None:
     if not glb_path.is_file():
         print(f"png skipped: {glb_path} is not in the cache")
         return
-    positions, indices = _glb_triangles(glb_path.read_bytes())
+    positions, indices, layers = _glb_triangles(glb_path.read_bytes())
     terrain = info.get("terrain") or {}
     origin = terrain.get("origin") or [0.0, 0.0, 0.0]
     scale = float(terrain.get("scale") or 1.0)
@@ -159,10 +175,13 @@ def _write_png(info: dict, png_path: str) -> None:
         indices,
         (float(origin[0]), float(origin[1]), float(origin[2])),
         scale,
+        layers=layers,
     )
     print(
-        f"png {png_path}  covered {stats['covered']}/{stats['pixels']} px  "
-        f"unit x,z -1..1  height {stats['heightMin']}..{stats['heightMax']}"
+        f"png {png_path}  main {stats['coveredMain']}  sub {stats['coveredSub']}  "
+        f"both {stats['coveredBoth']}  of {stats['pixels']} px  "
+        f"unit x,z -1..1  red main, blue sub, purple both  "
+        f"height {stats['heightMin']}..{stats['heightMax']}"
     )
 
 
@@ -172,6 +191,7 @@ def _glb_triangles(glb: bytes):
     blob = glb[20 + json_len + 8 :]
     positions = []
     indices = []
+    layers = []
     for mesh in document.get("meshes") or []:
         for primitive in mesh.get("primitives") or []:
             attrs = primitive.get("attributes") or {}
@@ -180,8 +200,13 @@ def _glb_triangles(glb: bytes):
             base = len(positions)
             positions.extend(_accessor(document, blob, attrs["POSITION"], 3, "f"))
             raw = _accessor(document, blob, primitive["indices"], 1, "index")
-            indices.extend(base + int(item[0]) for item in raw)
-    return positions, indices
+            marks = _accessor(document, blob, attrs["TEXCOORD_3"], 2, "f") if "TEXCOORD_3" in attrs else []
+            for start in range(0, len(raw) - 2, 3):
+                corners = [int(raw[start + offset][0]) for offset in range(3)]
+                indices.extend(base + corner for corner in corners)
+                overlay = any(marks and corner < len(marks) and marks[corner][1] > 0.5 for corner in corners)
+                layers.append(1 if overlay else 0)
+    return positions, indices, layers
 
 
 def _accessor(document, blob: bytes, index: int, width: int, kind: str):

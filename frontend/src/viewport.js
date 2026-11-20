@@ -105,6 +105,7 @@ export function createViewport(host, hooks) {
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
+  let showSub = true;
   let showTerrainDebug = false;
   let generation = 0;
   let loadQueue = null;
@@ -921,6 +922,7 @@ export function createViewport(host, hooks) {
       vec4 alongZ = terrainSample(vTerrainWorld.xy / terrainRepeat, slot);
       return alongX * blend.x + alongY * blend.y + alongZ * blend.z;
     }
+    if (terrainSub < 0.5 && vTerrainMark.y > 0.5) discard;
     vec4 sampledDiffuseColor = mix(
       terrainTri(vTerrainLayer.x),
       terrainTri(vTerrainLayer.y),
@@ -947,6 +949,9 @@ export function createViewport(host, hooks) {
     if (!material.userData.terrainDebugUniform) {
       material.userData.terrainDebugUniform = { value: showTerrainDebug ? 1 : 0 };
     }
+    if (!material.userData.terrainSubUniform) {
+      material.userData.terrainSubUniform = { value: showSub ? 1 : 0 };
+    }
     if (material.map) {
       material.map.wrapS = THREE.ClampToEdgeWrapping;
       material.map.wrapT = THREE.ClampToEdgeWrapping;
@@ -958,6 +963,7 @@ export function createViewport(host, hooks) {
       shader.uniforms.terrainCols = { value: columns };
       shader.uniforms.terrainRepeat = { value: repeat };
       shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
+      shader.uniforms.terrainSub = material.userData.terrainSubUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <uv_pars_vertex>",
@@ -991,7 +997,8 @@ varying vec2 vTerrainShade;
 varying vec2 vTerrainMark;
 uniform float terrainCols;
 uniform float terrainRepeat;
-uniform float terrainDebug;`
+uniform float terrainDebug;
+uniform float terrainSub;`
         )
         .replace("#include <map_fragment>", TERRAIN_MAP);
     };
@@ -1158,26 +1165,28 @@ uniform float terrainDebug;`
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function applyTerrainDebug() {
+  function applyTerrainUniforms() {
     if (!terrainRoot) return;
-    const value = showTerrainDebug ? 1 : 0;
+    const debug = showTerrainDebug ? 1 : 0;
+    const sub = showSub ? 1 : 0;
     terrainRoot.traverse((child) => {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const material of materials) {
-        if (material && material.userData && material.userData.terrainDebugUniform) {
-          material.userData.terrainDebugUniform.value = value;
-        }
+        if (!material || !material.userData) continue;
+        if (material.userData.terrainDebugUniform) material.userData.terrainDebugUniform.value = debug;
+        if (material.userData.terrainSubUniform) material.userData.terrainSubUniform.value = sub;
       }
     });
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
     if (ground !== undefined) showGround = Boolean(ground);
     if (water !== undefined) showWater = Boolean(water);
     if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
+    if (subTerrain !== undefined) showSub = Boolean(subTerrain);
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
@@ -1191,7 +1200,7 @@ uniform float terrainDebug;`
     syncBatchVisibility();
     applyGround();
     applyWater();
-    applyTerrainDebug();
+    applyTerrainUniforms();
     attach();
     syncLabels();
     requestRender();

@@ -26,12 +26,13 @@ The layout was checked against the files the game ships, not against game code:
   not a hole.
 
 A second scene named `<scene>_sub` (or a GameBancParam string that ends in
-`_sub`) lists the same quadtree. Fine tiles often have their `.hght` only
-under that directory, and the coarse tiles only under the main one. A tile
-is read from whichever directory has the file. A coarse cell is dropped only
-when its centre lies in a quad that finer tile actually emitted. A finer
-sample that never became a triangle, because the tile was skipped or a
-coarser step dropped the whole quad, leaves the coarse ground in place.
+`_sub`) is a separate overlay, not a finer copy of the walkable floor. On
+the retail Kokiri dump its heights sit about 13–24 m above the actors. Each
+scene is meshed on its own: the finest tile in that scene wins, and a sub
+quad does not drop a main cell. A tile reads `.hght` and `.mate` from its
+own scene directory. A coarse cell is dropped only when its centre lies in
+a quad that a finer tile of the same scene actually emitted. A finer sample
+that never became a triangle leaves the coarse ground in place.
 Every remaining tile that meets the placed actors, expanded by 200 m, is meshed. There is no fixed tile cap. Samples are about 2 m apart
 near the actors, 5 m in the middle distance, and 10 m at the edge of the
 margin, and never finer than step 8 on that path. Each tile grows a vertical
@@ -1303,16 +1304,18 @@ def build_scene(
     return parts, reports
 
 
-def write_coverage_png(path, positions, indices, origin, scale: float, size: int = 1024) -> dict:
+def write_coverage_png(path, positions, indices, origin, scale: float, size: int = 1024, layers=None) -> dict:
     """Paint emitted triangles into a top-down image of terrain-unit space.
 
     x increases to the right and z increases upward. The frame is -1..1.
-    A black pixel was not covered. Red means covered; green is the height.
+    A black pixel was not covered. Main ground is red, the sub overlay is
+    blue, and a pixel under both is purple. Green is the height.
+    ``layers`` is 0 for main and 1 for sub, one value per triangle.
     """
     from PIL import Image, ImageDraw
 
-    image = Image.new("RGB", (size, size), (0, 0, 0))
-    draw = ImageDraw.Draw(image)
+    main_image = Image.new("RGB", (size, size), (0, 0, 0))
+    sub_image = Image.new("RGB", (size, size), (0, 0, 0))
     ox, _oy, oz = origin
     scale = scale or 1.0
     triangles = []
@@ -1325,11 +1328,21 @@ def write_coverage_png(path, positions, indices, origin, scale: float, size: int
             heights.append(point[1])
         triangles.append(tri)
     if not triangles:
-        image.save(path)
-        return {"covered": 0, "pixels": size * size, "heightMin": 0.0, "heightMax": 0.0}
+        main_image.save(path)
+        return {
+            "covered": 0,
+            "coveredMain": 0,
+            "coveredSub": 0,
+            "coveredBoth": 0,
+            "pixels": size * size,
+            "heightMin": 0.0,
+            "heightMax": 0.0,
+        }
     low = min(heights)
     high = max(heights)
     span = high - low or 1.0
+    main_draw = ImageDraw.Draw(main_image)
+    sub_draw = ImageDraw.Draw(sub_image)
 
     def pixel(point):
         unit_x = (point[0] - ox) / scale
@@ -1338,10 +1351,43 @@ def write_coverage_png(path, positions, indices, origin, scale: float, size: int
         y = int(round((1.0 - (unit_z + 1.0) * 0.5) * (size - 1)))
         return (x, y)
 
-    for tri in triangles:
+    for index, tri in enumerate(triangles):
         green = int(max(0, min(255, round((sum(point[1] for point in tri) / 3 - low) / span * 255))))
-        draw.polygon([pixel(point) for point in tri], fill=(255, green, 48))
+        overlay = layers is not None and index < len(layers) and layers[index]
+        if overlay:
+            sub_draw.polygon([pixel(point) for point in tri], fill=(0, green, 255))
+        else:
+            main_draw.polygon([pixel(point) for point in tri], fill=(255, green, 0))
+    main_raw = main_image.tobytes()
+    sub_raw = sub_image.tobytes()
+    out = bytearray(len(main_raw))
+    covered = covered_main = covered_sub = covered_both = 0
+    for index in range(0, len(main_raw), 3):
+        main_on = main_raw[index] > 0
+        sub_on = sub_raw[index + 2] > 0
+        green = sub_raw[index + 1] if sub_on else main_raw[index + 1]
+        if main_on and sub_on:
+            out[index : index + 3] = bytes((255, green, 255))
+            covered_both += 1
+            covered_main += 1
+            covered_sub += 1
+            covered += 1
+        elif sub_on:
+            out[index : index + 3] = bytes((0, green, 255))
+            covered_sub += 1
+            covered += 1
+        elif main_on:
+            out[index : index + 3] = bytes((255, green, 0))
+            covered_main += 1
+            covered += 1
+    image = Image.frombytes("RGB", (size, size), bytes(out))
     image.save(path)
-    raw = image.tobytes()
-    covered = sum(1 for index in range(0, len(raw), 3) if raw[index] > 0)
-    return {"covered": covered, "pixels": size * size, "heightMin": low, "heightMax": high}
+    return {
+        "covered": covered,
+        "coveredMain": covered_main,
+        "coveredSub": covered_sub,
+        "coveredBoth": covered_both,
+        "pixels": size * size,
+        "heightMin": low,
+        "heightMax": high,
+    }

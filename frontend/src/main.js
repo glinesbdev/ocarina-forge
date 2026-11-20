@@ -24,6 +24,7 @@ const state = {
   hideVolumes: false,
   showGround: false,
   showWater: true,
+  showSub: true,
   terrainDebug: false,
   helperBoxes: null,
   terrain: null,
@@ -145,6 +146,10 @@ $("show-ground").addEventListener("change", (event) => {
 $("show-water").addEventListener("change", (event) => {
   state.showWater = event.target.checked;
   viewport.setFlags({ water: state.showWater });
+});
+$("show-sub").addEventListener("change", (event) => {
+  state.showSub = event.target.checked;
+  viewport.setFlags({ subTerrain: state.showSub });
 });
 $("terrain-debug").addEventListener("change", (event) => {
   state.terrainDebug = event.target.checked;

@@ -722,6 +722,18 @@ def test_a_dropped_mid_quad_does_not_take_the_coarse_ground_with_it():
     assert band, "coarse ground just outside the fine tile should stay"
 
 
+def test_a_uv_seam_is_closed_and_a_full_chart_is_left_alone():
+    from bancwright.formats.bfres import _close_uv_seams
+
+    positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+    seam = _close_uv_seams(positions, [(0.02, 0.2), (0.98, 0.2), (0.04, 0.8)], [0, 1, 2])
+    assert seam[2][1] != 1
+    assert seam[1][seam[2][1]][0] < 0
+    assert abs(seam[1][1][0] - 0.98) < 1e-6
+    chart = _close_uv_seams(positions, [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)], [0, 1, 2])
+    assert chart[2] == [0, 1, 2]
+
+
 def test_coverage_png_marks_the_emitted_quad(tmp_path):
     from PIL import Image
 
@@ -740,6 +752,7 @@ def test_coverage_png_marks_the_emitted_quad(tmp_path):
     assert image.getpixel((16, 16))[0] == 255
     assert image.getpixel((0, 0))[0] == 0
     assert stats["covered"] > 0
+    assert stats["coveredSub"] == 0
 
 
 def test_a_finer_tile_punches_the_coarser_one():
@@ -887,6 +900,8 @@ def test_sub_scene_supplies_the_fine_height_and_the_mate(tmp_path, monkeypatch):
     assert "custom.extm" in drawn["Fine"]["ao"]
     assert "not used" in drawn["Fine"]["ao"]
     assert drawn["Extra"]["directory"] == "KokiriForest_sub"
+    assert drawn["Fine"]["layer"] == "sub"
+    assert drawn["Coarse"]["layer"] == "main"
     assert any(row["name"] == "Far" and "outside" in row["reason"] for row in info["tiles"])
     glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
     document, blob = _glb_parts(glb)
@@ -900,6 +915,52 @@ def test_sub_scene_supplies_the_fine_height_and_the_mate(tmp_path, monkeypatch):
     colors = _accessor_floats(document, blob, coloured["attributes"]["COLOR_0"], 3)
     assert min(item[0] for item in colors) < 0.3
     assert max(item[0] for item in colors) > 0.7
+
+
+def test_sub_overlay_keeps_the_main_floor(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.terrain import SIZE
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    main = dump.romfs / "TerrainArc" / "KokiriForest"
+    sub = dump.romfs / "TerrainArc" / "KokiriForest_sub"
+    main.mkdir(parents=True)
+    sub.mkdir()
+    count = SIZE * SIZE
+    (dump.romfs / "TerrainArc" / "KokiriForest.tscb").write_bytes(
+        _tscb(1.0, 10.0, [(0.0, 0.0, 32.0, "Coarse"), (0.0, 0.0, 8.0, "Floor")])
+    )
+    (dump.romfs / "TerrainArc" / "KokiriForest_sub.tscb").write_bytes(
+        _tscb(1.0, 10.0, [(0.0, 0.0, 8.0, "Rim")])
+    )
+    (main / "Coarse.hght").write_bytes(_hght([0.2] * count))
+    (main / "Floor.hght").write_bytes(_hght([0.2] * count))
+    (sub / "Rim.hght").write_bytes(_hght([0.9] * count))
+    (main / "Floor.mate").write_bytes(bytes([1, 0, 0, 0]) * count)
+    (sub / "Floor.mate").write_bytes(bytes([9, 0, 0, 0]) * count)
+    (sub / "Rim.mate").write_bytes(bytes([2, 0, 0, 0]) * count)
+    (main / "Rim.mate").write_bytes(bytes([9, 0, 0, 0]) * count)
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    info = describe_terrain(dump, KOKIRI_STATIC)
+    drawn = {row["name"]: row for row in info["tiles"] if row["status"] == "drawn"}
+    assert drawn["Floor"]["layer"] == "main"
+    assert drawn["Floor"]["layers"] == [1]
+    assert "KokiriForest/Floor.mate" in drawn["Floor"]["mate"]
+    assert drawn["Rim"]["layer"] == "sub"
+    assert drawn["Rim"]["layers"] == [2]
+    assert "KokiriForest_sub/Rim.mate" in drawn["Rim"]["mate"]
+    assert drawn["Coarse"]["dropped"] > 0
+    glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
+    document, blob = _glb_parts(glb)
+    primitive = document["meshes"][0]["primitives"][0]
+    positions = _accessor_floats(document, blob, primitive["attributes"]["POSITION"], 3)
+    marks = _accessor_floats(document, blob, primitive["attributes"]["TEXCOORD_3"], 2)
+    floor = [point for point, mark in zip(positions, marks) if mark[1] < 0.5 and abs(point[1] - 2.0) < 0.05 and abs(point[0]) < 1 and abs(point[2]) < 1]
+    rim = [point for point, mark in zip(positions, marks) if mark[1] > 0.5 and abs(point[1] - 9.0) < 0.05 and abs(point[0]) < 1 and abs(point[2]) < 1]
+    assert floor and rim
 
 
 def _tscb(scale: float, height_scale: float, tiles: list[tuple]) -> bytes:
@@ -1743,6 +1804,9 @@ def test_terra_array_sand_guess_and_helper_shapes(tmp_path, monkeypatch):
     assert texture_rank("Pond_Flow_Ind") == 2
     assert texture_rank("Leaf_Msk") == 2
     assert texture_rank("Leaf_Alb") == 0
+    assert texture_rank("BarkFx") == 2
+    assert texture_rank("Tree_Alb_Fx") == 2
+    assert texture_rank("Wind") == 1
 
     def fail_full(blob):
         raise AssertionError("the terra array must not be decoded as one image")
@@ -1959,6 +2023,13 @@ def test_sparse_magenta_on_an_opaque_albedo_is_filled_not_punched():
     assert mode == "opaque"
     assert "neighbour" in note
     assert accepted.rgba[4] < 80 and accepted.rgba[6] < 80
+    wide = bytearray()
+    for x in range(14):
+        wide.extend((220, 10, 210, 255) if 2 <= x <= 11 else (20, 90, 30, 255))
+    gutter = Texture(name="BarkEdge", width=14, height=1, rgba=bytes(wide), fmt=0)
+    filled, mode, _cutoff, _note = _accept(gutter, "opaque", 0.5)
+    assert mode == "opaque"
+    assert filled.rgba[6 * 4] < 80
     solid = Texture(name="Bad", width=2, height=2, rgba=bytes([255, 0, 255, 255]) * 4, fmt=0)
     rejected, _mode, _cutoff, why = _accept(solid, "opaque", 0.5)
     assert rejected is None
