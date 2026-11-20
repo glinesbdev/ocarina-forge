@@ -267,6 +267,62 @@ def test_sample_project_ids_exist_in_the_fixture(tmp_path):
             assert ident in present
 
 
+def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("BANCWRIGHT_WORKERS", "1")
+    monkeypatch.chdir(tmp_path)
+    from bancwright.server import app, describe_actor
+
+    dump = _dump(tmp_path)
+    client = TestClient(app)
+    client.put("/api/config", json={"dump": str(dump.root), "project": ""})
+    listed = client.post("/api/models/batch", json={"names": ["Npc_Kokiri_F_01", "Npc_Kokiri_F_01", "Not_An_Actor"]})
+    assert listed.status_code == 200, listed.text
+    models = listed.json()["models"]
+    assert set(models) == {"Npc_Kokiri_F_01", "Not_An_Actor"}
+    assert models["Not_An_Actor"]["status"] == "box"
+    assert models["Npc_Kokiri_F_01"]["status"] == "queued"
+    assert models["Npc_Kokiri_F_01"]["url"].endswith("/model.glb")
+
+    calls = {"n": 0}
+    real = describe_actor
+
+    def counting(dump, gyaml, convert=True):
+        if convert:
+            calls["n"] += 1
+        return real(dump, gyaml, convert=convert)
+
+    monkeypatch.setattr("bancwright.server.describe_actor", counting)
+    import asyncio
+    from httpx import ASGITransport, AsyncClient
+
+    async def both():
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as http:
+            return await asyncio.gather(
+                http.get("/api/models/Npc_Kokiri_F_01/model.glb"),
+                http.get("/api/models/Npc_Kokiri_F_01/model.glb"),
+            )
+
+    first, second = asyncio.run(both())
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.headers["etag"] == second.headers["etag"]
+    assert calls["n"] == 1
+    digest = first.headers["etag"].strip('"')
+    cached = client.get(f"/api/models/Npc_Kokiri_F_01/model.glb?v={digest}")
+    assert cached.status_code == 200
+    assert cached.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert cached.headers["etag"] == f'"{digest}"'
+    again = client.get(
+        f"/api/models/Npc_Kokiri_F_01/model.glb?v={digest}",
+        headers={"If-None-Match": f'"{digest}"'},
+    )
+    assert again.status_code == 304
+    warm = client.post("/api/models/batch", json={"names": ["Npc_Kokiri_F_01"]})
+    assert warm.json()["models"]["Npc_Kokiri_F_01"]["url"].endswith(f"v={digest}")
+
+
 def test_sibling_bancs_swap_static_and_dynamic():
     from bancwright.scene import sibling_bancs
 

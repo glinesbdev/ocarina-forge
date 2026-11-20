@@ -36,6 +36,7 @@ const state = {
 
 const viewport = createViewport($("viewport"), {
   fetchModel: (gyaml) => api.model(gyaml),
+  fetchModels: (names) => api.models(names),
   fetchTerrain: (banc) => api.terrain(banc),
   onProgress: (info) => {
     const box = $("model-progress");

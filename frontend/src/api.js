@@ -38,6 +38,8 @@ export const api = {
   putRecipes: (banc, recipes) => request("/api/scene/recipes", { method: "PUT", body: JSON.stringify({ banc, recipes }) }),
   actors: (q) => request(`/api/actors?q=${encodeURIComponent(q)}`),
   model: (gyaml) => request(`/api/models/${encodeURIComponent(gyaml)}`),
+  models: (names) =>
+    request("/api/models/batch", { method: "POST", body: JSON.stringify({ names }) }).then((data) => data.models || {}),
   terrain: (banc) => request(`/api/terrain?banc=${encodeURIComponent(banc)}`),
   exportMod: (body) => request("/api/export", { method: "POST", body: JSON.stringify(body) }),
   importAto: (path) => request("/api/import/ato", { method: "POST", body: JSON.stringify({ path }) }),

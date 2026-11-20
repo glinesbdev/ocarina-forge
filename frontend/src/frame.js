@@ -14,11 +14,14 @@ export function formatTris(tris) {
  * Stats line. `instances` and `culled` are omitted until that pass records them.
  * A frame that will not be followed by another one is `idle`, even if fps was just measured.
  */
-export function formatStats({ rendering, fps, draws, instances, culled, separate, tris }) {
+export function formatStats({ rendering, fps, draws, instances, culled, separate, tris, queued, loading, loaded }) {
   const rate = rendering ? (fps ? `${fps} fps` : "…") : "idle";
   const parts = [rate, `${draws} draws`];
   if (instances != null) parts.push(`${instances} inst`);
   if (culled != null) parts.push(`${culled} culled`);
   parts.push(`${separate} separate`, `${formatTris(tris)} tris`);
+  if (queued != null) parts.push(`${queued} queued`);
+  if (loading != null) parts.push(`${loading} loading`);
+  if (loaded != null) parts.push(`${loaded} loaded`);
   return parts.join(" · ");
 }

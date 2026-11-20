@@ -26,4 +26,8 @@ test("a stopped view says idle and keeps the last counts", () => {
     formatStats({ rendering: true, fps: 58, draws: 220, instances: 4000, culled: 900, separate: 10553, tris: 1400000 }),
     "58 fps · 220 draws · 4000 inst · 900 culled · 10553 separate · 1.4M tris"
   );
+  assert.equal(
+    formatStats({ rendering: false, fps: 60, draws: 240, separate: 10553, tris: 1600000, queued: 40, loading: 8, loaded: 12 }),
+    "idle · 240 draws · 10553 separate · 1.6M tris · 40 queued · 8 loading · 12 loaded"
+  );
 });

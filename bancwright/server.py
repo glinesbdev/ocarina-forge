@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing
 import os
 import shutil
@@ -11,10 +12,10 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from bancwright import __version__
@@ -27,12 +28,11 @@ from bancwright.fixtures import build_fixture
 from bancwright.importers.ato import import_scenes
 from bancwright.models import (
     CacheMiss,
-    actor_glb,
+    _cached_glb,
     describe_actor,
     describe_actor_at,
     describe_terrain,
     describe_terrain_at,
-    terrain_glb,
 )
 from bancwright.project import Project
 from bancwright.recipes import recipe_actors
@@ -98,26 +98,104 @@ def _pool():
         return _POOL
 
 
-def _model_info(gyaml: str) -> dict:
-    dump = _open_dump()
-    try:
-        return describe_actor(dump, gyaml, convert=False)
-    except CacheMiss:
-        pool = _pool()
-        if pool is None:
-            return describe_actor(dump, gyaml)
-        return pool.submit(describe_actor_at, str(dump.root), gyaml).result()
+_CONVERTING: dict[str, asyncio.Future] = {}
+_CONVERT_LOCK = asyncio.Lock()
 
 
-def _terrain_info(banc: str) -> dict:
+def _publish(info: dict) -> dict:
+    """Put the cache digest in the glb URL so a rebuild is a different browser cache entry."""
+    digest = info.get("digest")
+    url = info.get("url")
+    if not digest or not url or "v=" in str(url):
+        return info
+    published = dict(info)
+    join = "&" if "?" in url else "?"
+    published["url"] = f"{url}{join}v={digest}"
+    return published
+
+
+def _cached_file(request: Request, path: Path, filename: str, digest: str):
+    etag = f'"{digest}"'
+    versioned = request.query_params.get("v") == digest
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "public, max-age=31536000, immutable" if versioned else "no-cache",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return FileResponse(path, media_type="model/gltf-binary", filename=filename, headers=headers)
+
+
+async def _convert(key: str, call):
+    """One conversion per key. Waiters share it, and the process pool does the work."""
+    async with _CONVERT_LOCK:
+        existing = _CONVERTING.get(key)
+        if existing is not None:
+            owner = False
+        else:
+            existing = asyncio.get_running_loop().create_future()
+            _CONVERTING[key] = existing
+            owner = True
+    if not owner:
+        return await existing
+    try:
+        info = await call()
+        existing.set_result(info)
+        return info
+    except Exception as exc:
+        existing.set_exception(exc)
+        existing.exception()
+        raise
+    finally:
+        _CONVERTING.pop(key, None)
+
+
+async def _describe_model(gyaml: str) -> dict:
     dump = _open_dump()
     try:
-        return describe_terrain(dump, banc, convert=False)
+        return _publish(describe_actor(dump, gyaml, convert=False))
     except CacheMiss:
+        pass
+
+    async def run():
         pool = _pool()
         if pool is None:
-            return describe_terrain(dump, banc)
-        return pool.submit(describe_terrain_at, str(dump.root), banc).result()
+            info = await asyncio.to_thread(describe_actor, dump, gyaml)
+        else:
+            info = await asyncio.wrap_future(pool.submit(describe_actor_at, str(dump.root), gyaml))
+        return _publish(info)
+
+    return await _convert(f"model:{gyaml}", run)
+
+
+async def _describe_terrain_model(banc: str) -> dict:
+    dump = _open_dump()
+    try:
+        return _publish(describe_terrain(dump, banc, convert=False))
+    except CacheMiss:
+        pass
+
+    async def run():
+        pool = _pool()
+        if pool is None:
+            info = await asyncio.to_thread(describe_terrain, dump, banc)
+        else:
+            info = await asyncio.wrap_future(pool.submit(describe_terrain_at, str(dump.root), banc))
+        return _publish(info)
+
+    return await _convert(f"terrain:{banc}", run)
+
+
+def _queued_model(gyaml: str) -> dict:
+    return {
+        "gyaml": gyaml,
+        "status": "queued",
+        "reason": "Waiting to convert.",
+        "source": "",
+        "triangles": 0,
+        "textures": 0,
+        "url": f"/api/models/{gyaml}/model.glb",
+    }
 
 
 def repo_root() -> Path:
@@ -427,30 +505,60 @@ def put_recipes(body: dict):
     return _attach_recipes(view, banc)
 
 
+@app.post("/api/models/batch")
+async def models_batch(body: dict):
+    """Cache hits now, and a glb URL for everything still to convert. One round trip."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for name in body.get("names") or []:
+        if not isinstance(name, str) or not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+        if len(names) >= 2000:
+            break
+    dump = _open_dump()
+
+    def lookup() -> dict[str, dict]:
+        found: dict[str, dict] = {}
+        for name in names:
+            try:
+                found[name] = _publish(describe_actor(dump, name, convert=False))
+            except CacheMiss:
+                found[name] = _queued_model(name)
+        return found
+
+    return {"models": await asyncio.to_thread(lookup)}
+
+
 @app.get("/api/models/{gyaml}")
-def model_info(gyaml: str):
-    return _model_info(gyaml)
+async def model_info(gyaml: str):
+    return await _describe_model(gyaml)
 
 
 @app.get("/api/models/{gyaml}/model.glb")
-def model_file(gyaml: str):
-    path = actor_glb(_open_dump(), gyaml)
+async def model_file(gyaml: str, request: Request):
+    info = await _describe_model(gyaml)
+    digest = info.get("digest") or ""
+    path = _cached_glb(digest) if info.get("status") == "mesh" else None
     if path is None:
-        raise BancError("This actor has no converted model.", "not_found")
-    return FileResponse(path, media_type="model/gltf-binary", filename=f"{gyaml}.glb")
+        raise BancError(info.get("reason") or "This actor has no converted model.", "not_found")
+    return _cached_file(request, path, f"{gyaml}.glb", digest)
 
 
 @app.get("/api/terrain")
-def terrain_info(banc: str):
-    return _terrain_info(banc)
+async def terrain_info(banc: str):
+    return await _describe_terrain_model(banc)
 
 
 @app.get("/api/terrain/model.glb")
-def terrain_file(banc: str):
-    path = terrain_glb(_open_dump(), banc)
+async def terrain_file(banc: str, request: Request):
+    info = await _describe_terrain_model(banc)
+    digest = info.get("digest") or ""
+    path = _cached_glb(digest) if info.get("status") == "mesh" else None
     if path is None:
-        raise BancError("This scene has no converted map model.", "not_found")
-    return FileResponse(path, media_type="model/gltf-binary", filename="terrain.glb")
+        raise BancError(info.get("reason") or "This scene has no converted map model.", "not_found")
+    return _cached_file(request, path, "terrain.glb", digest)
 
 
 @app.get("/api/actors")

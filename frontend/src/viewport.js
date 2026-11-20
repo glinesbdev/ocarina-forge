@@ -90,6 +90,8 @@ export function createViewport(host, hooks) {
   let frameHandle = 0;
   const loader = new GLTFLoader();
   const templateCache = new Map();
+  const modelRequests = new Map();
+  const GLB_SLOTS = 8;
   const metaCache = new Map();
   const categories = { area: "show", system: "show" };
   const boxCategories = {
@@ -427,104 +429,164 @@ export function createViewport(host, hooks) {
     loadQueue.sort((a, b) => gyamlScore(a) - gyamlScore(b));
   }
 
+  function fetchModelOnce(gyaml) {
+    const existing = modelRequests.get(gyaml);
+    if (existing) return existing;
+    const pending = (
+      hooks.fetchModel ? hooks.fetchModel(gyaml) : Promise.reject(new Error("Model loading is not connected."))
+    ).finally(() => {
+      if (modelRequests.get(gyaml) === pending) modelRequests.delete(gyaml);
+    });
+    modelRequests.set(gyaml, pending);
+    return pending;
+  }
+
+  function wantsGlb(meta) {
+    return Boolean(meta && (meta.status === "mesh" || meta.status === "queued") && meta.url);
+  }
+
   function loadModels(token, actors) {
     const names = [...new Set(actors.map((actor) => actor.gyaml).filter(Boolean))];
-    const pending = names.filter((name) => !metaCache.has(name));
-    let done = names.length - pending.length;
-    let boxes = names.filter((name) => {
-      const meta = metaCache.get(name);
-      return meta && meta.status !== "mesh";
-    }).length;
-    const applyCached = () => {
-      for (const entry of entries.values()) {
-        const meta = metaCache.get(entry.gyaml);
-        if (!meta) continue;
-        entry.modelMeta = meta;
-        if (meta.status !== "mesh") fitBounds(entry, meta.bounds);
-        if (meta.status === "mesh" && meta.url) {
-          ensureTemplate(meta.url)
-            .then((template) => {
-              if (token !== generation) return;
-              const current = entries.get(entry.key);
-              if (current) attachModel(current, template, meta.url);
-            })
-            .catch((error) => {
-              if (token !== generation) return;
-              const current = entries.get(entry.key);
-              const message = (error && error.message) || "The glTF did not load.";
-              console.error(`${entry.gyaml}: ${message}`);
-              if (current) {
-                current.modelMeta = { ...(current.modelMeta || {}), status: "box", reason: message };
-                current.mesh.visible = true;
-                fitBounds(current, current.modelMeta.bounds);
-              }
-              if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
-            });
-        }
-      }
-    };
-    applyCached();
-    const queue = pending.slice();
-    loadQueue = queue;
-    prioritizeLoad();
+    statQueued = 0;
+    statLoading = 0;
+    statLoaded = 0;
+    let done = 0;
+    let boxes = 0;
     const progressLabel = (finished) => {
       if (!names.length) return "No actors";
       return finished ? `Models ${done} of ${names.length}` : `Models ${done} of ${names.length} · nearest first, view stays usable`;
     };
-    report({
-      done,
-      total: names.length,
-      boxes,
-      finished: pending.length === 0,
-      label: progressLabel(pending.length === 0),
-    });
-    async function worker() {
-      while (queue.length) {
-        if (token !== generation) return;
-        prioritizeLoad();
-        const gyaml = queue.shift();
-        let meta;
-        try {
-          meta = hooks.fetchModel ? await hooks.fetchModel(gyaml) : { status: "box", reason: "Model loading is not connected." };
-        } catch (error) {
-          meta = { status: "box", reason: error.message || "The model request failed.", source: "" };
-        }
-        if (token !== generation) return;
-        metaCache.set(gyaml, meta);
-        if (meta.status !== "mesh") boxes += 1;
-        for (const entry of entries.values()) {
-          if (entry.gyaml !== gyaml) continue;
-          entry.modelMeta = meta;
-          if (meta.status !== "mesh") fitBounds(entry, meta.bounds);
-          if (meta.status !== "mesh" || !meta.url) continue;
-          try {
-            const template = await ensureTemplate(meta.url);
-            if (token !== generation) return;
-            attachModel(entry, template, meta.url);
-          } catch (error) {
-            const message = error.message || "The glTF did not load.";
-            console.error(`${gyaml}: ${message}`);
-            entry.modelMeta = { status: "box", reason: message, source: meta.source || "", bounds: meta.bounds || null };
-            entry.mesh.visible = true;
-            fitBounds(entry, meta.bounds);
-            if (hooks.onModelError) hooks.onModelError(gyaml, message);
-          }
-          if (meta.status !== "mesh") fitBounds(entry, meta.bounds);
-        }
-        done += 1;
-        report({
-          done,
-          total: names.length,
-          boxes,
-          finished: done >= names.length,
-          label: progressLabel(done >= names.length),
-        });
+    const publish = (finished) => {
+      statQueued = loadQueue ? loadQueue.length : 0;
+      report({
+        done,
+        total: names.length,
+        boxes,
+        finished,
+        label: progressLabel(finished),
+      });
+      requestRender();
+    };
+    const failEntry = (entry, meta, message) => {
+      entry.modelMeta = { ...(meta || entry.modelMeta || {}), status: "box", reason: message };
+      entry.mesh.visible = true;
+      fitBounds(entry, entry.modelMeta.bounds);
+      if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
+    };
+    async function deliver(gyaml, meta, template) {
+      for (const entry of entries.values()) {
+        if (entry.gyaml !== gyaml) continue;
+        entry.modelMeta = { ...meta, status: "mesh" };
+        if (template) attachModel(entry, template, meta.url);
+        else fitBounds(entry, meta.bounds);
       }
     }
-    const workers = Math.min(6, queue.length);
-    if (!workers) return;
+    async function glbWorker() {
+      while (loadQueue && loadQueue.length) {
+        if (token !== generation) return;
+        prioritizeLoad();
+        const gyaml = loadQueue.shift();
+        statQueued = loadQueue.length;
+        let meta = metaCache.get(gyaml);
+        statLoading += 1;
+        requestRender();
+        try {
+          if (!meta || meta.status === "queued") {
+            try {
+              meta = await fetchModelOnce(gyaml);
+            } catch (error) {
+              meta = { status: "box", reason: error.message || "The model request failed.", source: "" };
+            }
+            metaCache.set(gyaml, meta);
+          }
+          if (token !== generation) return;
+          if (meta.status !== "mesh" || !meta.url) {
+            boxes += 1;
+            for (const entry of entries.values()) {
+              if (entry.gyaml !== gyaml) continue;
+              entry.modelMeta = meta;
+              fitBounds(entry, meta.bounds);
+            }
+          } else {
+            try {
+              const template = await ensureTemplate(meta.url);
+              if (token !== generation) return;
+              await deliver(gyaml, meta, template);
+            } catch (error) {
+              const message = error.message || "The glTF did not load.";
+              console.error(`${gyaml}: ${message}`);
+              boxes += 1;
+              for (const entry of entries.values()) {
+                if (entry.gyaml === gyaml) failEntry(entry, meta, message);
+              }
+            }
+          }
+        } finally {
+          if (token !== generation) return;
+          statLoading = Math.max(0, statLoading - 1);
+          statLoaded += 1;
+          done += 1;
+          publish(done >= names.length && (!loadQueue || !loadQueue.length) && statLoading === 0);
+        }
+      }
+    }
     retainLoad();
-    Promise.all(Array.from({ length: workers }, () => worker())).finally(releaseLoad);
+    const run = async () => {
+      const missing = names.filter((name) => !metaCache.has(name));
+      if (missing.length && hooks.fetchModels) {
+        try {
+          const batch = await hooks.fetchModels(missing);
+          if (token !== generation) return;
+          for (const name of missing) {
+            metaCache.set(
+              name,
+              (batch && batch[name]) || { status: "box", reason: "The model list did not include this actor.", source: "" }
+            );
+          }
+        } catch (error) {
+          console.error(error);
+        }
+      }
+      if (token !== generation) return;
+      const queue = [];
+      for (const name of names) {
+        const meta = metaCache.get(name);
+        if (!meta) {
+          queue.push(name);
+          continue;
+        }
+        if (!wantsGlb(meta)) {
+          boxes += meta.status === "box" ? 1 : 0;
+          statLoaded += 1;
+          done += 1;
+          for (const entry of entries.values()) {
+            if (entry.gyaml !== name) continue;
+            entry.modelMeta = meta;
+            fitBounds(entry, meta.bounds);
+          }
+          continue;
+        }
+        if (templateCache.has(meta.url)) {
+          try {
+            const template = await templateCache.get(meta.url);
+            if (token !== generation) return;
+            await deliver(name, meta, template);
+            statLoaded += 1;
+            done += 1;
+          } catch (error) {
+            queue.push(name);
+          }
+          continue;
+        }
+        queue.push(name);
+      }
+      loadQueue = queue;
+      statQueued = queue.length;
+      publish(queue.length === 0);
+      const workers = Math.min(GLB_SLOTS, queue.length);
+      if (workers) await Promise.all(Array.from({ length: workers }, () => glbWorker()));
+    };
+    run().finally(releaseLoad);
   }
 
   function ensureTemplate(url) {
@@ -1542,6 +1604,9 @@ uniform float terrainLayerMissing;`
   let fps = 0;
   let statInstances = 0;
   let statCulled = 0;
+  let statQueued = 0;
+  let statLoading = 0;
+  let statLoaded = 0;
 
   function requestRender() {
     if (!running || frameHandle) return;
@@ -1565,6 +1630,9 @@ uniform float terrainLayerMissing;`
       culled: statCulled,
       separate: naiveDraws,
       tris: info.triangles,
+      queued: statQueued,
+      loading: statLoading,
+      loaded: statLoaded,
     });
   }
 
