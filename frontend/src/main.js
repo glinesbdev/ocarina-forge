@@ -2,7 +2,7 @@ import "dockview-core/dist/styles/dockview.css";
 
 import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
-import { renderBehavior } from "./behavior.js";
+import { graphHistory, historyStep, renderBehavior } from "./behavior.js";
 import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { modelLine } from "./inspector.js";
@@ -64,6 +64,9 @@ const state = {
   behaviorQuery: "",
   behaviorError: "",
   behaviorLoading: false,
+  behaviorTrail: [],
+  behaviorAhead: [],
+  behaviorFrame: "",
   showProblemNotes: false,
   hot: null,
   hotToken: 0,
@@ -299,6 +302,14 @@ onShortcut = (event) => {
     return;
   }
   if (isTyping(event)) return;
+  if (event.altKey && !meta && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    const behavior = document.getElementById("behavior-panel");
+    if (behavior && (behavior.matches(":hover") || behavior.contains(document.activeElement))) {
+      event.preventDefault();
+      stepBehavior(event.key === "ArrowLeft" ? -1 : 1);
+      return;
+    }
+  }
   if (event.key === "?") {
     event.preventDefault();
     openShortcuts();
@@ -2654,6 +2665,9 @@ function refreshBehavior() {
     state.behaviorEntry = "";
     state.behaviorQuery = "";
     state.behaviorError = "";
+    state.behaviorTrail = [];
+    state.behaviorAhead = [];
+    state.behaviorFrame = "";
     state.behaviorLoading = Boolean(actor);
     if (actor) {
       const requestKey = key;
@@ -2676,9 +2690,48 @@ function refreshBehavior() {
   drawBehavior();
 }
 
+function jumpBehavior(id, outside) {
+  const graph = state.behavior;
+  const node = graph && (graph.nodes || []).find((item) => item.id === id);
+  const current = { node: state.behaviorNode, entry: state.behaviorEntry, file: state.behaviorFile };
+  const file = node && node.source ? node.source : state.behaviorFile;
+  const next = {
+    node: id,
+    entry: outside ? id : state.behaviorEntry,
+    file: file || state.behaviorFile,
+  };
+  const history = graphHistory({ trail: state.behaviorTrail, ahead: state.behaviorAhead }, current, next);
+  state.behaviorTrail = history.trail;
+  state.behaviorAhead = history.ahead;
+  state.behaviorNode = id;
+  state.behaviorFile = next.file;
+  if (outside) {
+    state.behaviorEntry = id;
+    state.behaviorQuery = "";
+  }
+  state.behaviorFrame = id;
+  drawBehavior();
+}
+
+function stepBehavior(dir) {
+  const current = { node: state.behaviorNode, entry: state.behaviorEntry, file: state.behaviorFile };
+  const stepped = historyStep({ trail: state.behaviorTrail, ahead: state.behaviorAhead }, current, dir);
+  if (!stepped.current || stepped.current === current) return;
+  state.behaviorTrail = stepped.trail;
+  state.behaviorAhead = stepped.ahead;
+  state.behaviorNode = stepped.current.node || "";
+  state.behaviorEntry = stepped.current.entry || "";
+  state.behaviorFile = stepped.current.file || "";
+  state.behaviorQuery = "";
+  state.behaviorFrame = stepped.current.node || "";
+  drawBehavior();
+}
+
 function drawBehavior() {
   const host = $("behavior-panel");
   if (!host) return;
+  const frameId = state.behaviorFrame;
+  state.behaviorFrame = "";
   renderBehavior(host, {
     actor: selectedActor(),
     graph: state.behavior,
@@ -2687,6 +2740,7 @@ function drawBehavior() {
     file: state.behaviorFile,
     entry: state.behaviorEntry,
     query: state.behaviorQuery,
+    frameId,
     loading: state.behaviorLoading,
     error: state.behaviorError,
     onLayer: (layer) => {
@@ -2697,6 +2751,11 @@ function drawBehavior() {
       state.behaviorNode = id;
       drawBehavior();
     },
+    onSpotlight: (target) => {
+      const stage = host.querySelector(".graph-stage");
+      if (stage && stage.__spotlight) stage.__spotlight(target);
+    },
+    onJump: (id, outside) => jumpBehavior(id, outside),
     onFile: (id, keepQuery) => {
       state.behaviorFile = id;
       state.behaviorEntry = "";

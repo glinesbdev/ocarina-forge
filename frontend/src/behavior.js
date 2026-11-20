@@ -6,7 +6,7 @@ curated layer uses the friendly name. The picture is a blueprint: it fills
 the panel, and the camera pans and zooms.
 */
 
-import { COL, NODE_W, ROW_GAP, mountGraph, nodeHeight } from "./graph-view.js";
+import { COL, NODE_W, ROW_GAP, mountGraph, nodeHeight, pinColor } from "./graph-view.js";
 
 export function displayName(node, layer) {
   if (!node) return "";
@@ -65,6 +65,60 @@ export function layoutGraph(graph) {
 }
 
 const LAYOUT_CAP = 160;
+
+export function nodeConnections(node, graph, visibleIds) {
+  const nodes = (graph && graph.nodes) || [];
+  const byId = new Map(nodes.map((item) => [item.id, item]));
+  const visible = visibleIds instanceof Set ? visibleIds : new Set(visibleIds || []);
+  const edges = (graph && graph.edges) || [];
+  const pins = (node && node.pins) || [];
+  const group = (dir) =>
+    pins
+      .filter((pin) => (dir === "out" ? pin.dir === "out" : pin.dir !== "out"))
+      .map((pin) => {
+        const rows = [];
+        for (const edge of edges) {
+          const mine = dir === "out" ? edge.from : edge.to;
+          const otherPinId = dir === "out" ? edge.to : edge.from;
+          if (mine !== pin.id) continue;
+          const otherId = pinOwner(otherPinId, byId);
+          const other = byId.get(otherId);
+          const otherPin = other && (other.pins || []).find((item) => item.id === otherPinId);
+          rows.push({
+            edgeId: edge.id || `${edge.from}>${edge.to}`,
+            otherId,
+            otherName: other ? other.name || other.raw || otherId : otherPinId,
+            otherPin: otherPin ? otherPin.name || otherPin.type || "" : "",
+            outside: !otherId || !visible.has(otherId),
+          });
+        }
+        return { pin, rows };
+      })
+      .filter((item) => item.rows.length);
+  return { inputs: group("in"), outputs: group("out") };
+}
+
+export function graphHistory(history, current, next) {
+  const trail = [...((history && history.trail) || [])];
+  const ahead = [...((history && history.ahead) || [])];
+  if (!next || !next.node) return { trail, ahead };
+  if (current && current.node === next.node && current.entry === next.entry && current.file === next.file) {
+    return { trail, ahead };
+  }
+  if (current && current.node) trail.push(current);
+  return { trail, ahead: [] };
+}
+
+export function historyStep(history, current, dir) {
+  const trail = [...((history && history.trail) || [])];
+  const ahead = [...((history && history.ahead) || [])];
+  const from = dir < 0 ? trail : ahead;
+  const onto = dir < 0 ? ahead : trail;
+  if (!from.length) return { trail, ahead, current };
+  const point = from.pop();
+  if (current && current.node) onto.push(current);
+  return { trail, ahead, current: point };
+}
 
 export function visibleNodes(graph, options = {}) {
   const sources = (graph && graph.sources) || [];
@@ -241,7 +295,7 @@ export function renderBehavior(host, model) {
   body.append(stage);
   const selected = (graph.nodes || []).find((node) => node.id === model.selectedId);
   if (selected) {
-    const inspector = detail(selected, graph, model);
+    const inspector = detail(selected, graph, model, view);
     inspector.classList.add("behavior-inspector");
     body.append(inspector);
   }
@@ -256,10 +310,13 @@ export function renderBehavior(host, model) {
     edges: graph.edges || [],
     positions: laid.positions,
     selectedId: model.selectedId,
+    frameId: model.frameId || "",
     onSelect: (id) => model.onSelect && model.onSelect(id),
     onContext: (point) => model.onContext && model.onContext(point, view),
   });
   host.__fitGraph = () => stage.__fit && stage.__fit();
+  host.__clearGraph = () => model.onSelect && model.onSelect("");
+  host.__spotlight = (target) => stage.__spotlight && stage.__spotlight(target);
   if ((graph.diff || []).length) chrome.append(diffList(graph, model));
 }
 
@@ -330,7 +387,7 @@ function layerButton(label, layer, model) {
   return button;
 }
 
-function detail(node, graph, model) {
+function detail(node, graph, model, view) {
   const wrap = document.createElement("div");
   wrap.className = "model-note";
   const title = document.createElement("div");
@@ -352,6 +409,7 @@ function detail(node, graph, model) {
       wrap.append(warning);
     }
   }
+  wrap.append(connectionsBlock(node, graph, view, model));
   const editable = (node.fields || []).filter((field) => field.editable);
   if (!editable.length) {
     const line = document.createElement("p");
@@ -373,6 +431,62 @@ function detail(node, graph, model) {
   ident.textContent = node.id;
   wrap.append(ident);
   return wrap;
+}
+
+function connectionsBlock(node, graph, view, model) {
+  const visible = new Set(((view && view.nodes) || []).map((item) => item.id));
+  const links = nodeConnections(node, graph, visible);
+  const section = document.createElement("section");
+  section.className = "graph-connections";
+  const heading = document.createElement("div");
+  heading.className = "axis-label";
+  heading.textContent = "Connections";
+  section.append(heading);
+  section.append(connectionSide("Inputs", links.inputs, "in", model));
+  section.append(connectionSide("Outputs", links.outputs, "out", model));
+  return section;
+}
+
+function connectionSide(label, groups, dir, model) {
+  const block = document.createElement("div");
+  const title = document.createElement("div");
+  title.className = "graph-conn-side";
+  title.textContent = label;
+  block.append(title);
+  if (!groups.length) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = dir === "out" ? "No outputs." : "No inputs.";
+    block.append(empty);
+    return block;
+  }
+  for (const group of groups) {
+    const pin = group.pin || {};
+    const head = document.createElement("div");
+    head.className = "graph-conn-pin";
+    const swatch = document.createElement("span");
+    swatch.className = "graph-conn-swatch";
+    swatch.style.background = pinColor(pin);
+    const name = document.createElement("span");
+    name.textContent = pin.name || pin.type || "Pin";
+    head.append(swatch, name);
+    block.append(head);
+    for (const link of group.rows) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = link.outside ? "graph-conn-row is-outside" : "graph-conn-row";
+      row.style.borderLeftColor = pinColor(pin);
+      const other = link.otherPin ? `${link.otherName} · ${link.otherPin}` : link.otherName;
+      const mine = pin.name || pin.type || "Pin";
+      const via = dir === "out" ? `${mine} → ${other}` : `${other} → ${mine}`;
+      row.textContent = link.outside ? `${via} · outside view` : via;
+      row.addEventListener("pointerenter", () => model.onSpotlight && model.onSpotlight({ type: "edge", id: link.edgeId }));
+      row.addEventListener("pointerleave", () => model.onSpotlight && model.onSpotlight(null));
+      row.addEventListener("click", () => model.onJump && model.onJump(link.otherId, link.outside));
+      block.append(row);
+    }
+  }
+  return block;
 }
 
 function fieldRow(node, field, model) {

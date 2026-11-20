@@ -101,6 +101,43 @@ export function wirePath(start, end) {
   return `M ${start.x} ${start.y} C ${start.x + bend * dir} ${start.y}, ${end.x - bend * dir} ${end.y}, ${end.x} ${end.y}`;
 }
 
+export function connectionSpotlight(edges, target) {
+  if (!target || !target.id) return null;
+  const hot = [];
+  const inputs = new Set();
+  const outputs = new Set();
+  let focus = target.type === "node" ? target.id : target.node || "";
+  for (const edge of edges || []) {
+    const hit =
+      (target.type === "edge" && edge.id === target.id) ||
+      (target.type === "pin" && (edge.from === target.id || edge.to === target.id)) ||
+      (target.type === "node" && (edge.fromNode === target.id || edge.toNode === target.id));
+    if (!hit) continue;
+    hot.push(edge.id);
+    if (target.type === "node") {
+      if (edge.toNode === target.id && edge.fromNode && edge.fromNode !== target.id) inputs.add(edge.fromNode);
+      if (edge.fromNode === target.id && edge.toNode && edge.toNode !== target.id) outputs.add(edge.toNode);
+    } else {
+      if (edge.fromNode) inputs.add(edge.fromNode);
+      if (edge.toNode) outputs.add(edge.toNode);
+    }
+  }
+  return { hot, inputs: [...inputs], outputs: [...outputs], focus };
+}
+
+export function frameCamera(camera, view, box, options = {}) {
+  const zoom = options.keepZoom
+    ? camera.zoom
+    : clamp(Math.max(camera.zoom || 1, 0.9), ZOOM_MIN, ZOOM_MAX);
+  const cx = box.x + box.w / 2;
+  const cy = box.y + box.h / 2;
+  return {
+    zoom,
+    x: view.width / 2 - cx * zoom,
+    y: view.height / 2 - cy * zoom,
+  };
+}
+
 export function zoomAt(camera, sx, sy, factor) {
   const zoom = clamp(camera.zoom * factor, ZOOM_MIN, ZOOM_MAX);
   const wx = (sx - camera.x) / camera.zoom;
@@ -208,6 +245,7 @@ export function mountGraph(stage, spec) {
     for (const pin of item.node.pins || []) byPin.set(pin.id, { pin, item });
   }
 
+  const edgeRecords = [];
   for (const edge of spec.edges || []) {
     const from = byPin.get(edge.from);
     const to = byPin.get(edge.to);
@@ -215,22 +253,77 @@ export function mountGraph(stage, spec) {
     const start = pinAnchor(from.item.node, from.pin, from.item.pos);
     const end = pinAnchor(to.item.node, to.pin, to.item.pos);
     const color = pinColor(from.pin);
+    const id = edge.id || `${edge.from}>${edge.to}`;
     const hit = svgEl("path");
     hit.setAttribute("d", wirePath(start, end));
     hit.setAttribute("class", "graph-wire-hit");
     hit.dataset.from = edge.from;
     hit.dataset.to = edge.to;
-    hit.dataset.edge = edge.id || `${edge.from}>${edge.to}`;
+    hit.dataset.edge = id;
     const path = svgEl("path");
     path.setAttribute("d", wirePath(start, end));
     path.setAttribute("class", "graph-wire");
     path.setAttribute("stroke", color);
+    path.dataset.edge = id;
     wires.append(hit, path);
+    edgeRecords.push({
+      id,
+      from: edge.from,
+      to: edge.to,
+      fromNode: from.item.node.id,
+      toNode: to.item.node.id,
+      path,
+      flow: pinKind(from.pin) === "flow",
+    });
   }
 
+  const shapes = new Map();
   for (const item of spec.nodes) {
-    nodes.append(drawNode(item, spec.selectedId));
+    const shape = drawNode(item, spec.selectedId);
+    shapes.set(item.node.id, shape);
+    nodes.append(shape);
   }
+
+  let hover = null;
+  let cleared = false;
+
+  function paint() {
+    const target = hover || (!cleared && spec.selectedId ? { type: "node", id: spec.selectedId } : null);
+    const spot = connectionSpotlight(edgeRecords, target);
+    const active = Boolean(spot && (spot.focus || spot.hot.length || spot.inputs.length || spot.outputs.length));
+    world.classList.toggle("is-spotlight", active);
+    const hot = new Set((spot && spot.hot) || []);
+    const inputNodes = new Set((spot && spot.inputs) || []);
+    const outputNodes = new Set((spot && spot.outputs) || []);
+    for (const edge of edgeRecords) {
+      const on = hot.has(edge.id);
+      edge.path.classList.toggle("is-hot", on);
+      edge.path.classList.toggle("is-flow", on && edge.flow);
+    }
+    for (const [id, shape] of shapes) {
+      shape.classList.toggle("is-focus", Boolean(spot && spot.focus === id));
+      shape.classList.toggle("is-input", inputNodes.has(id));
+      shape.classList.toggle("is-output", outputNodes.has(id));
+      for (const pin of shape.querySelectorAll("[data-pin]")) {
+        pin.classList.toggle("is-hot", Boolean(target && target.type === "pin" && pin.dataset.pin === target.id));
+      }
+    }
+  }
+
+  function frameNode(id, options = {}) {
+    const item = byId.get(id);
+    const view = viewSize();
+    if (!item || view.width < 40 || view.height < 40) return;
+    camera = frameCamera(camera, view, item.pos, options);
+    remember();
+    apply();
+  }
+
+  stage.__spotlight = (target) => {
+    hover = target && target.id ? target : null;
+    paint();
+  };
+  stage.__frameNode = (id) => frameNode(id);
 
   function viewSize() {
     const rect = stage.getBoundingClientRect();
@@ -289,17 +382,35 @@ export function mountGraph(stage, spec) {
 
   if (!camera) {
     camera = { x: 0, y: 0, zoom: 1 };
-    requestAnimationFrame(fit);
+    requestAnimationFrame(() => {
+      if (!stage.isConnected) return;
+      fit();
+      if (spec.frameId) frameNode(spec.frameId, { keepZoom: true });
+    });
   } else {
     apply();
+    if (spec.frameId) frameNode(spec.frameId);
   }
+  paint();
 
   let drag = null;
   svg.addEventListener("pointerdown", (event) => {
     stage.focus({ preventScroll: true });
+    const pin = event.target.closest && event.target.closest("[data-pin]");
+    const wire = event.target.closest && event.target.closest(".graph-wire-hit");
     const node = event.target.closest && event.target.closest("[data-node]");
-    if (event.button === 0 && node && !spaceDown) {
-      spec.onSelect(node.dataset.node);
+    if (event.button === 0 && !spaceDown) {
+      if (node) {
+        cleared = false;
+        hover = pin ? { type: "pin", id: pin.dataset.pin, node: node.dataset.node } : null;
+        spec.onSelect(node.dataset.node);
+        return;
+      }
+      if (wire || !spec.selectedId) return;
+      cleared = true;
+      hover = null;
+      paint();
+      spec.onSelect("");
       return;
     }
     if (event.button === 1 || event.button === 2 || (event.button === 0 && spaceDown)) {
@@ -335,6 +446,23 @@ export function mountGraph(stage, spec) {
         worldY: (localY - camera.y) / camera.zoom,
       });
     }
+  });
+  svg.addEventListener("pointerover", (event) => {
+    if (drag) return;
+    const pin = event.target.closest && event.target.closest("[data-pin]");
+    const wire = event.target.closest && event.target.closest(".graph-wire-hit");
+    const node = event.target.closest && event.target.closest("[data-node]");
+    if (pin) hover = { type: "pin", id: pin.dataset.pin, node: node && node.dataset.node };
+    else if (wire) hover = { type: "edge", id: wire.dataset.edge };
+    else if (node) hover = { type: "node", id: node.dataset.node };
+    else return;
+    paint();
+  });
+  svg.addEventListener("pointerout", (event) => {
+    const related = event.relatedTarget;
+    if (related && svg.contains(related) && related.closest && related.closest("[data-pin], .graph-wire-hit, [data-node]")) return;
+    hover = null;
+    paint();
   });
   svg.addEventListener("contextmenu", (event) => event.preventDefault());
   svg.addEventListener(
@@ -393,6 +521,14 @@ export function mountGraph(stage, spec) {
     if ((event.key === "f" || event.key === "F") && (stage === active || stage.matches(":hover"))) {
       event.preventDefault();
       fit();
+    }
+    if (event.key === "Escape" && spec.selectedId && (stage === active || stage.matches(":hover") || stage.contains(active))) {
+      event.preventDefault();
+      event.stopPropagation();
+      cleared = true;
+      hover = null;
+      paint();
+      spec.onSelect("");
     }
   };
   doc.addEventListener("keydown", onKey);
@@ -456,6 +592,7 @@ function drawPin(pin, index, width, dir) {
   const y = HEAD + index * PIN + PIN / 2;
   const x = dir === "out" ? width : 0;
   const wrap = svgEl("g");
+  wrap.setAttribute("class", "graph-pin");
   wrap.dataset.pin = pin.id;
   wrap.dataset.dir = dir;
   wrap.dataset.type = pinKind(pin);
@@ -468,6 +605,7 @@ function drawPin(pin, index, width, dir) {
   dot.setAttribute("cx", String(x));
   dot.setAttribute("cy", String(y));
   dot.setAttribute("r", "5");
+  dot.setAttribute("class", "graph-pin-dot");
   dot.setAttribute("fill", pinColor(pin));
   dot.setAttribute("stroke", "#121614");
   dot.setAttribute("stroke-width", "1");

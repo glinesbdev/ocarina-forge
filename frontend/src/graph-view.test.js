@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   boundsOf,
   categoryColor,
+  connectionSpotlight,
   fitCamera,
+  frameCamera,
   minimapLayout,
   nodeCategory,
   pinColor,
@@ -36,6 +38,29 @@ test("pins keep a color for each type", () => {
   assert.equal(pinKind({ type: "flow" }), "flow");
   assert.notEqual(pinColor({ type: "bool" }), pinColor({ type: "float" }));
   assert.notEqual(pinColor({ type: "flow" }), pinColor({ type: "string" }));
+});
+
+test("a hovered node lights its wires and a hovered wire lights both ends", () => {
+  const edges = [
+    { id: "e1", from: "a:out", to: "b:in", fromNode: "a", toNode: "b" },
+    { id: "e2", from: "b:out", to: "c:in", fromNode: "b", toNode: "c" },
+    { id: "e3", from: "d:out", to: "e:in", fromNode: "d", toNode: "e" },
+  ];
+  const node = connectionSpotlight(edges, { type: "node", id: "b" });
+  assert.deepEqual(node.hot, ["e1", "e2"]);
+  assert.deepEqual(node.inputs, ["a"]);
+  assert.deepEqual(node.outputs, ["c"]);
+  assert.equal(node.focus, "b");
+  const wire = connectionSpotlight(edges, { type: "edge", id: "e1" });
+  assert.deepEqual(wire.hot, ["e1"]);
+  assert.deepEqual(wire.inputs, ["a"]);
+  assert.deepEqual(wire.outputs, ["b"]);
+  const pin = connectionSpotlight(edges, { type: "pin", id: "b:out", node: "b" });
+  assert.deepEqual(pin.hot, ["e2"]);
+  assert.deepEqual(pin.outputs, ["c"]);
+  const shot = frameCamera({ x: 0, y: 0, zoom: 1 }, { width: 800, height: 600 }, { x: 100, y: 40, w: 200, h: 80 });
+  assert.equal(shot.x, 800 / 2 - 200);
+  assert.equal(shot.y, 600 / 2 - 80);
 });
 
 test("a wire is a cubic bezier", () => {

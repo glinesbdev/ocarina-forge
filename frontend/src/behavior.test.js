@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { displayName, layoutGraph, sharedFileLabel, visibleNodes } from "./behavior.js";
+import { displayName, graphHistory, historyStep, layoutGraph, nodeConnections, sharedFileLabel, visibleNodes } from "./behavior.js";
 import { COL, NODE_W } from "./graph-view.js";
 
 test("a shared schedule file is labeled with the pack it lives in", () => {
@@ -47,6 +47,52 @@ test("a connected node sits to the right and a second layout keeps the same ids"
   assert.deepEqual(Object.keys(laid.positions), Object.keys(again.positions));
   assert.equal(laid.positions[flag.id].x, again.positions[flag.id].x);
   assert.equal(graph.nodes[0].id, "ainb:AI/Fado.ainb#0:HoldGameDataGetBool");
+});
+
+test("connections group each pin and mark a wire that leaves the view", () => {
+  const read = { id: "a", name: "Read flag", pins: [{ id: "a:out", dir: "out", name: "Bool", type: "bool" }] };
+  const gate = {
+    id: "b",
+    name: "Gate",
+    pins: [
+      { id: "b:in", dir: "in", name: "Logic", type: "bool" },
+      { id: "b:out", dir: "out", name: "Then", type: "flow" },
+    ],
+  };
+  const spawn = { id: "c", name: "Spawn", pins: [{ id: "c:in", dir: "in", name: "In", type: "flow" }] };
+  const graph = {
+    nodes: [read, gate, spawn],
+    edges: [
+      { id: "e1", from: "a:out", to: "b:in" },
+      { id: "e2", from: "b:out", to: "c:in" },
+    ],
+  };
+  const outside = nodeConnections(gate, graph, new Set(["b"]));
+  assert.equal(outside.inputs[0].pin.name, "Logic");
+  assert.equal(outside.inputs[0].rows[0].otherName, "Read flag");
+  assert.equal(outside.inputs[0].rows[0].otherPin, "Bool");
+  assert.equal(outside.inputs[0].rows[0].outside, true);
+  assert.equal(outside.outputs[0].rows[0].outside, true);
+  const inside = nodeConnections(gate, graph, new Set(["a", "b", "c"]));
+  assert.equal(inside.outputs[0].rows[0].outside, false);
+  assert.equal(inside.outputs[0].rows[0].edgeId, "e2");
+});
+
+test("connection jumps keep a back and forward history", () => {
+  let history = { trail: [], ahead: [] };
+  let current = { node: "a", entry: "a", file: "ai" };
+  history = graphHistory(history, current, { node: "b", entry: "a", file: "ai" });
+  current = { node: "b", entry: "a", file: "ai" };
+  history = graphHistory(history, current, { node: "c", entry: "c", file: "ai" });
+  assert.deepEqual(history.trail.map((point) => point.node), ["a", "b"]);
+  assert.equal(history.ahead.length, 0);
+  const back = historyStep(history, { node: "c", entry: "c", file: "ai" }, -1);
+  assert.equal(back.current.node, "b");
+  assert.equal(back.current.entry, "a");
+  const forward = historyStep(back, back.current, 1);
+  assert.equal(forward.current.node, "c");
+  const same = graphHistory(forward, forward.current, forward.current);
+  assert.equal(same.trail.length, forward.trail.length);
 });
 
 test("a file opens on its entry and search stays inside that file", () => {

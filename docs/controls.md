@@ -53,7 +53,13 @@ The editor shows this same list with ? or the Shortcuts button.
 - Scroll: Zoom toward the cursor
 - F, or Fit: Fit the graph in the panel
 - Minimap: Drag the map in the corner to pan. The rectangle is the current view
-- Click a node: Select it and edit its fields. The change is a set field op
+- Click a node: Select it and edit its fields. The change is a set field op. Its wires brighten and thicken, and flow wires animate. Nodes that feed it get a blue outline, nodes it feeds get an orange outline, and everything else dims to about 25%
+- Hover a node: The same highlight, for that node, until the pointer leaves
+- Hover a wire or a pin: That wire and its two ends stay bright. The rest dims
+- Esc, or click empty space: Clear the highlight and the node selection. Esc still clears the actor when the pointer is not over the graph
+- Connections: Inputs and outputs in the inspector, grouped by pin, in that pin's color. Hover a row to light that wire. Click a row to select the other node and pan to it
+- Outside view: A wire whose other end is past the 160-node neighborhood. Clicking it recenters the neighborhood on that node
+- Alt+Left / Alt+Right: Over the graph, back and forward through those connection jumps
 
 ## Windows
 

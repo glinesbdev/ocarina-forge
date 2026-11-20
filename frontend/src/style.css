@@ -377,6 +377,43 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .graph-pin-hit { fill: transparent; }
 .graph-wire { fill: none; stroke-width: 2.25; pointer-events: none; }
 .graph-wire-hit { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; }
+.graph-world.is-spotlight .graph-node-shape,
+.graph-world.is-spotlight .graph-wire { opacity: 0.25; }
+.graph-world.is-spotlight .graph-node-shape.is-focus,
+.graph-world.is-spotlight .graph-node-shape.is-input,
+.graph-world.is-spotlight .graph-node-shape.is-output,
+.graph-world.is-spotlight .graph-wire.is-hot { opacity: 1; }
+.graph-node-shape.is-input .graph-node-body { stroke: #7eb6ff; stroke-width: 2.5; }
+.graph-node-shape.is-output .graph-node-body { stroke: #f0a35e; stroke-width: 2.5; }
+.graph-node-shape.is-input.is-output .graph-node-body { stroke: #f4f7f2; stroke-width: 2.5; }
+.graph-node-shape.is-focus .graph-node-body.is-on { stroke: var(--gold); stroke-width: 2; }
+.graph-wire.is-hot { stroke-width: 4.5; }
+.graph-wire.is-hot.is-flow { stroke-dasharray: 7 5; animation: graph-flow 0.7s linear infinite; }
+.graph-pin-dot { pointer-events: none; }
+.graph-pin.is-hot .graph-pin-dot { stroke: #f4f7f2; stroke-width: 2; }
+@keyframes graph-flow { to { stroke-dashoffset: -24; } }
+@media (prefers-reduced-motion: reduce) {
+  .graph-wire.is-hot.is-flow { animation: none; }
+}
+.graph-connections { margin-top: 12px; }
+.graph-conn-side { margin-top: 8px; color: var(--text); font-size: 12px; font-weight: 600; }
+.graph-conn-pin { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12px; }
+.graph-conn-swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.graph-conn-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-left: 3px solid var(--line);
+  border-radius: 0;
+  padding: 4px 8px;
+  min-height: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+.graph-conn-row.is-outside { color: var(--muted); }
+.graph-conn-row:hover { background: var(--bg-inset); }
 .graph-minimap {
   position: absolute;
   right: 10px;
