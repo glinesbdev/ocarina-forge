@@ -5,8 +5,10 @@ from __future__ import annotations
 import multiprocessing
 import os
 import shutil
+import signal
 import threading
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -36,7 +38,28 @@ from bancwright.project import Project
 from bancwright.recipes import recipe_actors
 from bancwright.scene import apply_command, replace_diff, scene_view, sibling_bancs
 
-app = FastAPI(title="Bancwright", version=__version__)
+def _ignore_sigint() -> None:
+    """Worker processes must not print KeyboardInterrupt when the terminal gets Ctrl+C."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _close_pool() -> None:
+    """Drop queued converts and return without waiting on the workers."""
+    global _POOL
+    with _POOL_LOCK:
+        pool = _POOL
+        _POOL = None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    yield
+    _close_pool()
+
+
+app = FastAPI(title="Bancwright", version=__version__, lifespan=_lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.add_middleware(
     CORSMiddleware,
@@ -67,7 +90,11 @@ def _pool():
         return None
     with _POOL_LOCK:
         if _POOL is None:
-            _POOL = ProcessPoolExecutor(max_workers=count, mp_context=multiprocessing.get_context("spawn"))
+            _POOL = ProcessPoolExecutor(
+                max_workers=count,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_ignore_sigint,
+            )
         return _POOL
 
 

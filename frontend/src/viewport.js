@@ -876,6 +876,88 @@ export function createViewport(host, hooks) {
     groundGrid = gridLines;
   }
 
+  const TERRAIN_MAP = `
+    vec2 terrainCell(vec2 worldUv, float slot) {
+      float columns = max(terrainCols, 1.0);
+      float column = mod(floor(slot + 0.5), columns);
+      float row = floor(floor(slot + 0.5) / columns);
+      vec2 repeated = fract(worldUv);
+      vec2 inside = repeated * 0.96 + 0.02;
+      return (vec2(column, row) + inside) / columns;
+    }
+    vec4 terrainSample(vec2 worldUv, float slot) {
+      return texture2D(map, terrainCell(worldUv, slot));
+    }
+    vec4 terrainTri(float slot) {
+      vec3 blend = abs(normalize(vTerrainNormal));
+      blend = pow(max(blend, vec3(0.0001)), vec3(4.0));
+      blend /= (blend.x + blend.y + blend.z);
+      vec4 alongX = terrainSample(vTerrainWorld.zy / terrainRepeat, slot);
+      vec4 alongY = terrainSample(vTerrainWorld.xz / terrainRepeat, slot);
+      vec4 alongZ = terrainSample(vTerrainWorld.xy / terrainRepeat, slot);
+      return alongX * blend.x + alongY * blend.y + alongZ * blend.z;
+    }
+    vec4 sampledDiffuseColor = mix(
+      terrainTri(vTerrainLayer.x),
+      terrainTri(vTerrainLayer.y),
+      clamp(vTerrainShade.x, 0.0, 1.0)
+    );
+    diffuseColor *= sampledDiffuseColor;
+  `;
+
+  function installTerrainShader(material) {
+    if (!material || material.userData.terrainShader) return material;
+    const columns = Number(material.userData.atlas) || 1;
+    const repeat = Number(material.userData.repeat) || 8;
+    material.userData.terrainShader = true;
+    if (material.map) {
+      material.map.wrapS = THREE.ClampToEdgeWrapping;
+      material.map.wrapT = THREE.ClampToEdgeWrapping;
+      material.map.needsUpdate = true;
+    }
+    const previous = material.onBeforeCompile;
+    material.onBeforeCompile = (shader) => {
+      if (previous) previous(shader);
+      shader.uniforms.terrainCols = { value: columns };
+      shader.uniforms.terrainRepeat = { value: repeat };
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <uv_pars_vertex>",
+          `#include <uv_pars_vertex>
+attribute vec2 uv1;
+attribute vec2 uv2;
+varying vec3 vTerrainWorld;
+varying vec3 vTerrainNormal;
+varying vec2 vTerrainLayer;
+varying vec2 vTerrainShade;`
+        )
+        .replace(
+          "#include <uv_vertex>",
+          `#include <uv_vertex>
+vTerrainLayer = uv1;
+vTerrainShade = uv2;
+vTerrainWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+vTerrainNormal = normalize(mat3(modelMatrix) * normal);`
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <uv_pars_fragment>",
+          `#include <uv_pars_fragment>
+varying vec3 vTerrainWorld;
+varying vec3 vTerrainNormal;
+varying vec2 vTerrainLayer;
+varying vec2 vTerrainShade;
+uniform float terrainCols;
+uniform float terrainRepeat;`
+        )
+        .replace("#include <map_fragment>", TERRAIN_MAP);
+    };
+    const previousKey = material.customProgramCacheKey ? material.customProgramCacheKey.bind(material) : null;
+    material.customProgramCacheKey = () => `${previousKey ? previousKey() : ""}|terrain|${columns}|${repeat}`;
+    material.needsUpdate = true;
+    return material;
+  }
+
   function mergeStatic(template) {
     const byMaterial = new Map();
     template.traverse((child) => {
@@ -884,11 +966,15 @@ export function createViewport(host, hooks) {
       if (!source) return;
       let material = prepareMaterial(source);
       const geometry = child.geometry.clone();
-      if (geometry.getAttribute("color")) {
+      const terrain =
+        geometry.getAttribute("uv1") &&
+        (((material.userData && material.userData.banc) === "terrain") || (child.name || "").includes("terrain"));
+      if (geometry.getAttribute("color") || terrain) {
         material = material.clone();
-        material.vertexColors = true;
+        if (geometry.getAttribute("color")) material.vertexColors = true;
         material.needsUpdate = true;
       }
+      if (terrain) installTerrainShader(material);
       child.updateWorldMatrix(true, false);
       geometry.applyMatrix4(child.matrixWorld);
       const list = byMaterial.get(material) || { material, geometries: [] };

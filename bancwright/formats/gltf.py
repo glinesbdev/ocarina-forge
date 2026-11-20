@@ -24,6 +24,9 @@ class Primitive:
     unlit: bool = False
     kind: str = ""
     colors: list[tuple[float, float, float]] | None = None
+    uvs2: list[tuple[float, float]] | None = None
+    shades: list[tuple[float, float]] | None = None
+    extras: dict | None = None
 
 
 def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
@@ -246,6 +249,12 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if prim.uvs and len(prim.uvs) == len(positions):
             uv_bytes = b"".join(struct.pack("<2f", u, v) for u, v in prim.uvs)
             attributes["TEXCOORD_0"] = accessor(view(uv_bytes, 34962), len(prim.uvs), "VEC2", 5126)
+        if prim.uvs2 and len(prim.uvs2) == len(positions):
+            uv_bytes = b"".join(struct.pack("<2f", u, v) for u, v in prim.uvs2)
+            attributes["TEXCOORD_1"] = accessor(view(uv_bytes, 34962), len(prim.uvs2), "VEC2", 5126)
+        if prim.shades and len(prim.shades) == len(positions):
+            shade_bytes = b"".join(struct.pack("<2f", weight, shade) for weight, shade in prim.shades)
+            attributes["TEXCOORD_2"] = accessor(view(shade_bytes, 34962), len(prim.shades), "VEC2", 5126)
         if prim.colors and len(prim.colors) == len(positions):
             color_bytes = b"".join(struct.pack("<3f", red, green, blue) for red, green, blue in prim.colors)
             attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)
@@ -265,6 +274,8 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         alpha = prim.alpha if prim.alpha in ("opaque", "mask", "blend") else "opaque"
         cutoff = round(min(max(float(prim.cutoff), 0.0), 1.0), 4)
         kind = prim.kind or ""
+        extras = {key: value for key, value in (prim.extras or {}).items() if isinstance(key, str)}
+        extra_key = tuple(sorted((key, repr(value)) for key, value in extras.items()))
         key = (
             image_index,
             alpha,
@@ -273,6 +284,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             tuple(round(channel, 4) for channel in color),
             bool(prim.unlit),
             kind,
+            extra_key,
         )
         if key not in material_of:
             pbr = {
@@ -291,9 +303,12 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             if prim.unlit:
                 material["extensions"] = {"KHR_materials_unlit": {}}
                 used_unlit = True
-            if kind:
-                material["name"] = kind
-                material["extras"] = {"banc": kind}
+            if kind or extras:
+                material["extras"] = {}
+                if kind:
+                    material["name"] = kind
+                    material["extras"]["banc"] = kind
+                material["extras"].update(extras)
             materials.append(material)
             material_of[key] = len(materials) - 1
         label = prim.name or f"part{len(grouped)}"

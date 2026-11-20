@@ -18,6 +18,7 @@ import array
 import contextvars
 import hashlib
 import json
+import math
 import os
 import re
 import struct
@@ -47,7 +48,7 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-13\0"
+_CACHE_VERSION = b"models-14\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1405,7 +1406,11 @@ def _accept(image, alpha: str, cutoff: float):
     note = image.note or ""
     rgba = image.rgba
     mode = alpha
-    if fraction >= 0.02:
+    if mode == "opaque" and _has_near_magenta(rgba):
+        rgba = _inpaint_magenta(rgba, image.width, image.height)
+        extra = "magenta texels were replaced with a neighbour"
+        note = f"{note}. {extra}".strip(". ")
+    elif fraction >= 0.02:
         rgba = _punch_magenta(rgba)
         if mode == "opaque":
             mode = "mask"
@@ -1424,6 +1429,22 @@ def _accept(image, alpha: str, cutoff: float):
     return image, mode, cutoff, note
 
 
+def _strict_magenta(red: int, green: int, blue: int, alpha: int) -> bool:
+    return alpha >= 200 and red >= 235 and green <= 25 and blue >= 235
+
+
+def _near_magenta(red: int, green: int, blue: int, alpha: int) -> bool:
+    """A missing-texture dash that is not a clean 255,0,255 placeholder."""
+    return alpha >= 200 and red >= 190 and blue >= 190 and green <= 80 and abs(red - blue) <= 48
+
+
+def _has_near_magenta(rgba: bytes) -> bool:
+    for at in range(0, len(rgba) - 3, 4):
+        if _near_magenta(rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]):
+            return True
+    return False
+
+
 def _magenta_fraction(rgba: bytes) -> float:
     total = len(rgba) // 4
     if total <= 0:
@@ -1435,7 +1456,7 @@ def _magenta_fraction(rgba: bytes) -> float:
         at = index * 4
         red, green, blue, alpha = rgba[at : at + 4]
         seen += 1
-        if alpha >= 200 and red >= 235 and green <= 25 and blue >= 235:
+        if _strict_magenta(red, green, blue, alpha):
             hit += 1
     return hit / seen if seen else 0.0
 
@@ -1443,9 +1464,40 @@ def _magenta_fraction(rgba: bytes) -> float:
 def _punch_magenta(rgba: bytes) -> bytes:
     out = bytearray(rgba)
     for at in range(0, len(out) - 3, 4):
-        if out[at] >= 235 and out[at + 1] <= 25 and out[at + 2] >= 235 and out[at + 3] >= 200:
+        if _strict_magenta(out[at], out[at + 1], out[at + 2], out[at + 3]):
             out[at + 3] = 0
     return bytes(out)
+
+
+def _inpaint_magenta(rgba: bytes, width: int, height: int) -> bytes:
+    """Replace sparse magenta texels with a neighbour so the albedo stays opaque."""
+    if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return rgba
+    current = bytearray(rgba)
+    neighbours = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    for _sweep in range(4):
+        nxt = bytearray(current)
+        changed = False
+        for y in range(height):
+            for x in range(width):
+                at = (y * width + x) * 4
+                if not _near_magenta(current[at], current[at + 1], current[at + 2], current[at + 3]):
+                    continue
+                for dx, dy in neighbours:
+                    xx = x + dx
+                    yy = y + dy
+                    if xx < 0 or yy < 0 or xx >= width or yy >= height:
+                        continue
+                    src = (yy * width + xx) * 4
+                    if _near_magenta(current[src], current[src + 1], current[src + 2], current[src + 3]):
+                        continue
+                    nxt[at : at + 3] = current[src : src + 3]
+                    changed = True
+                    break
+        current = nxt
+        if not changed:
+            break
+    return bytes(current)
 
 
 def _alpha_span(rgba: bytes) -> tuple[int, int]:
@@ -2333,16 +2385,18 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 heights = [value * multiplier for value in heights]
             mate_dirs = [directory] + [item for item in directories if item != directory]
             mate_errors = []
+            pairs = None
             for mate_path, _mate_dir in _files_in_dirs(dump, mate_dirs, name, (".mate", ".mate.zs")):
                 _track_file(dump, mate_path)
                 try:
                     mate_blob, _dict_id = dump.read_file(mate_path)
-                    mate_layers, mate_note = heightmap.read_mate(mate_blob, dump.dicts())
+                    mate_layers, mate_pairs, mate_note = heightmap.read_terrain_material(mate_blob, dump.dicts())
                 except (BancError, heightmap.TerrainError, struct.error, ValueError, OSError) as exc:
                     message = exc.message if isinstance(exc, BancError) else str(exc)
-                    mate_layers, mate_note = None, message
+                    mate_layers, mate_pairs, mate_note = None, None, message
                 if mate_layers is not None:
                     layers = mate_layers
+                    pairs = mate_pairs
                     note = mate_note
                     info.mate = mate_path
                     info.mate_histogram, info.mate_note = heightmap.split_histogram(mate_note)
@@ -2381,7 +2435,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 info.ao = (info.ao + " " if info.ao else "") + f"{custom_files[0][0]} is present and was not used"
             _track_file(dump, path)
             info.reason = note
-            loaded.append((center_x, center_z, edge, name, heights, layers, occlusion, info))
+            loaded.append((center_x, center_z, edge, name, heights, layers, occlusion, pairs, info))
         focus_x = located["origin"][0] if clip is None else (clip[0] + clip[2]) / 2
         focus_z = located["origin"][2] if clip is None else (clip[1] + clip[3]) / 2
         steps, step_note = heightmap.sample_steps(
@@ -2392,14 +2446,14 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         )
         choice_notes.append(step_note)
         parts, reports = heightmap.build_scene(
-            [(item[0], item[1], item[2], item[3], item[4], item[5], item[6]) for item in loaded],
+            [(item[0], item[1], item[2], item[3], item[4], item[5], item[6], item[7]) for item in loaded],
             scale,
             height_scale,
             located["origin"],
             clip=None,
             steps=steps,
         )
-        by_name = {item[3]: item[7] for item in loaded}
+        by_name = {item[3]: item[8] for item in loaded}
         for report in reports:
             prior = by_name.get(report.name)
             path = prior.path if prior else ""
@@ -2427,34 +2481,11 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 "tiles": rows,
                 "terrain": _terrain_meta(located, scale, height_scale, clip, choice_notes, sub_paths),
             }
-        layer_ids = sorted({part.layer for part in parts if part.layer is not None})
+        layer_ids = sorted({item for part in parts for item in (part.layer, part.layer_b) if item is not None})
         images, log, raws = _bind_terrain_layers(dump, layer_ids)
     finally:
         _FILES.reset(token)
-    primitives = []
-    positions = []
-    triangles = 0
-    used_images = 0
-    for part in parts:
-        image = images.get(part.layer) if part.layer is not None else None
-        png = _encode_cached(image, "png") if image is not None and image.rgba else None
-        if png:
-            used_images += 1
-        primitives.append(
-            Primitive(
-                part.positions,
-                part.indices,
-                part.uvs,
-                png=png,
-                alpha="opaque",
-                double_sided=True,
-                base_color=(1.0, 1.0, 1.0, 1.0) if png else _EARTH,
-                name=f"terrain:{part.layer if part.layer is not None else 'earth'}",
-                colors=part.colors,
-            )
-        )
-        triangles += len(part.indices) // 3
-        positions.extend(part.positions)
+    primitives, positions, triangles, used_images = _terrain_primitives(parts, images, layer_ids)
     if not primitives:
         return {
             "status": "none",
@@ -2471,7 +2502,10 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         notes.append("MaterialAlb layers " + ", ".join(str(item) for item in layer_ids))
     else:
         notes.append("no material index in the heightmap, so the ground is a flat earth colour")
-    notes.append(f"UV repeats every {heightmap._UV_METRES:.0f} m (a guess)")
+    notes.append(
+        f"triplanar UV repeats every {heightmap._UV_METRES:.0f} m (a guess); "
+        "leaf tiles only, one atlas draw, skirts on tile edges"
+    )
     notes.append("custom.extm is not decoded")
     reason = "terrain heightmap. " + " ".join(notes)
     bounds = None
@@ -2519,6 +2553,150 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
     return _height_response(banc, digest, info)
 
 
+_ATLAS_CELL = 128
+_ATLAS_KEEP = 16
+
+
+def _solid_cell(color, size: int = _ATLAS_CELL) -> bytes:
+    red, green, blue = [max(0, min(255, int(round(channel * 255)))) for channel in color[:3]]
+    return bytes((red, green, blue, 255)) * (size * size)
+
+
+def _image_cell(image, size: int = _ATLAS_CELL) -> bytes:
+    width = int(getattr(image, "width", 0) or 0)
+    height = int(getattr(image, "height", 0) or 0)
+    rgba = getattr(image, "rgba", b"") or b""
+    if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return _solid_cell(_EARTH, size)
+    out = bytearray(size * size * 4)
+    for y in range(size):
+        sy = min(height - 1, y * height // size)
+        row = sy * width
+        for x in range(size):
+            sx = min(width - 1, x * width // size)
+            src = (row + sx) * 4
+            dst = (y * size + x) * 4
+            out[dst : dst + 4] = rgba[src : src + 4]
+    return bytes(out)
+
+
+def _pack_atlas(cells: list[bytes]) -> tuple[bytes, int]:
+    count = max(1, len(cells))
+    cols = max(1, math.ceil(math.sqrt(count)))
+    rows = max(1, math.ceil(count / cols))
+    size = _ATLAS_CELL
+    width = cols * size
+    height = rows * size
+    out = bytearray(width * height * 4)
+    for index, cell in enumerate(cells):
+        cx = (index % cols) * size
+        cy = (index // cols) * size
+        for y in range(size):
+            src = y * size * 4
+            dst = ((cy + y) * width + cx) * 4
+            out[dst : dst + size * 4] = cell[src : src + size * 4]
+    png, _mime = encode_albedo(width, height, bytes(out), "opaque")
+    return png, cols
+
+
+def _terrain_primitives(parts, images, layer_ids):
+    """One draw for the whole field. Layer ids live in TEXCOORD_1 and do not blend."""
+    positions = []
+    triangles = 0
+    if not layer_ids:
+        primitives = []
+        for part in parts:
+            primitives.append(
+                Primitive(
+                    part.positions,
+                    part.indices,
+                    part.uvs,
+                    alpha="opaque",
+                    double_sided=False,
+                    base_color=_EARTH,
+                    name="terrain",
+                    kind="terrain",
+                    colors=part.colors,
+                )
+            )
+            triangles += len(part.indices) // 3
+            positions.extend(part.positions)
+        return primitives, positions, triangles, 0
+    counts: dict[int, int] = {}
+    for part in parts:
+        for layer in (part.layer, part.layer_b):
+            if layer is None:
+                continue
+            counts[layer] = counts.get(layer, 0) + len(part.positions)
+    ranked = sorted(counts, key=lambda item: (-counts[item], item))
+    kept = ranked[:_ATLAS_KEEP]
+    slots: dict[int, float] = {}
+    cells = []
+    for layer in kept:
+        image = images.get(layer)
+        cells.append(_image_cell(image) if image is not None and getattr(image, "rgba", None) else _solid_cell(_EARTH))
+        slots[layer] = float(len(slots))
+    earth = float(len(cells))
+    cells.append(_solid_cell(_EARTH))
+    png, cols = _pack_atlas(cells)
+
+    def slot_for(layer):
+        if layer is None:
+            return earth
+        found = slots.get(layer)
+        if found is not None:
+            return found
+        if not kept:
+            return earth
+        nearest = min(kept, key=lambda item: (abs(item - layer), item))
+        return slots[nearest]
+
+    merged_pos = []
+    merged_idx = []
+    merged_uv = []
+    merged_uv2 = []
+    merged_shade = []
+    merged_color = []
+    any_color = any(part.colors for part in parts)
+    for part in parts:
+        base = len(merged_pos)
+        slot_a = slot_for(part.layer)
+        slot_b = slot_for(part.layer_b) if part.layer_b is not None else slot_a
+        for index, point in enumerate(part.positions):
+            merged_pos.append(point)
+            if part.uvs and index < len(part.uvs):
+                merged_uv.append(part.uvs[index])
+            else:
+                merged_uv.append((point[0] / heightmap._UV_METRES, point[2] / heightmap._UV_METRES))
+            merged_uv2.append((slot_a, slot_b))
+            weight = part.weights[index] if part.weights and index < len(part.weights) else 0.0
+            shade = part.colors[index][0] if part.colors and index < len(part.colors) else 1.0
+            merged_shade.append((float(weight), float(shade)))
+            if any_color:
+                merged_color.append(part.colors[index] if part.colors and index < len(part.colors) else (1.0, 1.0, 1.0))
+        merged_idx.extend(base + item for item in part.indices)
+        triangles += len(part.indices) // 3
+        positions.extend(part.positions)
+    if len(merged_pos) < 3 or len(merged_idx) < 3:
+        return [], positions, 0, 0
+    primitive = Primitive(
+        merged_pos,
+        merged_idx,
+        merged_uv,
+        png=png,
+        alpha="opaque",
+        double_sided=False,
+        base_color=(1.0, 1.0, 1.0, 1.0),
+        name="terrain",
+        kind="terrain",
+        colors=merged_color or None,
+        uvs2=merged_uv2,
+        shades=merged_shade,
+        extras={"atlas": cols, "repeat": heightmap._UV_METRES},
+    )
+    return [primitive], positions, triangles, 1 if png else 0
+
+
 def _terrain_meta(located, scale, height_scale, clip, notes, subs=None) -> dict:
     origin = located.get("origin") or (0.0, 0.0, 0.0)
     return {
@@ -2535,11 +2713,18 @@ def _terrain_meta(located, scale, height_scale, clip, notes, subs=None) -> dict:
 
 def _height_blob(loaded) -> bytes:
     chunks = []
-    for center_x, center_z, edge, name, heights, layers, occlusion, _info in loaded:
+    for center_x, center_z, edge, name, heights, layers, occlusion, pairs, _info in loaded:
         chunks.append(f"{name}:{center_x}:{center_z}:{edge}".encode("utf-8", "replace"))
         chunks.append(array.array("f", heights).tobytes())
         if layers:
             chunks.append(bytes((int(item) & 0xFF) if int(item) >= 0 else 0xFF for item in layers))
+        if pairs:
+            packed = bytearray()
+            for first, second, weight in pairs:
+                packed.append(int(first) & 0xFF if int(first) >= 0 else 0xFF)
+                packed.append(int(second) & 0xFF if int(second) >= 0 else 0xFF)
+                packed.append(max(0, min(255, int(round(float(weight) * 255)))))
+            chunks.append(bytes(packed))
         if occlusion:
             chunks.append(array.array("f", occlusion).tobytes())
     return b"\0".join(chunks)

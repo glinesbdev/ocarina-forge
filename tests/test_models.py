@@ -1822,3 +1822,75 @@ def test_empty_mask_alpha_stays_a_cutout_and_bc4_is_not_colour():
     rejected, _mode, _cutoff, why = _accept(noise, "opaque", 0.5)
     assert rejected is None
     assert "BC4" in why
+
+
+def test_sparse_magenta_on_an_opaque_albedo_is_filled_not_punched():
+    from bancwright.formats.bntx import Texture
+    from bancwright.models import _accept
+
+    rgba = bytearray([20, 90, 30, 255]) * 4
+    rgba[4:8] = bytes([220, 10, 210, 255])
+    image = Texture(name="Bark", width=2, height=2, rgba=bytes(rgba), fmt=0)
+    accepted, mode, _cutoff, note = _accept(image, "opaque", 0.5)
+    assert mode == "opaque"
+    assert "neighbour" in note
+    assert accepted.rgba[4] < 80 and accepted.rgba[6] < 80
+    solid = Texture(name="Bad", width=2, height=2, rgba=bytes([255, 0, 255, 255]) * 4, fmt=0)
+    rejected, _mode, _cutoff, why = _accept(solid, "opaque", 0.5)
+    assert rejected is None
+    assert "magenta" in why
+
+
+def test_neutral_blend_keeps_both_materials_and_holes_copy_a_neighbour():
+    from bancwright.formats.terrain import SIZE, _fill_pairs, read_terrain_material
+
+    raw = bytes([15, 11, 0x7F, 0x7F]) * (SIZE * SIZE)
+    layers, pairs, note = read_terrain_material(raw)
+    assert layers is not None and pairs is not None
+    assert layers[0] == 15
+    assert pairs[0] == (15, 11, 0.5)
+    assert "0x7f" in note
+    hole = bytearray(raw)
+    hole[0:4] = bytes([255, 127, 127, 127])
+    _layers, opened, _note = read_terrain_material(bytes(hole))
+    assert opened[0][0] < 0
+    filled = _fill_pairs(opened)
+    assert filled[0][0] == 15 and filled[0][1] == 11
+
+
+def test_leaf_tiles_stay_under_a_triangle_budget():
+    from bancwright.formats.terrain import SIZE, build_scene, sample_steps
+
+    quads = []
+    tiles = []
+    for index in range(30):
+        name = f"T{index:02d}"
+        center = (float((index % 6) * 10), float((index // 6) * 10))
+        quads.append((center[0], center[1], 8.0, name))
+        tiles.append((center[0], center[1], 8.0, name, [0.5] * (SIZE * SIZE), None))
+    coarse = (20.0, 10.0, 64.0, "Coarse", [0.5] * (SIZE * SIZE), None)
+    steps, note = sample_steps(quads + [coarse[:4]], 1.0, (0.0, 0.0, 0.0), (20.0, 10.0))
+    assert min(steps.values()) >= 8
+    assert "m apart" in note
+    parts, reports = build_scene(tiles + [coarse], 1.0, 10.0, steps=steps)
+    total = sum(len(part.indices) // 3 for part in parts)
+    assert total < 20000
+    alone, _reports = build_scene([coarse], 1.0, 10.0, steps=steps)
+    alone_tris = sum(len(part.indices) // 3 for part in alone)
+    coarse_tris = next(row.triangles for row in reports if row.name == "Coarse")
+    assert coarse_tris < alone_tris
+    assert total > coarse_tris
+
+
+def test_workers_ignore_sigint_and_the_pool_closes_quietly():
+    import signal
+
+    from bancwright.server import _close_pool, _ignore_sigint
+
+    previous = signal.getsignal(signal.SIGINT)
+    try:
+        _ignore_sigint()
+        assert signal.getsignal(signal.SIGINT) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    _close_pool()

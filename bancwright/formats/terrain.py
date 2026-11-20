@@ -20,23 +20,28 @@ The layout was checked against the files the game ships, not against game code:
 A second scene named `<scene>_sub` (or a GameBancParam string that ends in
 `_sub`) lists the same quadtree. Fine tiles often have their `.hght` only
 under that directory, and the coarse tiles only under the main one. A tile
-is read from whichever directory has the file. A finer tile replaces a
-coarser one. Every tile that meets the placed actors, expanded by 200 m, is
-meshed. There is no fixed tile cap. Tiles near that area are sampled more
-finely than tiles at the edge of the margin.
+is read from whichever directory has the file. Only the leaf of the quadtree
+is meshed: a coarse cell whose centre, or the inner half of that cell, sits
+on a finer tile is dropped. Every remaining tile that meets the placed
+actors, expanded by 200 m, is meshed. There is no fixed tile cap. Samples are
+about 2 m apart near the actors, 5 m in the middle distance, and 10 m at the
+edge of the margin, and never finer than step 8 on that path. Each tile grows
+a vertical skirt so a coarser neighbour does not leave a crack.
 
 The per-corner material is `<tile>.mate`, the same TARB-and-zstd wrapper as a
 heightmap. After the header, `+0x2C` is a relative offset to a 4-byte texel
 block and `+0x30` is its size. Retail blocks are two copies of the 257×257
 block-linear surface used by heights (log2 4, 417792 bytes each). A texel is
-material A, material B, then two blend bytes. 255 and 127 mean “no index”,
-and 0x7f in a blend byte is neutral, so material A is used. That reading is
-a guess. A tight linear grid is still accepted, and there blend at or above
-128 selects material B. The block at `.hght` `+0x1C` is only a fallback when
-no `.mate` decodes. `<tile>.<child|adult>.bake_ao.extm` uses the same header
-and is a 1-byte or 4-byte block-linear grid. `<tile>.custom.extm` is left unused.
-
-A coarser tile does not cover ground that a finer tile also covers.
+material A, material B, then two blend bytes. 255 and 127 mean “no index”.
+An empty or invalid texel copies a neighbouring material; it is never drawn
+as magenta. 0x7f in a blend byte is a neutral mix, so the two albedos are
+blended halfway. A real blend byte is that byte divided by 255. Both of those
+weights are a guess. The stored layer list still names material A unless a
+non-neutral weight is 128 or more, so a diagnostic can name one index. A
+tight linear grid is still accepted, and there blend at or above 128 selects
+material B. The block at `.hght` `+0x1C` is only a fallback when no `.mate`
+decodes. `<tile>.<child|adult>.bake_ao.extm` uses the same header and is a
+1-byte or 4-byte block-linear grid. `<tile>.custom.extm` is left unused.
 """
 
 from __future__ import annotations
@@ -55,8 +60,10 @@ _CLIP_PAD = 200.0
 _MAX_LAYERS = 24
 _MATE_LAYER = 89
 _MATE_KEEP = 48
-_NEAR_M = 80.0
+_NEAR_M = 70.0
 _MID_M = 180.0
+_SKIRT_M = 4.0
+_STEPS = (8, 16, 32, 64)
 
 
 class TerrainError(ValueError):
@@ -85,13 +92,20 @@ class TileInfo:
 
 @dataclass
 class HeightPart:
-    """One material's triangles. `layer` is None when the tile had no index."""
+    """Triangles that share one material pair. `layer` is None when the tile had no index.
+
+    `weights` is the 0..1 mix toward `layer_b` at each vertex. The pair itself
+    does not change across a triangle, so a shader can blend the two albedos
+    without interpolating the layer ids.
+    """
 
     layer: int | None
     positions: list[tuple[float, float, float]]
     indices: list[int]
     uvs: list[tuple[float, float]]
     colors: list[tuple[float, float, float]] | None = None
+    layer_b: int | None = None
+    weights: list[float] | None = None
 
 
 @dataclass
@@ -332,78 +346,117 @@ def _sentinel_mate(raw: bytes) -> bool:
     return seen > 0 and hits / seen >= 0.9
 
 
-def _read_sentinel_plane(raw: bytes) -> tuple[list[int], dict[int, int], dict[int, int]]:
-    """Chosen layer per sample, plus how often each index appears in byte 0 and byte 1.
+def _pair_weight(b2: int, b3: int) -> tuple[float | None, int | None]:
+    """Blend toward material B, and the raw byte when one is not 0 or 0x7f.
+
+    0x7f with no other weight is a halfway mix. A byte that is neither 0 nor
+    0x7f is that byte over 255. Both bytes 0 means the blend was not written,
+    so the mix stays on material A. The halfway reading is a guess.
+    """
+    weight = next((item for item in (b2, b3) if item not in (0, 0x7F)), None)
+    if weight is not None:
+        return weight / 255.0, weight
+    if b2 == 0x7F or b3 == 0x7F:
+        return 0.5, None
+    return 0.0, None
+
+
+def _read_sentinel_plane(raw: bytes) -> tuple[list[int], list[tuple[int, int, float]], dict[int, int], dict[int, int]]:
+    """Chosen layer and (material A, material B, weight) per sample.
 
     (0, 0, 0, 0) is an empty texel, not material 0. 255 and 127 are not indices.
-    When both indices are real and the blend bytes are the 0x7f sentinel, byte 0
-    is the one drawn. A blend byte other than 0 or 0x7f is a 0..255 weight, and
-    128 or more selects byte 1. That weight rule is a guess.
+    The chosen layer is material A unless a non-neutral weight is 128 or more,
+    which keeps the older diagnostic. The weight itself is the blend the mesh uses.
     """
     chosen = []
+    pairs: list[tuple[int, int, float]] = []
     seen0: dict[int, int] = {}
     seen1: dict[int, int] = {}
     for index in range(SIZE * SIZE):
         b0, b1, b2, b3 = raw[index * 4 : index * 4 + 4]
         if (b0, b1, b2, b3) == (0, 0, 0, 0):
             chosen.append(-1)
+            pairs.append((-1, -1, 0.0))
             continue
-        first = b0 if b0 <= _MATE_LAYER else None
-        second = b1 if b1 <= _MATE_LAYER else None
-        if first is not None:
+        first = b0 if b0 <= _MATE_LAYER else -1
+        second = b1 if b1 <= _MATE_LAYER else -1
+        if first >= 0:
             seen0[first] = seen0.get(first, 0) + 1
-        if second is not None:
+        if second >= 0:
             seen1[second] = seen1.get(second, 0) + 1
-        weight = next((item for item in (b2, b3) if item not in (0, 0x7F)), None)
-        if first is not None and second is not None and weight is not None and weight >= 128:
+        mix, raw_weight = _pair_weight(b2, b3)
+        if first >= 0 and second >= 0:
+            pairs.append((first, second, mix if mix is not None else 0.0))
+        elif first >= 0:
+            pairs.append((first, first, 0.0))
+        elif second >= 0:
+            pairs.append((second, second, 0.0))
+        else:
+            pairs.append((-1, -1, 0.0))
+        if first >= 0 and second >= 0 and raw_weight is not None and raw_weight >= 128:
             chosen.append(second)
-        elif first is not None:
+        elif first >= 0:
             chosen.append(first)
-        elif second is not None:
+        elif second >= 0:
             chosen.append(second)
         else:
             chosen.append(-1)
-    return chosen, seen0, seen1
+    return chosen, pairs, seen0, seen1
 
 
-def _decode_retail_planes(planes: list[bytes | None]) -> tuple[list[int], str] | None:
+def _decode_retail_planes(planes: list[bytes | None]) -> tuple[list[int], list[tuple[int, int, float]], str] | None:
     decoded: list[list[int] | None] = []
+    decoded_pairs: list[list[tuple[int, int, float]] | None] = []
     parts = []
     for number, plane in enumerate(planes, start=1):
         if plane is None or not _sentinel_mate(plane):
             decoded.append(None)
+            decoded_pairs.append(None)
             continue
-        chosen, seen0, seen1 = _read_sentinel_plane(plane)
+        chosen, pairs, seen0, seen1 = _read_sentinel_plane(plane)
         if not seen0 and not seen1:
             decoded.append(None)
+            decoded_pairs.append(None)
             continue
         decoded.append(chosen)
+        decoded_pairs.append(pairs)
         text = f"image {number} b0 {_fmt_counts(seen0)}, b1 {_fmt_counts(seen1)}"
         parts.append(text.replace("; ", ", "))
+    empty = [-1] * (SIZE * SIZE)
+    empty_pairs = [(-1, -1, 0.0)] * (SIZE * SIZE)
     if not any(item is not None for item in decoded):
         if any(plane is not None and _sentinel_mate(plane) for plane in planes):
-            return [-1] * (SIZE * SIZE), "hist empty; 257×257×4 block-linear, indices were 255 or 127 (a guess)"
+            return empty, empty_pairs, "hist empty; 257×257×4 block-linear, indices were 255 or 127 (a guess)"
         return None
     merged = []
+    merged_pairs: list[tuple[int, int, float]] = []
     for index in range(SIZE * SIZE):
         layer = -1
-        for plane in decoded:
+        pair = (-1, -1, 0.0)
+        for plane, plane_pairs in zip(decoded, decoded_pairs):
             if plane is not None and plane[index] >= 0:
                 layer = plane[index]
+                if plane_pairs is not None:
+                    pair = plane_pairs[index]
+                break
+            if plane_pairs is not None and (plane_pairs[index][0] >= 0 or plane_pairs[index][1] >= 0):
+                pair = plane_pairs[index]
                 break
         merged.append(layer)
+        merged_pairs.append(pair)
     merged, kept, dropped = _cap_mate(merged)
+    merged_pairs = _cap_pairs(merged_pairs, _pair_keep(merged_pairs))
     note = (
         "hist "
         + " | ".join(parts)
         + f"; 257×257×4 block-linear, {len(planes)} image(s), "
-        + "255 and 127 mean no material, 0x7f blend keeps byte 0 (a guess)"
+        + "255 and 127 mean no material, 0x7f blend mixes byte 0 and byte 1 equally (a guess)"
     )
     if dropped:
         note += f", {dropped} rarer materials left as the earth colour"
     if not kept and not any(item >= 0 for item in merged):
         note = "hist empty; 257×257×4 block-linear decoded with no material index (a guess)"
-    return merged, note
+    return merged, merged_pairs, note
 
 
 def _cap_mate(chosen: list[int]) -> tuple[list[int], list[int], int]:
@@ -418,21 +471,60 @@ def _cap_mate(chosen: list[int]) -> tuple[list[int], list[int], int]:
     return capped, sorted(keep), len(counts) - len(keep)
 
 
-def _blend_grid(raw: bytes, width: int) -> tuple[list[int], str] | None:
+def _pair_keep(pairs: list[tuple[int, int, float]]) -> set[int]:
+    """Layers to keep, counting both sides of a blend so material B is not dropped."""
+    counts: dict[int, int] = {}
+    for first, second, _weight in pairs:
+        for value in (first, second):
+            if value >= 0:
+                counts[value] = counts.get(value, 0) + 1
+    if len(counts) <= _MATE_KEEP:
+        return set(counts)
+    ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    return {item for item, _count in ranked[:_MATE_KEEP]}
+
+
+def _cap_pairs(pairs: list[tuple[int, int, float]], keep: set[int]) -> list[tuple[int, int, float]]:
+    if not keep:
+        return [(-1, -1, 0.0) for _item in pairs]
+    capped = []
+    for first, second, weight in pairs:
+        left = first if first in keep else -1
+        right = second if second in keep else -1
+        if left < 0 and right >= 0:
+            capped.append((right, right, 0.0))
+        elif right < 0 and left >= 0:
+            capped.append((left, left, 0.0))
+        elif left < 0 and right < 0:
+            capped.append((-1, -1, 0.0))
+        else:
+            capped.append((left, right, weight))
+    return capped
+
+
+def _blend_grid(raw: bytes, width: int) -> tuple[list[int], list[tuple[int, int, float]], str] | None:
     count = width * width
     if len(raw) < count * 4:
         return None
     chosen = []
+    pairs = []
     usable = 0
     for index in range(count):
         m0, m1, blend, _extra = raw[index * 4 : index * 4 + 4]
+        left = m0 if m0 <= _MATE_LAYER else -1
+        right = m1 if m1 <= _MATE_LAYER else -1
         layer = None
-        if m0 <= _MATE_LAYER and m1 <= _MATE_LAYER:
-            layer = m1 if blend >= 128 else m0
-        elif m0 <= _MATE_LAYER:
-            layer = m0
-        elif m1 <= _MATE_LAYER:
-            layer = m1
+        if left >= 0 and right >= 0:
+            layer = right if blend >= 128 else left
+            pairs.append((left, right, blend / 255.0))
+        elif left >= 0:
+            layer = left
+            pairs.append((left, left, 0.0))
+        elif right >= 0:
+            layer = right
+            pairs.append((right, right, 0.0))
+        else:
+            pairs.append((-1, -1, 0.0))
         if layer is not None:
             usable += 1
             chosen.append(layer)
@@ -441,13 +533,14 @@ def _blend_grid(raw: bytes, width: int) -> tuple[list[int], str] | None:
     if usable * 2 < count:
         return None
     layers, kept, dropped = _cap_mate(_resample(chosen, width))
+    fitted = _cap_pairs(_resample(pairs, width), _pair_keep(_resample(pairs, width)))
     note = (
         f"mate {width}×{width} blend records (material, material, blend, extra; "
         f"blend >= 128 uses the second index; this layout is a guess), layers {', '.join(str(item) for item in kept) or 'none'}"
     )
     if dropped:
         note += f", {dropped} rarer materials left as the earth colour"
-    return layers, note
+    return layers, fitted, note
 
 
 def _index_grid(raw: bytes, width: int, kind: str) -> tuple[list[int], str] | None:
@@ -473,7 +566,7 @@ def _index_grid(raw: bytes, width: int, kind: str) -> tuple[list[int], str] | No
     return layers, note
 
 
-def _parse_mate_block(block: bytes) -> tuple[list[int], str] | None:
+def _parse_mate_block(block: bytes) -> tuple[list[int], list[tuple[int, int, float]] | None, str] | None:
     planes = _swizzled_planes(block, 4)
     if planes:
         retail = _decode_retail_planes(planes)
@@ -483,28 +576,30 @@ def _parse_mate_block(block: bytes) -> tuple[list[int], str] | None:
         if raw is not None:
             parsed = _blend_grid(raw, SIZE)
             if parsed:
-                layers, note = parsed
+                layers, pairs, note = parsed
                 if len(block) != SIZE * SIZE * 4:
                     note += ", block-linear"
-                return layers, note
+                return layers, pairs, note
     for width in (SIZE, 256):
         raw = _linear_or_swizzled(block, width, 4)
         if raw is not None and not _sentinel_mate(raw):
             parsed = _blend_grid(raw, width)
             if parsed:
                 swizzle = "" if len(block) == width * width * 4 else ", block-linear"
-                layers, note = parsed
-                return layers, note + swizzle
+                layers, pairs, note = parsed
+                return layers, pairs, note + swizzle
         raw = _linear_or_swizzled(block, width, 1)
         if raw is not None:
             parsed = _index_grid(raw, width, "u8")
             if parsed:
-                return parsed
+                layers, note = parsed
+                return layers, None, note
         raw = _linear_or_swizzled(block, width, 2)
         if raw is not None:
             parsed = _index_grid(raw, width, "u16")
             if parsed:
-                return parsed
+                layers, note = parsed
+                return layers, None, note
     return None
 
 
@@ -516,19 +611,20 @@ def split_histogram(note: str) -> tuple[str, str]:
     return "", note
 
 
-def read_mate(data: bytes, dicts=None) -> tuple[list[int] | None, str]:
-    """Per-sample MaterialAlb index, or None when the file is not a material grid.
+def read_terrain_material(data: bytes, dicts=None) -> tuple[list[int] | None, list[tuple[int, int, float]] | None, str]:
+    """Layer list, optional (material A, material B, weight) pairs, and a note.
 
-    A negative index means that sample had no usable layer and should use the earth colour.
+    A negative index means that sample had no usable layer. `read_mate` is the
+    layer list alone, which is what older callers check.
     """
     try:
         payload = unpack_hght(data, dicts)
     except TerrainError as exc:
-        return None, str(exc)
+        return None, None, str(exc)
     parsed = _parse_mate_block(payload)
     if parsed:
-        layers, note = parsed
-        return layers, f"{note} (payload)"
+        layers, pairs, note = parsed
+        return layers, pairs, f"{note} (payload)"
     seen = []
     for at, label in ((0x2C, "+0x2C"), (0x1C, "+0x1C")):
         block = _block(payload, at)
@@ -537,13 +633,22 @@ def read_mate(data: bytes, dicts=None) -> tuple[list[int] | None, str]:
         seen.append(f"{label} {len(block)} bytes")
         parsed = _parse_mate_block(block)
         if parsed:
-            layers, note = parsed
+            layers, pairs, note = parsed
             format_byte = payload[4] if len(payload) > 4 else None
             if format_byte is not None:
                 note += f", format byte {format_byte:#04x}"
-            return layers, f"{note} ({label})"
+            return layers, pairs, f"{note} ({label})"
     where = ", ".join(seen) if seen else "no image block"
-    return None, f"mate did not contain a material grid ({where})"
+    return None, None, f"mate did not contain a material grid ({where})"
+
+
+def read_mate(data: bytes, dicts=None) -> tuple[list[int] | None, str]:
+    """Per-sample MaterialAlb index, or None when the file is not a material grid.
+
+    A negative index means that sample had no usable layer and should use the earth colour.
+    """
+    layers, _pairs, note = read_terrain_material(data, dicts)
+    return layers, note
 
 
 def _occlusion_grid(raw: bytes, width: int) -> list[float] | None:
@@ -626,39 +731,108 @@ def read_occlusion(data: bytes, dicts=None) -> tuple[list[float] | None, str]:
     return None, flat_note or "bake_ao is not a single-channel occlusion grid"
 
 
+def _step_for(edge_metres: float, spacing: float) -> int:
+    """Smallest step in ``_STEPS`` whose samples are at least ``spacing`` metres apart."""
+    if edge_metres <= 0:
+        return _STEPS[-1]
+    raw = 256.0 * spacing / edge_metres
+    for step in _STEPS:
+        if step + 1e-6 >= raw:
+            return step
+    return _STEPS[-1]
+
+
 def sample_steps(tiles, scale: float, origin, focus: tuple[float, float]) -> tuple[dict[str, int], str]:
-    """Finer samples near the actors. More than 40 nearby tiles drop from step 4 to step 8."""
+    """About 2 m between samples near the actors, coarser farther out. Never step 4."""
     focus_x, focus_z = focus
-    distances = []
+    measured = []
     near = 0
     for center_x, center_z, edge, name in tiles:
         box = _world_box(center_x, center_z, edge, scale, origin)
         dx = (box[0] + box[2]) / 2 - focus_x
         dz = (box[1] + box[3]) / 2 - focus_z
         distance = (dx * dx + dz * dz) ** 0.5
-        distances.append((name, distance))
+        measured.append((name, distance, abs(edge * scale)))
         if distance <= _NEAR_M:
             near += 1
-    near_step = 8 if near > 40 else 4
+    near_spacing = 3.0 if near > 24 else 2.0
     steps: dict[str, int] = {}
     used: set[int] = set()
-    for name, distance in distances:
+    for name, distance, edge_metres in measured:
         if distance <= _NEAR_M:
-            step = near_step
+            spacing = near_spacing
         elif distance <= _MID_M:
-            step = 8
+            spacing = 5.0
         else:
-            step = 16
+            spacing = 10.0
+        step = _step_for(edge_metres, spacing)
         steps[name] = step
         used.add(step)
     if not used:
-        return steps, "height samples step 16"
-    note = f"height samples step {min(used)} near the actors"
+        return steps, "height samples about 10 m apart"
+    note = f"height samples about {near_spacing:.0f} m apart near the actors"
     if len(used) > 1:
-        note += f" and step {max(used)} at the edge of the margin"
-    if near > 40:
-        note += f" ({near} tiles within {_NEAR_M:.0f} m, so nearby tiles use step {near_step})"
+        note += f" (step {min(used)} to {max(used)})"
+    if near > 24:
+        note += f" ({near} tiles within {_NEAR_M:.0f} m, so nearby samples are coarser)"
     return steps, note
+
+
+def _fill_pairs(pairs: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
+    """Copy a neighbouring material into samples that have no index.
+
+    A few sweeps is enough for the dashed lines at a material boundary. The
+    index is taken from the nearest written texel. It is not blended.
+    """
+    count = SIZE * SIZE
+    if len(pairs) < count:
+        return pairs
+    current = list(pairs[:count])
+    neighbours = ((0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1))
+    for _sweep in range(6):
+        nxt = list(current)
+        changed = False
+        for z in range(SIZE):
+            row = z * SIZE
+            for x in range(SIZE):
+                first, second, _weight = current[row + x]
+                if first >= 0 or second >= 0:
+                    continue
+                for dz, dx in neighbours:
+                    zz = z + dz
+                    xx = x + dx
+                    if zz < 0 or xx < 0 or zz >= SIZE or xx >= SIZE:
+                        continue
+                    found = current[zz * SIZE + xx]
+                    if found[0] >= 0 or found[1] >= 0:
+                        nxt[row + x] = found
+                        changed = True
+                        break
+        current = nxt
+        if not changed:
+            break
+    return current
+
+
+def _overlaps(left, right) -> bool:
+    return left[0] < right[2] and left[2] > right[0] and left[1] < right[3] and left[3] > right[1]
+
+
+def _cell_covered(x0: float, z0: float, x1: float, z1: float, edge: float, boxes) -> bool:
+    """True when a finer tile owns this cell, not only when the centre is inside it.
+
+    The inner half has to meet the finer tile. A coarse cell that merely
+    grazes the border stays, and the skirt covers the join.
+    """
+    cx = (x0 + x1) * 0.5
+    cz = (z0 + z1) * 0.5
+    inner = (cx - (x1 - x0) * 0.25, cz - (z1 - z0) * 0.25, cx + (x1 - x0) * 0.25, cz + (z1 - z0) * 0.25)
+    for bx0, bz0, bx1, bz1, bedge in boxes:
+        if bedge >= edge - 1e-4:
+            continue
+        if (bx0 < cx < bx1 and bz0 < cz < bz1) or _overlaps(inner, (bx0, bz0, bx1, bz1)):
+            return True
+    return False
 
 
 def _indices(step: int) -> list[int]:
@@ -740,19 +914,20 @@ def build_scene(
     clip: tuple[float, float, float, float] | None = None,
     steps: dict[str, int] | None = None,
 ) -> tuple[list[HeightPart], list[TileInfo]]:
-    """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers, and optional occlusion."""
+    """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers, optional occlusion, optional pairs."""
     default_step = _sample_step(len(tiles))
     boxes = []
     for tile in tiles:
         center_x, center_z, edge = tile[0], tile[1], tile[2]
         boxes.append((center_x - edge / 2, center_z - edge / 2, center_x + edge / 2, center_z + edge / 2, edge))
-    grouped: dict[int | None, list[tuple[tuple[float, float, float], tuple[float, float], tuple[float, float, float]]]] = {}
-    grouped_index: dict[int | None, list[int]] = {}
+    grouped: dict[tuple[int | None, int | None], list] = {}
+    grouped_index: dict[tuple[int | None, int | None], list[int]] = {}
     reports: list[TileInfo] = []
     ox, oy, oz = origin
     for tile in tiles:
         center_x, center_z, edge, name, heights, layers = tile[:6]
         occlusion = tile[6] if len(tile) > 6 else None
+        pairs = tile[7] if len(tile) > 7 else None
         step = int((steps or {}).get(name) or default_step)
         samples = _indices(step)
         count = len(samples)
@@ -766,6 +941,10 @@ def build_scene(
             info.reason = "outside the placed actors"
             reports.append(info)
             continue
+        if pairs is None and layers is not None and len(layers) >= SIZE * SIZE:
+            pairs = [(item if item >= 0 else -1, item if item >= 0 else -1, 0.0) for item in layers[: SIZE * SIZE]]
+        if pairs is not None and len(pairs) >= SIZE * SIZE:
+            pairs = _fill_pairs(pairs)
         grid = []
         for row in samples:
             line = []
@@ -773,6 +952,13 @@ def build_scene(
                 value = heights[row * SIZE + col]
                 line.append(0.0 if value != value or value <= 0 else value)
             grid.append(line)
+
+        def sample_pair(row: int, col: int) -> tuple[int, int, float]:
+            if not pairs:
+                return (-1, -1, 0.0)
+            found = pairs[samples[row] * SIZE + samples[col]]
+            return int(found[0]), int(found[1]), float(found[2])
+
         keep = []
         for row in range(count - 1):
             for col in range(count - 1):
@@ -784,33 +970,33 @@ def build_scene(
                 )
                 if any(item <= 0 for item in corners):
                     continue
-                unit_x = (center_x - edge / 2) + edge * ((samples[col] + samples[col + 1]) / 2) / (SIZE - 1)
-                unit_z = (center_z - edge / 2) + edge * ((samples[row] + samples[row + 1]) / 2) / (SIZE - 1)
-                covered = False
-                for bx0, bz0, bx1, bz1, bedge in boxes:
-                    if bedge < edge - 1e-4 and bx0 < unit_x < bx1 and bz0 < unit_z < bz1:
-                        covered = True
-                        break
-                if not covered:
+                x0 = (center_x - edge / 2) + edge * samples[col] / (SIZE - 1)
+                x1 = (center_x - edge / 2) + edge * samples[col + 1] / (SIZE - 1)
+                z0 = (center_z - edge / 2) + edge * samples[row] / (SIZE - 1)
+                z1 = (center_z - edge / 2) + edge * samples[row + 1] / (SIZE - 1)
+                if not _cell_covered(x0, z0, x1, z1, edge, boxes):
                     keep.append((row, col))
         if not keep:
             info.reason = "height is 0, or a finer tile covers it"
             reports.append(info)
             continue
-        layer_cells: dict[int | None, list[tuple[int, int]]] = {}
+        layer_cells: dict[tuple[int | None, int | None], list[tuple[int, int]]] = {}
+        seen_layers: set[int] = set()
         for row, col in keep:
-            layer = None
-            if layers is not None:
-                raw = int(layers[samples[row] * SIZE + samples[col]])
-                if raw >= 0:
-                    layer = raw
-            layer_cells.setdefault(layer, []).append((row, col))
-        info.layers = sorted(item for item in layer_cells if item is not None)
+            first, second, _weight = sample_pair(row, col)
+            layer = first if first >= 0 else None
+            other = second if second >= 0 else None
+            if layer is not None:
+                seen_layers.add(layer)
+            layer_cells.setdefault((layer, other), []).append((row, col))
+        info.layers = sorted(seen_layers)
         info.status = "drawn"
         shade = occlusion if occlusion and len(occlusion) >= SIZE * SIZE else None
-        for layer, cells in layer_cells.items():
-            bucket = grouped.setdefault(layer, [])
-            tris = grouped_index.setdefault(layer, [])
+        skirt = max(_SKIRT_M, abs(edge * scale) * 0.02)
+        last = count - 2
+        for (layer, other), cells in layer_cells.items():
+            bucket = grouped.setdefault((layer, other), [])
+            tris = grouped_index.setdefault((layer, other), [])
             used: dict[tuple[int, int], int] = {}
 
             def vert(row: int, col: int) -> int:
@@ -825,11 +1011,34 @@ def build_scene(
                 position = (unit_x * scale + ox, grid[row][col] * height_scale + oy, unit_z * scale + oz)
                 uv = (position[0] / _UV_METRES, position[2] / _UV_METRES)
                 amount = shade[sz * SIZE + sx] if shade is not None else 1.0
-                color = (amount, amount, amount)
+                _first, _second, weight = sample_pair(row, col)
                 index = len(bucket)
                 used[key] = index
-                bucket.append((position, uv, color))
+                bucket.append((position, uv, (amount, amount, amount), weight))
                 return index
+
+            def drop(row: int, col: int, down: float) -> int:
+                sx = samples[col]
+                sz = samples[row]
+                unit_x = (center_x - edge / 2) + edge * sx / (SIZE - 1)
+                unit_z = (center_z - edge / 2) + edge * sz / (SIZE - 1)
+                position = (unit_x * scale + ox, grid[row][col] * height_scale + oy - down, unit_z * scale + oz)
+                uv = (position[0] / _UV_METRES, position[2] / _UV_METRES)
+                amount = shade[sz * SIZE + sx] if shade is not None else 1.0
+                _first, _second, weight = sample_pair(row, col)
+                index = len(bucket)
+                bucket.append((position, uv, (amount, amount, amount), weight))
+                return index
+
+            def skirt_edge(r0: int, c0: int, r1: int, c1: int, outward: str) -> None:
+                top0 = drop(r0, c0, 0.0)
+                top1 = drop(r1, c1, 0.0)
+                bot0 = drop(r0, c0, skirt)
+                bot1 = drop(r1, c1, skirt)
+                if outward in ("-z", "+x"):
+                    tris.extend((top0, top1, bot0, top1, bot1, bot0))
+                else:
+                    tris.extend((top0, bot0, top1, bot0, bot1, top1))
 
             for row, col in cells:
                 a = vert(row, col)
@@ -838,20 +1047,36 @@ def build_scene(
                 d = vert(row + 1, col + 1)
                 # (x, z), (x, z+1), (x+1, z) then the opposite corner. The cross product points up.
                 tris.extend((a, c, b, b, c, d))
-            info.triangles += len(cells) * 2
+                added = 0
+                if row == 0:
+                    skirt_edge(row, col, row, col + 1, "-z")
+                    added += 2
+                if row == last:
+                    skirt_edge(row + 1, col, row + 1, col + 1, "+z")
+                    added += 2
+                if col == 0:
+                    skirt_edge(row, col, row + 1, col, "-x")
+                    added += 2
+                if col == last:
+                    skirt_edge(row, col + 1, row + 1, col + 1, "+x")
+                    added += 2
+                info.triangles += 2 + added
         reports.append(info)
     parts = []
-    for layer, verts in grouped.items():
-        if not verts or not grouped_index.get(layer):
+    for (layer, other), verts in grouped.items():
+        if not verts or not grouped_index.get((layer, other)):
             continue
         colored = any(abs(item[2][0] - 1.0) > 1e-4 for item in verts)
+        weighted = any(abs(item[3]) > 1e-4 for item in verts)
         parts.append(
             HeightPart(
                 layer=layer,
+                layer_b=other,
                 positions=[item[0] for item in verts],
-                indices=grouped_index[layer],
+                indices=grouped_index[(layer, other)],
                 uvs=[item[1] for item in verts],
                 colors=[item[2] for item in verts] if colored else None,
+                weights=[item[3] for item in verts] if weighted else None,
             )
         )
     return parts, reports
