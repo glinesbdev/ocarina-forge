@@ -6,12 +6,14 @@ FSHP, FMAT, and the GPU buffer. Vertex formats are the Switch attribute ids
 from that library. This file is an original reader, not a copy of the C#.
 
 Smooth-skinned vertices (skin count 2–4) are already stored in model space,
-so they are the bind pose and are not moved again. Skin count 0 is one rigid
-bone, the shape’s bone. Skin count 1 stores each vertex in one bone’s space;
-`_i0` indexes the skeleton matrix palette, and only a bone with a rigid
-palette slot is applied. Bone flag 0x1000 stores Euler XYZ radians in the
-rotation floats; anything else is a quaternion. Flag 0x800000 is segment-scale
-compensation. Skeletal animation is not read.
+so they are the bind pose and are not moved again. Skin count 0 is stored in
+the shape bone’s local space and is moved by that bone’s world matrix even
+when the rigid palette index is -1. Skin count 1 stores each vertex in one
+bone’s space; `_i0` indexes the skeleton matrix palette, and only a bone with
+a rigid palette slot is applied. Bone flag 0x1000 stores Euler XYZ radians,
+composed as Rz · Ry · Rx (X first, the same extrinsic order as a banc Rotate).
+Anything else is a quaternion. Flag 0x800000 is segment-scale compensation.
+Skeletal animation is not read.
 
 `sample_bfres` writes a tiny file the reader understands. It is synthetic.
 Nothing in it comes from a game.
@@ -1280,7 +1282,9 @@ def _bind_pose(positions, bones, palette, bone_index: int, slots: list[int] | No
     """Bake skin count 0 or 1 into model space. Smooth skin is left where it is.
 
     `slots` is one palette index per vertex. None means every vertex uses the
-    shape bone. A bone whose rigid index is -1 is already in model space.
+    shape bone. A skin-count-0 shape is in that bone's local space, so the
+    bone's world matrix applies even when its rigid index is -1. A skin-count-1
+    vertex on a bone with no rigid slot is already in model space.
     """
     if not bones:
         return positions
@@ -1295,9 +1299,10 @@ def _bind_pose(positions, bones, palette, bone_index: int, slots: list[int] | No
                 index = slot
         if index < 0 or index >= len(bones) or index >= len(worlds):
             return None
-        rigid = bones[index][5] if len(bones[index]) > 5 else 0
-        if rigid < 0:
-            return None
+        if slot is not None:
+            rigid = bones[index][5] if len(bones[index]) > 5 else 0
+            if rigid < 0:
+                return None
         return worlds[index]
 
     if slots is None:
@@ -1356,7 +1361,11 @@ def _scale_inverse(scale) -> list[list[float]]:
 
 
 def _euler_quat(x: float, y: float, z: float) -> tuple[float, float, float, float]:
-    """XYZ radians to the quaternion `_trs` expects. Rest pose is Rz · Ry · Rx."""
+    """Extrinsic XYZ radians. The matrix is Rz · Ry · Rx, so X is applied first.
+
+    That is three.js Euler order ``ZYX``. A pure yaw matches order ``XYZ``;
+    a combined X and Y, such as the ivy sheets, does not.
+    """
     cx, sx = math.cos(x * 0.5), math.sin(x * 0.5)
     cy, sy = math.cos(y * 0.5), math.sin(y * 0.5)
     cz, sz = math.cos(z * 0.5), math.sin(z * 0.5)

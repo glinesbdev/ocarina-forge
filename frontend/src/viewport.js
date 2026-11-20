@@ -365,7 +365,7 @@ export async function createViewport(host, hooks) {
     const [rx, ry, rz] = actor.rotate;
     const [sx, sy, sz] = actor.scale;
     pivot.position.set(x, y, z);
-    pivot.rotation.set(rx, ry, rz);
+    placeRotate(pivot, [rx, ry, rz]);
     pivot.scale.set(sx || 1, sy || 1, sz || 1);
     pivot.userData.actorId = actor.id;
     const gate = {
@@ -445,6 +445,20 @@ export async function createViewport(host, hooks) {
     }
   }
 
+  function placeRotate(pivot, rotate) {
+    // Banc Rotate is extrinsic XYZ: R = Rz · Ry · Rx on a column vector.
+    // three.js order ZYX is that composition. Picking uses the pivot matrix,
+    // and the gizmo writes these same components back.
+    const [rx, ry, rz] = rotate || [0, 0, 0];
+    pivot.rotation.set(rx || 0, ry || 0, rz || 0, "ZYX");
+  }
+
+  function fileRotate(pivot) {
+    if (pivot.rotation.order !== "ZYX") pivot.rotation.order = "ZYX";
+    const r = pivot.rotation;
+    return [r.x, r.y, r.z];
+  }
+
   function actorLabel(actor, recipe, source) {
     let text;
     if (actor.companion) text = `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`;
@@ -478,7 +492,7 @@ export async function createViewport(host, hooks) {
     const [rx, ry, rz] = actor.rotate;
     const [sx, sy, sz] = actor.scale || [1, 1, 1];
     entry.pivot.position.set(x, y, z);
-    entry.pivot.rotation.set(rx, ry, rz);
+    placeRotate(entry.pivot, [rx, ry, rz]);
     entry.pivot.scale.set(sx || 1, sy || 1, sz || 1);
     entry.status = actor.status;
     entry.category = actor.category;
@@ -2066,8 +2080,7 @@ uniform float terrainLayerMissing;`
     const axis = transform.axis;
     if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) maybeSnap(entry);
     const p = entry.pivot.position;
-    const r = entry.pivot.rotation;
-    hooks.onPreview(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
+    hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot));
     syncInstanceMatrix(entry);
     requestRender();
   });
@@ -2082,8 +2095,7 @@ uniform float terrainLayerMissing;`
     if (!entry || !entry.id) return;
     maybeSnap(entry);
     const p = entry.pivot.position;
-    const r = entry.pivot.rotation;
-    hooks.onTransform(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
+    hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot));
   });
 
   window.addEventListener("keydown", (event) => {

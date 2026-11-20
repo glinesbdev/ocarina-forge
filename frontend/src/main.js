@@ -1393,7 +1393,7 @@ function renderProps() {
   if (!actor.id || actor.status === "locked") return;
 
   panel.append(vectorFields("Position (metres)", "t", actor.translate));
-  panel.append(vectorFields("Rotation (degrees, Y is yaw)", "r", actor.rotate.map(deg)));
+  panel.append(vectorFields("Rotation (degrees, X then Y then Z)", "r", actor.rotate.map(deg)));
   panel.append(vectorFields("Scale", "s", actor.scale));
 
   const actions = document.createElement("div");

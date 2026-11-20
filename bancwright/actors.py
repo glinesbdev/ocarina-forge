@@ -7,7 +7,7 @@ the placement files actually use (public custom-map notes, 1.1.1):
     Hash        u64 instance id, also stored as Phive.Placement.ID
     SRTHash     u32
     Translate   [x, y, z] metres, or a dictionary X/Y/Z
-    Rotate      optional [x, y, z] radians (yaw is Y)
+    Rotate      optional [x, y, z] radians, extrinsic XYZ (Rz · Ry · Rx; yaw is Y)
     Scale       optional [x, y, z]
     Name        optional instance name
     Dynamic     per-instance parameters

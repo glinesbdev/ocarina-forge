@@ -6,7 +6,7 @@ from pathlib import Path
 from bancwright.actors import is_volume, view_actor
 from bancwright.dump import Dump
 from bancwright.fixtures import KOKIRI_STATIC, build_fixture
-from bancwright.formats.bfres import _bind_pose, _euler_quat, _rigid, base_color_name, parse, rank_albedo, sample_bfres
+from bancwright.formats.bfres import _apply, _bind_pose, _euler_quat, _rigid, _trs, base_color_name, parse, rank_albedo, sample_bfres
 from bancwright.formats.bntx import _decode
 from bancwright.formats.gltf import Primitive, png_rgba, to_glb
 from bancwright.formats.swizzle import deswizzle, swizzle
@@ -75,6 +75,77 @@ def test_euler_bone_and_per_vertex_rigid_skin():
     assert abs(placed[0][2] + 1.0) < 1e-4
     assert abs(placed[1][0]) < 1e-4
     assert abs(placed[1][1] - 1.0) < 1e-4
+
+
+def _shutter_bone(parent, euler, pos, flags, rigid, name):
+    quat = _euler_quat(*euler)
+    return (parent, pos, quat, (1.0, 1.0, 1.0), flags, rigid, name, euler, -1)
+
+
+def test_switch_shutter_panels_stand_beside_the_arch():
+    """Obj_HrlCastle_SwitchShutter_A_01 from the castle dump.
+
+    Both door bones are Euler XYZ with rigid index -1. Skin count 0 still
+    uses the shape bone. Rz · Ry · Rx stands each panel upright, hinged about
+    2.65 m to either side of the centre.
+    """
+    flags = 0x1000 | 0x800000
+    bones = [
+        _shutter_bone(-1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), 0x1000, -1, "Root"),
+        _shutter_bone(0, (1.5708, 1.5708, 0.0), (-2.65156, 0.0, -0.18121), flags, -1, "DoubleDoor_L"),
+        _shutter_bone(0, (-1.5708, 1.5708, 0.0), (2.65156, 0.0, -0.18121), flags, -1, "DoubleDoor_R"),
+    ]
+    # FlameR01_1 is long in local -Z and tall in local Y. The long edge is the height.
+    left_high = _bind_pose([(-0.283, -0.075, -7.230)], bones, [], 1, None)[0]
+    left_inner = _bind_pose([(0.075, 2.648, 0.0)], bones, [], 1, None)[0]
+    left_hinge = _bind_pose([(0.0, 0.0, 0.0)], bones, [], 1, None)[0]
+    # FlameR01 is the mirror, long in local +Z.
+    right_high = _bind_pose([(0.0, 0.0, 7.230)], bones, [], 2, None)[0]
+    right_inner = _bind_pose([(0.074, 2.648, 0.0)], bones, [], 2, None)[0]
+    right_hinge = _bind_pose([(0.0, 0.0, 0.0)], bones, [], 2, None)[0]
+    assert abs(left_hinge[0] + 2.65156) < 0.01
+    assert abs(right_hinge[0] - 2.65156) < 0.01
+    assert abs(left_hinge[1]) < 0.01 and abs(right_hinge[1]) < 0.01
+    assert abs(left_high[1] - 7.230) < 0.02
+    assert abs(right_high[1] - 7.230) < 0.02
+    assert abs(left_high[0] - left_hinge[0]) < 0.15
+    assert abs(right_high[0] - right_hinge[0]) < 0.15
+    # The local Y width reaches the centre instead of tipping the panel over.
+    assert abs(left_inner[0]) < 0.05
+    assert abs(right_inner[0]) < 0.05
+    assert abs(left_inner[1]) < 0.05 and abs(right_inner[1]) < 0.05
+
+
+def test_ivy_rotate_hangs_the_sheet_down_the_cliff():
+    """Land_IvyClimbable_A_01 #745 and A_02 #743. The mesh runs along +Z.
+
+    Actor Rotate is the same Rz · Ry · Rx as a bone. X = 90° then the yaw
+    drops +Z straight down and leaves the sheet's normal horizontal, along
+    the yaw direction. three.js order XYZ does not.
+    """
+    import math
+
+    poses = (
+        ((1.5708, -1.29154, 0.0), (29.5, 109.0, -21.75)),
+        ((1.5708, -1.309, 0.0), (0.0, 0.0, 0.0)),
+    )
+    for euler, origin in poses:
+        quat = _euler_quat(*euler)
+        placed = _trs(origin, quat, (1.0, 1.0, 1.0))
+        spin = _trs((0.0, 0.0, 0.0), quat, (1.0, 1.0, 1.0))
+        tip = _apply(placed, (0.0, 0.0, 3.0))
+        base = _apply(placed, (0.0, 0.0, 0.0))
+        assert abs((tip[1] - base[1]) + 3.0) < 0.02
+        assert abs(tip[0] - base[0]) < 0.02
+        assert abs(tip[2] - base[2]) < 0.02
+        assert abs(base[0] - origin[0]) < 1e-4
+        assert abs(base[1] - origin[1]) < 1e-4
+        side = _apply(spin, (1.7, 0.0, 0.0))
+        assert abs(side[1]) < 0.02
+        normal = _apply(spin, (0.0, 1.0, 0.0))
+        assert abs(normal[1]) < 0.02
+        assert abs(normal[0] - math.sin(euler[1])) < 0.02
+        assert abs(normal[2] - math.cos(euler[1])) < 0.02
 
 
 def test_moat_and_stream_count_as_water_and_a_bounds_box_is_omitted():
@@ -185,7 +256,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-25", "a4b1538eb1e5f9be84ff4d81cc56a3bae5362280dfa6fe4349c2a45c1f934177")
+    pinned = ("models-26", "e1237a6665c27e05876108a726e69792d4fa97786adee445a5614069e29cd787")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
