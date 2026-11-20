@@ -61,6 +61,7 @@ const viewport = createViewport($("viewport"), {
   onTerrain: (meta) => {
     state.terrain = meta;
     const proxy = Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));
+    const heightmap = Boolean(meta && typeof meta.reason === "string" && /terrain heightmap/i.test(meta.reason));
     const show = Boolean(meta && meta.status === "mesh" && !proxy);
     state.showGround = show;
     const box = $("show-ground");
@@ -68,7 +69,9 @@ const viewport = createViewport($("viewport"), {
       box.checked = show;
       const title = proxy
         ? "The static map has no albedo. On draws a neutral grid at its height instead of the green stand-in."
-        : "Show the static ground mesh";
+        : heightmap
+          ? "Show the terrain heightmap. The untextured stand-in stays off."
+          : "Show the static ground mesh";
       box.title = title;
       if (box.parentElement) box.parentElement.title = title;
     }
@@ -1606,7 +1609,7 @@ function setNav(mode) {
   viewport.setNav(mode);
   document.querySelectorAll("[data-nav]").forEach((button) => button.classList.toggle("is-on", button.dataset.nav === mode));
   $("stage-hint").textContent = mode === "fly"
-    ? "WASD moves. Q and E go down and up. Right-drag looks. Shift is faster."
+    ? "WASD moves. Q and E go down and up. Right-drag looks, and the cursor hides until you release. Shift is faster."
     : "Click a model to select. Alt-click, or click again, cycles overlaps. Volumes are the faint boxes.";
 }
 

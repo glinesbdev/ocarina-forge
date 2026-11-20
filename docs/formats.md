@@ -116,7 +116,38 @@ The render-state array is 31 fixed slots of string pointers, not the version-9 `
 
 Public Switch 1 notes give FSHP `+0x04` two bits that matter here: `0x02` means the shape has a vertex buffer. Kokiri and Deku files also set `0x10`, so the flags word is `0x12` (`Obj_Kokiri_Door_A_*`, `Fence_A_03`, `RoofFence_A_01`, `StoneGate_A_01`, `Stone_A_06`, `Land_Deku_CaveProp_A_*`, `ProceduralIvy_*`, `House_Outside_C_00`, and the rest of that set: 69 of 526 models in those two areas). On those shapes the FVTX pointer lands in zeroed memory and the mesh-count byte is 0. Bytes after the GPU buffer base (`0x7000` on the files that were inspected) include the u32s `0x40` and `0x7c`, which is the sort of header a meshlet or mesh-codec block would have.
 
-Wexos, BfresLibrary, and Switch Toolbox do not document that bit or a meshlet layout inside FSHP. `.bfres.mc` is a separate stream (`MCPK` / `FMSH`) and is still refused. There is not enough public structure to turn those bytes into indices, so this reader does not guess a decoder. The shape’s bounding record (center and extent, six floats at the pointer in FSHP `+0x38`) becomes the actor’s box, and the reason is `geometry format not decoded (FSHP flag 0x10)`. A file that also contains ordinary shapes still draws those.
+Wexos, BfresLibrary, and Switch Toolbox do not document that bit or a meshlet layout inside FSHP. `.bfres.mc` is a separate stream (`MCPK` / `FMSH`) and is still refused. There is not enough public structure to turn those bytes into indices, so this reader does not guess a decoder. The shape’s bounding record (center and extent, six floats at the pointer in FSHP `+0x38`) becomes the actor’s box, and the reason is `geometry format not decoded (FSHP flag 0x10)`. A file that also contains ordinary shapes still draws those. These shapes are not the missing field. The field is the TerrainArc heightmap below. `scripts/check_terrain.py` lists the ground-like actors that still have a 0x10 shape.
+
+## TerrainArc
+
+The ground under a scene is not `Model/<Area>_01`. That bfres is a stand-in. The heightmap is named by the scene’s game banc param and stored under `TerrainArc/`.
+
+`Banc/GameBancParam/<Level>.game__banc__GameBancParam.bgyml` (or the `.zs` file) has `TerrainSceneName` and `TerrainScenePosition` (`X`, `Y`, `Z`). `<Level>` is the banc filename with `.bcett.byml.zs` and a trailing `_Static` or `_Dynamic` removed, then the area folder name. `$parent` is followed: a leading `?` and `Work/` are stripped, `.gyml` becomes `.bgyml`, and `.zs` is tried. The parent fills fields the child does not set. At most eight parents.
+
+`TerrainArc/<scene>.tscb` (plain, or `.tscb.zs`) is little-endian:
+
+| Offset | Field |
+| --- | --- |
+| `+0x00` | `TSCB` |
+| `+0x10` | float, metres per terrain unit |
+| `+0x14` | float, world height of a 0..1 sample |
+| `+0x38` | u32 tile count |
+| `+0x78` | relative u32 to a table of relative u32s, one per tile |
+
+A relative u32 is `field + value`. A tile starts with three floats: centre x, centre z, edge length, in terrain units. `+0x60` is a relative offset to a NUL-terminated tile name. The quadtree names every tile; only some have a file.
+
+`TerrainArc/<scene>/<name>.hght` starts with `TARB`. The u16 at file offset 10 is the header size. The bytes after that header are a zstd frame (dictionary id from the frame, usually the shared zs dictionary). Unpacked, offsets are relative the same way:
+
+| Offset | Field |
+| --- | --- |
+| `+0x2C` | relative u32 to the height block |
+| `+0x30` | u32 size of that block |
+
+The height block is 257×257 float32 samples, row-major, row along z and column along x, edge to edge. A sample of exactly 0 is a hole. When the block size is `257×257×4` the floats are linear. Otherwise the block is the same block-linear layout as a texture: 4 bytes per sample, 16 GOBs per block, so block-height log2 4 (`surface_bytes` is 417792). The value is 0..1 and the world position is `unit * scale + origin`. Y is up.
+
+`+0x1C` / `+0x20` are the same record for a second block. That block is not documented. This reader treats it as a material index only when it is 257×257 bytes (linear or the same log2-4 swizzle) or 257×257 u16s, the distinct values are 24 or fewer, and none is above 128. Those values are layer indices into `Tex/MaterialAlb.bntx.zs`. Any other size or range is ignored, and the tile is a flat earth colour. The UV repeat, 8 metres, is a guess. So is using that block as the layer index.
+
+A coarser tile does not cover a cell whose centre lies in a finer tile. Tiles outside the placed actors, expanded by 200 m, are not read. When more than 36 tiles would be drawn, only the 36 nearest the actors are meshed. The sample step is 4 (65×65) for up to 24 tiles, 8 for up to 80, and 16 after that. Actor LOD, the small-prop distance cull, and the InnerMesh / bake / fade / water-volume filters do not apply to this mesh.
 
 ## BNTX
 

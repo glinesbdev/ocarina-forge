@@ -8,15 +8,16 @@ test("a selected actor keeps the full mesh", () => {
 });
 
 test("small props drop out before trees do", () => {
-  assert.equal(chooseLod({ distance: 30, radius: 0.8, pixels: 12, hasFar: false, selected: false }), null);
-  assert.equal(chooseLod({ distance: 50, radius: 2.4, pixels: 20, hasFar: true, selected: false }), null);
-  assert.equal(chooseLod({ distance: 100, radius: 6, pixels: 30, hasFar: true, selected: false }), null);
+  assert.equal(chooseLod({ distance: 40, radius: 0.8, pixels: 12, hasFar: false, selected: false }), 0);
+  assert.equal(chooseLod({ distance: 60, radius: 0.8, pixels: 12, hasFar: false, selected: false }), null);
+  assert.equal(chooseLod({ distance: 100, radius: 2.4, pixels: 20, hasFar: true, selected: false }), null);
+  assert.equal(chooseLod({ distance: 200, radius: 6, pixels: 30, hasFar: true, selected: false }), null);
 });
 
 test("the coarse mesh starts just past the actor", () => {
-  assert.equal(chooseLod({ distance: 10, radius: 8, pixels: 80, hasFar: true, selected: false }), 0);
-  assert.equal(chooseLod({ distance: 30, radius: 8, pixels: 40, hasFar: true, selected: false }), 1);
-  assert.equal(chooseLod({ distance: 30, radius: 8, pixels: 40, hasFar: false, selected: false }), 0);
+  assert.equal(chooseLod({ distance: 30, radius: 8, pixels: 80, hasFar: true, selected: false }), 0);
+  assert.equal(chooseLod({ distance: 50, radius: 8, pixels: 40, hasFar: true, selected: false }), 1);
+  assert.equal(chooseLod({ distance: 50, radius: 8, pixels: 40, hasFar: false, selected: false }), 0);
 });
 
 test("a tiny screen size hides a modest prop and keeps a huge one", () => {
@@ -29,5 +30,6 @@ test("the terrain proxy is the untextured static map", () => {
   assert.equal(isTerrainProxy({ reason: "Flat colour. terrain proxy", textures: 0 }), true);
   assert.equal(isTerrainProxy({ reason: "", textures: 0, status: "mesh" }), false);
   assert.equal(isTerrainProxy({ reason: "a real albedo" }), false);
+  assert.equal(isTerrainProxy({ reason: "terrain heightmap. UV repeats every 8 m (a guess)", status: "mesh" }), false);
   assert.equal(isTerrainProxy(null), false);
 });

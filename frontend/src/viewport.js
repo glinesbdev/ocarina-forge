@@ -35,7 +35,7 @@ export function createViewport(host, hooks) {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x141b16);
 
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 4000);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 8000);
   camera.position.set(12, 9, 14);
   camera.rotation.order = "YXZ";
 
@@ -108,6 +108,7 @@ export function createViewport(host, hooks) {
   let showHidden = false;
   let nav = "orbit";
   let looking = false;
+  let lookLocked = false;
   let lastPointer = null;
   let gizmoUsed = false;
   const keys = new Set();
@@ -236,7 +237,7 @@ export function createViewport(host, hooks) {
     camera.position.copy(center).add(new THREE.Vector3(radius * 0.7, radius * 0.5, radius * 0.7));
     orbit.target.copy(center);
     camera.near = 0.05;
-    camera.far = Math.max(2000, radius * 40);
+    camera.far = Math.max(4000, radius * 80);
     camera.updateProjectionMatrix();
     orbit.update();
     requestRender();
@@ -980,7 +981,32 @@ export function createViewport(host, hooks) {
   function setNav(mode) {
     nav = mode;
     orbit.enabled = mode === "orbit";
+    releaseLook();
+  }
+
+  function requestLookLock() {
+    const canvas = renderer.domElement;
+    if (!canvas.requestPointerLock || document.pointerLockElement === canvas) return;
+    const pending = canvas.requestPointerLock();
+    if (pending && typeof pending.catch === "function") pending.catch(() => {});
+  }
+
+  function releaseLook() {
     looking = false;
+    lookLocked = false;
+    const canvas = renderer.domElement;
+    if (document.pointerLockElement === canvas && document.exitPointerLock) document.exitPointerLock();
+  }
+
+  function applyLook(dx, dy) {
+    if (!dx && !dy) return;
+    camera.rotation.order = "YXZ";
+    camera.rotation.y -= dx * 0.003;
+    camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x - dy * 0.003));
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+    requestRender();
   }
 
   function setGizmo(mode) {
@@ -1134,6 +1160,12 @@ export function createViewport(host, hooks) {
     if (event.button === 2 && nav === "fly") {
       looking = true;
       lastPointer = { x: event.clientX, y: event.clientY };
+      try {
+        renderer.domElement.setPointerCapture(event.pointerId);
+      } catch {
+        /* capture is only the fallback when pointer lock is refused */
+      }
+      requestLookLock();
       event.preventDefault();
       return;
     }
@@ -1144,17 +1176,8 @@ export function createViewport(host, hooks) {
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
-    if (looking && lastPointer) {
-      const dx = event.clientX - lastPointer.x;
-      const dy = event.clientY - lastPointer.y;
-      lastPointer = { x: event.clientX, y: event.clientY };
-      camera.rotation.order = "YXZ";
-      camera.rotation.y -= dx * 0.003;
-      camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x - dy * 0.003));
-      const forward = new THREE.Vector3();
-      camera.getWorldDirection(forward);
-      orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
-      requestRender();
+    if (looking) {
+      applyLook(event.movementX || 0, event.movementY || 0);
       return;
     }
     if (lastPointer && event.buttons === 1) {
@@ -1176,7 +1199,10 @@ export function createViewport(host, hooks) {
   });
 
   function endPointer(event) {
-    if (event.button === 2) looking = false;
+    if (event.button === 2) {
+      releaseLook();
+      event.preventDefault();
+    }
     if (event.button === 0 && lastPointer && !lastPointer.moved && !gizmoUsed && !transform.dragging) pick(event);
     if (nav === "orbit") orbit.enabled = true;
     gizmoUsed = false;
@@ -1184,8 +1210,21 @@ export function createViewport(host, hooks) {
   }
 
   renderer.domElement.addEventListener("pointerup", endPointer);
-  renderer.domElement.addEventListener("pointerleave", () => {
-    looking = false;
+  window.addEventListener("pointerup", (event) => {
+    if (event.button === 2 && looking) releaseLook();
+  });
+  document.addEventListener("pointerlockchange", () => {
+    const locked = document.pointerLockElement === renderer.domElement;
+    if (locked) {
+      lookLocked = true;
+      return;
+    }
+    // Esc, or the browser dropping the lock. A refused request never locked,
+    // so a drag that is still held keeps turning through pointer capture.
+    if (lookLocked) {
+      lookLocked = false;
+      looking = false;
+    }
   });
   renderer.domElement.addEventListener("contextmenu", (event) => event.preventDefault());
 

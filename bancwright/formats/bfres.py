@@ -103,6 +103,8 @@ class Model:
     string_pool: list[str] = field(default_factory=list)
     # Model-space AABB from shapes whose geometry this reader does not decode.
     shape_bounds: dict | None = None
+    # Shape names whose FSHP flags include 0x10 and whose payload is not an FVTX.
+    flag10: list[str] = field(default_factory=list)
 
 
 def parse(data: bytes) -> list[Model]:
@@ -305,6 +307,7 @@ class _File:
             pool,
             bounds,
         )
+        model.flag10 = [str(item.get("name") or "") for item in undecoded]
         if undecoded and not parts:
             model.notes.append("geometry format not decoded (FSHP flag 0x10)")
         elif undecoded:

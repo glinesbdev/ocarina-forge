@@ -456,6 +456,275 @@ def test_dummy_terrain_is_an_earth_green_proxy(tmp_path, monkeypatch):
     assert abs(nz) > 0.9
 
 
+def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypatch):
+    import json
+    import struct
+
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.bntx import write_rgba
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.terrain import SIZE, level_stems
+    from bancwright.formats.zsio import compress
+    from bancwright.models import CacheMiss
+
+    assert level_stems(KOKIRI_STATIC)[0] == "KokiriForest_Child"
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    proxy = sample_v10_bfres(
+        "KokiriForest_01",
+        [{"name": "dummy_material", "samplers": []}],
+        shapes=[{"name": "Ground", "material": 0}],
+        with_uvs=False,
+    )
+    (dump.romfs / "Model" / "KokiriForest_01.KokiriForest_01.bfres.zs").write_bytes(compress(proxy, 1, dicts, level=3))
+    parent = dumps(
+        {
+            "TerrainSceneName": "KokiriField",
+            "TerrainScenePosition": {"X": 0.0, "Y": 2.0, "Z": 0.0},
+        }
+    )
+    child = dumps(
+        {"$parent": "Work/Banc/GameBancParam/KokiriForest_Base.game__banc__GameBancParam.gyml"}
+    )
+    param = dump.romfs / "Banc" / "GameBancParam"
+    param.mkdir(parents=True)
+    (param / "KokiriForest_Base.game__banc__GameBancParam.bgyml").write_bytes(parent)
+    (param / "KokiriForest_Child.game__banc__GameBancParam.bgyml").write_bytes(child)
+    heights = [0.4] * (SIZE * SIZE)
+    layers = bytes([1]) * (SIZE * SIZE)
+    folder = dump.romfs / "TerrainArc" / "KokiriField"
+    folder.mkdir(parents=True)
+    (dump.romfs / "TerrainArc" / "KokiriField.tscb").write_bytes(
+        _tscb(1.0, 10.0, [(0.0, 0.0, 16.0, "Tile_00"), (8000.0, 8000.0, 20.0, "Far_00")])
+    )
+    (folder / "Tile_00.hght").write_bytes(_hght(heights, layers))
+    green = bytes([20, 140, 40, 255]) * 4
+    red = bytes([220, 20, 20, 255]) * 4
+    (dump.romfs / "Tex" / "MaterialAlb.bntx.zs").write_bytes(
+        compress(_array_bntx("MaterialAlb", [green, red], 2, 2), 1, dicts, level=3)
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    try:
+        describe_terrain(dump, KOKIRI_STATIC, convert=False)
+    except CacheMiss:
+        pass
+    else:
+        raise AssertionError("a cold heightmap should miss the cache")
+    info = describe_terrain(dump, KOKIRI_STATIC)
+    assert info["status"] == "mesh"
+    assert info["source"].endswith("TerrainArc/KokiriField.tscb")
+    assert "terrain heightmap" in info["reason"]
+    assert "terrain proxy" not in info["reason"]
+    assert "MaterialAlb layers 1" in info["reason"]
+    assert info["textures"] == 1
+    assert info["terrain"]["origin"] == [0.0, 2.0, 0.0]
+    drawn = [row for row in info["tiles"] if row["status"] == "drawn"]
+    skipped = [row for row in info["tiles"] if row["status"] != "drawn"]
+    assert [row["name"] for row in drawn] == ["Tile_00"]
+    assert drawn[0]["layers"] == [1]
+    assert "material index" in drawn[0]["reason"]
+    assert any(row["name"] == "Far_00" and "outside" in row["reason"] for row in skipped)
+    again = describe_terrain(dump, KOKIRI_STATIC)
+    assert again["digest"] == info["digest"]
+    glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
+    document, blob = _glb_parts(glb)
+    factor = document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert factor[0] == 1.0 and factor[1] == 1.0
+    assert "baseColorTexture" in document["materials"][0]["pbrMetallicRoughness"]
+    primitive = document["meshes"][0]["primitives"][0]
+    positions = _accessor_floats(document, blob, primitive["attributes"]["POSITION"], 3)
+    assert min(point[0] for point in positions) < -7
+    assert max(point[0] for point in positions) > 7
+    assert abs(positions[0][1] - 6.0) < 1e-3
+    normals = _accessor_floats(document, blob, primitive["attributes"]["NORMAL"], 3)
+    assert normals[0][1] > 0.9
+    image = document["images"][0]
+    view = document["bufferViews"][image["bufferView"]]
+    png = blob[view["byteOffset"] : view["byteOffset"] + view["byteLength"]]
+    from io import BytesIO
+
+    from PIL import Image
+
+    pixel = Image.open(BytesIO(png)).getpixel((0, 0))
+    assert pixel[0] > 200 and pixel[1] < 40
+
+
+def test_heightmap_without_an_index_is_earth_and_a_failed_tscb_is_not_the_proxy(tmp_path, monkeypatch):
+    import struct
+
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.terrain import SIZE
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    proxy = sample_v10_bfres(
+        "KokiriForest_01",
+        [{"name": "dummy_material", "samplers": []}],
+        shapes=[{"name": "Ground", "material": 0}],
+        with_uvs=False,
+    )
+    (dump.romfs / "Model" / "KokiriForest_01.KokiriForest_01.bfres.zs").write_bytes(compress(proxy, 1, dicts, level=3))
+    folder = dump.romfs / "TerrainArc" / "KokiriForest"
+    folder.mkdir(parents=True)
+    (dump.romfs / "TerrainArc" / "KokiriForest.tscb").write_bytes(_tscb(1.0, 4.0, [(0.0, 0.0, 16.0, "Flat_00")]))
+    (folder / "Flat_00.hght").write_bytes(_hght([0.5] * (SIZE * SIZE)))
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    info = describe_terrain(dump, KOKIRI_STATIC)
+    assert info["status"] == "mesh"
+    assert "no material index" in info["reason"]
+    assert "terrain proxy" not in info["reason"]
+    assert info["textures"] == 0
+    glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
+    document, _blob = _glb_parts(glb)
+    factor = document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    assert abs(factor[0] - 0.40) < 1e-6
+    assert abs(factor[1] - 0.36) < 1e-6
+    flat = folder / "Flat_00.hght"
+    flat.write_bytes(_hght([0.0] * (SIZE * SIZE)))
+    stamp = flat.stat()
+    os.utime(flat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
+    model_mod._FILE_SIG.clear()
+    empty = describe_terrain(dump, KOKIRI_STATIC)
+    assert empty["status"] == "none"
+    assert "terrain proxy" not in (empty.get("reason") or "")
+    assert any("height is 0" in (row.get("reason") or "") for row in empty["tiles"])
+
+
+def test_swizzled_heights_round_trip():
+    import struct
+
+    from bancwright.formats.swizzle import swizzle
+    from bancwright.formats.terrain import SIZE, read_height_file
+
+    heights = [0.5] * (SIZE * SIZE)
+    heights[20 * SIZE + 10] = 0.25
+    linear = _f32(heights)
+    packed = swizzle(SIZE, SIZE, 1, 1, 4, 0, 4, linear)
+    header = bytearray(0x40)
+    struct.pack_into("<I", header, 0x2C, 0x40 - 0x2C)
+    struct.pack_into("<I", header, 0x30, len(packed))
+    decoded, layers, note = read_height_file(bytes(header) + packed)
+    assert layers is None
+    assert "no material index" in note
+    assert abs(decoded[20 * SIZE + 10] - 0.25) < 1e-5
+    assert abs(decoded[0] - 0.5) < 1e-5
+
+
+def test_a_finer_tile_punches_the_coarser_one():
+    from bancwright.formats.terrain import SIZE, build_scene
+
+    coarse = [0.5] * (SIZE * SIZE)
+    fine = [0.8] * (SIZE * SIZE)
+    both, reports = build_scene(
+        [
+            (0.0, 0.0, 32.0, "Coarse", coarse, None),
+            (0.0, 0.0, 8.0, "Fine", fine, None),
+        ],
+        1.0,
+        10.0,
+    )
+    alone, _alone_reports = build_scene([(0.0, 0.0, 32.0, "Coarse", coarse, None)], 1.0, 10.0)
+    assert all(row.status == "drawn" for row in reports)
+    coarse_tris = next(row.triangles for row in reports if row.name == "Coarse")
+    assert 0 < coarse_tris < alone[0].indices.__len__() // 3
+    assert sum(len(part.indices) // 3 for part in both) > coarse_tris
+
+
+def _tscb(scale: float, height_scale: float, tiles: list[tuple]) -> bytes:
+    import struct
+
+    blob = bytearray(0x80 + len(tiles) * 4)
+    blob[:4] = b"TSCB"
+    struct.pack_into("<2f", blob, 0x10, scale, height_scale)
+    struct.pack_into("<I", blob, 0x38, len(tiles))
+    struct.pack_into("<I", blob, 0x78, 8)
+    for index, (center_x, center_z, edge, name) in enumerate(tiles):
+        slot = 0x80 + index * 4
+        body = len(blob)
+        struct.pack_into("<I", blob, slot, body - slot)
+        blob.extend(b"\0" * 0x64)
+        struct.pack_into("<3f", blob, body, center_x, center_z, edge)
+        name_at = len(blob)
+        struct.pack_into("<I", blob, body + 0x60, name_at - (body + 0x60))
+        blob.extend(str(name).encode("ascii") + b"\0")
+    return bytes(blob)
+
+
+def _f32(heights: list[float]) -> bytes:
+    import struct
+
+    return b"".join(
+        struct.pack(f"<{len(piece)}f", *piece)
+        for start in range(0, len(heights), 1024)
+        for piece in (heights[start : start + 1024],)
+    )
+
+
+def _hght(heights: list[float], layers: bytes | None = None) -> bytes:
+    import struct
+
+    raw = _f32(heights)
+    header = bytearray(0x40)
+    blob = header + bytearray(raw)
+    struct.pack_into("<I", blob, 0x2C, 0x40 - 0x2C)
+    struct.pack_into("<I", blob, 0x30, len(raw))
+    if layers is not None:
+        start = len(blob)
+        blob.extend(layers)
+        struct.pack_into("<I", blob, 0x1C, start - 0x1C)
+        struct.pack_into("<I", blob, 0x20, len(layers))
+    from bancwright.formats.zsio import compress
+
+    frame = compress(bytes(blob), 0, None, level=1)
+    wrapped = bytearray(16)
+    wrapped[:4] = b"TARB"
+    struct.pack_into("<H", wrapped, 10, 16)
+    return bytes(wrapped) + frame
+
+
+def _array_bntx(name: str, layers: list[bytes], width: int, height: int) -> bytes:
+    import struct
+
+    from bancwright.formats.bntx import write_rgba
+
+    blob = bytearray(write_rgba(name, width, height, layers[0]))
+    layer_bytes = width * height * 4
+    assert bytes(blob[-layer_bytes:]) == layers[0][:layer_bytes]
+    for extra in layers[1:]:
+        blob.extend(extra[:layer_bytes])
+    at = blob.find(b"BRTI")
+    struct.pack_into("<I", blob, at + 0x30, len(layers))
+    struct.pack_into("<I", blob, at + 0x50, layer_bytes * len(layers))
+    return bytes(blob)
+
+
+def _glb_parts(glb: bytes):
+    import json
+    import struct
+
+    json_len = struct.unpack_from("<I", glb, 12)[0]
+    document = json.loads(glb[20 : 20 + json_len])
+    return document, glb[20 + json_len + 8 :]
+
+
+def _accessor_floats(document, blob: bytes, index: int, width: int):
+    import struct
+
+    accessor = document["accessors"][index]
+    view = document["bufferViews"][accessor["bufferView"]]
+    start = view["byteOffset"]
+    count = accessor["count"]
+    return [struct.unpack_from(f"<{width}f", blob, start + item * width * 4) for item in range(count)]
+
+
 def test_alb_suffix_and_bundle_resolve(tmp_path, monkeypatch):
     monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
     from bancwright.formats.bntx import write_rgba
