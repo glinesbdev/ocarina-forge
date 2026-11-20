@@ -12,7 +12,7 @@ The editor shows this same list with ? or the Shortcuts button.
 - Alt+left-drag: Orbit the point under the cursor, or the selection
 - Middle-drag: Pan
 - Scroll: Zoom
-- F: Frame the selection, or the whole scene
+- F: Frame the selection, or the whole scene. Over the behavior graph, F fits that graph
 
 ## Selection and editing
 
@@ -46,6 +46,14 @@ The editor shows this same list with ? or the Shortcuts button.
 
 - Esc: Close a dialog, release mouse look, or clear the selection
 - Stats: The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line
+
+## Behavior graph
+
+- Middle-drag, right-drag, or Space-drag: Pan the graph
+- Scroll: Zoom toward the cursor
+- F, or Fit: Fit the graph in the panel
+- Minimap: Drag the map in the corner to pan. The rectangle is the current view
+- Click a node: Select it and edit its fields. The change is a set field op
 
 ## Windows
 

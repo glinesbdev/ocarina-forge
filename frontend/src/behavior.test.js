@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { displayName, layoutGraph, sharedFileLabel, visibleNodes } from "./behavior.js";
+import { COL, NODE_W } from "./graph-view.js";
 
 test("a shared schedule file is labeled with the pack it lives in", () => {
   const label = sharedFileLabel(
@@ -39,7 +40,8 @@ test("a connected node sits to the right and a second layout keeps the same ids"
     edges: [{ id: "e", from: flag.pins[0].id, to: spawn.pins[0].id }],
   };
   const laid = layoutGraph(graph);
-  assert.ok(laid.positions[spawn.id].x > laid.positions[flag.id].x);
+  assert.equal(laid.positions[spawn.id].x - laid.positions[flag.id].x, COL);
+  assert.ok(COL - NODE_W >= 80);
   assert.ok(laid.positions[blank.id]);
   const again = layoutGraph(graph);
   assert.deepEqual(Object.keys(laid.positions), Object.keys(again.positions));
