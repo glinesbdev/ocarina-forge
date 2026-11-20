@@ -882,8 +882,13 @@ export function createViewport(host, hooks) {
       if (!child.isMesh || !child.geometry) return;
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
-      const material = prepareMaterial(source);
+      let material = prepareMaterial(source);
       const geometry = child.geometry.clone();
+      if (geometry.getAttribute("color")) {
+        material = material.clone();
+        material.vertexColors = true;
+        material.needsUpdate = true;
+      }
       child.updateWorldMatrix(true, false);
       geometry.applyMatrix4(child.matrixWorld);
       const list = byMaterial.get(material) || { material, geometries: [] };

@@ -23,6 +23,7 @@ class Primitive:
     name: str = ""
     unlit: bool = False
     kind: str = ""
+    colors: list[tuple[float, float, float]] | None = None
 
 
 def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
@@ -245,6 +246,9 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if prim.uvs and len(prim.uvs) == len(positions):
             uv_bytes = b"".join(struct.pack("<2f", u, v) for u, v in prim.uvs)
             attributes["TEXCOORD_0"] = accessor(view(uv_bytes, 34962), len(prim.uvs), "VEC2", 5126)
+        if prim.colors and len(prim.colors) == len(positions):
+            color_bytes = b"".join(struct.pack("<3f", red, green, blue) for red, green, blue in prim.colors)
+            attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)
         index_accessor = accessor(view(idx_bytes, 34963), len(indices), "SCALAR", 5123 if use_short else 5125)
         image_index = None
         if prim.png:

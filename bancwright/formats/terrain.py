@@ -17,19 +17,29 @@ The layout was checked against the files the game ships, not against game code:
   block-linear order as a texture (16 GOBs per block, so log2 4). Rows run
   along z.
 
-`+0x1C` / `+0x20` are the same kind of record for a second block. When that
-block is one byte per sample and the values stay inside the MaterialAlb
-array, they are used as layer indices. That reading is a guess: the public
-notes only identify the height block. A tile with no usable index is drawn
-in one flat earth colour.
+A second scene named `<scene>_sub` (or a GameBancParam string that ends in
+`_sub`) lists the same quadtree. Fine tiles often have their `.hght` only
+under that directory, and the coarse tiles only under the main one. A tile
+is read from whichever directory has the file. A finer tile replaces a
+coarser one. Every tile that meets the placed actors, expanded by 200 m, is
+meshed. There is no fixed tile cap. Tiles near that area are sampled more
+finely than tiles at the edge of the margin.
 
-A coarser tile does not cover ground that a finer tile also covers. Tiles
-outside the placed actors, expanded by 200 m, are left out when the scene
-has more tiles than that neighbourhood needs.
+The per-corner material is `<tile>.mate`. A `.mate` is the same TARB-and-zstd
+wrapper. The grid is 257×257 or 256×256 records of four bytes (first
+material, second material, blend, extra), which is the Breath of the Wild
+mate layout and is a guess here. Blend at or above 128 uses the second
+index. A byte or u16 grid is accepted when the values can be MaterialAlb
+layers. The block at `.hght` `+0x1C` is only a fallback when no `.mate`
+decodes. `<tile>.<child|adult>.bake_ao.extm` is used as occlusion when it
+is a single-channel grid of the same size. `<tile>.custom.extm` is left unused.
+
+A coarser tile does not cover ground that a finer tile also covers.
 """
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass, field
 
@@ -41,6 +51,10 @@ _HEIGHT_LOG2 = 4
 _UV_METRES = 8.0
 _CLIP_PAD = 200.0
 _MAX_LAYERS = 24
+_MATE_LAYER = 89
+_MATE_KEEP = 48
+_NEAR_M = 80.0
+_MID_M = 180.0
 
 
 class TerrainError(ValueError):
@@ -59,6 +73,11 @@ class TileInfo:
     layers: list[int] = field(default_factory=list)
     height_min: float = 0.0
     height_max: float = 0.0
+    directory: str = ""
+    mate: str = ""
+    mate_note: str = ""
+    ao: str = ""
+    step: int = 0
 
 
 @dataclass
@@ -69,6 +88,7 @@ class HeightPart:
     positions: list[tuple[float, float, float]]
     indices: list[int]
     uvs: list[tuple[float, float]]
+    colors: list[tuple[float, float, float]] | None = None
 
 
 @dataclass
@@ -219,6 +239,228 @@ def _sample_step(tile_count: int) -> int:
     return 16
 
 
+def embedded_sub_names(data: bytes) -> list[str]:
+    """Scene names ending in `_sub` stored as ASCII inside a TSCB."""
+    found: list[str] = []
+    for match in re.findall(rb"[A-Za-z0-9][A-Za-z0-9_]{0,80}_sub", data or b""):
+        text = match.decode("ascii", "ignore")
+        if text not in found:
+            found.append(text)
+    return found
+
+
+def _resample(values: list, width: int):
+    if width == SIZE:
+        return list(values[: SIZE * SIZE])
+    out = []
+    for z in range(SIZE):
+        sz = min(width - 1, int(z * width / SIZE))
+        row = sz * width
+        for x in range(SIZE):
+            sx = min(width - 1, int(x * width / SIZE))
+            out.append(values[row + sx])
+    return out
+
+
+def _linear_or_swizzled(block: bytes, width: int, channels: int) -> bytes | None:
+    tight = width * width * channels
+    if len(block) == tight:
+        return block
+    if width != SIZE or len(block) != surface_bytes(SIZE, SIZE, 1, 1, channels, _HEIGHT_LOG2):
+        return None
+    linear = deswizzle(SIZE, SIZE, 1, 1, channels, 0, _HEIGHT_LOG2, block)
+    if len(linear) < tight:
+        return None
+    return linear[:tight]
+
+
+def _cap_mate(chosen: list[int]) -> tuple[list[int], list[int], int]:
+    counts: dict[int, int] = {}
+    for value in chosen:
+        if value >= 0:
+            counts[value] = counts.get(value, 0) + 1
+    if len(counts) <= _MATE_KEEP:
+        return chosen, sorted(counts), 0
+    keep = {item for item, _count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))[:_MATE_KEEP]}
+    capped = [value if value in keep else -1 for value in chosen]
+    return capped, sorted(keep), len(counts) - len(keep)
+
+
+def _blend_grid(raw: bytes, width: int) -> tuple[list[int], str] | None:
+    count = width * width
+    if len(raw) < count * 4:
+        return None
+    chosen = []
+    usable = 0
+    for index in range(count):
+        m0, m1, blend, _extra = raw[index * 4 : index * 4 + 4]
+        layer = None
+        if m0 <= _MATE_LAYER and m1 <= _MATE_LAYER:
+            layer = m1 if blend >= 128 else m0
+        elif m0 <= _MATE_LAYER:
+            layer = m0
+        elif m1 <= _MATE_LAYER:
+            layer = m1
+        if layer is not None:
+            usable += 1
+            chosen.append(layer)
+        else:
+            chosen.append(-1)
+    if usable * 2 < count:
+        return None
+    layers, kept, dropped = _cap_mate(_resample(chosen, width))
+    note = (
+        f"mate {width}×{width} blend records (material, material, blend, extra; "
+        f"blend >= 128 uses the second index; this layout is a guess), layers {', '.join(str(item) for item in kept) or 'none'}"
+    )
+    if dropped:
+        note += f", {dropped} rarer materials left as the earth colour"
+    return layers, note
+
+
+def _index_grid(raw: bytes, width: int, kind: str) -> tuple[list[int], str] | None:
+    count = width * width
+    if kind == "u16":
+        if len(raw) < count * 2:
+            return None
+        values = list(struct.unpack_from(f"<{count}H", raw))
+    else:
+        if len(raw) < count:
+            return None
+        values = list(raw[:count])
+    usable = [item for item in values if item <= _MATE_LAYER]
+    if len(usable) * 2 < count:
+        return None
+    chosen = [item if item <= _MATE_LAYER else -1 for item in values]
+    layers, kept, dropped = _cap_mate(_resample(chosen, width))
+    if not kept:
+        return None
+    note = f"mate {width}×{width} {kind} indices, layers {', '.join(str(item) for item in kept)}"
+    if dropped:
+        note += f", {dropped} rarer materials left as the earth colour"
+    return layers, note
+
+
+def _parse_mate_block(block: bytes) -> tuple[list[int], str] | None:
+    for width in (SIZE, 256):
+        raw = _linear_or_swizzled(block, width, 4)
+        if raw is not None:
+            parsed = _blend_grid(raw, width)
+            if parsed:
+                swizzle = "" if len(block) == width * width * 4 else ", block-linear"
+                layers, note = parsed
+                return layers, note + swizzle
+        raw = _linear_or_swizzled(block, width, 1)
+        if raw is not None:
+            parsed = _index_grid(raw, width, "u8")
+            if parsed:
+                return parsed
+        raw = _linear_or_swizzled(block, width, 2)
+        if raw is not None:
+            parsed = _index_grid(raw, width, "u16")
+            if parsed:
+                return parsed
+    return None
+
+
+def read_mate(data: bytes, dicts=None) -> tuple[list[int] | None, str]:
+    """Per-sample MaterialAlb index, or None when the file is not a material grid.
+
+    A negative index means that sample had no usable layer and should use the earth colour.
+    """
+    try:
+        payload = unpack_hght(data, dicts)
+    except TerrainError as exc:
+        return None, str(exc)
+    parsed = _parse_mate_block(payload)
+    if parsed:
+        layers, note = parsed
+        return layers, f"{note} (payload)"
+    for at, label in ((0x2C, "+0x2C"), (0x1C, "+0x1C")):
+        block = _block(payload, at)
+        if not block:
+            continue
+        parsed = _parse_mate_block(block)
+        if parsed:
+            layers, note = parsed
+            return layers, f"{note} ({label})"
+    return None, "mate did not contain a material grid"
+
+
+def _occlusion_grid(raw: bytes, width: int) -> list[float] | None:
+    count = width * width
+    if len(raw) < count:
+        return None
+    values = [raw[index] / 255.0 for index in range(count)]
+    return _resample(values, width)
+
+
+def _occlusion_varies(values: list[float]) -> bool:
+    sample = values[::73] or values
+    mean = sum(sample) / len(sample)
+    variance = sum((item - mean) ** 2 for item in sample) / len(sample)
+    return 0.15 <= mean <= 0.98 and variance >= 0.0004
+
+
+def read_occlusion(data: bytes, dicts=None) -> tuple[list[float] | None, str]:
+    """0..1 occlusion per height sample, 1 meaning open ground. None when the file is not that grid."""
+    try:
+        payload = unpack_hght(data, dicts)
+    except TerrainError as exc:
+        return None, str(exc)
+    blocks = [payload]
+    for at in (0x2C, 0x1C):
+        block = _block(payload, at)
+        if block:
+            blocks.append(block)
+    for block in blocks:
+        for width in (SIZE, 256, 128, 64):
+            raw = _linear_or_swizzled(block, width, 1)
+            if raw is None:
+                continue
+            values = _occlusion_grid(raw, width)
+            if values and _occlusion_varies(values):
+                return values, f"bake_ao {width}×{width} applied as vertex shade"
+            if values:
+                return None, f"bake_ao {width}×{width} was flat or not an occlusion range, so it was not applied"
+    return None, "bake_ao is not a single-channel occlusion grid"
+
+
+def sample_steps(tiles, scale: float, origin, focus: tuple[float, float]) -> tuple[dict[str, int], str]:
+    """Finer samples near the actors. More than 40 nearby tiles drop from step 4 to step 8."""
+    focus_x, focus_z = focus
+    distances = []
+    near = 0
+    for center_x, center_z, edge, name in tiles:
+        box = _world_box(center_x, center_z, edge, scale, origin)
+        dx = (box[0] + box[2]) / 2 - focus_x
+        dz = (box[1] + box[3]) / 2 - focus_z
+        distance = (dx * dx + dz * dz) ** 0.5
+        distances.append((name, distance))
+        if distance <= _NEAR_M:
+            near += 1
+    near_step = 8 if near > 40 else 4
+    steps: dict[str, int] = {}
+    used: set[int] = set()
+    for name, distance in distances:
+        if distance <= _NEAR_M:
+            step = near_step
+        elif distance <= _MID_M:
+            step = 8
+        else:
+            step = 16
+        steps[name] = step
+        used.add(step)
+    if not used:
+        return steps, "height samples step 16"
+    note = f"height samples step {min(used)} near the actors"
+    if len(used) > 1:
+        note += f" and step {max(used)} at the edge of the margin"
+    if near > 40:
+        note += f" ({near} tiles within {_NEAR_M:.0f} m, so nearby tiles use step {near_step})"
+    return steps, note
+
+
 def _indices(step: int) -> list[int]:
     found = list(range(0, SIZE, step))
     if found[-1] != SIZE - 1:
@@ -291,25 +533,30 @@ def _world_box(center_x, center_z, edge, scale, origin) -> tuple[float, float, f
 
 
 def build_scene(
-    tiles: list[tuple[float, float, float, str, list[float], list[int] | None]],
+    tiles: list[tuple],
     scale: float,
     height_scale: float,
     origin: tuple[float, float, float] = (0.0, 0.0, 0.0),
     clip: tuple[float, float, float, float] | None = None,
+    steps: dict[str, int] | None = None,
 ) -> tuple[list[HeightPart], list[TileInfo]]:
-    """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers."""
-    step = _sample_step(len(tiles))
-    samples = _indices(step)
-    count = len(samples)
+    """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers, and optional occlusion."""
+    default_step = _sample_step(len(tiles))
     boxes = []
-    for center_x, center_z, edge, _name, _heights, _layers in tiles:
+    for tile in tiles:
+        center_x, center_z, edge = tile[0], tile[1], tile[2]
         boxes.append((center_x - edge / 2, center_z - edge / 2, center_x + edge / 2, center_z + edge / 2, edge))
-    grouped: dict[int | None, list[tuple[tuple[float, float, float], tuple[float, float]]]] = {}
+    grouped: dict[int | None, list[tuple[tuple[float, float, float], tuple[float, float], tuple[float, float, float]]]] = {}
     grouped_index: dict[int | None, list[int]] = {}
     reports: list[TileInfo] = []
     ox, oy, oz = origin
-    for center_x, center_z, edge, name, heights, layers in tiles:
-        info = TileInfo(name=name, center=(center_x, center_z), edge=edge)
+    for tile in tiles:
+        center_x, center_z, edge, name, heights, layers = tile[:6]
+        occlusion = tile[6] if len(tile) > 6 else None
+        step = int((steps or {}).get(name) or default_step)
+        samples = _indices(step)
+        count = len(samples)
+        info = TileInfo(name=name, center=(center_x, center_z), edge=edge, step=step)
         present = [value for value in heights if value == value]
         if present:
             info.height_min = min(present)
@@ -354,10 +601,13 @@ def build_scene(
         for row, col in keep:
             layer = None
             if layers is not None:
-                layer = int(layers[samples[row] * SIZE + samples[col]])
+                raw = int(layers[samples[row] * SIZE + samples[col]])
+                if raw >= 0:
+                    layer = raw
             layer_cells.setdefault(layer, []).append((row, col))
         info.layers = sorted(item for item in layer_cells if item is not None)
         info.status = "drawn"
+        shade = occlusion if occlusion and len(occlusion) >= SIZE * SIZE else None
         for layer, cells in layer_cells.items():
             bucket = grouped.setdefault(layer, [])
             tris = grouped_index.setdefault(layer, [])
@@ -374,9 +624,11 @@ def build_scene(
                 unit_z = (center_z - edge / 2) + edge * sz / (SIZE - 1)
                 position = (unit_x * scale + ox, grid[row][col] * height_scale + oy, unit_z * scale + oz)
                 uv = (position[0] / _UV_METRES, position[2] / _UV_METRES)
+                amount = shade[sz * SIZE + sx] if shade is not None else 1.0
+                color = (amount, amount, amount)
                 index = len(bucket)
                 used[key] = index
-                bucket.append((position, uv))
+                bucket.append((position, uv, color))
                 return index
 
             for row, col in cells:
@@ -392,12 +644,14 @@ def build_scene(
     for layer, verts in grouped.items():
         if not verts or not grouped_index.get(layer):
             continue
+        colored = any(abs(item[2][0] - 1.0) > 1e-4 for item in verts)
         parts.append(
             HeightPart(
                 layer=layer,
                 positions=[item[0] for item in verts],
                 indices=grouped_index[layer],
                 uvs=[item[1] for item in verts],
+                colors=[item[2] for item in verts] if colored else None,
             )
         )
     return parts, reports

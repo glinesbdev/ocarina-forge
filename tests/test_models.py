@@ -638,6 +638,107 @@ def test_a_finer_tile_punches_the_coarser_one():
     assert sum(len(part.indices) // 3 for part in both) > coarse_tris
 
 
+def test_mate_blend_uses_the_second_index_and_rejects_noise():
+    from bancwright.formats.terrain import SIZE, read_mate
+
+    count = SIZE * SIZE
+    raw = bytearray()
+    for _index in range(count):
+        raw.extend((3, 7, 200, 0))
+    layers, note = read_mate(bytes(raw))
+    assert layers is not None and layers[0] == 7
+    assert "guess" in note
+    wide = bytes([4, 9, 0, 0]) * (256 * 256)
+    resampled, wide_note = read_mate(wide)
+    assert resampled is not None and len(resampled) == count and resampled[0] == 4
+    assert "256" in wide_note
+    noise, rejected = read_mate(bytes([200, 201, 202, 203]) * count)
+    assert noise is None
+    assert "did not contain" in rejected
+
+
+def test_tiles_inside_the_clip_are_not_capped():
+    from bancwright.models import _choose_tiles
+
+    tiles = [(float(index), 0.0, 4.0, f"T{index:02d}") for index in range(40)]
+    chosen, skipped, notes = _choose_tiles(tiles, 1.0, (0.0, 0.0, 0.0), (-10.0, -10.0, 200.0, 10.0))
+    assert len(chosen) == 40
+    assert skipped == []
+    assert not any("36" in note or "nearest" in note for note in notes)
+
+
+def test_sub_scene_supplies_the_fine_height_and_the_mate(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.formats.terrain import SIZE
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    main = dump.romfs / "TerrainArc" / "KokiriForest"
+    sub = dump.romfs / "TerrainArc" / "KokiriForest_sub"
+    main.mkdir(parents=True)
+    sub.mkdir()
+    (dump.romfs / "TerrainArc" / "KokiriForest.tscb").write_bytes(
+        _tscb(
+            1.0,
+            4.0,
+            [
+                (0.0, 0.0, 32.0, "Coarse"),
+                (0.0, 0.0, 8.0, "Fine"),
+                (8000.0, 8000.0, 20.0, "Far"),
+            ],
+        )
+    )
+    (dump.romfs / "TerrainArc" / "KokiriForest_sub.tscb").write_bytes(
+        _tscb(1.0, 4.0, [(0.0, 0.0, 8.0, "Fine"), (4.0, 0.0, 4.0, "Extra")])
+    )
+    (main / "Coarse.hght").write_bytes(_hght([0.5] * (SIZE * SIZE), bytes([0]) * (SIZE * SIZE)))
+    (sub / "Fine.hght").write_bytes(_hght([0.5] * (SIZE * SIZE)))
+    (sub / "Extra.hght").write_bytes(_hght([0.5] * (SIZE * SIZE)))
+    (main / "Fine.mate").write_bytes(bytes([0, 0, 0, 0]) * (SIZE * SIZE))
+    (sub / "Fine.mate").write_bytes(bytes([1, 0, 0, 0]) * (SIZE * SIZE))
+    shade = bytes([40] * (SIZE * SIZE // 2) + [220] * (SIZE * SIZE - SIZE * SIZE // 2))
+    (sub / "Fine.child.bake_ao.extm").write_bytes(shade)
+    (sub / "Fine.custom.extm").write_bytes(b"not a grid")
+    green = bytes([20, 140, 40, 255]) * 4
+    red = bytes([220, 20, 20, 255]) * 4
+    (dump.romfs / "Tex" / "MaterialAlb.bntx.zs").write_bytes(
+        compress(_array_bntx("MaterialAlb", [green, red], 2, 2), 1, dicts, level=3)
+    )
+    from bancwright import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    info = describe_terrain(dump, KOKIRI_STATIC)
+    assert info["status"] == "mesh"
+    assert "terrain heightmap" in info["reason"]
+    assert any(path.endswith("KokiriForest_sub.tscb") for path in info["terrain"]["subs"])
+    drawn = {row["name"]: row for row in info["tiles"] if row["status"] == "drawn"}
+    assert "Fine" in drawn and "Extra" in drawn
+    assert "KokiriForest_sub" in drawn["Fine"]["path"]
+    assert drawn["Fine"]["directory"] == "KokiriForest_sub"
+    assert drawn["Fine"]["layers"] == [1]
+    assert "KokiriForest_sub/Fine.mate" in drawn["Fine"]["mate"]
+    assert "guess" in drawn["Fine"]["mateNote"]
+    assert "applied" in drawn["Fine"]["ao"], drawn["Fine"]["ao"]
+    assert "custom.extm" in drawn["Fine"]["ao"]
+    assert "not used" in drawn["Fine"]["ao"]
+    assert drawn["Extra"]["directory"] == "KokiriForest_sub"
+    assert any(row["name"] == "Far" and "outside" in row["reason"] for row in info["tiles"])
+    glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
+    document, blob = _glb_parts(glb)
+    coloured = None
+    for mesh in document["meshes"]:
+        for primitive in mesh["primitives"]:
+            if "COLOR_0" in primitive["attributes"]:
+                coloured = primitive
+                break
+    assert coloured is not None
+    colors = _accessor_floats(document, blob, coloured["attributes"]["COLOR_0"], 3)
+    assert min(item[0] for item in colors) < 0.3
+    assert max(item[0] for item in colors) > 0.7
+
+
 def _tscb(scale: float, height_scale: float, tiles: list[tuple]) -> bytes:
     import struct
 

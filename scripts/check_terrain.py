@@ -65,6 +65,8 @@ def main(argv: list[str]) -> int:
             f"origin {origin[0]} {origin[1]} {origin[2]}  "
             f"scale {terrain.get('scale')}  height scale {terrain.get('heightScale')}"
         )
+    for extra in terrain.get("subs") or []:
+        print(f"sub scene {extra}")
     clip = terrain.get("clip")
     if clip:
         print(f"actor clip x {clip[0]}..{clip[2]}  z {clip[1]}..{clip[3]}")
@@ -76,12 +78,17 @@ def main(argv: list[str]) -> int:
     for row in tiles:
         layers = ",".join(str(item) for item in row.get("layers") or []) or "-"
         where = row.get("path") or "(no file)"
+        folder = row.get("directory") or "(no dir)"
+        mate = row.get("mate") or "(no mate)"
+        mate_note = row.get("mateNote") or "(mate not decoded)"
+        step = row.get("step") or "-"
+        ao = row.get("ao") or ""
         print(
             f"  {row.get('status')} {row.get('name')}  "
-            f"centre {row.get('center')}  edge {row.get('edge')}  "
-            f"triangles {row.get('triangles') or 0}  layers {layers}  "
+            f"dir {folder}  centre {row.get('center')}  edge {row.get('edge')}  "
+            f"triangles {row.get('triangles') or 0}  step {step}  layers {layers}  "
             f"height {row.get('heightMin')}..{row.get('heightMax')}  "
-            f"{where}  {row.get('reason') or ''}"
+            f"hght {where}  mate {mate}  {mate_note}  {ao}  {row.get('reason') or ''}"
         )
     if not tiles and info.get("status") == "mesh" and "terrain proxy" in (info.get("reason") or ""):
         print("no TerrainArc for this scene. The static-map bfres is the untextured stand-in and is not drawn.")
@@ -97,7 +104,8 @@ def main(argv: list[str]) -> int:
     print(
         "filters: actor LOD, the small-prop distance cull, and InnerMesh / bake / fade / "
         "water-volume omission do not drop the heightmap. Path strips and moss mounds that "
-        "already draw are actor models, not the field."
+        "already draw are actor models, not the field. .custom.extm is not decoded. "
+        "A .mate line is the material grid; the directory is the folder the .hght came from."
     )
     return 0
 

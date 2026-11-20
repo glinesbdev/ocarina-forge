@@ -47,7 +47,7 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-11\0"
+_CACHE_VERSION = b"models-12\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -55,7 +55,6 @@ _TERRAIN = (0.36, 0.45, 0.28, 1.0)
 # Heightmap colour when the tile has no MaterialAlb index.
 _EARTH = (0.40, 0.36, 0.22, 1.0)
 _GROUND_GYAML = re.compile(r"land|ground|terra|cliff|field|path|moss|paving|earth|road|hill|mound", re.IGNORECASE)
-_HEIGHT_CAP = 36
 # Unlit translucent water when the shader cannot be reproduced.
 _WATER = (0.35, 0.55, 0.55, 0.2)
 _ROCK = (0.45, 0.40, 0.34, 1.0)
@@ -1867,18 +1866,110 @@ def _tscb_stem(relative: str) -> str:
     return name
 
 
-def _hght_candidates(scene: str, name: str) -> list[str]:
+def _tile_stem(name: str) -> str:
     text = (name or "").strip().replace("\\", "/").lstrip("/")
-    for suffix in (".hght.zs", ".hght"):
+    for suffix in (".hght.zs", ".hght", ".mate.zs", ".mate", ".extm.zs", ".extm"):
         if text.endswith(suffix):
-            text = text[: -len(suffix)]
-            break
+            return text[: -len(suffix)]
+    return text
+
+
+def _hght_candidates(scene: str, name: str) -> list[str]:
+    text = _tile_stem(name)
     return [
         f"TerrainArc/{scene}/{text}.hght",
         f"TerrainArc/{scene}/{text}.hght.zs",
         f"TerrainArc/{text}.hght",
         f"TerrainArc/{text}.hght.zs",
     ]
+
+
+def _files_in_dirs(dump, directories: list[str], name: str, extensions: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Existing TerrainArc files in directory order, and the directory each came from."""
+    text = _tile_stem(name)
+    found = []
+    seen: set[str] = set()
+    folders = [item for item in directories if item] + [""]
+    for directory in folders:
+        for extension in extensions:
+            relative = f"TerrainArc/{directory}/{text}{extension}" if directory else f"TerrainArc/{text}{extension}"
+            if relative in seen or not _exists(dump, relative):
+                continue
+            seen.add(relative)
+            found.append((relative, directory))
+    return found
+
+
+def _file_in_dirs(dump, directories: list[str], name: str, extensions: tuple[str, ...]) -> tuple[str, str]:
+    """The first existing TerrainArc file, and the directory it came from."""
+    found = _files_in_dirs(dump, directories, name, extensions)
+    return found[0] if found else ("", "")
+
+
+def _sub_scene_names(scene: str, document, tscb: bytes) -> list[str]:
+    found: list[str] = []
+
+    def add(value: str) -> None:
+        text = (value or "").strip().replace("\\", "/").lstrip("/")
+        if text.startswith("Work/"):
+            text = text[5:]
+        for suffix in (".tscb.zs", ".tscb"):
+            if text.endswith(suffix):
+                text = text[: -len(suffix)]
+                break
+        text = text.rsplit("/", 1)[-1]
+        if text and text != scene and text not in found:
+            found.append(text)
+
+    if isinstance(document, dict):
+        for key, value in document.items():
+            if isinstance(value, str) and ("sub" in str(key).lower() or value.strip().endswith("_sub")):
+                add(value)
+    if scene:
+        add(scene + "_sub")
+    for name in heightmap.embedded_sub_names(tscb):
+        add(name)
+    return found
+
+
+def _scene_present(dump, name: str) -> bool:
+    if any(_exists(dump, relative) for relative in _tscb_candidates(name)):
+        return True
+    return (dump.romfs / "TerrainArc" / name).is_dir()
+
+
+def _lookup_directories(dump, scene: str, document, tscb: bytes = b"") -> list[str]:
+    """Fine-scene folders first, then the main scene, so a duplicated file prefers the fine copy."""
+    extra = [name for name in _sub_scene_names(scene, document, tscb) if _scene_present(dump, name)]
+    ordered = extra + ([scene] if scene else [])
+    found: list[str] = []
+    for name in ordered:
+        if name and name not in found:
+            found.append(name)
+    return found
+
+
+def _terrain_dir_token(dump, directories: list[str]) -> list[dict]:
+    tokens = []
+    for name in sorted({item for item in directories if item}):
+        folder = dump.romfs / "TerrainArc" / name
+        stamp = 0
+        if folder.is_dir():
+            try:
+                stamp = folder.stat().st_mtime_ns
+            except OSError:
+                stamp = 0
+        tokens.append({"path": f"TerrainArc/{name}", "mtime_ns": stamp})
+    return tokens
+
+
+def _age_variant(banc: str) -> str:
+    text = (banc or "").lower()
+    if "child" in text:
+        return "child"
+    if "adult" in text:
+        return "adult"
+    return ""
 
 
 def _merge_byml(parent, child):
@@ -2027,6 +2118,7 @@ def _locate_heightmap(dump, banc: str) -> dict:
             "origin": origin,
             "param": param,
             "notes": notes,
+            "document": document,
         }
     if scene or param:
         shown = ", ".join(tried[:6]) or "(none)"
@@ -2054,6 +2146,11 @@ def _tile_row(info: heightmap.TileInfo, path: str = "") -> dict:
         "edge": info.edge,
         "heightMin": info.height_min,
         "heightMax": info.height_max,
+        "directory": info.directory,
+        "mate": info.mate,
+        "mateNote": info.mate_note,
+        "ao": info.ao,
+        "step": info.step,
     }
 
 
@@ -2073,9 +2170,6 @@ def _choose_tiles(tiles, scale, origin, clip):
     if clip is not None and not inside and ranked:
         pool = sorted(ranked, key=lambda item: item[0])[:24]
         notes.append("no tile overlapped the actors, so the 24 nearest tiles were used")
-    if len(pool) > _HEIGHT_CAP:
-        pool = sorted(pool, key=lambda item: item[0])[:_HEIGHT_CAP]
-        notes.append(f"only the {_HEIGHT_CAP} tiles nearest the actors were meshed")
     chosen_ids = {id(item[1]) for item in pool}
     chosen = []
     skipped = []
@@ -2090,8 +2184,10 @@ def _choose_tiles(tiles, scale, origin, clip):
     return chosen, skipped, notes
 
 
-def _height_source(banc: str, tscb: str) -> str:
-    return hashlib.sha256(_CACHE_VERSION + b"height\0" + banc.encode("utf-8", "replace") + b"\0" + tscb.encode("utf-8", "replace")).hexdigest()
+def _height_source(banc: str, tscb: str, extras: str = "") -> str:
+    blob = _CACHE_VERSION + b"height\0" + banc.encode("utf-8", "replace") + b"\0" + tscb.encode("utf-8", "replace")
+    blob += b"\0" + extras.encode("utf-8", "replace")
+    return hashlib.sha256(blob).hexdigest()
 
 
 def _height_response(banc: str, digest: str, info: dict) -> dict:
@@ -2111,15 +2207,44 @@ def _height_response(banc: str, digest: str, info: dict) -> dict:
     }
 
 
+def _fit_extra_tiles(tiles, scale: float, height_scale: float, sub_scale: float, sub_height: float):
+    factor = (sub_scale / scale) if scale else 1.0
+    multiplier = (sub_height / height_scale) if height_scale else 1.0
+    fitted = []
+    for center_x, center_z, edge, name in tiles:
+        fitted.append((center_x * factor, center_z * factor, edge * factor, name, multiplier))
+    return fitted, abs(factor - 1.0) > 1e-3 or abs(multiplier - 1.0) > 1e-3
+
+
+def _merge_tile_sets(primary, extras):
+    """extras items are (label, scale_differs, fitted tiles with a height multiplier)."""
+    merged = {}
+    order = []
+    height_mul = {}
+    notes = []
+    for tile in primary:
+        merged[tile[3]] = tile
+        order.append(tile[3])
+        height_mul[tile[3]] = 1.0
+    for label, differs, fitted in extras:
+        if differs:
+            notes.append(f"{label} used a different scale and was fitted onto the main scene")
+        for center_x, center_z, edge, name, multiplier in fitted:
+            quad = (center_x, center_z, edge, name)
+            if name not in merged:
+                merged[name] = quad
+                order.append(name)
+                height_mul[name] = multiplier
+                continue
+            if edge < merged[name][2] - 1e-4:
+                merged[name] = quad
+                height_mul[name] = multiplier
+    return [merged[name] for name in order], height_mul, notes
+
+
 def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dict:
     tscb = located["tscb"]
-    source = _height_source(banc, tscb)
-    pointer = cache_dir() / "src" / source[:2] / f"{source}.json"
-    cached = _read_pointer(pointer, dump)
-    if cached is not None and cached.get("kind") == "mesh":
-        return _height_response(banc, cached["digest"], cached["info"])
-    if not convert:
-        raise CacheMiss()
+    scene = located.get("scene") or _tscb_stem(tscb)
     try:
         raw, _dict_id = dump.read_file(tscb)
         scale, height_scale, tiles = heightmap.read_tscb(raw)
@@ -2132,8 +2257,39 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
             "url": None,
             "banc": banc,
             "tiles": [],
-            "terrain": {"param": located.get("param") or "", "scene": located.get("scene") or ""},
+            "terrain": {"param": located.get("param") or "", "scene": scene},
         }
+    directories = _lookup_directories(dump, scene, located.get("document"), raw)
+    dir_token = _terrain_dir_token(dump, directories)
+    source = _height_source(banc, tscb, " ".join(item["path"] for item in dir_token))
+    pointer = cache_dir() / "src" / source[:2] / f"{source}.json"
+    cached = _read_pointer(pointer, dump)
+    if cached is not None and cached.get("kind") == "mesh" and cached.get("terrainDirs") == dir_token:
+        return _height_response(banc, cached["digest"], cached["info"])
+    if not convert:
+        raise CacheMiss()
+    sub_paths = []
+    extras = []
+    sub_notes = []
+    for name in directories:
+        if name == scene:
+            continue
+        path = next((item for item in _tscb_candidates(name) if _exists(dump, item)), "")
+        if not path:
+            sub_notes.append(f"TerrainArc/{name} is an extra heightmap folder with no TSCB")
+            continue
+        try:
+            sub_raw, _dict_id = dump.read_file(path)
+            sub_scale, sub_height, sub_tiles = heightmap.read_tscb(sub_raw)
+        except (BancError, heightmap.TerrainError, struct.error, ValueError) as exc:
+            message = exc.message if isinstance(exc, BancError) else str(exc)
+            sub_notes.append(f"{path} was not a usable extra index: {message}")
+            continue
+        fitted, differs = _fit_extra_tiles(sub_tiles, scale, height_scale, sub_scale, sub_height)
+        extras.append((path, differs, fitted))
+        sub_paths.append(path)
+        sub_notes.append(f"also {path} ({len(sub_tiles)} tiles)")
+    tiles, height_mul, merge_notes = _merge_tile_sets(tiles, extras)
     clip = None
     try:
         document, _dict_id, _payload = dump.read_byml(banc)
@@ -2141,18 +2297,23 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
     except BancError:
         clip = None
     chosen, skipped, choice_notes = _choose_tiles(tiles, scale, located["origin"], clip)
+    choice_notes = sub_notes + merge_notes + choice_notes
     files: list[dict] = []
     token = _FILES.set(files)
     rows = [_tile_row(info) for info in skipped]
     loaded = []
     try:
         _track_file(dump, tscb)
+        for extra in sub_paths:
+            _track_file(dump, extra)
         if located.get("param"):
             _track_file(dump, located["param"])
+        variant = _age_variant(banc)
         for center_x, center_z, edge, name in chosen:
             info = heightmap.TileInfo(name=name, center=(center_x, center_z), edge=edge)
-            path = next((item for item in _hght_candidates(located["scene"], name) if _exists(dump, item)), "")
+            path, directory = _file_in_dirs(dump, directories, name, (".hght", ".hght.zs"))
             info.path = path
+            info.directory = directory
             if not path:
                 info.reason = "no heightmap file"
                 rows.append(_tile_row(info))
@@ -2166,22 +2327,87 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 info.reason = message
                 rows.append(_tile_row(info, path))
                 continue
+            multiplier = height_mul.get(name, 1.0)
+            if multiplier != 1.0:
+                heights = [value * multiplier for value in heights]
+            mate_dirs = [directory] + [item for item in directories if item != directory]
+            mate_errors = []
+            for mate_path, _mate_dir in _files_in_dirs(dump, mate_dirs, name, (".mate", ".mate.zs")):
+                _track_file(dump, mate_path)
+                try:
+                    mate_blob, _dict_id = dump.read_file(mate_path)
+                    mate_layers, mate_note = heightmap.read_mate(mate_blob, dump.dicts())
+                except (BancError, heightmap.TerrainError, struct.error, ValueError, OSError) as exc:
+                    message = exc.message if isinstance(exc, BancError) else str(exc)
+                    mate_layers, mate_note = None, message
+                if mate_layers is not None:
+                    layers = mate_layers
+                    note = mate_note
+                    info.mate = mate_path
+                    info.mate_note = mate_note
+                    mate_errors = []
+                    break
+                mate_errors.append(f"{mate_path}: {mate_note}")
+            if mate_errors and not info.mate:
+                info.mate = mate_errors[0].split(":", 1)[0]
+                info.mate_note = " ".join(mate_errors)
+                note = f"{note}. {info.mate_note}"
+            occlusion = None
+            ao_ext = []
+            if variant:
+                ao_ext.extend((f".{variant}.bake_ao.extm", f".{variant}.bake_ao.extm.zs"))
+            ao_ext.extend((".bake_ao.extm", ".bake_ao.extm.zs"))
+            ao_errors = []
+            for ao_path, _ao_dir in _files_in_dirs(dump, mate_dirs, name, tuple(ao_ext)):
+                _track_file(dump, ao_path)
+                try:
+                    ao_blob, _dict_id = dump.read_file(ao_path)
+                    found_ao, ao_note = heightmap.read_occlusion(ao_blob, dump.dicts())
+                except (BancError, heightmap.TerrainError, struct.error, ValueError, OSError) as exc:
+                    message = exc.message if isinstance(exc, BancError) else str(exc)
+                    found_ao, ao_note = None, message
+                if found_ao is not None:
+                    occlusion = found_ao
+                    info.ao = f"{ao_path}: {ao_note}"
+                    break
+                ao_errors.append(f"{ao_path}: {ao_note}")
+            if occlusion is None and ao_errors:
+                info.ao = " ".join(ao_errors)
+            custom_files = _files_in_dirs(dump, mate_dirs, name, (".custom.extm", ".custom.extm.zs"))
+            if custom_files:
+                info.ao = (info.ao + " " if info.ao else "") + f"{custom_files[0][0]} is present and was not used"
             _track_file(dump, path)
             info.reason = note
-            loaded.append((center_x, center_z, edge, name, heights, layers, info))
+            loaded.append((center_x, center_z, edge, name, heights, layers, occlusion, info))
+        focus_x = located["origin"][0] if clip is None else (clip[0] + clip[2]) / 2
+        focus_z = located["origin"][2] if clip is None else (clip[1] + clip[3]) / 2
+        steps, step_note = heightmap.sample_steps(
+            [(item[0], item[1], item[2], item[3]) for item in loaded],
+            scale,
+            located["origin"],
+            (focus_x, focus_z),
+        )
+        choice_notes.append(step_note)
         parts, reports = heightmap.build_scene(
-            [(item[0], item[1], item[2], item[3], item[4], item[5]) for item in loaded],
+            [(item[0], item[1], item[2], item[3], item[4], item[5], item[6]) for item in loaded],
             scale,
             height_scale,
             located["origin"],
             clip=None,
+            steps=steps,
         )
-        by_name = {item[3]: item[6] for item in loaded}
+        by_name = {item[3]: item[7] for item in loaded}
         for report in reports:
             prior = by_name.get(report.name)
             path = prior.path if prior else ""
-            if prior and prior.reason:
-                report.reason = prior.reason if not report.reason else f"{report.reason}. {prior.reason}"
+            if prior:
+                report.path = prior.path
+                report.directory = prior.directory
+                report.mate = prior.mate
+                report.mate_note = prior.mate_note
+                report.ao = prior.ao
+                if prior.reason:
+                    report.reason = prior.reason if not report.reason else f"{report.reason}. {prior.reason}"
             rows.append(_tile_row(report, path))
         if not parts:
             reason = f"{tscb} has no tile that produced triangles."
@@ -2195,7 +2421,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 "url": None,
                 "banc": banc,
                 "tiles": rows,
-                "terrain": _terrain_meta(located, scale, height_scale, clip, choice_notes),
+                "terrain": _terrain_meta(located, scale, height_scale, clip, choice_notes, sub_paths),
             }
         layer_ids = sorted({part.layer for part in parts if part.layer is not None})
         images, log, raws = _bind_terrain_layers(dump, layer_ids)
@@ -2220,6 +2446,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 double_sided=True,
                 base_color=(1.0, 1.0, 1.0, 1.0) if png else _EARTH,
                 name=f"terrain:{part.layer if part.layer is not None else 'earth'}",
+                colors=part.colors,
             )
         )
         triangles += len(part.indices) // 3
@@ -2232,7 +2459,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
             "url": None,
             "banc": banc,
             "tiles": rows,
-            "terrain": _terrain_meta(located, scale, height_scale, clip, choice_notes),
+            "terrain": _terrain_meta(located, scale, height_scale, clip, choice_notes, sub_paths),
         }
     drawn = [row for row in rows if row["status"] == "drawn"]
     notes = list(located.get("notes") or []) + choice_notes
@@ -2241,7 +2468,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
     else:
         notes.append("no material index in the heightmap, so the ground is a flat earth colour")
     notes.append(f"UV repeats every {heightmap._UV_METRES:.0f} m (a guess)")
-    notes.append(f"height samples step {heightmap._sample_step(len(loaded) or 1)}")
+    notes.append("custom.extm is not decoded")
     reason = "terrain heightmap. " + " ".join(notes)
     bounds = None
     if positions:
@@ -2257,7 +2484,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         "bounds": bounds,
         "textureLog": log,
         "tiles": rows,
-        "terrain": _terrain_meta(located, scale, height_scale, clip, notes),
+        "terrain": _terrain_meta(located, scale, height_scale, clip, notes, sub_paths),
         "notes": notes,
     }
     info["terrain"]["drawn"] = len(drawn)
@@ -2276,12 +2503,19 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
             meta_path.write_text(json.dumps(info), encoding="utf-8")
         _write_pointer(
             pointer,
-            {"kind": "mesh", "digest": digest, "info": info, "files": files, "texDir": _tex_token(dump)},
+            {
+                "kind": "mesh",
+                "digest": digest,
+                "info": info,
+                "files": files,
+                "texDir": _tex_token(dump),
+                "terrainDirs": dir_token,
+            },
         )
     return _height_response(banc, digest, info)
 
 
-def _terrain_meta(located, scale, height_scale, clip, notes) -> dict:
+def _terrain_meta(located, scale, height_scale, clip, notes, subs=None) -> dict:
     origin = located.get("origin") or (0.0, 0.0, 0.0)
     return {
         "scene": located.get("scene") or "",
@@ -2291,16 +2525,19 @@ def _terrain_meta(located, scale, height_scale, clip, notes) -> dict:
         "heightScale": height_scale,
         "clip": list(clip) if clip else None,
         "notes": list(notes),
+        "subs": list(subs or []),
     }
 
 
 def _height_blob(loaded) -> bytes:
     chunks = []
-    for center_x, center_z, edge, name, heights, layers, _info in loaded:
+    for center_x, center_z, edge, name, heights, layers, occlusion, _info in loaded:
         chunks.append(f"{name}:{center_x}:{center_z}:{edge}".encode("utf-8", "replace"))
         chunks.append(array.array("f", heights).tobytes())
         if layers:
-            chunks.append(bytes(int(item) & 0xFF for item in layers))
+            chunks.append(bytes((int(item) & 0xFF) if int(item) >= 0 else 0xFF for item in layers))
+        if occlusion:
+            chunks.append(array.array("f", occlusion).tobytes())
     return b"\0".join(chunks)
 
 
