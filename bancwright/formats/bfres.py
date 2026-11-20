@@ -79,6 +79,8 @@ class Part:
     omit_reason: str = ""
     # "repeat" writes a glTF sampler with wrap REPEAT. Terra UVs tile past 1.
     wrap: str = ""
+    normal_texture: str = ""
+    emission_texture: str = ""
 
 
 @dataclass
@@ -94,6 +96,17 @@ class Material:
     note: str = ""
     # v10 render-state string at index 11 (opaque, mask, translucent, custom).
     render_state: str = ""
+    # Shader archive and shading model. Empty when the file has no shader assign.
+    archive: str = ""
+    options: dict[str, str] = field(default_factory=dict)
+    # Sampler slot in the file -> the name the shader uses for that slot.
+    assign: dict[str, str] = field(default_factory=dict)
+    # Shader attribute -> mesh attribute. `_u0` / `_u1` / `_u2` are the UV channels.
+    attributes: dict[str, str] = field(default_factory=dict)
+    render_info: list[dict] = field(default_factory=list)
+    params: list[dict] = field(default_factory=list)
+    # v10 render-state strings in slot order, including the empty ones.
+    states: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -506,14 +519,21 @@ class _File:
             render = self._render_map(render_at, render_dict, render_count)
         except (FresError, struct.error, IndexError, OSError):
             render = {}
+        archive = model = ""
+        attributes: dict[str, str] = {}
         try:
-            shader, assign, options = self._shader_assign(assign_at)
+            archive, model, attributes, assign, options = self._shader_assign(assign_at)
         except (FresError, struct.error, IndexError, OSError):
-            shader, assign, options = "", {}, {}
+            archive, model, attributes, assign, options = "", "", {}, {}, {}
+        shader = model or archive
         try:
             color = self._param_color(param_at, param_dict, param_data, param_count)
         except (FresError, struct.error, IndexError, OSError):
             color = None
+        try:
+            params = self._read_params(param_at, param_dict, param_data, param_count)
+        except (FresError, struct.error, IndexError, OSError, ValueError):
+            params = []
         role = {target: slot for slot, target in assign.items() if target}
         binds: list[tuple[str, str]] = []
         count = max(len(textures), len(sampler_names))
@@ -525,7 +545,23 @@ class _File:
             binds.append((role.get(sampler, sampler), texture))
         albedo = rank_albedo(binds)
         alpha, cutoff, sided = _alpha_state(render, options, shader, name)
-        return Material(name, binds, albedo, alpha, cutoff, sided, color, shader)
+        info = [{"name": key, "value": value} for key, value in render.items()]
+        return Material(
+            name,
+            binds,
+            albedo,
+            alpha,
+            cutoff,
+            sided,
+            color,
+            shader,
+            archive=archive,
+            options=dict(options),
+            assign=dict(assign),
+            attributes=dict(attributes),
+            render_info=info,
+            params=params,
+        )
 
     def _read_material_v10(self, at: int, fallback: str) -> Material:
         """Switch 2 FMAT. Offsets are from the FMAT magic, and the block is 0xB0 bytes.
@@ -569,7 +605,29 @@ class _File:
             alpha, cutoff, sided = _alpha_state({}, {}, "", name)
             mode = ""
         note = self._render_info_note(at)
-        return Material(name, binds, albedo, alpha, cutoff, sided, None, "", note, render_state=mode)
+        try:
+            archive, model, attributes, assign, options, params = self._probe_v10_shader(at)
+        except (FresError, struct.error, IndexError, OSError, ValueError):
+            archive, model, attributes, assign, options, params = "", "", {}, {}, {}, []
+        return Material(
+            name,
+            binds,
+            albedo,
+            alpha,
+            cutoff,
+            sided,
+            None,
+            model or archive,
+            note,
+            mode,
+            archive,
+            options,
+            assign,
+            attributes,
+            [],
+            params,
+            states,
+        )
 
     def _render_info_note(self, at: int) -> str:
         """Why a v10 material has no render-info keys.
@@ -672,36 +730,148 @@ class _File:
             found[name] = _render_values(self, data_at, kind, amount)
         return found
 
-    def _shader_assign(self, at: int) -> tuple[str, dict[str, str], dict[str, str]]:
+    def _shader_assign(self, at: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str]]:
+        """Archive, shading model, attribute map, sampler map, and option strings.
+
+        Attribute pairs are at +0x10 / +0x18 (count byte +0x44). Sampler pairs
+        are at +0x20 / +0x28 (count byte +0x45). Option pairs are at +0x30 /
+        +0x38 (count u16 +0x46). The dictionary key is the shader name and the
+        array string is the mesh or material name. `_u0`, `_u1`, and `_u2` in
+        either side are UV channels.
+        """
         if not at or at + 0x48 > len(self.data):
-            return "", {}, {}
+            return "", "", {}, {}, {}
         archive = self.string(self.u64(at))
         model = self.string(self.u64(at + 8))
         if archive and not _TEX_NAME.fullmatch(archive):
-            return "", {}, {}
+            return "", "", {}, {}, {}
         if model and not _TEX_NAME.fullmatch(model):
-            return "", {}, {}
-        samp_arr = self.u64(at + 0x20)
+            return "", "", {}, {}, {}
+        attributes = self._string_pairs(self.u64(at + 0x10), self.u64(at + 0x18), self.data[at + 0x44])
+        samplers = self._string_pairs(self.u64(at + 0x20), self.u64(at + 0x28), self.data[at + 0x45])
+        options = self._string_pairs(self.u64(at + 0x30), self.u64(at + 0x38), self.u16(at + 0x46))
+        return archive, model, attributes, samplers, options
+
+    def _string_pairs(self, array: int, dictionary: int, count: int) -> dict[str, str]:
+        if not dictionary and not array:
+            return {}
+        try:
+            keys = self.dict_keys(dictionary) if dictionary else []
+        except FresError:
+            keys = []
+        found = {}
+        limit = max(count, len(keys)) if (count or keys) else 0
+        for index, key in enumerate(keys[: min(limit, 64)]):
+            target = key
+            if array:
+                slot = array + index * 8
+                if slot + 8 <= len(self.data):
+                    target = self.string(self.u64(slot)) or key
+            if key:
+                found[key] = target
+        return found
+
+    def _probe_v10_shader(self, header: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str], list[dict]]:
+        """Find a version-9 shader-assign block and shader-param array in a v10 header.
+
+        Version 10's known fields are the texture list, the sampler dictionary,
+        and the render-state strings. The other qwords are only accepted when
+        they match that older record: a shader assign needs a dictionary whose
+        length is the count at +0x45 or +0x46, and a param array needs every
+        dictionary key to decode as a known uniform. A miss stays empty.
+        """
+        slots = (0x10, 0x18, 0x28, 0x30, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98)
+        pointers = []
+        for slot in slots:
+            ptr = self.u64(header + slot)
+            if ptr and ptr not in pointers:
+                pointers.append(ptr)
+        archive = model = ""
+        attributes: dict[str, str] = {}
+        assign: dict[str, str] = {}
+        options: dict[str, str] = {}
+        for ptr in pointers:
+            found = self._assign_block(ptr)
+            if found is None:
+                continue
+            archive, model, attributes, assign, options = found
+            break
+        params = self._probe_params(pointers)
+        return archive, model, attributes, assign, options, params
+
+    def _assign_block(self, at: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str]] | None:
+        if not at or at + 0x48 > len(self.data):
+            return None
+        attr_dict = self.u64(at + 0x18)
         samp_dict = self.u64(at + 0x28)
-        opt_arr = self.u64(at + 0x30)
         opt_dict = self.u64(at + 0x38)
+        if not any(self._dict_ok(ptr) for ptr in (attr_dict, samp_dict, opt_dict)):
+            return None
+        archive_at = self.u64(at)
+        model_at = self.u64(at + 8)
+        if archive_at and not self._is_string(archive_at):
+            return None
+        if model_at and not self._is_string(model_at):
+            return None
+        archive, model, attributes, assign, options = self._shader_assign(at)
+        if not archive and not model:
+            return None
+        attr_count = self.data[at + 0x44]
         samp_count = self.data[at + 0x45]
         opt_count = self.u16(at + 0x46)
-        samplers: dict[str, str] = {}
-        keys = self.dict_keys(samp_dict) if samp_dict else []
-        for index, key in enumerate(keys[: max(samp_count, len(keys)) or 0][:64]):
-            target = key
-            if samp_arr:
-                target = self.string(self.u64(samp_arr + index * 8)) or key
-            if key:
-                samplers[key] = target
-        options: dict[str, str] = {}
-        okeys = self.dict_keys(opt_dict) if opt_dict else []
-        for index, key in enumerate(okeys[: max(opt_count, len(okeys)) or 0][:64]):
-            if not opt_arr or not key:
+        if attr_count > 32 or samp_count > 32 or opt_count > 64:
+            return None
+        if self._dict_ok(attr_dict):
+            if len(self.dict_keys(attr_dict)) != attr_count:
+                return None
+        elif attr_count:
+            return None
+        if self._dict_ok(samp_dict):
+            if len(self.dict_keys(samp_dict)) != samp_count:
+                return None
+        elif samp_count:
+            return None
+        if self._dict_ok(opt_dict):
+            if len(self.dict_keys(opt_dict)) != opt_count:
+                return None
+        elif opt_count:
+            return None
+        if not attr_count and not samp_count and not opt_count:
+            return None
+        return archive, model, attributes, assign, options
+
+    def _probe_params(self, pointers: list[int]) -> list[dict]:
+        best: list[dict] = []
+        for dictionary in pointers:
+            if not self._dict_ok(dictionary):
                 continue
-            options[key] = self.string(self.u64(opt_arr + index * 8))
-        return model or archive, samplers, options
+            try:
+                keys = [key for key in self.dict_keys(dictionary) if key]
+            except FresError:
+                continue
+            if not keys or len(keys) > 80 or all(_sampler_key(key) for key in keys):
+                continue
+            for array in pointers:
+                if array == dictionary:
+                    continue
+                for data in pointers:
+                    if data in (array, dictionary):
+                        continue
+                    try:
+                        rows = self._read_params(array, dictionary, data, len(keys))
+                    except (FresError, struct.error, IndexError, OSError, ValueError):
+                        continue
+                    if len(rows) == len(keys) and len(rows) > len(best):
+                        best = rows
+        return best
+
+    def _dict_ok(self, at: int) -> bool:
+        if not at or at + 24 > len(self.data):
+            return False
+        if self.u32(at + 8) != 0xFFFFFFFF:
+            return False
+        count = self.i32(at + 4)
+        return 0 < count <= 80
 
     def _param_color(self, array: int, dictionary: int, data: int, count: int) -> tuple[float, float, float, float] | None:
         if not array or not data or count <= 0 or count > 80:
@@ -727,6 +897,38 @@ class _File:
                 values.append(1.0)
             return _sane_color(tuple(values))
         return None
+
+    def _read_params(self, array: int, dictionary: int, data: int, count: int) -> list[dict]:
+        """Every shader uniform whose type and bytes are in the public list.
+
+        Kinds are the Switch parameter ids: 0x0C–0x0F are floats, and 0x1E /
+        0x1F are a texture SRT (mode, scale, rotation, translation). A row
+        whose name is not the dictionary key, or whose floats are not finite,
+        is left out. The caller drops a probe that does not decode every key.
+        """
+        if not array or not data or count <= 0 or count > 80:
+            return []
+        try:
+            labels = self.dict_keys(dictionary) if dictionary else []
+        except FresError:
+            labels = []
+        found = []
+        for index in range(count):
+            at = array + index * 0x20
+            if at + 0x14 > len(self.data):
+                break
+            expected = labels[index] if index < len(labels) else ""
+            name = self.string(self.u64(at + 8)) or expected
+            if expected and name != expected:
+                continue
+            if not name:
+                continue
+            kind = self.data[at + 0x10]
+            offset = self.u16(at + 0x12)
+            row = _decode_param(self, name, kind, data, offset)
+            if row is not None:
+                found.append(row)
+        return found
 
     def _scan_fmats(self) -> list[Material]:
         found = []
@@ -1440,6 +1642,161 @@ _SKIP = {
     "ind",
 }
 _TEX_NAME = re.compile(r"[A-Za-z0-9_./+-]{1,120}")
+def bind_role(sampler: str, texture: str = "") -> str:
+    """albedo, normal, emission, mask, or other. The slot name wins over the texture name."""
+    token = "".join(char for char in (sampler or "").lower() if char.isalnum())
+    if token in _PRIMARY_SAMPLER or token in _EXTRA_SAMPLER or (len(token) == 2 and token[0] == "a" and token[1].isdigit()):
+        return "albedo"
+    if token in {"n", "n0", "n1", "n2", "n3", "nrm", "nrm0", "normal", "normal0"} or token.startswith(("normal", "nrm")):
+        return "normal"
+    if "emiss" in token or token.startswith(("emm", "emit")) or token in {"e", "e0", "e1", "e2", "e3"}:
+        return "emission"
+    if "mask" in token or token.startswith("msk"):
+        return "mask"
+    if token and _SAMPLER_SKIP.fullmatch(token):
+        return "other"
+    if not token:
+        rank = texture_rank(texture)
+        if rank == 0:
+            return "albedo"
+        if rank == 2:
+            return "other"
+    return "other"
+
+
+def _sampler_key(name: str) -> bool:
+    """A sampler slot such as ``_a0``, not a uniform such as ``albedo_color``."""
+    return bool(re.fullmatch(r"_[A-Za-z]{1,12}\d{0,2}", name or ""))
+
+
+_PARAM_FLOATS = {0x0C: 1, 0x0D: 2, 0x0E: 3, 0x0F: 4}
+_PARAM_INTS = {0x00: 1, 0x01: 2, 0x02: 3, 0x03: 4, 0x04: 1, 0x05: 2, 0x06: 3, 0x07: 4}
+_PARAM_UINTS = {0x08: 1, 0x09: 2, 0x0A: 3, 0x0B: 4}
+_SRT_MODE = {0: "maya", 1: "max", 2: "softimage"}
+
+
+def _decode_param(reader, name: str, kind: int, data: int, offset: int) -> dict | None:
+    if kind in (0x1E, 0x1F):
+        at = data + offset
+        if at < 0 or at + 24 > len(reader.data):
+            return None
+        mode = reader.u32(at)
+        scale = (reader.f32(at + 4), reader.f32(at + 8))
+        rotate = reader.f32(at + 12)
+        translate = (reader.f32(at + 16), reader.f32(at + 20))
+        numbers = (*scale, rotate, *translate)
+        if not all(math.isfinite(item) for item in numbers):
+            return None
+        return {
+            "name": name,
+            "kind": "texsrt",
+            "mode": _SRT_MODE.get(mode, mode),
+            "scale": [round(item, 6) for item in scale],
+            "rotate": round(rotate, 6),
+            "translate": [round(item, 6) for item in translate],
+        }
+    if kind in _PARAM_FLOATS:
+        count = _PARAM_FLOATS[kind]
+        at = data + offset
+        if at < 0 or at + count * 4 > len(reader.data):
+            return None
+        values = [reader.f32(at + index * 4) for index in range(count)]
+        if not all(math.isfinite(item) for item in values):
+            return None
+        return {"name": name, "kind": "float", "value": [round(item, 6) for item in values]}
+    if kind in _PARAM_INTS or kind in _PARAM_UINTS:
+        count = _PARAM_INTS.get(kind) or _PARAM_UINTS[kind]
+        at = data + offset
+        if at < 0 or at + count * 4 > len(reader.data):
+            return None
+        read = reader.u32 if kind in _PARAM_UINTS else reader.i32
+        label = "uint" if kind in _PARAM_UINTS else ("bool" if kind <= 0x03 else "int")
+        return {"name": name, "kind": label, "value": [read(at + index * 4) for index in range(count)]}
+    return None
+
+
+def _param_bytes(item: dict) -> bytes:
+    kind = int(item["kind"]) if item.get("kind") is not None else 0x0C
+    if kind in (0x1E, 0x1F):
+        scale = list(item.get("scale") or [1.0, 1.0])
+        translate = list(item.get("translate") or [0.0, 0.0])
+        return struct.pack(
+            "<I5f",
+            int(item.get("mode") or 0),
+            float(scale[0]),
+            float(scale[1]),
+            float(item.get("rotate") or 0),
+            float(translate[0]),
+            float(translate[1]),
+        )
+    values = list(item.get("values") or [0])
+    if kind < 0x0C:
+        return struct.pack("<" + "i" * len(values), *[int(item) for item in values])
+    return struct.pack("<" + "f" * len(values), *[float(item) for item in values])
+
+
+def _pack_shader(blob: bytearray, add_string, add_dict, shader: dict) -> tuple[int, int, int, int, int]:
+    """Append a version-9 shader assign and its uniforms. Returns the five pointers and the param count."""
+    archive = add_string(str(shader.get("archive") or ""))
+    model = add_string(str(shader.get("model") or ""))
+
+    def align(n: int) -> None:
+        while len(blob) % n:
+            blob.append(0)
+
+    def pack_map(mapping: dict) -> tuple[int, int, int]:
+        items = list(mapping.items())
+        if not items:
+            return 0, 0, 0
+        keys = [add_string(str(key)) for key, _value in items]
+        values = [add_string(str(value)) for _key, value in items]
+        align(8)
+        array = len(blob)
+        for off in values:
+            blob.extend(struct.pack("<Q", off))
+        return array, add_dict(keys), len(items)
+
+    attr_arr, attr_dict, attr_count = pack_map(dict(shader.get("attributes") or {}))
+    samp_arr, samp_dict, samp_count = pack_map(dict(shader.get("samplers") or {}))
+    opt_arr, opt_dict, opt_count = pack_map({str(key): str(value) for key, value in (shader.get("options") or {}).items()})
+    align(8)
+    assign_at = len(blob)
+    block = bytearray(0x48)
+    struct.pack_into("<Q", block, 0, archive)
+    struct.pack_into("<Q", block, 8, model)
+    struct.pack_into("<Q", block, 0x10, attr_arr)
+    struct.pack_into("<Q", block, 0x18, attr_dict)
+    struct.pack_into("<Q", block, 0x20, samp_arr)
+    struct.pack_into("<Q", block, 0x28, samp_dict)
+    struct.pack_into("<Q", block, 0x30, opt_arr)
+    struct.pack_into("<Q", block, 0x38, opt_dict)
+    block[0x44] = attr_count & 0xFF
+    block[0x45] = samp_count & 0xFF
+    struct.pack_into("<H", block, 0x46, opt_count)
+    blob.extend(block)
+    params = list(shader.get("params") or [])
+    if not params:
+        return assign_at, 0, 0, 0, 0
+    names = [add_string(str(item.get("name") or f"param{index}")) for index, item in enumerate(params)]
+    chunks = [_param_bytes(item) for item in params]
+    align(8)
+    data_at = len(blob)
+    offsets = []
+    for chunk in chunks:
+        offsets.append(len(blob) - data_at)
+        blob.extend(chunk)
+        align(4)
+    align(8)
+    array_at = len(blob)
+    for index, item in enumerate(params):
+        kind = int(item["kind"]) if item.get("kind") is not None else 0x0C
+        blob.extend(struct.pack("<QQ", 0, names[index]))
+        blob.extend(struct.pack("<BBH", kind & 0xFF, len(chunks[index]) & 0xFF, offsets[index] & 0xFFFF))
+        blob.extend(struct.pack("<iHH", -1, 0, 0))
+        blob.extend(struct.pack("<I", 0))
+    return assign_at, array_at, add_dict(names), data_at, len(params)
+
+
 _COLOR_PARAM = re.compile(r"(const_color|albedo_color|base_color|diffuse_color|material_color|color0|gsys_color)", re.I)
 _COLOR_SKIP = re.compile(r"(spec|emit|emiss|rim|shadow|fog|light)", re.I)
 _SAMPLER_SKIP = re.compile(
@@ -1862,6 +2219,7 @@ def sample_bfres(
     cutoff: float = 0.5,
     display_face: str = "",
     link_textures: bool = True,
+    shader: dict | None = None,
 ) -> bytes:
     """A version-9 Switch BFRES with one textured triangle mesh. Synthetic."""
     if len(positions) != len(uvs):
@@ -2025,25 +2383,29 @@ def sample_bfres(
             texture_count = 0
             sampler_count = 0
         sampler_dict_at = add_dict(samp_offs) if samp_offs and link_textures else 0
+    assign_ptr = param_array = param_dict_at = param_data = 0
+    param_count = 0
+    if shader:
+        assign_ptr, param_array, param_dict_at, param_data, param_count = _pack_shader(blob, add_string, add_dict, shader)
     mat_at = len(blob)
     blob.extend(b"FMAT")
     blob.extend(struct.pack("<I", 1))
     blob.extend(struct.pack("<Q", mat_name))
     blob.extend(struct.pack("<QQ", render_at, render_dict))
-    blob.extend(struct.pack("<Q", 0))  # shader assign
+    blob.extend(struct.pack("<Q", assign_ptr))  # shader assign
     blob.extend(struct.pack("<Q", 0))  # runtime textures
     blob.extend(struct.pack("<Q", tex_ptr))
     blob.extend(struct.pack("<Q", 0))  # sampler array
     blob.extend(struct.pack("<QQ", 0, sampler_dict_at))
-    blob.extend(struct.pack("<QQ", 0, 0))  # shader params
-    blob.extend(struct.pack("<Q", 0))  # param data
+    blob.extend(struct.pack("<QQ", param_array, param_dict_at))  # shader params
+    blob.extend(struct.pack("<Q", param_data))  # param data
     blob.extend(struct.pack("<QQ", 0, 0))  # user data
     blob.extend(struct.pack("<Q", 0))  # volatile
     blob.extend(struct.pack("<Q", 0))  # user pointer
     blob.extend(struct.pack("<QQ", 0, 0))  # slots
     blob.extend(struct.pack("<HH", 0, render_count))
     blob.extend(bytes((sampler_count & 0xFF, texture_count & 0xFF)))
-    blob.extend(struct.pack("<HHHHH", 0, 0, 0, 0, 0))
+    blob.extend(struct.pack("<HHHHH", param_count, 0, 0, 0, 0))
     mat_dict = add_dict([mat_name])
 
     align(8)
@@ -2188,7 +2550,7 @@ def sample_v10_bfres(
         words[11] = mode
         words[15] = "true" if mode == "mask" else "false"
         state_offs = [add_string(word) for word in words]
-        prepared.append((mat_name, pairs, tex_offs, samp_offs, state_offs))
+        prepared.append((mat_name, pairs, tex_offs, samp_offs, state_offs, item.get("shader") or None))
 
     align(8)
     attr_at = len(blob)
@@ -2269,7 +2631,7 @@ def sample_v10_bfres(
     shape_dict = add_dict(shape_names)
 
     built = []
-    for mat_name, pairs, tex_offs, samp_offs, state_offs in prepared:
+    for mat_name, pairs, tex_offs, samp_offs, state_offs, shader in prepared:
         align(8)
         tex_ptr = 0
         if tex_offs:
@@ -2283,18 +2645,27 @@ def sample_v10_bfres(
             for off in state_offs:
                 blob.extend(struct.pack("<Q", off))
         sampler_dict = add_dict(samp_offs) if samp_offs else 0
-        built.append((mat_name, tex_ptr, sampler_dict, state_ptr, len(samp_offs), len(tex_offs), len(state_offs)))
+        assign_ptr = param_array = param_dict_at = param_data = 0
+        if shader:
+            assign_ptr, param_array, param_dict_at, param_data, _count = _pack_shader(blob, add_string, add_dict, shader)
+        built.append(
+            (mat_name, tex_ptr, sampler_dict, state_ptr, len(samp_offs), len(tex_offs), len(state_offs), assign_ptr, param_array, param_dict_at, param_data)
+        )
 
     align(8)
     mat_at = len(blob)
-    for mat_name, tex_ptr, sampler_dict, state_ptr, sampler_count, texture_count, state_count in built:
+    for mat_name, tex_ptr, sampler_dict, state_ptr, sampler_count, texture_count, state_count, assign_ptr, param_array, param_dict_at, param_data in built:
         header = bytearray(0xB0)
         header[0:4] = b"FMAT"
         struct.pack_into("<I", header, 0x04, 1)
         struct.pack_into("<Q", header, 0x08, mat_name)
+        struct.pack_into("<Q", header, 0x10, assign_ptr)
         struct.pack_into("<Q", header, 0x20, tex_ptr)
         struct.pack_into("<Q", header, 0x38, sampler_dict)
         struct.pack_into("<Q", header, 0x40, state_ptr)
+        struct.pack_into("<Q", header, 0x48, param_array)
+        struct.pack_into("<Q", header, 0x50, param_dict_at)
+        struct.pack_into("<Q", header, 0x58, param_data)
         # Real files store 0 or 1 here. It is not the render-state array length.
         struct.pack_into("<H", header, 0xA0, 1 if state_count else 0)
         header[0xA2] = sampler_count & 0xFF

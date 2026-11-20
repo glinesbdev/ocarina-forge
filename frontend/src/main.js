@@ -1389,6 +1389,8 @@ function renderProps() {
   if (notes.length) panel.append(problemNotes(notes));
   if (actor.status === "recipe") panel.append(recipeNote(actor));
   panel.append(modelBlock(actor));
+  const materials = materialBlock(info);
+  if (materials) panel.append(materials);
 
   if (!actor.id || actor.status === "locked") return;
 
@@ -1511,6 +1513,66 @@ function modelBlock(actor) {
     wrap.append(source);
   }
   return wrap;
+}
+
+function materialBlock(info) {
+  const rows = (info && info.textureLog) || [];
+  const useful = rows.filter((row) => row && (row.material || (row.roles && row.roles.length) || (row.params && row.params.length)));
+  if (!useful.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "model-note";
+  const title = document.createElement("div");
+  title.className = "axis-label";
+  title.textContent = "Materials";
+  wrap.append(title);
+  for (const row of useful.slice(0, 8)) {
+    const body = document.createElement("p");
+    body.className = "material-dump";
+    body.textContent = materialText(row);
+    wrap.append(body);
+  }
+  if (useful.length > 8) {
+    const more = document.createElement("p");
+    more.className = "muted";
+    more.textContent = `${useful.length - 8} more. python -m bancwright material-debug prints every material.`;
+    wrap.append(more);
+  }
+  return wrap;
+}
+
+function materialText(row) {
+  const lines = [row.material || "material"];
+  const shader = [row.archive, row.shader].filter(Boolean).join(" / ");
+  lines.push(shader || "no shader assign");
+  if (row.hints && row.hints.length) lines.push("name hint " + row.hints.join(", "));
+  const attributes = row.attributes || {};
+  for (const key of Object.keys(attributes)) lines.push(`${key} = ${attributes[key]}`);
+  const projection = row.projection || {};
+  for (const key of Object.keys(projection)) lines.push(`${key} = ${projection[key]}`);
+  for (const role of row.roles || []) {
+    const slot = role[0] || "?";
+    const texture = role[1] || "?";
+    const kind = role[2] || "other";
+    const uv = role[3] ? `uv ${role[3]}` : "uv (not in the shader assign)";
+    const srt = role[4] ? `srt ${role[4]}` : "srt (none named for this sampler)";
+    lines.push(`${slot} = ${texture}  ${kind}  ${uv}  ${srt}`);
+  }
+  if (row.alpha) lines.push(String(row.alpha));
+  const options = row.options || {};
+  for (const key of Object.keys(options)) lines.push(`${key} = ${options[key]}`);
+  for (const param of row.params || []) lines.push(paramText(param));
+  return lines.join("\n");
+}
+
+function paramText(param) {
+  if (!param) return "";
+  if (param.kind === "texsrt") {
+    const scale = (param.scale || []).join(" ");
+    const translate = (param.translate || []).join(" ");
+    return `${param.name}  texsrt ${param.mode}  scale ${scale}  rotate ${param.rotate}  translate ${translate}`;
+  }
+  const value = Array.isArray(param.value) ? param.value.join(" ") : param.value ?? "";
+  return `${param.name}  ${param.kind || ""} ${value}`.trim();
 }
 
 function vectorFields(label, prefix, values) {

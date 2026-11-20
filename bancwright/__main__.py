@@ -2,7 +2,8 @@
 
 ``problems <banc>`` prints scene diagnostics. ``model-debug`` prints a bind-pose
 bake or the actors near a point. ``ground-debug <banc>`` prints the ground
-layer. With no subcommand, the server starts, which is what dev.sh runs.
+layer. ``material-debug`` prints the shader assign and the uniforms. With no
+subcommand, the server starts, which is what dev.sh runs.
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "serve"],
-        help="problems, model-debug, and ground-debug print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "serve"],
+        help="problems, model-debug, ground-debug, and material-debug print reports. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, or bfres path.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
@@ -62,6 +63,10 @@ def main(argv: list[str] | None = None) -> None:
         if not args.banc:
             parser.error("ground-debug needs a banc path")
         raise SystemExit(print_ground_debug(args.banc, points=args.at, as_json=args.json, dump=args.dump))
+    if args.command == "material-debug":
+        if not args.banc:
+            parser.error("material-debug needs a gyaml or a bfres path")
+        raise SystemExit(print_material_debug(args.banc, as_json=args.json, dump=args.dump))
     if args.static:
         from bancwright.server import mount_frontend
 
@@ -202,6 +207,38 @@ def print_ground_debug(banc: str, *, points: list[str] | None = None, as_json: b
     try:
         report = inspect_ground(opened, banc, parsed)
     except (BancError, TerrainError, OSError, ValueError) as exc:
+        print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
+        return 2
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_text(report), end="")
+    return 0
+
+
+def print_material_debug(target: str, *, as_json: bool = False, dump: str | None = None) -> int:
+    """Print shader assign and uniforms. 2 when the dump or the model is missing."""
+    from bancwright.config import load_config
+    from bancwright.dump import Dump
+    from bancwright.errors import BancError
+    from bancwright.formats.bfres import FresError
+    from bancwright.materialdebug import inspect_materials, render_text
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    opened = None
+    if dump_path:
+        try:
+            opened = Dump(dump_path)
+        except BancError as exc:
+            print(exc.message, file=sys.stderr)
+            return 2
+    elif not Path(target).expanduser().is_file():
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        report = inspect_materials(opened, target)
+    except (BancError, FresError, OSError, ValueError) as exc:
         print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
         return 2
     if as_json:

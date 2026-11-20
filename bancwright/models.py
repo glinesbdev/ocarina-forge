@@ -29,7 +29,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from bancwright.errors import BancError
-from bancwright.formats.bfres import FresError, base_color_name, parse, texture_rank
+from bancwright.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
+from bancwright.materialdebug import name_hints, projection_options, sampler_lines
 
 
 class UndecodedGeometry(Exception):
@@ -53,7 +54,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-26\0"
+_CACHE_VERSION = b"models-27\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -943,11 +944,15 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
         for part in model.parts:
             if part.omit:
                 continue
-            image = None
-            if part.texture:
-                image = model.images.get(part.texture) or external.get(part.texture) or external.get(part.texture.lower())
-            if image is not None and not image.rgba:
-                image = None
+            def taken(name: str):
+                if not name:
+                    return None
+                image = model.images.get(name) or external.get(name) or external.get(name.lower())
+                if image is None or not image.rgba:
+                    return None
+                return image
+
+            image = taken(part.texture)
             png = None
             water = part.stand_in == "water"
             if water and (image is None or part.texture == _WATER_TEX):
@@ -990,6 +995,23 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             else:
                 color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
                 alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
+
+            def extra_png(name: str):
+                nonlocal texture_count
+                extra = taken(name)
+                if extra is None:
+                    return None
+                encoded = png_for.get(id(extra))
+                if encoded is None:
+                    encoded = _encode_cached(extra, "mask")
+                    png_for[id(extra)] = encoded
+                    if id(extra) not in seen_images:
+                        texture_count += 1
+                        seen_images.add(id(extra))
+                return encoded
+
+            normal_png = extra_png(part.normal_texture)
+            emissive_png = extra_png(part.emission_texture)
             primitives.append(
                 Primitive(
                     part.positions,
@@ -1004,6 +1026,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     name=f"{part.name}:{part.material_index}",
                     unlit=unlit,
                     kind=kind,
+                    normal_png=normal_png,
+                    emissive_png=emissive_png,
                 )
             )
             if part.lod == 0 and not any(other.name == part.name and other.lod for other in model.parts):
@@ -1026,6 +1050,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             name=f"{part.name}:{part.material_index}",
                             unlit=unlit,
                             kind=kind,
+                            normal_png=normal_png,
+                            emissive_png=emissive_png,
                         )
                     )
             triangles += len(part.indices) // 3
@@ -1099,6 +1125,8 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                         continue
                     part.texture = choice["wanted"]
                     part.albedo_sampler = choice["sampler"]
+                    part.normal_texture = (choice.get("maps") or {}).get("normal") or ""
+                    part.emission_texture = (choice.get("maps") or {}).get("emission") or ""
                     part.alpha = choice["alpha"]
                     part.cutoff = choice["cutoff"]
                     if choice.get("wrap"):
@@ -1279,6 +1307,18 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
     if wrap and result.get("image") is not None:
         result["alpha"] = "opaque"
         result["entry"]["alpha"] = "opaque"
+    maps = {}
+    for slot, tex in material.binds:
+        role = bind_role(slot, tex)
+        if role not in {"normal", "emission"} or not tex or role in maps:
+            continue
+        extra = _load_named(dump, model, tex, hints, "opaque", material.cutoff, external, raws)
+        found = extra.get("found") or ""
+        # A missing normal must not borrow an albedo through the hint search.
+        if extra.get("image") is not None and (found == "embedded" or _stem(found).lower() == _stem(tex).lower()):
+            maps[role] = tex
+            external[tex] = extra["image"]
+    result["maps"] = maps
     return result
 
 
@@ -1355,6 +1395,19 @@ def _log_entry(material, sampler, wanted, found, alpha, cutoff, sided, error) ->
         "renderState": getattr(material, "render_state", "") or "",
         "blockHeight": 0,
         "error": error or "",
+        "shader": getattr(material, "shader", "") or "",
+        "archive": getattr(material, "archive", "") or "",
+        "options": dict(getattr(material, "options", {}) or {}),
+        "projection": projection_options(getattr(material, "options", {}) or {}),
+        "attributes": dict(getattr(material, "attributes", {}) or {}),
+        "hints": name_hints(getattr(material, "name", "") or ""),
+        "params": list(getattr(material, "params", []) or []),
+        "renderInfo": list(getattr(material, "render_info", []) or []),
+        "states": [text for text in (getattr(material, "states", []) or []) if text],
+        "roles": [
+            [item["sampler"], item["texture"], item["role"], item["uv"], (item.get("srt") or {}).get("name") or ""]
+            for item in sampler_lines(material)
+        ],
     }
 
 

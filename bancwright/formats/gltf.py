@@ -28,6 +28,8 @@ class Primitive:
     shades: list[tuple[float, float]] | None = None
     marks: list[tuple[float, float]] | None = None
     extras: dict | None = None
+    normal_png: bytes | None = None
+    emissive_png: bytes | None = None
 
 
 def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
@@ -263,15 +265,20 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             color_bytes = b"".join(struct.pack("<3f", red, green, blue) for red, green, blue in prim.colors)
             attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)
         index_accessor = accessor(view(idx_bytes, 34963), len(indices), "SCALAR", 5123 if use_short else 5125)
-        image_index = None
-        if prim.png:
-            if prim.png not in image_of:
-                image_view = view(prim.png)
-                mime = "image/jpeg" if prim.png[:2] == b"\xff\xd8" else "image/png"
+        def image_index_for(blob: bytes | None) -> int | None:
+            if not blob:
+                return None
+            if blob not in image_of:
+                image_view = view(blob)
+                mime = "image/jpeg" if blob[:2] == b"\xff\xd8" else "image/png"
                 images.append({"bufferView": image_view, "mimeType": mime})
                 textures.append({"sampler": 0, "source": len(images) - 1})
-                image_of[prim.png] = len(images) - 1
-            image_index = image_of[prim.png]
+                image_of[blob] = len(images) - 1
+            return image_of[blob]
+
+        image_index = image_index_for(prim.png)
+        normal_index = image_index_for(prim.normal_png)
+        emissive_index = image_index_for(prim.emissive_png)
         color = [float(channel) for channel in prim.base_color[:4]]
         if len(color) < 4:
             color = (color + [1.0, 1.0, 1.0, 1.0])[:4]
@@ -289,6 +296,8 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             bool(prim.unlit),
             kind,
             extra_key,
+            normal_index,
+            emissive_index,
         )
         if key not in material_of:
             pbr = {
@@ -299,6 +308,11 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             if image_index is not None:
                 pbr["baseColorTexture"] = {"index": image_index}
             material = {"doubleSided": bool(prim.double_sided), "pbrMetallicRoughness": pbr}
+            if normal_index is not None:
+                material["normalTexture"] = {"index": normal_index}
+            if emissive_index is not None:
+                material["emissiveTexture"] = {"index": emissive_index}
+                material["emissiveFactor"] = [1.0, 1.0, 1.0]
             if alpha == "mask":
                 material["alphaMode"] = "MASK"
                 material["alphaCutoff"] = cutoff

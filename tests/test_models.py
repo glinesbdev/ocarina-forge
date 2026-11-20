@@ -256,7 +256,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-26", "e1237a6665c27e05876108a726e69792d4fa97786adee445a5614069e29cd787")
+    pinned = ("models-27", "48337a05b4af93c24c2744dbba123430855f61ee7aeb528037735bd670a5e7d4")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1356,8 +1356,9 @@ def test_untextured_mesh_is_flat_color_and_cutout_is_masked(tmp_path, monkeypatc
     (dump.romfs / "Tex" / "FlatBlue.bntx.zs").write_bytes(compress(write_rgba("FlatBlue", 2, 2, blue), 1, dicts, level=3))
     (dump.romfs / "Tex" / "LeafGreen.bntx.zs").write_bytes(compress(write_rgba("LeafGreen", 2, 2, green), 1, dicts, level=3))
     resolved = describe_actor(dump, gyaml)
-    assert resolved["textures"] == 1
+    assert resolved["textures"] == 2
     row = resolved["textureLog"][0]
+    assert any(role[2] == "normal" and role[1] == "FlatBlue" for role in row["roles"])
     assert row["wanted"] == "LeafGreen"
     assert row["sampler"] == "_a0"
     assert row["decoded"] is True
@@ -1367,6 +1368,7 @@ def test_untextured_mesh_is_flat_color_and_cutout_is_masked(tmp_path, monkeypatc
     document = json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
     assert document["materials"][0]["alphaMode"] == "MASK"
     assert document["materials"][0]["alphaCutoff"] == 0.4
+    assert "normalTexture" in document["materials"][0]
 
     magenta = bytes([255, 0, 255, 255]) * 4
     missing = sample_bfres(
@@ -1900,6 +1902,72 @@ def test_a_busy_albedo_keeps_the_stored_block_height():
     assert image.block_height == 1
     assert "looked like noise" not in (image.note or "")
     assert image.rgba[:3] == bytes((90, 50, 30))
+
+
+def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, capsys):
+    import json
+
+    from bancwright.__main__ import print_material_debug
+    from bancwright.formats.bfres import parse, sample_bfres, sample_v10_bfres
+
+    shader = {
+        "archive": "Land.sharc",
+        "model": "Land_Solid",
+        "attributes": {"in_uv0": "_u1"},
+        "samplers": {"_a0": "_u1"},
+        "options": {"enable_alphatest": "1", "projection_type": "triplanar"},
+        "params": [
+            {"name": "albedo_color", "kind": 0x0F, "values": [0.2, 0.4, 0.6, 1.0]},
+            {"name": "albedo_texsrt", "kind": 0x1E, "mode": 0, "scale": [2.0, 3.0], "rotate": 0.25, "translate": [0.1, -0.2]},
+        ],
+    }
+    mesh = sample_bfres(
+        "Leaf",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        bytes([20, 140, 40, 255]) * 4,
+        2,
+        2,
+        samplers=[("_a0", "Leaf_Alb")],
+        shader=shader,
+        embed_texture=False,
+    )
+    path = tmp_path / "leaf.bfres"
+    path.write_bytes(mesh)
+    assert print_material_debug(str(path), as_json=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    row = report["materials"][0]
+    assert row["archive"] == "Land.sharc"
+    assert row["shader"] == "Land_Solid"
+    assert row["options"]["enable_alphatest"] == "1"
+    assert row["attributes"]["in_uv0"] == "_u1"
+    assert row["projection"]["projection_type"] == "triplanar"
+    assert row["binds"][0]["role"] == "albedo"
+    assert row["binds"][0]["uv"] == "_u1"
+    assert row["binds"][0]["uvSource"] == "sampler assign"
+    assert row["binds"][0]["srt"]["name"] == "albedo_texsrt"
+    assert row["binds"][0]["srt"]["scale"] == [2.0, 3.0]
+    by_name = {item["name"]: item for item in row["params"]}
+    assert by_name["albedo_color"]["value"] == [0.2, 0.4, 0.6, 1.0]
+    assert by_name["albedo_texsrt"]["mode"] == "maya"
+    assert by_name["albedo_texsrt"]["scale"] == [2.0, 3.0]
+    assert parse(mesh)[0].parts[0].uvs == [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+
+    bare = sample_v10_bfres("Rock", [{"name": "Mt_Rock", "samplers": [("_a0", "Rock_Alb"), ("_n0", "Rock_Nrm")]}])
+    assert parse(bare)[0].materials[0].archive == ""
+    assert parse(bare)[0].materials[0].params == []
+    v10 = sample_v10_bfres(
+        "Gate",
+        [{"name": "Mt_Gate", "samplers": [("_n0", "Gate_Nrm"), ("_a0", "Gate_Alb")], "shader": shader}],
+    )
+    material = parse(v10)[0].materials[0]
+    assert material.archive == "Land.sharc"
+    assert material.shader == "Land_Solid"
+    assert material.attributes["in_uv0"] == "_u1"
+    assert material.assign["_a0"] == "_u1"
+    assert material.params[1]["kind"] == "texsrt"
+    assert material.albedo[0] == ("_a0", "Gate_Alb")
 
 
 def test_a_normal_named_texture_is_not_albedo_on_a0():
