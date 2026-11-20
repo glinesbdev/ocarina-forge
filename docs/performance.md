@@ -7,3 +7,7 @@ Baseline on Bradyn’s PC, Kokiri Forest child Static+Dynamic, before this pass:
 `renderer.render` runs only from the animation frame requested by `requestRender`. Nothing calls `setAnimationLoop`. A frame schedules the next one only while the camera is moving (orbit damping, fly keys, or right-button look), the gizmo is dragging, or a model or terrain load is still in flight. Water does not animate, so it does not keep the loop. When that stops, the overlay reads `idle` and the last draw and triangle counts stay put.
 
 Check: turn **Stats** on, orbit, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead.
+
+## Instanced repeats
+
+Copies of a model that share an albedo are already one `BatchedMesh`: the geometry is uploaded once and each actor is an instance (matrix, colour, visibility). Picking, the selection tint, the gizmo, hide, lock, and the category toggles still go through that instance. **Stats** now includes `inst`, the number of those instances. On Kokiri that count should be in the thousands while draws stay in the low hundreds. This slice does not change the batching, so the draw count should stay near the 200–275 baseline.

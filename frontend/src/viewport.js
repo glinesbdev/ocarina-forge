@@ -720,14 +720,17 @@ export function createViewport(host, hooks) {
   }
 
   function syncBatchVisibility() {
+    let instances = 0;
     for (const entry of entries.values()) {
       if (!entry.slots || !entry.slots.length) continue;
       const distance = camera.position.distanceTo(entry.pivot.position);
       for (const slot of entry.slots) {
+        instances += 1;
         const lod = entry.pivot.visible ? lodFor(entry, slot, distance) : null;
         slot.mesh.setVisibleAt(slot.index, lod === slot.lod);
       }
     }
+    statInstances = instances;
   }
 
   function rebuildBatches() {
@@ -1515,6 +1518,7 @@ uniform float terrainLayerMissing;`
   let lastCullAt = 0;
   const frameTimes = [];
   let fps = 0;
+  let statInstances = 0;
 
   function requestRender() {
     if (!running || frameHandle) return;
@@ -1534,6 +1538,7 @@ uniform float terrainLayerMissing;`
       rendering,
       fps,
       draws: info.calls,
+      instances: statInstances,
       separate: naiveDraws,
       tris: info.triangles,
     });
