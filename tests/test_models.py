@@ -185,7 +185,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-24", "abcd4ac7f1fe0ee63b03336681369e71badb0205cb238a8a89bbc3266eb3bc51")
+    pinned = ("models-25", "a4b1538eb1e5f9be84ff4d81cc56a3bae5362280dfa6fe4349c2a45c1f934177")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1628,6 +1628,79 @@ def test_model_debug_prints_skin_and_the_actor_placement(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["placements"][0]["translate"] == [2.0, 0.0, 3.0]
     assert payload["files"][0]["models"][0]["shapes"]
+
+
+def _fork_pack(glb, conn):
+    from bancwright.formats.meshopt import finish_glb
+
+    packed = finish_glb(glb)
+    conn.send(b"EXT_meshopt_compression" in packed)
+    conn.close()
+
+
+def test_a_dead_meshopt_helper_restarts_without_a_broken_pipe(monkeypatch, tmp_path):
+    import contextlib
+    import gc
+    import io
+    import os
+    import sys
+
+    from bancwright.formats import meshopt
+    from bancwright.formats.gltf import Primitive, png_rgba, to_glb
+
+    log = tmp_path / "meshopt.log"
+    monkeypatch.setattr(meshopt, "_LOG", log)
+    png = png_rgba(2, 2, bytes([1, 2, 3, 255]) * 4)
+    glb = to_glb([Primitive([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], png=png, name="Pot")])
+    assert b"EXT_meshopt_compression" in meshopt.finish_glb(glb)
+    proc = meshopt._PROCS[os.getpid()]
+    proc.kill()
+    proc.wait(timeout=5)
+    caught = []
+    previous = sys.unraisablehook
+
+    def hook(unraisable):
+        caught.append(unraisable)
+
+    sys.unraisablehook = hook
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            packed = meshopt.finish_glb(glb)
+            gc.collect()
+    finally:
+        sys.unraisablehook = previous
+    noise = stderr.getvalue() + "".join(f"{item.exc_type} {item.exc_value}" for item in caught)
+    assert "BrokenPipe" not in noise
+    assert "Exception ignored" not in noise
+    assert b"EXT_meshopt_compression" in packed
+    assert "start" in log.read_text(encoding="utf-8")
+    assert meshopt._PROCS[os.getpid()].poll() is None
+
+
+def test_a_forked_worker_does_not_kill_the_parent_meshopt_helper():
+    import multiprocessing
+    import os
+
+    from bancwright.formats.gltf import Primitive, png_rgba, to_glb
+    from bancwright.formats.meshopt import _PROCS, finish_glb
+
+    png = png_rgba(2, 2, bytes([4, 5, 6, 255]) * 4)
+    glb = to_glb([Primitive([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], png=png, name="Lamp")])
+    assert b"EXT_meshopt_compression" in finish_glb(glb)
+    parent = _PROCS[os.getpid()]
+    node_pid = parent.pid
+    ctx = multiprocessing.get_context("fork")
+    reader, writer = ctx.Pipe(duplex=False)
+    child = ctx.Process(target=_fork_pack, args=(glb, writer))
+    child.start()
+    writer.close()
+    packed = reader.recv()
+    child.join(30)
+    assert child.exitcode == 0
+    assert packed is True
+    assert parent.pid == node_pid
+    assert parent.poll() is None
 
 
 def test_import_cache_stores_meshopt_geometry_and_keeps_the_texture():

@@ -2,7 +2,6 @@
  * One JSON request per line on stdin, one JSON response per line on stdout.
  * The Python converter keeps this process alive so a scene does not start Node once per mesh.
  */
-import readline from "node:readline";
 import { NodeIO } from "@gltf-transform/core";
 import { EXTMeshoptCompression, KHRMaterialsUnlit } from "@gltf-transform/extensions";
 import { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } from "meshoptimizer";
@@ -122,20 +121,68 @@ function simplify(body) {
   };
 }
 
-const lines = readline.createInterface({ input: process.stdin });
-let pending = Promise.resolve();
-lines.on("line", (line) => {
-  pending = pending.then(async () => {
-    let response;
-    try {
-      const body = JSON.parse(line);
-      if (body.op === "simplify") response = simplify(body);
-      else if (body.op === "pack") response = await pack(body);
-      else if (body.op === "plain") response = await plain(body);
-      else response = { ok: false, reason: "unknown op" };
-    } catch (error) {
-      response = { ok: false, reason: error.message || "meshopt failed" };
-    }
-    process.stdout.write(`${JSON.stringify(response)}\n`);
-  });
+// Length-prefixed frames. A newline JSON reader dies, or recurses until it
+// crashes, once a base64 glb is larger than its line buffer. The process used
+// to exit on that, and Python then flushed a dead stdin pipe.
+function writeFrame(obj) {
+  const json = Buffer.from(JSON.stringify(obj));
+  const head = Buffer.alloc(4);
+  head.writeUInt32LE(json.length, 0);
+  process.stdout.write(Buffer.concat([head, json]));
+}
+
+process.stdout.on("error", (error) => {
+  console.error(`stdout: ${error.message}`);
 });
+process.on("uncaughtException", (error) => {
+  console.error(error && error.stack ? error.stack : error);
+});
+process.on("unhandledRejection", (error) => {
+  console.error(error && error.stack ? error.stack : error);
+});
+
+let buffer = Buffer.alloc(0);
+let pending = Promise.resolve();
+
+function takeFrames() {
+  while (buffer.length >= 4) {
+    const size = buffer.readUInt32LE(0);
+    if (size <= 0 || size > 512 * 1024 * 1024) {
+      console.error(`meshopt frame ${size} is not usable`);
+      process.exit(1);
+    }
+    if (buffer.length < 4 + size) return;
+    const text = buffer.subarray(4, 4 + size).toString("utf8");
+    buffer = Buffer.from(buffer.subarray(4 + size));
+    pending = pending.then(async () => {
+      let response;
+      try {
+        const body = JSON.parse(text);
+        if (body.op === "simplify") response = simplify(body);
+        else if (body.op === "pack") response = await pack(body);
+        else if (body.op === "plain") response = await plain(body);
+        else response = { ok: false, reason: "unknown op" };
+      } catch (error) {
+        response = { ok: false, reason: error.message || "meshopt failed" };
+      }
+      try {
+        writeFrame(response);
+      } catch (error) {
+        console.error(error && error.stack ? error.stack : error);
+      }
+    });
+  }
+}
+
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  takeFrames();
+});
+process.stdin.on("error", (error) => {
+  console.error(`stdin: ${error.message}`);
+});
+process.stdin.on("end", () => {
+  pending.then(() => process.exit(0));
+});
+process.stdin.resume();
+writeFrame({ ok: true, ready: true });
