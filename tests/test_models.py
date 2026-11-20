@@ -143,7 +143,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-21", "f9332a4ad61925d69d9c396df43eceaf7f676b11b2c46e17bd558b99dfb98780")
+    pinned = ("models-22", "af5c1c171d75e360bf10fc3893febff6883ba642ec7a037321336416f01d7806")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1516,6 +1516,24 @@ def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
     ys = [point[1] for point in new_pos]
     assert min(xs) == 0 and max(xs) == 39
     assert min(ys) == 0 and max(ys) == 39
+
+
+def test_terrain_atlas_is_cached_apart_from_the_glb(tmp_path, monkeypatch):
+    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    from bancwright.models import _CACHE_VERSION, _pack_atlas, _solid_cell
+
+    cells = [_solid_cell((1, 0, 0)), _solid_cell((0, 1, 0))]
+    png, cols = _pack_atlas(cells)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n" or png[:2] == b"\xff\xd8"
+    stored = next((tmp_path / "cache" / "atlas").glob("*.img"))
+    assert _CACHE_VERSION.split(b"\0", 1)[0].decode() not in stored.name
+    stored.write_bytes(b"\x89PNG\r\n\x1a\n" + b"cached-atlas")
+    again, cols_again = _pack_atlas(cells)
+    assert again == stored.read_bytes()
+    assert cols_again == cols
+    other, _other_cols = _pack_atlas([_solid_cell((0, 0, 1))])
+    assert other != again
+    assert other[:8] == b"\x89PNG\r\n\x1a\n" or other[:2] == b"\xff\xd8"
 
 
 def test_import_cache_stores_meshopt_geometry_and_keeps_the_texture():

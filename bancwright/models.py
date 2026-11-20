@@ -53,7 +53,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-21\0"
+_CACHE_VERSION = b"models-22\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -2613,6 +2613,17 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
 
 _ATLAS_CELL = 128
 _ATLAS_KEEP = 16
+# Cell bytes only. A models.py bump rebuilds the glb and still reads this PNG.
+_ATLAS_VERSION = b"atlas-1\0"
+
+
+def _atlas_key(cells: list[bytes]) -> str:
+    digest = hashlib.sha256(_ATLAS_VERSION)
+    digest.update(len(cells).to_bytes(4, "little"))
+    for cell in cells:
+        digest.update(len(cell).to_bytes(8, "little"))
+        digest.update(cell)
+    return digest.hexdigest()
 
 
 def _solid_cell(color, size: int = _ATLAS_CELL) -> bytes:
@@ -2638,9 +2649,21 @@ def _image_cell(image, size: int = _ATLAS_CELL) -> bytes:
     return bytes(out)
 
 
+def _atlas_image(data: bytes) -> bool:
+    return data[:8] == b"\x89PNG\r\n\x1a\n" or (len(data) > 4 and data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9")
+
+
 def _pack_atlas(cells: list[bytes]) -> tuple[bytes, int]:
     count = max(1, len(cells))
     cols = max(1, math.ceil(math.sqrt(count)))
+    path = cache_dir() / "atlas" / f"{_atlas_key(cells)}.img"
+    with _LOCK:
+        try:
+            cached = path.read_bytes()
+        except OSError:
+            cached = b""
+    if _atlas_image(cached):
+        return cached, cols
     rows = max(1, math.ceil(count / cols))
     size = _ATLAS_CELL
     width = cols * size
@@ -2654,6 +2677,15 @@ def _pack_atlas(cells: list[bytes]) -> tuple[bytes, int]:
             dst = ((cy + y) * width + cx) * 4
             out[dst : dst + size * 4] = cell[src : src + size * 4]
     png, _mime = encode_albedo(width, height, bytes(out), "opaque")
+    with _LOCK:
+        try:
+            cached = path.read_bytes()
+        except OSError:
+            cached = b""
+        if _atlas_image(cached):
+            return cached, cols
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(png)
     return png, cols
 
 

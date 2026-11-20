@@ -1247,7 +1247,7 @@ uniform float terrainLayerMissing;`
         }
       });
       if (missingLayer) {
-        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-21 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
+        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-22 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
         console.warn(message);
         if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
       }
