@@ -332,15 +332,20 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 
 #outliner-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 #props-panel, #behavior-panel { padding: 12px; flex: 1; }
-.behavior-bar { display: flex; gap: 8px; margin-bottom: 8px; }
-.behavior-bar button {
+.behavior-bar, .behavior-entries { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.behavior-bar button, .behavior-entries button, .behavior-files button, .behavior-jump {
   background: var(--bg-inset);
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 4px 12px;
   min-height: 32px;
 }
-.behavior-bar button.is-on { border-color: var(--gold); color: var(--text); }
+.behavior-bar button.is-on, .behavior-entries button.is-on, .behavior-files button.is-on { border-color: var(--gold); color: var(--text); }
+.behavior-files { display: flex; flex-direction: column; gap: 4px; max-height: 168px; overflow: auto; margin-bottom: 8px; }
+.behavior-files button { border-radius: 8px; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.behavior-search { width: 100%; margin-bottom: 8px; }
+.behavior-jump { margin-bottom: 8px; }
+.graph-scroll { overflow: auto; max-height: calc(100vh - 280px); }
 .graph-canvas { position: relative; margin-top: 8px; }
 .graph-svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
 .graph-edge { fill: none; stroke: var(--gold); stroke-width: 1.5; opacity: 0.8; }

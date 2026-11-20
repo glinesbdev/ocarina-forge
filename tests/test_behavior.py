@@ -47,8 +47,15 @@ def test_fado_graph_is_stable_and_keeps_the_undecoded_node(tmp_path):
     assert any(node["name"] == "Play Act_Wait" for node in graph["nodes"])
     assert any(node["name"] == "Talk Npc_Kokiri_F_01_Talk" for node in graph["nodes"])
     assert any(node["raw"] == "row 2" and node["decoded"] is False for node in graph["nodes"])
-    assert any(node["name"] == "Enter OnPlayerTalk" for node in graph["nodes"])
-    assert any(node["name"] == "Talk" and node["kind"] == "event" for node in graph["nodes"])
+    talk = next(node for node in graph["nodes"] if node["raw"] == "OnPlayerTalk")
+    assert talk["name"] == "Talk"
+    assert talk["entry"] is True
+    assert any(node["name"] == "Talk" and node["kind"] == "event" and node["raw"] == "Demo_Talk" for node in graph["nodes"])
+    opened = next(source for source in graph["sources"] if source["id"] == graph["open"])
+    assert opened["path"] == FADO_AI
+    assert any(entry["raw"] == "Root" for entry in opened["entries"])
+    flow = next(source for source in graph["sources"] if source["kind"] == "event")
+    assert any(entry["name"] == "Talk" and entry["raw"] == "OnPlayerTalk" for entry in flow["entries"])
     kinds = {source["kind"] for source in graph["sources"]}
     assert kinds == {"ainb", "schedule", "event"}
     assert any(source["path"] == FADO_AI for source in graph["sources"])
@@ -166,6 +173,74 @@ def test_an_actor_without_logic_is_an_empty_graph(tmp_path):
     assert graph["nodes"] == []
     assert graph["edges"] == []
     assert "no AI graph" in graph["note"]
+
+
+def test_a_builtin_ainb_node_uses_its_type_and_child_plug():
+    from ainb import AINB
+    from ainb.blackboard import Blackboard
+    from ainb.command import Command
+    from ainb.node import ChildPlug, Node, NodeFlag, NodeType
+
+    from ocarina_forge.behavior import _ainb
+
+    graph = AINB()
+    graph.version = 0x407
+    graph.filename = "Seq"
+    graph.category = "AI"
+    graph.blackboard = Blackboard()
+    graph.exists_section_0x6c = True
+    sequence = Node(NodeType.Element_Sequential)
+    sequence.flags = NodeFlag(0)
+    child = Node(NodeType.UserDefined)
+    child.name = "HoldGameDataGetBool"
+    child.flags = NodeFlag(1)
+    plug = ChildPlug()
+    plug.node_index = 1
+    plug.name = "then"
+    sequence.child_plugs.append(plug)
+    graph.nodes = [sequence, child]
+    for index, node in enumerate(graph.nodes):
+        node.index = index
+    command = Command()
+    command.name = "Root"
+    command.guid = "11111111-1111-1111-1111-111111111111"
+    command.root_node_index = 0
+    graph.commands.append(command)
+    built = _ainb("AI/Seq.ainb", graph.to_binary())
+    sequence_node = next(node for node in built["nodes"] if node["type"] == "Element_Sequential")
+    assert sequence_node["name"] == "Sequence"
+    assert sequence_node["decoded"] is True
+    assert sequence_node["raw"] == "Element_Sequential"
+    assert any(edge["from"].startswith(sequence_node["id"]) for edge in built["edges"])
+
+
+def test_build_time_paths_are_reference_only(tmp_path):
+    from ocarina_forge.behavior import _reference_only, _try_reference
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    assert _reference_only("Work/AI/Root/Npc_Kokiri_F_01.ain")
+    assert _reference_only("Work/BSA/Npc_Kokiri_F_01/Brain.ainb")
+    assert _reference_only("AI/Npc_Kokiri_F_01.root.ainb") is False
+    found = []
+    trace = []
+    _try_reference(dump, found, set(), set(), trace, [], "ainb", "Work/AI/Root/Npc_Kokiri_F_01.ain", "AIProgram")
+    _try_reference(dump, found, set(), set(), trace, [], "ainb", "Work/BSA/Npc_Kokiri_F_01/Brain.ainb", "Logic")
+    text = "\n".join(trace)
+    assert text.count("reference only") == 2
+    assert "missing" not in text
+    assert found == []
+
+
+def test_behavior_audit_counts_unnamed_user_nodes(tmp_path):
+    from ocarina_forge.behavior import audit_npc_behavior
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    report = audit_npc_behavior(dump)
+    assert report["packs"] >= 1
+    assert report["undecoded"] >= 1
+    labels = {row["type"] for row in report["undecodedTypes"]}
+    assert "UserDefined" in labels
+    assert "Element_Sequential" not in labels
 
 
 def test_friendly_names_leave_unknown_types_readable():

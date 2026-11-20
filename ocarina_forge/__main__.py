@@ -6,6 +6,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
+``behavior-audit`` counts undecoded node types across every Npc_ pack.
 With no subcommand, the server starts, which is what dev.sh runs.
 """
 
@@ -28,12 +29,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "behavior", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, and behavior print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "behavior", "behavior-audit", "serve"],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, behavior, and behavior-audit print reports. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
     parser.add_argument("--trace", action="store_true", help="behavior prints the pack, each component, and every path it tried.")
+    parser.add_argument("--nodes", action="store_true", help="behavior lists every node. A large graph prints the files and entry points without this.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     parser.add_argument(
         "--banc",
@@ -94,8 +96,11 @@ def main(argv: list[str] | None = None) -> None:
                 as_json=args.json,
                 dump=args.dump,
                 trace=args.trace,
+                nodes=args.nodes,
             )
         )
+    if args.command == "behavior-audit":
+        raise SystemExit(print_behavior_audit(as_json=args.json, dump=args.dump, out=args.out))
     if args.command == "tex-debug":
         if not args.banc:
             parser.error("tex-debug needs a texture name or a Tex path")
@@ -147,6 +152,7 @@ def print_behavior(
     as_json: bool = False,
     dump: str | None = None,
     trace: bool = False,
+    nodes: bool = False,
 ) -> int:
     """Print the read-only behavior graph. 2 when the dump is missing."""
     from ocarina_forge.behavior import load_actor_graph
@@ -176,16 +182,55 @@ def print_behavior(
     print(f"behavior {graph.get('gyaml') or gyaml}")
     if graph.get("note"):
         print(graph["note"])
+    opened = graph.get("open") or ""
     for source in graph.get("sources") or []:
-        print(f"{source['kind']} {source['status']} {source['path']}")
-    print(f"nodes {len(graph.get('nodes') or [])}")
+        mark = " open" if source.get("id") == opened else ""
+        print(f"{source['kind']} {source['status']} {source.get('count', 0)} {source['path']}{mark}")
+        shown = source.get("entries") or []
+        for entry in shown[:16]:
+            print(f"  entry {entry['name']} ({entry['raw']})")
+        if len(shown) > 16:
+            print(f"  entries {len(shown) - 16} more")
+    node_rows = graph.get("nodes") or []
+    print(f"nodes {len(node_rows)}")
     print(f"edges {len(graph.get('edges') or [])}")
-    if trace or not graph.get("nodes"):
+    print(f"undecoded {graph.get('undecoded', 0)}")
+    if trace or not node_rows:
         for line in graph.get("trace") or []:
             print(line)
-    for node in graph.get("nodes") or []:
+    if node_rows and not nodes and len(node_rows) > 40:
+        print("Pass --nodes to list every node.")
+        return 0
+    for node in node_rows:
         mark = "raw" if not node.get("decoded") else "friendly" if node.get("known") else "named"
         print(f"  {mark} {node.get('raw')} -> {node.get('name')}  {node.get('id')}")
+    return 0
+
+
+def print_behavior_audit(*, as_json: bool = False, dump: str | None = None, out: str | None = None) -> int:
+    """Count undecoded node types on every Npc_ pack. 2 when the dump is missing."""
+    from ocarina_forge.behavior import audit_npc_behavior, render_behavior_audit
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    report = audit_npc_behavior(opened)
+    text = json.dumps(report, indent=2) if as_json else render_behavior_audit(report)
+    if out:
+        destination = Path(out).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    print(text, end="" if text.endswith("\n") else "\n")
     return 0
 
 

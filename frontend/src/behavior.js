@@ -66,6 +66,95 @@ export function layoutGraph(graph) {
   return { positions, titles, width, height: Math.max(y, 80) };
 }
 
+const LAYOUT_CAP = 160;
+
+export function visibleNodes(graph, options = {}) {
+  const sources = (graph && graph.sources) || [];
+  const nodes = (graph && graph.nodes) || [];
+  const edges = (graph && graph.edges) || [];
+  const requested = options.file || (graph && graph.open) || (sources[0] && sources[0].id) || "";
+  const source = sources.find((item) => item.id === requested) || sources[0] || null;
+  const sourceId = source ? source.id : "";
+  const members = nodes.filter((node) => !sourceId || node.source === sourceId);
+  const query = String(options.query || "").trim().toLowerCase();
+  const entry = options.entry || (source && source.openEntry) || "";
+  if (query) {
+    const matches = members.filter((node) => nodeMatches(node, query));
+    let elsewhere = null;
+    if (!matches.length) {
+      const counts = new Map();
+      for (const node of nodes) {
+        if (node.source === sourceId || !nodeMatches(node, query)) continue;
+        counts.set(node.source, (counts.get(node.source) || 0) + 1);
+      }
+      let best = "";
+      let bestCount = 0;
+      for (const [id, count] of counts) {
+        if (count > bestCount) {
+          best = id;
+          bestCount = count;
+        }
+      }
+      if (best) {
+        const other = sources.find((item) => item.id === best);
+        elsewhere = { id: best, count: bestCount, file: (other && (other.file || other.title)) || "another file" };
+      }
+    }
+    return {
+      source,
+      entry: "",
+      nodes: matches.slice(0, LAYOUT_CAP),
+      total: matches.length,
+      capped: matches.length > LAYOUT_CAP,
+      elsewhere,
+    };
+  }
+  const order = entry ? neighborhood(entry, members, edges) : members.map((node) => node.id);
+  const keep = new Set(order.slice(0, LAYOUT_CAP));
+  return {
+    source,
+    entry,
+    nodes: members.filter((node) => keep.has(node.id)),
+    total: order.length,
+    capped: order.length > LAYOUT_CAP,
+    elsewhere: null,
+  };
+}
+
+function nodeMatches(node, query) {
+  const fields = (node.fields || []).map((field) => `${field.name} ${field.value}`);
+  return [node.name, node.raw, node.type, node.id, ...fields].join(" ").toLowerCase().includes(query);
+}
+
+function neighborhood(start, members, edges) {
+  const ids = new Set(members.map((node) => node.id));
+  if (!ids.has(start)) return [...ids];
+  const byId = new Map(members.map((node) => [node.id, node]));
+  const nextTo = new Map();
+  for (const id of ids) nextTo.set(id, []);
+  for (const edge of edges) {
+    const from = pinOwner(edge.from, byId);
+    const to = pinOwner(edge.to, byId);
+    if (!from || !to || from === to || !ids.has(from) || !ids.has(to)) continue;
+    nextTo.get(from).push(to);
+    nextTo.get(to).push(from);
+  }
+  const order = [];
+  const seen = new Set([start]);
+  const queue = [start];
+  while (queue.length) {
+    const id = queue.shift();
+    order.push(id);
+    for (const next of nextTo.get(id) || []) {
+      if (!seen.has(next)) {
+        seen.add(next);
+        queue.push(next);
+      }
+    }
+  }
+  return order;
+}
+
 export function pinAnchor(node, pin, pos) {
   const pins = (node && node.pins) || [];
   const index = Math.max(0, pins.findIndex((item) => item.id === pin.id));
@@ -100,18 +189,41 @@ export function renderBehavior(host, model) {
     layerButton("Friendly", "curated", model),
     layerButton("Raw", "raw", model),
   );
-  const hint = document.createElement("p");
-  hint.className = "muted";
-  hint.textContent = graph.note
-    ? graph.note
-    : "Read only. A later edit stores add node, connect, and set field against these ids.";
-  host.append(bar, hint);
+  host.append(bar);
   if (!graph.nodes || !graph.nodes.length) {
+    const hint = document.createElement("p");
+    hint.className = "muted";
+    hint.textContent = graph.note || "This actor's pack has no AI graph, schedule, or event flow.";
+    host.append(hint);
     if (graph.trace && graph.trace.length) host.append(traceBlock(graph.trace));
     return;
   }
 
-  const laid = layoutGraph(graph);
+  const view = visibleNodes(graph, { file: model.file, entry: model.entry, query: model.query });
+  host.append(fileList(graph, view, model));
+  const search = document.createElement("input");
+  search.className = "behavior-search";
+  search.type = "search";
+  search.placeholder = "Search this actor";
+  search.value = model.query || "";
+  search.addEventListener("input", (event) => model.onQuery && model.onQuery(event.target.value));
+  host.append(search);
+  if (!model.query) host.append(entryList(view, model));
+  const hint = document.createElement("p");
+  hint.className = "muted";
+  hint.textContent = viewHint(graph, view);
+  host.append(hint);
+  if (view.elsewhere && model.onFile) {
+    const jump = document.createElement("button");
+    jump.type = "button";
+    jump.className = "behavior-jump";
+    jump.textContent = `${view.elsewhere.count} in ${view.elsewhere.file}`;
+    jump.addEventListener("click", () => model.onFile(view.elsewhere.id, true));
+    host.append(jump);
+  }
+  if (!view.nodes.length) return;
+
+  const laid = layoutGraph({ nodes: view.nodes, edges: graph.edges, sources: view.source ? [view.source] : [] });
   const canvas = document.createElement("div");
   canvas.className = "graph-canvas";
   canvas.style.width = `${laid.width}px`;
@@ -137,6 +249,9 @@ export function renderBehavior(host, model) {
     path.setAttribute("class", "graph-edge");
     svg.append(path);
   }
+  const scroller = document.createElement("div");
+  scroller.className = "graph-scroll";
+  scroller.append(canvas);
   canvas.append(svg);
   for (const title of laid.titles) {
     const label = document.createElement("div");
@@ -146,7 +261,7 @@ export function renderBehavior(host, model) {
     label.textContent = title.text;
     canvas.append(label);
   }
-  for (const node of graph.nodes) {
+  for (const node of view.nodes) {
     const pos = laid.positions[node.id];
     if (!pos) continue;
     const button = document.createElement("button");
@@ -170,9 +285,55 @@ export function renderBehavior(host, model) {
     button.addEventListener("click", () => model.onSelect(node.id));
     canvas.append(button);
   }
-  host.append(canvas);
-  const selected = graph.nodes.find((node) => node.id === model.selectedId);
+  host.append(scroller);
+  const selected = view.nodes.find((node) => node.id === model.selectedId);
   if (selected) host.append(detail(selected, graph));
+}
+
+function fileList(graph, view, model) {
+  const files = document.createElement("div");
+  files.className = "behavior-files";
+  for (const source of graph.sources || []) {
+    const button = document.createElement("button");
+    button.type = "button";
+    const count = source.count != null ? source.count : (graph.nodes || []).filter((node) => node.source === source.id).length;
+    button.textContent = `${source.file || source.title || source.kind} · ${count}`;
+    button.title = source.path || "";
+    if (view.source && source.id === view.source.id) button.classList.add("is-on");
+    button.addEventListener("click", () => model.onFile && model.onFile(source.id));
+    files.append(button);
+  }
+  return files;
+}
+
+function entryList(view, model) {
+  const row = document.createElement("div");
+  row.className = "behavior-entries";
+  const entries = (view.source && view.source.entries) || [];
+  for (const entry of entries.slice(0, 24)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = entry.name || entry.raw;
+    button.title = entry.raw || "";
+    if (entry.id === view.entry) button.classList.add("is-on");
+    button.addEventListener("click", () => model.onEntry && model.onEntry(entry.id));
+    row.append(button);
+  }
+  if (entries.length > 24) {
+    const more = document.createElement("span");
+    more.className = "muted";
+    more.textContent = `+${entries.length - 24}`;
+    row.append(more);
+  }
+  return row;
+}
+
+function viewHint(graph, view) {
+  const file = (view.source && (view.source.file || view.source.title)) || "Behavior";
+  const shown = view.capped ? `showing ${view.nodes.length} of ${view.total}` : `${view.nodes.length} in view`;
+  const whole = `${(graph.nodes || []).length} nodes`;
+  const missed = graph.undecoded ? `${graph.undecoded} undecoded` : "";
+  return [file, shown, whole, missed].filter(Boolean).join(" · ");
 }
 
 function layerButton(label, layer, model) {

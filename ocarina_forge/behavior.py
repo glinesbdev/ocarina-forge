@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import re
+import sys
 from pathlib import Path
 
 from ocarina_forge.errors import BancError
@@ -34,6 +35,42 @@ _FRIENDLY = {
     "ASPlay": "Play animation",
     "Demo_Talk": "Talk",
     "Demo_WaitFrame": "Wait",
+    "Element_S32Selector": "Pick by number",
+    "Element_Sequential": "Sequence",
+    "Element_Simultaneous": "Together",
+    "Element_F32Selector": "Pick by value",
+    "Element_StringSelector": "Pick by text",
+    "Element_RandomSelector": "Pick at random",
+    "Element_BoolSelector": "Pick by flag",
+    "Element_Fork": "Fork",
+    "Element_Join": "Join",
+    "Element_Alert": "Alert",
+    "Element_Expression": "Expression",
+    "Element_ModuleIF_Input_S32": "Module number in",
+    "Element_ModuleIF_Input_F32": "Module value in",
+    "Element_ModuleIF_Input_Vec3f": "Module vector in",
+    "Element_ModuleIF_Input_String": "Module text in",
+    "Element_ModuleIF_Input_Bool": "Module flag in",
+    "Element_ModuleIF_Input_Ptr": "Module pointer in",
+    "Element_ModuleIF_Output_S32": "Module number out",
+    "Element_ModuleIF_Output_F32": "Module value out",
+    "Element_ModuleIF_Output_Vec3f": "Module vector out",
+    "Element_ModuleIF_Output_String": "Module text out",
+    "Element_ModuleIF_Output_Bool": "Module flag out",
+    "Element_ModuleIF_Output_Ptr": "Module pointer out",
+    "Element_ModuleIF_Child": "Module child",
+    "Element_StateEnd": "State end",
+    "Element_SplitTiming": "Split timing",
+}
+
+# Event-flow entry names the game uses, and the label a person should see.
+_ENTRY_NAMES = {
+    "onplayertalk": "Talk",
+    "ontalk": "Talk",
+    "demotalk": "Talk",
+    "talk": "Talk",
+    "onplayernear": "Player near",
+    "onnear": "Player near",
 }
 
 _PARAM_LISTS = (
@@ -90,6 +127,96 @@ def friendly_name(raw: str) -> tuple[str, bool]:
     return spaced, False
 
 
+def entry_label(raw: str) -> str:
+    """Friendly name for an event-flow entry such as OnPlayerTalk."""
+    text = (raw or "").strip()
+    folded = re.sub(r"[^a-z0-9]", "", text.lower())
+    if folded in _ENTRY_NAMES:
+        return _ENTRY_NAMES[folded]
+    if "talk" in folded:
+        return "Talk"
+    if folded.startswith("on") and len(text) > 2:
+        return friendly_name(text[2:])[0]
+    return friendly_name(text)[0]
+
+
+def audit_npc_behavior(dump) -> dict:
+    """Count undecoded node types across every Npc_ pack."""
+    packs = [name for name in dump.actor_names() if name.startswith("Npc_")]
+    undecoded: dict[str, dict] = {}
+    common: dict[str, dict] = {}
+    errors = []
+    node_total = 0
+    for index, gyaml in enumerate(packs, start=1):
+        try:
+            graph = load_actor_graph(dump, gyaml=gyaml)
+        except Exception as exc:
+            errors.append({"gyaml": gyaml, "error": getattr(exc, "message", None) or str(exc)})
+            continue
+        for node in graph["nodes"]:
+            node_total += 1
+            label = node.get("type") or node.get("raw") or "undecoded"
+            bucket = common.setdefault(label, {"count": 0, "kind": node.get("kind") or "", "decoded": 0})
+            bucket["count"] += 1
+            if node.get("decoded"):
+                bucket["decoded"] += 1
+            if node.get("decoded"):
+                continue
+            missed = undecoded.setdefault(
+                label, {"count": 0, "kind": node.get("kind") or "", "actors": []}
+            )
+            missed["count"] += 1
+            if gyaml not in missed["actors"] and len(missed["actors"]) < 5:
+                missed["actors"].append(gyaml)
+        if index == len(packs) or index % 25 == 0:
+            print(f"behavior-audit {index}/{len(packs)} {gyaml}", file=sys.stderr)
+    missed_rows = [
+        {"type": name, "count": row["count"], "kind": row["kind"], "actors": row["actors"]}
+        for name, row in sorted(undecoded.items(), key=lambda pair: (-pair[1]["count"], pair[0]))
+    ]
+    common_rows = [
+        {
+            "type": name,
+            "count": row["count"],
+            "decoded": row["decoded"],
+            "kind": row["kind"],
+        }
+        for name, row in sorted(common.items(), key=lambda pair: (-pair[1]["count"], pair[0]))
+    ]
+    return {
+        "packs": len(packs),
+        "read": len(packs) - len(errors),
+        "nodes": node_total,
+        "undecoded": sum(row["count"] for row in missed_rows),
+        "undecodedTypes": missed_rows[:40],
+        "types": common_rows[:40],
+        "errors": errors,
+    }
+
+
+def render_behavior_audit(report: dict) -> str:
+    """Text form of an NPC behavior audit."""
+    lines = [
+        f"behavior-audit packs {report['packs']} read {report['read']}",
+        f"nodes {report['nodes']}",
+        f"undecoded {report['undecoded']}",
+    ]
+    if report["undecodedTypes"]:
+        lines.append("undecoded types")
+        for row in report["undecodedTypes"]:
+            actors = ", ".join(row["actors"])
+            lines.append(f"  {row['count']:6}  {row['kind'] or 'node':8}  {row['type']}  {actors}")
+    else:
+        lines.append("undecoded types: none")
+    if report["types"]:
+        lines.append("common types")
+        for row in report["types"][:15]:
+            lines.append(f"  {row['count']:6}  decoded {row['decoded']:6}  {row['type']}")
+    for row in report["errors"][:10]:
+        lines.append(f"error {row['gyaml']}: {row['error']}")
+    return "\n".join(lines) + "\n"
+
+
 def load_actor_graph(dump, *, gyaml: str = "", banc: str = "", actor_id: str = "") -> dict:
     """The base graph for this actor class, plus any path named on the placement."""
     actor = None
@@ -131,9 +258,19 @@ def _graph(gyaml: str, files: list[dict]) -> dict:
             node["source"] = source["id"]
             nodes.append(node)
         edges.extend(built["edges"])
+        source["count"] = len(built["nodes"])
+        source["file"] = Path(item["path"]).name
+        source["role"] = _source_role(item["path"], item["kind"], gyaml)
+        source["entries"] = [
+            {"id": node["id"], "name": node["name"], "raw": node["raw"]}
+            for node in built["nodes"]
+            if node.get("entry")
+        ]
+        source["openEntry"] = _pick_entry(source["entries"])
     sources.sort(key=lambda row: (_KIND_ORDER.get(row["kind"], 9), row["path"]))
     order = {row["id"]: index for index, row in enumerate(sources)}
     nodes.sort(key=lambda row: (order.get(row["source"], 9), row.get("index", 0), row["id"]))
+    opened = _pick_source(sources, gyaml)
     return {
         "gyaml": gyaml,
         "actor": "",
@@ -144,9 +281,75 @@ def _graph(gyaml: str, files: list[dict]) -> dict:
         "sources": sources,
         "nodes": nodes,
         "edges": edges,
+        "open": opened,
+        "undecoded": sum(1 for node in nodes if not node.get("decoded")),
         "note": "",
         "trace": [],
     }
+
+
+def _source_role(path: str, kind: str, gyaml: str) -> str:
+    low = path.lower()
+    actor = gyaml.lower()
+    if kind == "event":
+        return "event"
+    if kind == "schedule":
+        return "schedule"
+    if kind == "ainb" and actor and actor in low and "logic" in low:
+        return "root"
+    if "utility" in low:
+        return "utility"
+    if "root" in low:
+        return "root"
+    return "ai"
+
+
+def _pick_source(sources: list[dict], gyaml: str) -> str:
+    """The actor's own logic module, else its root AI, else its event flow."""
+    if not sources:
+        return ""
+    actor = gyaml.lower()
+
+    def score(source: dict) -> tuple:
+        path = source["path"].lower()
+        own = bool(actor and actor in path)
+        role = source.get("role") or ""
+        if source["kind"] == "ainb" and own and "logic" in path:
+            rank = 0
+        elif role == "root" and own:
+            rank = 1
+        elif source["kind"] == "event" and own:
+            rank = 2
+        elif role == "root":
+            rank = 3
+        elif source["kind"] == "event":
+            rank = 4
+        else:
+            rank = 5
+        return (rank, path)
+
+    return min(sources, key=score)["id"]
+
+
+def _pick_entry(entries: list[dict]) -> str:
+    """Root, then Utility, then a talk entry."""
+    if not entries:
+        return ""
+
+    def score(entry: dict) -> tuple:
+        raw = (entry.get("raw") or "").lower()
+        name = (entry.get("name") or "").lower()
+        if raw == "root":
+            rank = 0
+        elif "utility" in raw:
+            rank = 1
+        elif raw == "event" or name == "talk" or "talk" in raw:
+            rank = 2
+        else:
+            rank = 5
+        return (rank, raw)
+
+    return min(entries, key=score)["id"]
 
 
 def _read_source(item: dict) -> dict:
@@ -182,15 +385,17 @@ def _undecoded(item: dict) -> dict:
     )
 
 
-def _node(*, kind, path, index, key, raw, name, known, decoded, fields=None, pins=None, note="") -> dict:
+def _node(*, kind, path, index, key, raw, name, known, decoded, fields=None, pins=None, note="", type_name="", entry=False) -> dict:
     return {
         "id": f"{kind}:{path}#{index}:{key}",
         "kind": kind,
         "index": index,
+        "type": type_name,
         "raw": raw or "undecoded",
         "name": name,
         "known": known,
         "decoded": decoded,
+        "entry": entry,
         "fields": fields or [],
         "pins": pins or [],
         "note": note,
@@ -219,8 +424,23 @@ def _ainb(path: str, data: bytes) -> dict:
     by_index: dict[int, str] = {}
     pins_out: dict[tuple[int, int, str], str] = {}
     for index, node in enumerate(graph.nodes or []):
+        type_name = getattr(getattr(node, "type", None), "name", "") or ""
         raw = str(getattr(node, "name", "") or "")
-        name, known = friendly_name(raw)
+        if raw:
+            name, known = friendly_name(raw)
+            decoded = True
+        elif type_name in _FRIENDLY:
+            raw = type_name
+            name, known = _FRIENDLY[type_name], True
+            decoded = True
+        elif type_name and type_name != "UserDefined":
+            raw = type_name
+            name, known = friendly_name(type_name)
+            decoded = True
+        else:
+            raw = f"node {index}"
+            name, known, decoded = "Undecoded", False, False
+            type_name = type_name or "UserDefined"
         ident_key = raw or "undecoded"
         fields = _ainb_fields(node)
         built = _node(
@@ -228,13 +448,20 @@ def _ainb(path: str, data: bytes) -> dict:
             path=path,
             index=index,
             key=ident_key,
-            raw=raw or f"node {index}",
-            name=name if raw else "Undecoded",
-            known=known if raw else False,
-            decoded=bool(raw),
+            raw=raw,
+            name=name,
+            known=known,
+            decoded=decoded,
             fields=fields,
+            type_name=type_name,
         )
         pins = []
+        for slot, plug in enumerate(getattr(node, "child_plugs", []) or []):
+            label = str(getattr(plug, "name", "") or "") or "child"
+            pins.append(_pin(built["id"], "out", 1000 + slot, label, "flow"))
+        for slot, plug in enumerate(getattr(node, "generic_plugs", []) or []):
+            label = str(getattr(plug, "name", "") or "") or "in"
+            pins.append(_pin(built["id"], "in", 2000 + slot, label, "flow"))
         for type_name, inputs, outputs in _PARAM_LISTS:
             for slot, param in enumerate(getattr(node.params, outputs, []) or []):
                 pin = _pin(built["id"], "out", slot, str(getattr(param, "name", "") or ""), type_name)
@@ -259,6 +486,22 @@ def _ainb(path: str, data: bytes) -> dict:
                     if src is None:
                         src = _pin(by_index[src_index], "out", src_slot, "out", type_name)["id"]
                     edges.append(_edge(src, dst))
+        for slot, plug in enumerate(getattr(node, "child_plugs", []) or []):
+            dst_index = int(getattr(plug, "node_index", -1))
+            if dst_index not in by_index:
+                continue
+            label = str(getattr(plug, "name", "") or "") or "child"
+            src = _pin(by_index[index], "out", 1000 + slot, label, "flow")["id"]
+            dst = _flow_in(nodes[dst_index], by_index[dst_index])
+            edges.append(_edge(src, dst, label))
+        for slot, plug in enumerate(getattr(node, "generic_plugs", []) or []):
+            src_index = int(getattr(plug, "node_index", -1))
+            if src_index not in by_index:
+                continue
+            label = str(getattr(plug, "name", "") or "") or "in"
+            src = _flow_out(nodes[src_index], by_index[src_index], label)
+            dst = _pin(by_index[index], "in", 2000 + slot, label, "flow")["id"]
+            edges.append(_edge(src, dst, label))
     for command in graph.commands or []:
         root = int(getattr(command, "root_node_index", -1))
         label = str(getattr(command, "name", "") or "Root")
@@ -271,6 +514,8 @@ def _ainb(path: str, data: bytes) -> dict:
             name=f"Command {label}",
             known=True,
             decoded=True,
+            type_name="Command",
+            entry=True,
         )
         # Keep the command's index stable from the file, not from how many nodes we already drew.
         cmd["index"] = root if root >= 0 else 0
@@ -306,6 +551,20 @@ def _ainb_fields(node) -> list[dict]:
                     continue
                 fields.append({"name": str(getattr(prop, "name", "") or "property"), "value": _plain(value)})
     return fields
+
+
+def _flow_in(node: dict, node_id: str) -> str:
+    pin = _pin(node_id, "in", 0, "in", "flow")
+    if not any(item["id"] == pin["id"] for item in node["pins"]):
+        node["pins"].insert(0, pin)
+    return pin["id"]
+
+
+def _flow_out(node: dict, node_id: str, label: str) -> str:
+    pin = _pin(node_id, "out", 0, label or "out", "flow")
+    if not any(item["id"] == pin["id"] for item in node["pins"]):
+        node["pins"].append(pin)
+    return pin["id"]
 
 
 def _param_sources(param) -> list:
@@ -435,6 +694,8 @@ def _event(path: str, data: bytes) -> dict:
     for index, event in enumerate(chart.events or []):
         raw, label, fields, decoded = _event_label(event)
         name, known = (label, True) if decoded else ("Undecoded", False)
+        data = getattr(event, "data", None)
+        event_type = type(data).__name__.replace("Event", "") if data is not None else ""
         built = _node(
             kind="event",
             path=path,
@@ -445,6 +706,7 @@ def _event(path: str, data: bytes) -> dict:
             known=known,
             decoded=decoded,
             fields=fields,
+            type_name=event_type,
         )
         nodes.append(built)
         by_event[index] = built["id"]
@@ -468,9 +730,12 @@ def _event(path: str, data: bytes) -> dict:
             index=index,
             key=f"entry:{label}",
             raw=label,
-            name=f"Enter {label}",
+            name=entry_label(label),
             known=True,
             decoded=True,
+            type_name="Entry",
+            entry=True,
+            fields=[{"name": "entry", "value": label}],
         )
         built["id"] = f"event:{path}#entry:{label}"
         nodes.append(built)
@@ -491,10 +756,24 @@ def _event_label(event) -> tuple[str, str, list[dict], bool]:
         return (str(getattr(event, "name", "") or "event"), "Undecoded", [], False)
     kind = type(data).__name__.replace("Event", "") or "Action"
     action = _holder(getattr(data, "actor_action", None)) or _holder(getattr(data, "actor_query", None))
+    structural = {
+        "Switch": "Choose",
+        "Fork": "Fork",
+        "Join": "Join",
+        "Return": "Return",
+        "SubFlow": "Sub flow",
+        "SubFlowSwitch": "Choose sub flow",
+        "Action": "Action",
+    }
     raw = action or str(getattr(event, "name", "") or kind)
-    friendly, known = friendly_name(action) if action else (kind, True)
-    if action and not known:
-        friendly = f"Call {action}"
+    if action:
+        friendly, known = friendly_name(action)
+        if not known:
+            friendly = f"Call {action}"
+        if kind == "Switch":
+            friendly = f"Choose {friendly}"
+    else:
+        friendly, known = structural.get(kind, kind), True
     fields = [{"name": "event", "value": str(getattr(event, "name", "") or "")}]
     if action:
         fields.append({"name": "action", "value": action})
@@ -681,6 +960,9 @@ def _drain(dump, found: list[dict], seen: set[str], logged: set[str], trace: lis
 
 
 def _try_reference(dump, found, seen, logged, trace, queue, role: str, text: str, why: str) -> None:
+    if _reference_only(text):
+        trace.append(f"reference {text} reference only ({why})")
+        return
     candidates = _candidates(text, role)
     if candidates and candidates[0] in seen:
         return
@@ -954,6 +1236,17 @@ def _role_of(field: str, value: str) -> str:
     if key in _AI_KEYS or ".ainb" in low or low.startswith("ai/") or low.startswith("logic/") or "/logic/" in low or ".logic.module" in low:
         return "ainb"
     return ""
+
+
+def _reference_only(text: str) -> bool:
+    """Work/AI/Root and Work/BSA paths are editor sources, not files in the romfs."""
+    raw = text.replace("\\", "/").strip().lower()
+    if "work/ai/root/" in raw or raw.startswith("ai/root/"):
+        return True
+    if "work/bsa/" in raw or raw.startswith("bsa/"):
+        return True
+    base = raw.rsplit("/", 1)[-1]
+    return base.endswith(".ain") or base.endswith(".ain.zs")
 
 
 def _explicit_file(text: str) -> bool:

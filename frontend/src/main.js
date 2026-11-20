@@ -23,6 +23,9 @@ const state = {
   behaviorKey: "",
   behaviorLayer: "curated",
   behaviorNode: "",
+  behaviorFile: "",
+  behaviorEntry: "",
+  behaviorQuery: "",
   behaviorError: "",
   behaviorLoading: false,
   showProblemNotes: false,
@@ -2457,6 +2460,9 @@ function refreshBehavior() {
     state.behaviorKey = key;
     state.behavior = null;
     state.behaviorNode = "";
+    state.behaviorFile = "";
+    state.behaviorEntry = "";
+    state.behaviorQuery = "";
     state.behaviorError = "";
     state.behaviorLoading = Boolean(actor);
     if (actor) {
@@ -2488,6 +2494,9 @@ function drawBehavior() {
     graph: state.behavior,
     layer: state.behaviorLayer,
     selectedId: state.behaviorNode,
+    file: state.behaviorFile,
+    entry: state.behaviorEntry,
+    query: state.behaviorQuery,
     loading: state.behaviorLoading,
     error: state.behaviorError,
     onLayer: (layer) => {
@@ -2497,6 +2506,29 @@ function drawBehavior() {
     onSelect: (id) => {
       state.behaviorNode = id;
       drawBehavior();
+    },
+    onFile: (id, keepQuery) => {
+      state.behaviorFile = id;
+      state.behaviorEntry = "";
+      state.behaviorNode = "";
+      if (!keepQuery) state.behaviorQuery = "";
+      drawBehavior();
+    },
+    onEntry: (id) => {
+      state.behaviorEntry = id;
+      state.behaviorQuery = "";
+      state.behaviorNode = id;
+      drawBehavior();
+    },
+    onQuery: (value) => {
+      state.behaviorQuery = value;
+      drawBehavior();
+      const input = host.querySelector(".behavior-search");
+      if (input) {
+        input.focus();
+        const end = input.value.length;
+        input.setSelectionRange(end, end);
+      }
     },
   });
 }
