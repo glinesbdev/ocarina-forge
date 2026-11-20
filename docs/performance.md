@@ -50,6 +50,10 @@ Before: every terrain rebuild packed the cells. A 17-cell solid atlas took 16 ms
 
 Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene keeps the old field up until the new one's shader and atlas are ready, then swaps.
 
+## Converter cores
+
+The process pool defaults to one less than `os.cpu_count()`, and never below 1. One core stays in the server process and does not start a pool. **Settings** in the top bar is a slider and a number from 1 to the machine's core count. It is saved in the config file and applied between converts: a job already running finishes on the old pool, and the next one uses the new count. `OCARINA_FORGE_WORKERS` overrides the slider. While that variable is set, Settings says so and does not change the running count.
+
 ## Workers
 
 The client was measured before moving work off the main thread. Nothing in that set was faster in a worker, so none of it moved.
@@ -94,7 +98,7 @@ Opening a scene queues the rest of that scene's models, nearest to the camera fi
 
 ## Model loading
 
-Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`), and the view downloads up to 8 of those files at once, nearest to the camera first. A name that is not converted yet is `queued`: one of those 8 slots calls `GET /api/models/<name>`, which converts it, and only a real mesh then downloads the glb. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Conversions run in the `OCARINA_FORGE_WORKERS` process pool (4 unless you set it; `0` or `1` stays in the server process) and the handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.
+Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`), and the view downloads up to 8 of those files at once, nearest to the camera first. A name that is not converted yet is `queued`: one of those 8 slots calls `GET /api/models/<name>`, which converts it, and only a real mesh then downloads the glb. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Conversions run in the process pool (one less than the core count, unless Settings or `OCARINA_FORGE_WORKERS` says otherwise; 1 stays in the server process) and the handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.
 
 **Stats** adds `queued`, `loading`, and `loaded`. While Kokiri is streaming, `loading` should sit near 8 and `queued` should fall. After it settles, `loading` is 0 and `loaded` is the number of distinct models.
 

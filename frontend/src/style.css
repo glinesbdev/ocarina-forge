@@ -68,6 +68,8 @@ p { margin: 0; }
 .project-chip span { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-chip #project-title { font-weight: 640; }
 .muted { color: var(--muted); }
+.worker-setting { display: flex; align-items: center; gap: 12px; }
+.worker-setting input[type="number"] { width: 4.5rem; }
 .top-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
 button.ghost, button.primary, .linkish {
   border-radius: 9px;

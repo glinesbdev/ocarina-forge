@@ -57,15 +57,24 @@ def load_config() -> dict:
     project = setting("PROJECT")
     if project:
         data["project"] = project
+    workers = data.get("workers")
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        workers = None
     return {
         "dump": data.get("dump") or "",
         "project": data.get("project") or "",
         "hotReload": hot_reload_settings(data),
+        "workers": workers,
         "path": str(path),
     }
 
 
-def save_config(dump: str | None = None, project: str | None = None, hot_reload: dict | None = None) -> dict:
+def save_config(
+    dump: str | None = None,
+    project: str | None = None,
+    hot_reload: dict | None = None,
+    workers: int | None = None,
+) -> dict:
     current = load_config()
     if dump is not None:
         current["dump"] = dump
@@ -73,12 +82,16 @@ def save_config(dump: str | None = None, project: str | None = None, hot_reload:
         current["project"] = project
     if hot_reload is not None:
         current["hotReload"] = hot_reload_settings({"hotReload": hot_reload})
+    if workers is not None:
+        current["workers"] = max(1, int(workers))
     path = Path(current["path"])
     payload = {
         "dump": current["dump"],
         "project": current["project"],
         "hotReload": current["hotReload"],
     }
+    if current.get("workers"):
+        payload["workers"] = current["workers"]
     atomic_write(path, dump_yaml(payload))
     current.update(payload)
     return current

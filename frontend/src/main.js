@@ -176,6 +176,54 @@ viewport = await createViewport($("viewport"), {
   },
 });
 
+async function openSettings() {
+  try {
+    const status = await api.status();
+    const workers = status.workers || { count: 1, max: 1, source: "default" };
+    const range = $("worker-range");
+    const number = $("worker-count");
+    const max = String(workers.max || 1);
+    range.max = max;
+    number.max = max;
+    range.min = "1";
+    number.min = "1";
+    range.value = String(workers.count || 1);
+    number.value = range.value;
+    const locked = workers.source === "env";
+    range.disabled = locked;
+    number.disabled = locked;
+    $("worker-save").disabled = locked;
+    $("worker-note").textContent = locked
+      ? `OCARINA_FORGE_WORKERS is ${workers.count}, so this slider is saved but not used until that variable is unset. This machine has ${workers.max} cores.`
+      : `Using ${workers.count} of ${workers.max}. The default leaves one core free. The pool is rebuilt between converts.`;
+    $("settings-dialog").showModal();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function syncWorkerCount(value) {
+  const range = $("worker-range");
+  const number = $("worker-count");
+  const max = Number(range.max) || 1;
+  const next = Math.min(max, Math.max(1, Number(value) || 1));
+  range.value = String(next);
+  number.value = String(next);
+}
+
+$("worker-range").addEventListener("input", () => syncWorkerCount($("worker-range").value));
+$("worker-count").addEventListener("input", () => syncWorkerCount($("worker-count").value));
+$("settings-form").addEventListener("submit", async (event) => {
+  if (event.submitter && event.submitter.value !== "save") return;
+  event.preventDefault();
+  try {
+    await api.saveConfig({ workers: Number($("worker-count").value) });
+    $("settings-dialog").close();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
 let streamAt = 0;
 function refreshStreamLog() {
   const box = $("stream-readout");
@@ -194,6 +242,7 @@ function refreshStreamLog() {
     .catch(() => {});
 }
 
+$("settings-open").addEventListener("click", () => openSettings());
 $("undo").addEventListener("click", () => undo());
 $("redo").addEventListener("click", () => redo());
 $("build-open").addEventListener("click", () => $("build-dialog").showModal());

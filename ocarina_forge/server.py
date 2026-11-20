@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing
+import os
 import shutil
 import signal
 import threading
@@ -46,10 +47,13 @@ def _ignore_sigint() -> None:
 
 def _close_pool() -> None:
     """Drop queued converts and return without waiting on the workers."""
-    global _POOL
+    global _POOL, _POOL_SIZE, _POOL_WANT, _POOL_INFLIGHT
     with _POOL_LOCK:
         pool = _POOL
         _POOL = None
+        _POOL_SIZE = 0
+        _POOL_WANT = None
+        _POOL_INFLIGHT = 0
     if pool is not None:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -76,31 +80,98 @@ _POOL = None
 _POOL_LOCK = threading.Lock()
 
 
-def _worker_count() -> int:
+_POOL_SIZE = 0
+_POOL_INFLIGHT = 0
+_POOL_WANT: int | None = None
+
+
+def _configured_workers() -> tuple[int, int, str]:
+    """1..cpu_count. The env var wins, then the saved setting, then one core left free."""
     from ocarina_forge.locate import setting
 
-    raw = setting("WORKERS", "4") or "4"
-    try:
-        count = int(raw)
-    except ValueError:
-        return 4
-    return max(0, count)
+    cpus = os.cpu_count() or 1
+    raw = setting("WORKERS")
+    if raw is not None and str(raw).strip() != "":
+        source = "env"
+        try:
+            count = int(raw)
+        except ValueError:
+            count = max(1, cpus - 1)
+    else:
+        saved = load_config().get("workers")
+        if isinstance(saved, int) and not isinstance(saved, bool) and saved >= 1:
+            source = "config"
+            count = saved
+        else:
+            source = "default"
+            count = max(1, cpus - 1)
+    return max(1, min(cpus, count)), cpus, source
+
+
+def _worker_public() -> dict:
+    count, cpus, source = _configured_workers()
+    return {"count": count, "max": cpus, "source": source, "saved": load_config().get("workers")}
+
+
+def _install_pool(count: int) -> None:
+    """Replace the pool. The caller holds ``_POOL_LOCK`` and no job is in flight."""
+    global _POOL, _POOL_SIZE, _POOL_WANT
+    old = _POOL
+    _POOL = None
+    _POOL_SIZE = count
+    _POOL_WANT = None
+    if count > 1:
+        _POOL = ProcessPoolExecutor(
+            max_workers=count,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_ignore_sigint,
+        )
+    if old is not None:
+        old.shutdown(wait=False, cancel_futures=True)
+
+
+def _job_finished(_future=None) -> None:
+    global _POOL_INFLIGHT
+    with _POOL_LOCK:
+        _POOL_INFLIGHT = max(0, _POOL_INFLIGHT - 1)
+        if _POOL_INFLIGHT == 0 and _POOL_WANT is not None and _POOL_WANT != _POOL_SIZE:
+            _install_pool(_POOL_WANT)
 
 
 def _pool():
-    """Cold model converts run in child processes. A warm cache hit stays here."""
-    global _POOL
-    count = _worker_count()
-    if count <= 1:
-        return None
+    """Cold model converts run in child processes. A warm cache hit stays here.
+
+    One worker stays in this process. A new count waits until the current jobs
+    finish, then the pool is rebuilt.
+    """
+    global _POOL_WANT
+    count, _cpus, _source = _configured_workers()
     with _POOL_LOCK:
-        if _POOL is None:
-            _POOL = ProcessPoolExecutor(
-                max_workers=count,
-                mp_context=multiprocessing.get_context("spawn"),
-                initializer=_ignore_sigint,
-            )
+        if count <= 1:
+            _POOL_WANT = 1
+            if _POOL_INFLIGHT == 0 and _POOL is not None:
+                _install_pool(1)
+            return None if _POOL_SIZE <= 1 else _POOL
+        if _POOL is not None and _POOL_SIZE == count:
+            return _POOL
+        if _POOL is not None and _POOL_INFLIGHT > 0:
+            _POOL_WANT = count
+            return _POOL
+        _install_pool(count)
         return _POOL
+
+
+async def _submit(fn, *args):
+    """Run in the pool when there is one, and rebuild that pool only between jobs."""
+    global _POOL_INFLIGHT
+    pool = _pool()
+    if pool is None:
+        return await asyncio.to_thread(fn, *args)
+    with _POOL_LOCK:
+        _POOL_INFLIGHT += 1
+        future = pool.submit(fn, *args)
+    future.add_done_callback(_job_finished)
+    return await asyncio.wrap_future(future)
 
 
 _CONVERTING: dict[str, asyncio.Future] = {}
@@ -252,11 +323,11 @@ async def _describe_model(gyaml: str, *, interactive: bool = True) -> dict:
             pass
 
         async def run():
-            pool = _pool()
-            if pool is None:
-                info = await asyncio.to_thread(describe_actor, dump, gyaml)
+            count, _cpus, _source = _configured_workers()
+            if count <= 1:
+                info = await _submit(describe_actor, dump, gyaml)
             else:
-                info = await asyncio.wrap_future(pool.submit(describe_actor_at, str(dump.root), gyaml))
+                info = await _submit(describe_actor_at, str(dump.root), gyaml)
             return _publish(info)
 
         return _note_stream("model", gyaml, await _convert(f"model:{gyaml}", run))
@@ -275,11 +346,11 @@ async def _describe_terrain_model(banc: str) -> dict:
             pass
 
         async def run():
-            pool = _pool()
-            if pool is None:
-                info = await asyncio.to_thread(describe_terrain, dump, banc)
+            count, _cpus, _source = _configured_workers()
+            if count <= 1:
+                info = await _submit(describe_terrain, dump, banc)
             else:
-                info = await asyncio.wrap_future(pool.submit(describe_terrain_at, str(dump.root), banc))
+                info = await _submit(describe_terrain_at, str(dump.root), banc)
             return _publish(info)
 
         return _note_stream("terrain", banc, await _convert(f"terrain:{banc}", run))
@@ -436,6 +507,7 @@ def status():
         "project": project,
         "ready": ready,
         "repo": str(repo_root()),
+        "workers": _worker_public(),
     }
 
 
@@ -445,19 +517,28 @@ def put_config(body: dict):
     project = body.get("project") if "project" in body else None
     dump_to_save = None
     project_to_save = None
+    workers = None
     if dump is not None:
         if str(dump).strip():
             dump_to_save = str(Dump(dump).root)
         else:
             dump_to_save = ""
+        _dump_cache["key"] = None
     if project is not None:
         if str(project).strip():
             project_to_save = str(Project(project).root)
         else:
             project_to_save = ""
-    _dump_cache["key"] = None
-    saved = save_config(dump=dump_to_save, project=project_to_save)
-    return {"config": saved, "dump": _dump_status(), "project": _project_status()}
+    if "workers" in body:
+        try:
+            workers = int(body.get("workers"))
+        except (TypeError, ValueError) as exc:
+            raise BancError("Converter cores must be a number.", "config") from exc
+        _cpus = os.cpu_count() or 1
+        if workers < 1 or workers > _cpus:
+            raise BancError(f"Converter cores must be from 1 to {_cpus}.", "config")
+    saved = save_config(dump=dump_to_save, project=project_to_save, workers=workers)
+    return {"config": saved, "dump": _dump_status(), "project": _project_status(), "workers": _worker_public()}
 
 
 @app.get("/api/hot-reload")
