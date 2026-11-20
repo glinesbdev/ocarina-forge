@@ -10,6 +10,7 @@ import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-
 
 import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
 import { shouldReloadTerrain } from "./terrain.js";
+import { createBackendRenderer, drawCount } from "./backend.js";
 import { formatStats, keepRendering } from "./frame.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick } from "./instance.js";
 import { chooseHit } from "./pick.js";
@@ -36,7 +37,14 @@ export const CATEGORY_COLOR = {
  * drawn only while that volume is selected, so overlapping areas cannot wash
  * the scene. Picks prefer a solid mesh over a volume.
  */
-export function createViewport(host, hooks) {
+export async function createViewport(host, hooks) {
+  const created = await createBackendRenderer(THREE, globalThis.location ? globalThis.location.search : "");
+  const renderer = created.renderer;
+  const backendName = created.backend;
+  const backendNote = created.note;
+  let terrainNodes = null;
+  if (created.nodes) terrainNodes = await import("./terrain-node.js");
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x141b16);
 
@@ -44,11 +52,17 @@ export function createViewport(host, hooks) {
   camera.position.set(12, 9, 14);
   camera.rotation.order = "YXZ";
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.shadowMap.enabled = false;
-  renderer.shadowMap.autoUpdate = false;
+  if (renderer.shadowMap && "autoUpdate" in renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+  if (renderer.isWebGPURenderer && typeof renderer.onDeviceLost === "function") {
+    const previousLost = renderer.onDeviceLost.bind(renderer);
+    renderer.onDeviceLost = (info) => {
+      previousLost(info);
+      if (hooks.onDeviceLost) hooks.onDeviceLost("The WebGPU device was lost. Uncheck WebGPU to reload on WebGL.");
+    };
+  }
   host.appendChild(renderer.domElement);
 
   const labels = new CSS2DRenderer();
@@ -712,7 +726,8 @@ export function createViewport(host, hooks) {
       material.map.wrapS = THREE.RepeatWrapping;
       material.map.wrapT = THREE.RepeatWrapping;
       material.map.generateMipmaps = true;
-      material.map.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+      const maxAniso = renderer.capabilities && renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 4;
+      material.map.anisotropy = Math.min(4, maxAniso);
       material.map.needsUpdate = true;
     }
     const tag = (material.userData && material.userData.banc) || material.name || "";
@@ -1314,6 +1329,9 @@ uniform float terrainLayerMissing;`
     // that never received the atlas uniforms.
     material.customProgramCacheKey = () => `terrain|${columns}|${repeat}`;
     material.needsUpdate = true;
+    // WebGPU does not run onBeforeCompile. The node graph reads the same
+    // uniform objects the GLSL path writes.
+    if (terrainNodes) terrainNodes.attachTerrainColor(material);
     return material;
   }
 
@@ -1890,6 +1908,8 @@ uniform float terrainLayerMissing;`
   let lastCullAt = 0;
   const frameTimes = [];
   let fps = 0;
+  let frameMs = null;
+  let lastTickAt = 0;
   let statInstances = 0;
   let statCulled = 0;
   let statQueued = 0;
@@ -1909,11 +1929,13 @@ uniform float terrainLayerMissing;`
     if (frameTimes.length >= 4) {
       fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
     }
-    const info = renderer.info.render;
+    const info = renderer.info && renderer.info.render;
     statsEl.textContent = formatStats({
+      backend: backendName,
       rendering,
       fps,
-      draws: info.calls,
+      frameMs,
+      draws: drawCount(info, Boolean(renderer.isWebGPURenderer)),
       instances: statInstances,
       culled: statCulled,
       separate: naiveDraws,
@@ -1927,6 +1949,9 @@ uniform float terrainLayerMissing;`
   function tick() {
     frameHandle = 0;
     if (!running) return;
+    const tickAt = performance.now();
+    const gap = lastTickAt ? tickAt - lastTickAt : 0;
+    lastTickAt = tickAt;
     const dt = Math.min(clock.getDelta(), 0.05);
     const flying = updateFly(dt);
     const damped = nav === "orbit" ? orbit.update() : false;
@@ -1943,6 +1968,7 @@ uniform float terrainLayerMissing;`
       const distance = camera.position.distanceTo(entry.pivot.position);
       transform.size = THREE.MathUtils.clamp(distance / 14, 0.55, 2.4);
     }
+    if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
     renderer.render(scene, camera);
     labels.render(scene, camera);
     const loading = pendingLoads > 0;
@@ -1953,6 +1979,7 @@ uniform float terrainLayerMissing;`
       dragging: transform.dragging,
       loading,
     });
+    if (again && gap > 0 && gap < 250) frameMs = Math.round(gap * 10) / 10;
     writeStats(again);
     if (again) requestRender();
   }
@@ -1961,6 +1988,8 @@ uniform float terrainLayerMissing;`
   requestRender();
 
   return {
+    backend: backendName,
+    backendNote,
     setActors,
     patchActors,
     select,

@@ -6,7 +6,7 @@ Baseline on Bradyn’s PC, Kokiri Forest child Static+Dynamic, before this pass:
 
 `renderer.render` runs only from the animation frame requested by `requestRender`. Nothing calls `setAnimationLoop`. A frame schedules the next one only while the camera is moving (orbit damping, fly keys, or right-button look), the gizmo is dragging, or a model or terrain load is still in flight. Water does not animate, so it does not keep the loop. When that stops, the overlay reads `idle` and the last draw and triangle counts stay put.
 
-Check: turn **Stats** on, orbit, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead.
+Check: turn **Stats** on, orbit, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead. The line starts with the backend (`WebGL` or `WebGPU`) and, once a run of frames has been measured, the frame time in milliseconds.
 
 ## Instanced repeats
 
@@ -55,3 +55,23 @@ Check: open a scene with a heightmap, quit, pull this build, and open it again. 
 Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`), and the view downloads up to 8 of those files at once, nearest to the camera first. A name that is not converted yet is `queued`: one of those 8 slots calls `GET /api/models/<name>`, which converts it, and only a real mesh then downloads the glb. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Conversions run in the `BANCWRIGHT_WORKERS` process pool (4 unless you set it; `0` or `1` stays in the server process) and the handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.
 
 **Stats** adds `queued`, `loading`, and `loaded`. While Kokiri is streaming, `loading` should sit near 8 and `queued` should fall. After it settles, `loading` is 0 and `loaded` is the number of distinct models.
+
+## WebGPU trial
+
+Three stays on **r170** (`0.170.0`). That release already has `WebGPURenderer`, TSL node materials, and a `BatchedMesh` draw path, so a bump was not required for the trial. A newer three would also move the WebGL editor (material compile, `TransformControls`, `BatchedMesh`, and three-mesh-bvh) under an unproven renderer. WebGL remains the default until a Kokiri pass shows WebGPU is faster and looks the same.
+
+The stage bar has a **WebGPU** checkbox. Checking it reloads with `?gpu=1`. Unchecking reloads without that parameter. `?renderer=webgpu` does the same thing. `?gpu=0` or `?renderer=webgl` forces WebGL. If the browser has no WebGPU adapter, the checkbox request falls back to the same `WebGLRenderer` as the default and a toast says so. The WebGPU renderer's own WebGL2 node backend is not used for that fallback, so a failed trial is the editor you already know.
+
+What is shared, so both backends should match:
+
+- Actor batches. The same `BatchedMesh` stores the instance matrix, colour, and visibility. Picking is a CPU raycast on that mesh. The gizmo writes one actor's matrix. LOD and frustum culling set `setVisibleAt` from the same screen-size rules. Render-on-change is the same loop: no `setAnimationLoop`, another frame only while the camera, the gizmo, or a load is active.
+- The field. WebGL still injects the GLSL atlas (`terrainCell`, triplanar blend, sub-sheet discard, tile colors). WebGPU ignores `onBeforeCompile`, so the same uniforms feed a TSL `colorNode` that does that work. Batch tint, selection colour, hide, and lock are applied after that colour on both paths.
+
+What differs on r170's WebGPU backend:
+
+- The lighting model is the node physical shader, not the WebGL standard chunks. The forest can read a little brighter or flatter. Water and alpha-tested leaves go through the node material's alpha test instead of the GLSL chunk.
+- `info.render.calls` is how many times `render()` ran, not the draw count. **Stats** reads `drawCalls` on WebGPU. That backend's `BatchedMesh` loop does not add those draws to `drawCalls` or `triangles`, so on WebGPU the `draws` and `tris` numbers miss the forest and mostly count the field, the helpers, and the gizmo. Compare `inst`, the picture, the fps, and the frame time. Do not compare `tris` across the two backends on this build.
+- The first WebGPU frames compile pipelines. Orbit once and let it settle before reading fps. The console warns that two copies of three.js are loaded. That is this build pulling the WebGPU bundle next to the WebGL one, not a failed start. If the device is lost, a toast says so and unchecking **WebGPU** reloads the WebGL editor.
+- Labels are DOM on both. Shadows stay off.
+
+Check: open Kokiri on WebGL, turn **Stats** on, orbit, and note fps, ms, and `inst`. Then check **WebGPU** (the page reloads). The line should start with `WebGPU`. The field should be textured, not black and not the warning stripes, unless **Tile colors** is on. Drag one copy of a repeated model: only that copy moves, during the drag and after release. Hide a category and those instances drop. Fly back: trees stay, and `inst` falls only by culling, not to zero. Uncheck **WebGPU** and confirm the line says `WebGL` again. If the browser cannot start WebGPU, the line stays `WebGL` and a toast explains the fallback.

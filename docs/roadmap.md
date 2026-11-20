@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is underway; the other items are not started. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass and the WebGPU trial are in this build. Editing UX and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
@@ -8,7 +8,7 @@ Render on change, so an idle view does not redraw. Instance repeated models on t
 
 ## 2. WebGPU trial
 
-Do this before the behavior editor grows. Try three.js `WebGPURenderer` with TSL ports of the terrain, water, and blend shaders, and keep a WebGL fallback. Compare fps on Kokiri.
+In this build, as an opt-in. Three stays on r170. **WebGPU** in the stage bar, or `?gpu=1`, reloads on `WebGPURenderer`. The default, and any failed start, is the existing `WebGLRenderer`. The terrain atlas has a TSL port; instancing, picking, the gizmo, LOD, culling, and render-on-change are the same scene code on both. Water and leaf alpha go through the node material when WebGPU is on. r170 does not count `BatchedMesh` draws in the WebGPU info counters, so compare fps, frame time, `inst`, and the picture, not `tris`. How to switch, and the gaps, are in [performance.md](performance.md). A Kokiri A/B is still the thing that decides whether WebGPU becomes the default.
 
 ## 3. Editing UX
 

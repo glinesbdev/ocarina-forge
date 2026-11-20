@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
+import { rendererChoice, rendererSearch } from "./backend.js";
 import { createViewport } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -35,7 +36,7 @@ const state = {
   addMode: "add",
 };
 
-const viewport = createViewport($("viewport"), {
+const viewport = await createViewport($("viewport"), {
   fetchModel: (gyaml) => api.model(gyaml),
   fetchModels: (names) => api.models(names),
   fetchTerrain: (banc) => api.terrain(banc),
@@ -109,6 +110,7 @@ const viewport = createViewport($("viewport"), {
     fillNumber("ry", deg(rotate[1]));
     fillNumber("rz", deg(rotate[2]));
   },
+  onDeviceLost: (message) => toast(message),
   onTransform: (id, translate, rotate) => {
     const actor = selectedActor();
     const scale = actor && actor.id === id ? actor.scale : undefined;
@@ -151,6 +153,21 @@ $("companion-pick").addEventListener("change", (event) => {
 $("show-stats").addEventListener("change", (event) => {
   viewport.setShowStats(event.target.checked);
 });
+const gpuBox = $("use-webgpu");
+if (gpuBox) {
+  gpuBox.checked = rendererChoice(window.location.search) === "webgpu";
+  const gpuLabel = gpuBox.parentElement;
+  if (gpuLabel) {
+    gpuLabel.title = viewport.backend === "WebGPU"
+      ? "WebGPU is drawing. Uncheck to reload on WebGL."
+      : "Reload and try WebGPU. WebGL stays the default, and a missing GPU falls back here.";
+  }
+  gpuBox.addEventListener("change", () => {
+    const next = rendererSearch(window.location.search, gpuBox.checked ? "webgpu" : "webgl");
+    window.location.assign(`${window.location.pathname}${next}${window.location.hash}`);
+  });
+}
+if (viewport.backendNote) toast(viewport.backendNote);
 $("draw-distance").addEventListener("change", (event) => {
   viewport.setFlags({ distance: Number(event.target.value) || 0 });
 });

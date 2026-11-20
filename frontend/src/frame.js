@@ -10,13 +10,23 @@ export function formatTris(tris) {
   return String(count);
 }
 
+function formatMs(value) {
+  const rounded = Math.round(Number(value) * 10) / 10;
+  return String(rounded);
+}
+
 /**
  * Stats line. `instances` and `culled` are omitted until that pass records them.
  * A frame that will not be followed by another one is `idle`, even if fps was just measured.
+ * `backend` and `frameMs` are included when the caller has them.
  */
-export function formatStats({ rendering, fps, draws, instances, culled, separate, tris, queued, loading, loaded }) {
+export function formatStats({ rendering, fps, frameMs, backend, draws, instances, culled, separate, tris, queued, loading, loaded }) {
   const rate = rendering ? (fps ? `${fps} fps` : "…") : "idle";
-  const parts = [rate, `${draws} draws`];
+  const parts = [];
+  if (backend) parts.push(backend);
+  parts.push(rate);
+  if (frameMs != null) parts.push(`${formatMs(frameMs)} ms`);
+  parts.push(`${draws} draws`);
   if (instances != null) parts.push(`${instances} inst`);
   if (culled != null) parts.push(`${culled} culled`);
   parts.push(`${separate} separate`, `${formatTris(tris)} tris`);
