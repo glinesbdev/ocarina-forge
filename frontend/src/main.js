@@ -2582,6 +2582,8 @@ async function saveBehaviorField(node, field, value) {
     drawBehavior();
     renderChanges();
     updateHistoryButtons();
+    const source = (graph.sources || []).find((item) => item.id === node.source);
+    if (source && source.warning) toast(source.warning);
   } catch (error) {
     toast(error.message);
   }

@@ -170,6 +170,10 @@ def schedule_builtin_label(name: str) -> str | None:
         return None
     if folded == "dummy" or folded.startswith("dummygamecomponentaischeduleparam"):
         return "Dummy schedule"
+    # A .bgyml name is a file in some pack. game__bsa__ActionSeq__AIScheduleMoveTo is a type.
+    low = base.lower()
+    if low.endswith((".bgyml", ".bgyml.zs", ".gyml", ".gyml.zs")):
+        return None
     if "gamebsa" not in folded and "gameaischedule" not in folded:
         return None
     for token, label in (
@@ -296,6 +300,9 @@ def _graph(gyaml: str, files: list[dict]) -> dict:
             "title": item["title"],
             "status": item["status"],
             "note": item.get("note") or "",
+            "sharedFrom": item.get("sharedFrom") or "",
+            "sharedWith": list(item.get("sharedWith") or []),
+            "warning": item.get("warning") or "",
         }
         sources.append(source)
         built = _read_source(item)
@@ -405,7 +412,12 @@ def _read_source(item: dict) -> dict:
         if kind == "ainb":
             return _ainb(item["path"], item["data"])
         if kind == "schedule":
-            return _schedule(item["path"], item["data"])
+            if _is_row_schedule(item["data"]):
+                return _schedule(item["path"], item["data"])
+            shared = _shared_container(item["path"], item["data"])
+            if shared is not None:
+                return shared
+            raise ValueError("not an AIScheduleParam")
         if kind == "event":
             return _event(item["path"], item["data"])
     except Exception as exc:  # a file the library cannot read still has a node
@@ -981,6 +993,7 @@ def _collect(dump, gyaml: str, actor: dict | None) -> tuple[list[dict], list[str
         for relative in hits:
             queue.append((role, relative, f"name match in {folder}/"))
     _drain(dump, found, seen, logged, trace, queue)
+    _annotate_shared(dump, gyaml, found)
     return found, trace
 
 
@@ -1062,6 +1075,14 @@ def _try_reference(dump, found, seen, logged, trace, queue, role: str, text: str
         trace.append(f"try {relative} opened {kind} ({why})")
         _add_file(found, seen, kind, relative, blob)
         _enqueue_document(blob, kind, relative, queue, trace)
+        return
+    shared = _open_shared_schedule(dump, text)
+    if shared is not None:
+        blob, path, pack = shared
+        if path not in seen:
+            trace.append(f"try {path} opened schedule shared from {pack} ({why})")
+            _add_file(found, seen, "schedule", path, blob)
+            _enqueue_document(blob, "schedule", path, queue, trace)
         return
     named = why == "actor name" or why.startswith("name match")
     if not tried and not named and _explicit_file(text):
@@ -1196,6 +1217,240 @@ def _add_file(found: list[dict], seen: set[str], kind: str, path: str, data: byt
             "note": "",
         }
     )
+
+
+def _is_row_schedule(data: bytes) -> bool:
+    if data[:2] != b"YB":
+        return False
+    try:
+        document = loads(data)
+    except ValueError:
+        return False
+    return _is_schedule(document)
+
+
+def _shared_container(path: str, data: bytes) -> dict | None:
+    """A ConditionContainer (or any other schedule BYML) still counts as the file we found."""
+    try:
+        document = loads(data)
+    except ValueError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    fields = []
+    for key, value in document.items():
+        if isinstance(value, (list, dict)) or value is None:
+            continue
+        fields.append(_field(str(key), value, _py_field_type(value)))
+        if len(fields) >= 8:
+            break
+    label = Path(path).name
+    friendly, known = friendly_name(label)
+    return {
+        "nodes": [
+            _node(
+                kind="schedule",
+                path=path,
+                index=0,
+                key=label,
+                raw=label,
+                name=friendly if known else label,
+                known=True,
+                decoded=True,
+                type_name="shared",
+                fields=fields,
+            )
+        ],
+        "edges": [],
+    }
+
+
+def _is_shared_schedule_name(text: str) -> bool:
+    low = text.replace("\\", "/").lower()
+    return "aischeduleparam" in low or "conditioncontainer" in low
+
+
+def _schedule_lookup_keys(text: str) -> list[str]:
+    base = text.replace("\\", "/").strip().split("/")[-1]
+    keys: list[str] = []
+
+    def add(item: str) -> None:
+        folded = item.lower()
+        if folded and folded not in keys:
+            keys.append(folded)
+
+    add(base)
+    stem = base
+    for suffix in (".bgyml.zs", ".bgyml", ".gyml", ".zs"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    add(stem)
+    marker = ".game__"
+    at = stem.lower().find(marker)
+    if at > 0:
+        add(stem[:at])
+    return keys
+
+
+def schedule_index(dump) -> dict:
+    """Stem to the pack member that holds it, and the actors whose BYML names that file.
+
+    Built once per dump. A later actor reuses the same index.
+    """
+    cached = getattr(dump, "_behavior_schedule_index", None)
+    if cached is not None:
+        return cached
+    files: dict[str, list[dict]] = {}
+    users: dict[str, list[str]] = {}
+    names = dump.actor_names()
+    for index, gyaml in enumerate(names, start=1):
+        pack_rel = f"Pack/Actor/{gyaml}.pack.zs"
+        try:
+            archive = _open_pack_archive(dump, pack_rel)
+        except Exception:
+            continue
+        for member in archive.names():
+            if _is_shared_schedule_name(member):
+                record = {"pack": gyaml, "pack_rel": pack_rel, "member": member}
+                for key in _schedule_lookup_keys(member):
+                    rows = files.setdefault(key, [])
+                    if not any(row["pack"] == gyaml and row["member"] == member for row in rows):
+                        rows.append(record)
+            blob = _member_bytes(dump, archive, member)
+            _note_schedule_users(users, gyaml, blob)
+        if index == len(names) or index % 200 == 0:
+            print(f"schedule index {index}/{len(names)} {gyaml}", file=sys.stderr)
+    for bucket in users.values():
+        bucket.sort()
+    cached = {"files": files, "users": users}
+    dump._behavior_schedule_index = cached
+    print(f"schedule index {len(names)} packs, {len(files)} names", file=sys.stderr)
+    return cached
+
+
+def _note_schedule_users(users: dict[str, list[str]], gyaml: str, blob: bytes) -> None:
+    if blob[:2] not in (b"YB", b"BY"):
+        return
+    folded = blob.lower()
+    if b"aischeduleparam" not in folded and b"conditioncontainer" not in folded:
+        return
+    try:
+        from ocarina_forge.validate import byml_strings
+
+        strings = byml_strings(blob)
+    except Exception:
+        return
+    for text in strings:
+        if not _is_shared_schedule_name(text):
+            continue
+        for key in _schedule_lookup_keys(text):
+            bucket = users.setdefault(key, [])
+            if gyaml not in bucket:
+                bucket.append(gyaml)
+
+
+def _open_pack_archive(dump, pack_rel: str):
+    from ocarina_forge.formats.sarc import Sarc
+
+    payload, _dict_id = dump.read_file(pack_rel)
+    return Sarc(payload)
+
+
+def _member_bytes(dump, archive, member: str) -> bytes:
+    from ocarina_forge.formats.zsio import decompress, is_zstd
+
+    blob = archive.read(member)
+    if is_zstd(blob):
+        blob, _dict_id = decompress(blob, dump.dicts())
+    return blob
+
+
+def _pick_schedule(index: dict, text: str) -> dict | None:
+    keys = _schedule_lookup_keys(text)
+    files = index["files"]
+    head = keys[-1] if keys else ""
+    base = keys[0] if keys else ""
+    for key in keys:
+        choices = list(files.get(key) or [])
+        if not choices:
+            continue
+        exact = [row for row in choices if row["member"].split("/")[-1].lower() == base]
+        pool = exact or choices
+        owned = [row for row in pool if row["pack"].lower() == head]
+        if owned:
+            return owned[0]
+        if len(pool) == 1:
+            return pool[0]
+    return None
+
+
+def _fallback_schedule_pack(dump, text: str) -> dict | None:
+    keys = _schedule_lookup_keys(text)
+    head = keys[-1] if len(keys) > 1 else ""
+    if not head:
+        return None
+    pack = next((name for name in dump.actor_names() if name.lower() == head), "")
+    if not pack:
+        return None
+    pack_rel = f"Pack/Actor/{pack}.pack.zs"
+    try:
+        archive = _open_pack_archive(dump, pack_rel)
+    except Exception:
+        return None
+    base = keys[0]
+    exact = [name for name in archive.names() if name.split("/")[-1].lower() == base]
+    if not exact:
+        exact = [name for name in archive.names() if _is_shared_schedule_name(name)]
+        if len(exact) != 1:
+            return None
+    return {"pack": pack, "pack_rel": pack_rel, "member": exact[0]}
+
+
+def _open_shared_schedule(dump, text: str) -> tuple[bytes, str, str] | None:
+    if not _is_shared_schedule_name(text):
+        return None
+    index = schedule_index(dump)
+    hit = _pick_schedule(index, text) or _fallback_schedule_pack(dump, text)
+    if hit is None:
+        return None
+    try:
+        archive = _open_pack_archive(dump, hit["pack_rel"])
+        blob = _member_bytes(dump, archive, hit["member"])
+    except Exception:
+        return None
+    if blob[:2] != b"YB":
+        return None
+    return blob, f"{hit['pack_rel']}:{hit['member']}", hit["pack"]
+
+
+def _annotate_shared(dump, gyaml: str, found: list[dict]) -> None:
+    index = schedule_index(dump)
+    for item in found:
+        path = item.get("path") or ""
+        if ":" not in path:
+            continue
+        member = path.split(":", 1)[1]
+        base = member.split("/")[-1]
+        if not _is_shared_schedule_name(base):
+            continue
+        pack = path.split(":", 1)[0].rsplit("/", 1)[-1].removesuffix(".pack.zs")
+        users = []
+        for key in _schedule_lookup_keys(base):
+            for name in index["users"].get(key) or []:
+                if name not in users:
+                    users.append(name)
+        affected = []
+        for name in [pack, *users]:
+            if name and name not in affected:
+                affected.append(name)
+        others = [name for name in affected if name != gyaml]
+        if pack != gyaml:
+            item["sharedFrom"] = pack
+            item["note"] = f"shared from {pack}"
+        if others:
+            item["sharedWith"] = affected
+            item["warning"] = f"Editing it changes {', '.join(affected)}."
 
 
 def _add_missing(found: list[dict], seen: set[str], kind: str, path: str, note: str) -> None:

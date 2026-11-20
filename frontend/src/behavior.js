@@ -299,6 +299,12 @@ export function renderBehavior(host, model) {
   if ((graph.diff || []).length) host.append(diffList(graph, model));
 }
 
+export function sharedFileLabel(source, count) {
+  const file = source.file || source.title || source.kind;
+  const label = `${file} · ${count}`;
+  return source.sharedFrom ? `${label} · shared from ${source.sharedFrom}` : label;
+}
+
 function fileList(graph, view, model) {
   const files = document.createElement("div");
   files.className = "behavior-files";
@@ -306,8 +312,8 @@ function fileList(graph, view, model) {
     const button = document.createElement("button");
     button.type = "button";
     const count = source.count != null ? source.count : (graph.nodes || []).filter((node) => node.source === source.id).length;
-    button.textContent = `${source.file || source.title || source.kind} · ${count}`;
-    button.title = source.path || "";
+    button.textContent = sharedFileLabel(source, count);
+    button.title = source.warning || source.path || "";
     if (view.source && source.id === view.source.id) button.classList.add("is-on");
     button.addEventListener("click", () => model.onFile && model.onFile(source.id));
     files.append(button);
@@ -369,8 +375,13 @@ function detail(node, graph, model) {
   if (source) {
     const path = document.createElement("p");
     path.className = "muted";
-    path.textContent = source.path;
+    path.textContent = source.sharedFrom ? `shared from ${source.sharedFrom}` : source.path;
     wrap.append(path);
+    if (source.warning) {
+      const warning = document.createElement("p");
+      warning.textContent = source.warning;
+      wrap.append(warning);
+    }
   }
   const editable = (node.fields || []).filter((field) => field.editable);
   if (!editable.length) {

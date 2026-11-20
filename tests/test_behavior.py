@@ -243,6 +243,85 @@ def test_behavior_audit_counts_unnamed_user_nodes(tmp_path):
     assert "Element_Sequential" not in labels
 
 
+def test_a_schedule_in_another_actors_pack_is_shared(tmp_path):
+    """Gerudo uses NpcSecurityGuard's param. Zelda's patrol container is not its own pack."""
+    from ocarina_forge.behavior import schedule_index
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    romfs = dump.romfs
+    guard_name = "NpcSecurityGuard.game__component__AIScheduleParam.bgyml"
+    container = "Npc_Zelda_Adult_AISchedulePatrolMove.game__bsa__ConditionContainer.bgyml"
+
+    def write_pack(gyaml: str, files: dict) -> None:
+        (romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(pack(files))
+
+    write_pack(
+        "NpcSecurityGuard",
+        {
+            "Actor/NpcSecurityGuard.engine__actor__ActorParam.bgyml": dumps(
+                {"$type": "engine__actor__ActorParam", "Name": "NpcSecurityGuard"}
+            ),
+            f"Component/AIScheduleParam/{guard_name}": sample_schedule_bytes(),
+        },
+    )
+    for gyaml in ("Npc_Gerudo_001", "Npc_Gerudo_002"):
+        write_pack(
+            gyaml,
+            {
+                f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps(
+                    {"$type": "engine__actor__ActorParam", "Name": gyaml, "SharedSchedule": guard_name}
+                )
+            },
+        )
+    write_pack(
+        "Npc_Zelda_Adult",
+        {
+            "Actor/Npc_Zelda_Adult.engine__actor__ActorParam.bgyml": dumps(
+                {"$type": "engine__actor__ActorParam", "Name": "Npc_Zelda_Adult"}
+            ),
+            f"Component/AIScheduleParam/{container}": dumps(
+                {"$type": "game__bsa__ConditionContainer", "Name": "Patrol"}
+            ),
+        },
+    )
+    write_pack(
+        "Npc_Zelda_Adult_Escaped",
+        {
+            "Actor/Npc_Zelda_Adult_Escaped.engine__actor__ActorParam.bgyml": dumps(
+                {
+                    "$type": "engine__actor__ActorParam",
+                    "Name": "Npc_Zelda_Adult_Escaped",
+                    "Patrol": container,
+                }
+            )
+        },
+    )
+
+    graph = load_actor_graph(dump, gyaml="Npc_Gerudo_001")
+    source = next(item for item in graph["sources"] if guard_name in item["path"])
+    assert source["sharedFrom"] == "NpcSecurityGuard"
+    assert source["note"] == "shared from NpcSecurityGuard"
+    assert source["sharedWith"] == ["NpcSecurityGuard", "Npc_Gerudo_001", "Npc_Gerudo_002"]
+    assert source["warning"] == "Editing it changes NpcSecurityGuard, Npc_Gerudo_001, Npc_Gerudo_002."
+    assert any(node["name"] == "When ChildDay" and node["decoded"] for node in graph["nodes"])
+    assert guard_name not in {node["raw"] for node in graph["nodes"] if not node["decoded"]}
+    assert "shared from NpcSecurityGuard" in "\n".join(graph["trace"])
+    assert schedule_index(dump) is schedule_index(dump)
+
+    escaped = load_actor_graph(dump, gyaml="Npc_Zelda_Adult_Escaped")
+    box = next(item for item in escaped["sources"] if container in item["path"])
+    assert box["sharedFrom"] == "Npc_Zelda_Adult"
+    assert box["path"].startswith("Pack/Actor/Npc_Zelda_Adult.pack.zs:")
+    assert any(node["raw"] == container and node["decoded"] for node in escaped["nodes"])
+
+    users = schedule_index(dump)["users"]
+    dump._behavior_schedule_index = {"files": {}, "users": users}
+    fallback = load_actor_graph(dump, gyaml="Npc_Gerudo_001")
+    again = next(item for item in fallback["sources"] if guard_name in item["path"])
+    assert again["sharedFrom"] == "NpcSecurityGuard"
+    assert any(node["name"] == "When ChildDay" for node in fallback["nodes"])
+
+
 def test_friendly_names_leave_unknown_types_readable():
     assert friendly_name("HoldGameDataGetBool") == ("Read flag", True)
     assert friendly_name("") == ("Undecoded", False)

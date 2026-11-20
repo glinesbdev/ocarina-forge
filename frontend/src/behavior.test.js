@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { displayName, layoutGraph, visibleNodes } from "./behavior.js";
+import { displayName, layoutGraph, sharedFileLabel, visibleNodes } from "./behavior.js";
+
+test("a shared schedule file is labeled with the pack it lives in", () => {
+  const label = sharedFileLabel(
+    { file: "NpcSecurityGuard.game__component__AIScheduleParam.bgyml", sharedFrom: "NpcSecurityGuard" },
+    5,
+  );
+  assert.equal(label, "NpcSecurityGuard.game__component__AIScheduleParam.bgyml · 5 · shared from NpcSecurityGuard");
+  assert.equal(sharedFileLabel({ file: "Fado.root.ainb" }, 3), "Fado.root.ainb · 3");
+});
 
 test("the raw layer keeps the file name and the curated layer uses the friendly one", () => {
   const node = { id: "ainb:a#0:HoldGameDataGetBool", raw: "HoldGameDataGetBool", name: "Read flag", decoded: true };
