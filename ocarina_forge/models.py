@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-41\0"
+_CACHE_VERSION = b"models-42\0"
 _BNTX_VERSION = b"bntx-5\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -545,13 +545,15 @@ def _blob_key(blob: bytes) -> bytes:
     return digest
 
 
-def _decode_layer_cached(blob: bytes, index: int, *, flatten_alpha: bool) -> object:
+def _decode_layer_cached(blob: bytes, index: int, *, flatten_alpha: bool, tex_path: str = "") -> object:
     """One array layer, cached on its own so the rest of the stack is not decoded."""
     from ocarina_forge.formats.bntx import texture_layer
 
-    token = hashlib.sha256(
-        _BNTX_VERSION + b"layer\0" + _blob_key(blob) + struct.pack("<IB", index & 0xFFFFFFFF, 1 if flatten_alpha else 0)
-    ).hexdigest()
+    extra = b"layer\0" + struct.pack("<IB", index & 0xFFFFFFFF, 1 if flatten_alpha else 0)
+    if tex_path:
+        token = _bntx_cache_key(blob, tex_path, extra)
+    else:
+        token = hashlib.sha256(_BNTX_VERSION + extra + _blob_key(blob)).hexdigest()
     cached = _BNTX_MEM.get(token)
     if cached:
         _touch_bntx(token)
@@ -1713,7 +1715,7 @@ def _load_named(
     result["found"] = relative
     if layer is not None:
         try:
-            picked = _decode_layer_cached(blob, layer, flatten_alpha=flatten_alpha)
+            picked = _decode_layer_cached(blob, layer, flatten_alpha=flatten_alpha, tex_path=relative)
         except BntxError as exc:
             result["error"] = str(exc)
             return result
@@ -1727,7 +1729,7 @@ def _load_named(
         result["error"] = note or ""
         return result
     try:
-        decoded = _decode_bntx_cached(blob)
+        decoded = _decode_bntx_cached(blob, relative)
     except BntxError as exc:
         result["error"] = str(exc)
         return result

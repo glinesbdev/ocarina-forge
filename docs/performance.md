@@ -50,6 +50,10 @@ Before: every terrain rebuild packed the cells. A 17-cell solid atlas took 16 ms
 
 Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene keeps the old field up until the new one's shader and atlas are ready, then swaps.
 
+## Shared texture cache
+
+A decoded BNTX is stored under its Tex path and the decoder version, not only under a hash of that one model's copy of the bytes. Castle bricks that many actors name are decoded once. The next model reads `bntx/*.bwtx`. The in-memory cache is still per process, so another worker hits the file. An embedded texture with no path keeps the blob hash.
+
 ## Converter cores
 
 The process pool defaults to one less than `os.cpu_count()`, and never below 1. One core stays in the server process and does not start a pool. **Settings** in the top bar is a slider and a number from 1 to the machine's core count. It is saved in the config file and applied between converts: a job already running finishes on the old pool, and the next one uses the new count. `OCARINA_FORGE_WORKERS` overrides the slider. While that variable is set, Settings says so and does not change the running count.

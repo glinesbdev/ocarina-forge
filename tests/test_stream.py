@@ -40,3 +40,28 @@ def test_a_converted_model_reports_convert_and_texture_time(tmp_path, monkeypatc
     assert warm["timing"]["cache"] == "hit"
     assert warm["timing"]["textureMs"] == 0
     assert warm["digest"] == cold["digest"]
+
+
+def test_two_models_share_a_decoded_texture_by_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge import models as model_mod
+
+    blob = write_rgba("Brick", 8, 8, bytes([140, 90, 60, 255]) * 64)
+    calls = {"n": 0}
+    real = model_mod.read_bntx
+
+    def counted(data):
+        calls["n"] += 1
+        return real(data)
+
+    monkeypatch.setattr(model_mod, "read_bntx", counted)
+    model_mod._BNTX_MEM.clear()
+    model_mod._BNTX_ORDER.clear()
+    first = model_mod._decode_bntx_cached(blob, "Tex/Land_HrlCastle_Wall_Brick_A_Lighter_Alb.bntx.zs")
+    model_mod._BNTX_MEM.clear()
+    second = model_mod._decode_bntx_cached(blob, "Tex/Land_HrlCastle_Wall_Brick_A_Lighter_Alb.bntx.zs")
+    assert calls["n"] == 1
+    assert second[0].rgba == first[0].rgba
+    model_mod._decode_bntx_cached(blob, "Tex/Other.bntx.zs")
+    assert calls["n"] == 2
