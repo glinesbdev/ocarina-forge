@@ -24,6 +24,14 @@ Occlusion culling is not in this slice. A depth prepass over the whole forest is
 
 Check: **Draw** on Auto should look like the previous build. Set 200 m, orbit to the edge of the village, and distant props should drop while `culled` rises. The selected actor stays drawn if you fly away from it.
 
+## LODs
+
+A shape that already has a coarser BFRES level keeps that mesh as `lod1`. Anything else with more than about 300 triangles gets a meshoptimizer simplification at import, with the border locked so the outline does not collapse. The old grid quantize remains only when Node cannot run the simplifier. The view switches on screen size: under about 64 pixels the coarse mesh is drawn, and the full mesh comes back when the actor is larger on screen. A selected actor stays on the full mesh. The 44 m switch remains only for the first frames before the canvas height is known.
+
+Before this slice the far mesh was a grid quantize and it came on past 44 m even when the actor still filled the screen. After it, a wide view should draw fewer triangles than the 1.4–1.8M full-detail baseline once the coarse meshes are on screen, and a large actor that still covers the view stays on the full mesh past 44 m. The sample scene’s meshes are too small to grow a far level.
+
+Check: open Kokiri, fly back until trees are small, and **Stats** tris should fall compared with the previous build at the same camera. Fly toward one tree and it should sharpen before it fills the screen. Select an actor and fly away: that one stays on the full mesh. The first open rebuilds the cache (`models-20`).
+
 ## Model loading
 
 Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`), and the view downloads up to 8 of those files at once, nearest to the camera first. A name that is not converted yet is `queued`: one of those 8 slots calls `GET /api/models/<name>`, which converts it, and only a real mesh then downloads the glb. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Conversions run in the `BANCWRIGHT_WORKERS` process pool (4 unless you set it; `0` or `1` stays in the server process) and the handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.

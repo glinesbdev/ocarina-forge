@@ -124,7 +124,7 @@ def test_block_height_uses_layout_low_bits_and_mip_size():
 
 
 def test_converter_output_is_pinned_to_the_cache_version():
-    """models.py, bfres.py, terrain.py, and gltf.py are hashed into the cache key.
+    """The converter sources are hashed into the cache key.
 
     Changing any of them fails this test until `_CACHE_VERSION` is bumped and
     the pin below is updated in the same edit. Reusing the previous version with
@@ -132,11 +132,18 @@ def test_converter_output_is_pinned_to_the_cache_version():
     """
     from bancwright.models import _CACHE_VERSION, _cache_prefix, _converter_files, _converter_stamp
 
-    assert [path.name for path in _converter_files()] == ["models.py", "bfres.py", "terrain.py", "gltf.py"]
+    assert [path.name for path in _converter_files()] == [
+        "models.py",
+        "bfres.py",
+        "terrain.py",
+        "gltf.py",
+        "meshopt.py",
+        "meshopt-worker.mjs",
+    ]
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-19", "d2e787c0c2d70f9ac57f5b27ccd833e397a86e6c52b7ce3e51953abdfcf9af3a")
+    pinned = ("models-20", "901a12cc196b8f7643b31c24e0c886980e02e02c6d48a09ebb7ced8b37adb27d")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1482,6 +1489,27 @@ def test_cluster_lod_shrinks_a_dense_mesh():
     far = cluster_lod(positions, indices, None)
     assert far is not None
     assert len(far[1]) < len(indices) * 0.5
+
+
+def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
+    from bancwright.formats.meshopt import simplify_mesh
+
+    positions = [(float(x), float(y), 0.0) for y in range(40) for x in range(40)]
+    indices = []
+    for y in range(39):
+        for x in range(39):
+            corner = y * 40 + x
+            indices.extend((corner, corner + 1, corner + 40, corner + 1, corner + 41, corner + 40))
+    uvs = [(point[0] / 39, point[1] / 39) for point in positions]
+    far = simplify_mesh(positions, indices, uvs)
+    assert far is not None, "meshoptimizer did not return a far mesh (is node on PATH, and is frontend/node_modules/meshoptimizer installed?)"
+    new_pos, new_idx, new_uv = far
+    assert len(new_idx) < len(indices) * 0.5
+    assert len(new_uv) == len(new_pos)
+    xs = [point[0] for point in new_pos]
+    ys = [point[1] for point in new_pos]
+    assert min(xs) == 0 and max(xs) == 39
+    assert min(ys) == 0 and max(ys) == 39
 
 
 def _document(glb: bytes) -> dict:

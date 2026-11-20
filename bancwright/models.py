@@ -41,6 +41,7 @@ class UndecodedGeometry(Exception):
 from bancwright.formats.bntx import BntxError, image_names, textures as read_bntx
 from bancwright.formats.byml import loads
 from bancwright.formats.gltf import Primitive, cluster_lod, encode_albedo, to_glb
+from bancwright.formats.meshopt import available as meshopt_available, simplify_mesh
 from bancwright.formats.sarc import Sarc
 from bancwright.formats import terrain as heightmap
 
@@ -49,10 +50,10 @@ _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.z
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
 # Bump this when the glb or texture output changes. The cache key also hashes
-# models.py, bfres.py, terrain.py, and gltf.py, so a forgotten bump still
+# the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-19\0"
+_CACHE_VERSION = b"models-20\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -78,6 +79,8 @@ def _converter_files() -> tuple[Path, ...]:
         root / "formats" / "bfres.py",
         root / "formats" / "terrain.py",
         root / "formats" / "gltf.py",
+        root / "formats" / "meshopt.py",
+        root.parent / "frontend" / "tools" / "meshopt-worker.mjs",
     )
 
 
@@ -925,9 +928,12 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     kind=kind,
                 )
             )
-            if part.lod == 0:
-                coarser = cluster_lod(part.positions, part.indices, part.uvs)
-                if coarser and not any(other.name == part.name and other.lod for other in model.parts):
+            if part.lod == 0 and not any(other.name == part.name and other.lod for other in model.parts):
+                if meshopt_available():
+                    coarser = simplify_mesh(part.positions, part.indices, part.uvs)
+                else:
+                    coarser = cluster_lod(part.positions, part.indices, part.uvs)
+                if coarser:
                     primitives.append(
                         Primitive(
                             coarser[0],
