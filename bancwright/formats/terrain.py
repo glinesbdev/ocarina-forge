@@ -15,18 +15,24 @@ The layout was checked against the files the game ships, not against game code:
   relative offset to the height block and `+0x30` is its size. The block is
   257 by 257 float32 heights, 0 meaning no ground, stored in the same
   block-linear order as a texture (16 GOBs per block, so log2 4). Rows run
-  along z.
+  along z. A finite sample, including 0, is ground: the stored range on the
+  retail files is about 0..0.18, so 0 is the bottom of that range, at the
+  terrain origin. Only a non-finite sample (NaN or infinity) is a hole. The
+  header we read has no hole bitmap. An empty `.mate` texel is a missing
+  material, not a hole.
 
 A second scene named `<scene>_sub` (or a GameBancParam string that ends in
 `_sub`) lists the same quadtree. Fine tiles often have their `.hght` only
 under that directory, and the coarse tiles only under the main one. A tile
-is read from whichever directory has the file. Only the leaf of the quadtree
-is meshed: a coarse cell whose centre, or the inner half of that cell, sits
-on a finer tile is dropped. Every remaining tile that meets the placed
-actors, expanded by 200 m, is meshed. There is no fixed tile cap. Samples are
-about 2 m apart near the actors, 5 m in the middle distance, and 10 m at the
-edge of the margin, and never finer than step 8 on that path. Each tile grows
-a vertical skirt so a coarser neighbour does not leave a crack.
+is read from whichever directory has the file. A coarse cell is dropped only
+when its centre lands on a finer tile that has a finite height there. A
+finer tile that is missing or holed at that sample leaves the coarse ground
+in place. Every remaining tile that meets the placed actors, expanded by
+200 m, is meshed. There is no fixed tile cap. Samples are about 2 m apart
+near the actors, 5 m in the middle distance, and 10 m at the edge of the
+margin, and never finer than step 8 on that path. Each tile grows a vertical
+skirt so a coarser neighbour does not leave a crack. Surface triangles are
+wound so the normal points up.
 
 The per-corner material is `<tile>.mate`, the same TARB-and-zstd wrapper as a
 heightmap. After the header, `+0x2C` is a relative offset to a 4-byte texel
@@ -88,6 +94,8 @@ class TileInfo:
     mate_histogram: str = ""
     ao: str = ""
     step: int = 0
+    holes: int = 0
+    dropped: int = 0
 
 
 @dataclass
@@ -814,23 +822,31 @@ def _fill_pairs(pairs: list[tuple[int, int, float]]) -> list[tuple[int, int, flo
     return current
 
 
-def _overlaps(left, right) -> bool:
-    return left[0] < right[2] and left[2] > right[0] and left[1] < right[3] and left[3] > right[1]
+def _finite(value: float) -> bool:
+    """A usable height. 0 is the bottom of the normalised range, not a hole."""
+    return value == value and value not in (float("inf"), float("-inf"))
 
 
-def _cell_covered(x0: float, z0: float, x1: float, z1: float, edge: float, boxes) -> bool:
-    """True when a finer tile owns this cell, not only when the centre is inside it.
+def _covered_by_fine(unit_x: float, unit_z: float, edge: float, sources) -> bool:
+    """True when a finer tile has a finite height at this sample.
 
-    The inner half has to meet the finer tile. A coarse cell that merely
-    grazes the border stays, and the skirt covers the join.
+    The finer tile's box is not enough. A hole, or a tile that does not
+    actually contain this point, leaves the coarse sample in place.
     """
-    cx = (x0 + x1) * 0.5
-    cz = (z0 + z1) * 0.5
-    inner = (cx - (x1 - x0) * 0.25, cz - (z1 - z0) * 0.25, cx + (x1 - x0) * 0.25, cz + (z1 - z0) * 0.25)
-    for bx0, bz0, bx1, bz1, bedge in boxes:
-        if bedge >= edge - 1e-4:
+    for x0, z0, x1, z1, bedge, heights in sources:
+        if bedge >= edge - 1e-4 or bedge <= 0 or not heights:
             continue
-        if (bx0 < cx < bx1 and bz0 < cz < bz1) or _overlaps(inner, (bx0, bz0, bx1, bz1)):
+        if not (x0 < unit_x < x1 and z0 < unit_z < z1):
+            continue
+        span_x = x1 - x0
+        span_z = z1 - z0
+        if span_x <= 0 or span_z <= 0:
+            continue
+        sx = int(round((unit_x - x0) / span_x * (SIZE - 1)))
+        sz = int(round((unit_z - z0) / span_z * (SIZE - 1)))
+        sx = 0 if sx < 0 else SIZE - 1 if sx >= SIZE else sx
+        sz = 0 if sz < 0 else SIZE - 1 if sz >= SIZE else sz
+        if sz * SIZE + sx < len(heights) and _finite(heights[sz * SIZE + sx]):
             return True
     return False
 
@@ -916,10 +932,11 @@ def build_scene(
 ) -> tuple[list[HeightPart], list[TileInfo]]:
     """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers, optional occlusion, optional pairs."""
     default_step = _sample_step(len(tiles))
-    boxes = []
+    sources = []
     for tile in tiles:
         center_x, center_z, edge = tile[0], tile[1], tile[2]
-        boxes.append((center_x - edge / 2, center_z - edge / 2, center_x + edge / 2, center_z + edge / 2, edge))
+        heights = tile[4] if len(tile) > 4 else None
+        sources.append((center_x - edge / 2, center_z - edge / 2, center_x + edge / 2, center_z + edge / 2, edge, heights))
     grouped: dict[tuple[int | None, int | None], list] = {}
     grouped_index: dict[tuple[int | None, int | None], list[int]] = {}
     reports: list[TileInfo] = []
@@ -932,7 +949,8 @@ def build_scene(
         samples = _indices(step)
         count = len(samples)
         info = TileInfo(name=name, center=(center_x, center_z), edge=edge, step=step)
-        present = [value for value in heights if value == value]
+        info.holes = sum(1 for value in heights[: SIZE * SIZE] if not _finite(value))
+        present = [value for value in heights[: SIZE * SIZE] if _finite(value)]
         if present:
             info.height_min = min(present)
             info.height_max = max(present)
@@ -950,7 +968,7 @@ def build_scene(
             line = []
             for col in samples:
                 value = heights[row * SIZE + col]
-                line.append(0.0 if value != value or value <= 0 else value)
+                line.append(value if _finite(value) else None)
             grid.append(line)
 
         def sample_pair(row: int, col: int) -> tuple[int, int, float]:
@@ -968,16 +986,23 @@ def build_scene(
                     grid[row + 1][col],
                     grid[row + 1][col + 1],
                 )
-                if any(item <= 0 for item in corners):
+                if any(item is None for item in corners):
                     continue
                 x0 = (center_x - edge / 2) + edge * samples[col] / (SIZE - 1)
                 x1 = (center_x - edge / 2) + edge * samples[col + 1] / (SIZE - 1)
                 z0 = (center_z - edge / 2) + edge * samples[row] / (SIZE - 1)
                 z1 = (center_z - edge / 2) + edge * samples[row + 1] / (SIZE - 1)
-                if not _cell_covered(x0, z0, x1, z1, edge, boxes):
-                    keep.append((row, col))
+                if _covered_by_fine((x0 + x1) * 0.5, (z0 + z1) * 0.5, edge, sources):
+                    info.dropped += 1
+                    continue
+                keep.append((row, col))
         if not keep:
-            info.reason = "height is 0, or a finer tile covers it"
+            if info.dropped and info.holes < SIZE * SIZE:
+                info.reason = "a finer tile covers every finite sample"
+            elif info.holes:
+                info.reason = "no valid height; a non-finite sample is a hole, and 0 is ground"
+            else:
+                info.reason = "no valid height samples"
             reports.append(info)
             continue
         layer_cells: dict[tuple[int | None, int | None], list[tuple[int, int]]] = {}
@@ -1040,13 +1065,23 @@ def build_scene(
                 else:
                     tris.extend((top0, bot0, top1, bot0, bot1, top1))
 
+            def face_up(i0: int, i1: int, i2: int) -> None:
+                p0, p1, p2 = bucket[i0][0], bucket[i1][0], bucket[i2][0]
+                # Y of (p1 - p0) cross (p2 - p0). Negative means the camera above would see the back.
+                facing = (p1[2] - p0[2]) * (p2[0] - p0[0]) - (p1[0] - p0[0]) * (p2[2] - p0[2])
+                if facing < 0:
+                    tris.extend((i0, i2, i1))
+                else:
+                    tris.extend((i0, i1, i2))
+
             for row, col in cells:
                 a = vert(row, col)
                 b = vert(row, col + 1)
                 c = vert(row + 1, col)
                 d = vert(row + 1, col + 1)
-                # (x, z), (x, z+1), (x+1, z) then the opposite corner. The cross product points up.
-                tris.extend((a, c, b, b, c, d))
+                # (x, z), (x, z+1), (x+1, z) then the opposite corner. Flipped when that would point down.
+                face_up(a, c, b)
+                face_up(b, c, d)
                 added = 0
                 if row == 0:
                     skirt_edge(row, col, row, col + 1, "-z")

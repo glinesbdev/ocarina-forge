@@ -24,6 +24,7 @@ const state = {
   hideVolumes: false,
   showGround: false,
   showWater: true,
+  helperBoxes: null,
   terrain: null,
   nav: "orbit",
   gizmo: "translate",
@@ -862,6 +863,74 @@ const CATEGORY_FILTERS = [
   ["system", "System"],
   ["other", "Other"],
 ];
+
+const HELPER_DEFAULTS = {
+  npc: true,
+  enemy: true,
+  object: true,
+  land: true,
+  effect: true,
+  animal: true,
+  area: false,
+  system: false,
+  other: true,
+};
+
+function loadHelperBoxes() {
+  const next = { ...HELPER_DEFAULTS };
+  try {
+    const raw = localStorage.getItem("bancwright.helperBoxes");
+    if (!raw) return next;
+    const parsed = JSON.parse(raw);
+    for (const key of Object.keys(HELPER_DEFAULTS)) {
+      if (parsed && typeof parsed[key] === "boolean") next[key] = parsed[key];
+    }
+  } catch {
+    /* a bad saved value keeps the defaults */
+  }
+  return next;
+}
+
+function eyeMarkup(on) {
+  const slash = on ? "" : '<path d="M2.2 13.6 13.8 2.4" fill="none" stroke="currentColor" stroke-width="1.4"/>';
+  return `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 3.2C4.2 3.2 1.6 8 1.6 8S4.2 12.8 8 12.8 14.4 8 14.4 8 11.8 3.2 8 3.2zm0 7.6A2.8 2.8 0 1 1 8 5.2a2.8 2.8 0 0 1 0 5.6z"/>${slash}</svg>`;
+}
+
+function renderLegend() {
+  const host = document.querySelector(".legend");
+  if (!host || !state.helperBoxes) return;
+  host.replaceChildren();
+  for (const [id, label] of CATEGORY_FILTERS) {
+    if (id === "other") continue;
+    const on = state.helperBoxes[id] !== false;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = on ? "legend-toggle" : "legend-toggle is-off";
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.title = on
+      ? `Hide ${label} helper boxes and labels. Models stay. The selected or hovered actor still shows its box.`
+      : `Show ${label} helper boxes for actors without a model, and their labels.`;
+    const swatch = document.createElement("i");
+    swatch.className = `swatch ${id}`;
+    const name = document.createElement("span");
+    name.textContent = label;
+    const eye = document.createElement("i");
+    eye.className = "eye";
+    eye.innerHTML = eyeMarkup(on);
+    button.append(swatch, name, eye);
+    button.addEventListener("click", () => {
+      state.helperBoxes[id] = !on;
+      localStorage.setItem("bancwright.helperBoxes", JSON.stringify(state.helperBoxes));
+      viewport.setFlags({ boxes: { [id]: state.helperBoxes[id] } });
+      renderLegend();
+    });
+    host.append(button);
+  }
+}
+
+state.helperBoxes = loadHelperBoxes();
+viewport.setFlags({ boxes: state.helperBoxes });
+renderLegend();
 
 function setCategory(cat, mode) {
   state.categories[cat] = mode;

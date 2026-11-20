@@ -88,6 +88,7 @@ def main(argv: list[str]) -> int:
             f"  {row.get('status')} {row.get('name')}  "
             f"dir {folder}  centre {row.get('center')}  edge {row.get('edge')}  "
             f"triangles {row.get('triangles') or 0}  step {step}  layers {layers}  "
+            f"holes {row.get('holes') or 0}  dropped {row.get('dropped') or 0}  "
             f"height {row.get('heightMin')}..{row.get('heightMax')}  "
             f"hght {where}  mate {mate}  hist {histogram}  {mate_note}  {ao}  {row.get('reason') or ''}"
         )
@@ -106,7 +107,9 @@ def main(argv: list[str]) -> int:
         "filters: actor LOD, the small-prop distance cull, and InnerMesh / bake / fade / "
         "water-volume omission do not drop the heightmap. Path strips and moss mounds that "
         "already draw are actor models, not the field. .custom.extm is not decoded. "
-        "A .mate line is the material grid; the directory is the folder the .hght came from."
+        "A .mate line is the material grid; the directory is the folder the .hght came from. "
+        "holes is how many samples were non-finite (0 is ground, not a hole). "
+        "dropped is how many coarse cells were removed because a finer tile had a finite height there."
     )
     return 0
 

@@ -91,6 +91,17 @@ export function createViewport(host, hooks) {
   const templateCache = new Map();
   const metaCache = new Map();
   const categories = { area: "show", system: "show" };
+  const boxCategories = {
+    npc: true,
+    enemy: true,
+    object: true,
+    land: true,
+    effect: true,
+    animal: true,
+    area: false,
+    system: false,
+    other: true,
+  };
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
@@ -165,10 +176,16 @@ export function createViewport(host, hooks) {
     entries.clear();
   }
 
+  function helperVisible(entry) {
+    if (!entry.pivot.visible) return false;
+    if (entry.key === selected || entry.key === hovered) return true;
+    if (boxCategories[entry.category] === false) return false;
+    return !entry.parts || !entry.parts.length;
+  }
+
   function syncGhost(entry) {
-    const ghost = !entry.parts || !entry.parts.length;
-    const show = ghost && entry.pivot.visible;
-    const volume = Boolean(show && entry.volume);
+    const show = helperVisible(entry);
+    const volume = Boolean(entry.volume);
     const on = entry.key === selected;
     if (volume) {
       entry.material.opacity = on ? 0.08 : 0;
@@ -211,7 +228,13 @@ export function createViewport(host, hooks) {
     if (selected) wanted.add(selected);
     if (hovered) wanted.add(hovered);
     if (showLabels) {
-      const ranked = [...entries.values()].filter((entry) => entry.pivot.visible && entry.key !== selected && entry.key !== hovered);
+      const ranked = [...entries.values()].filter(
+        (entry) =>
+          entry.pivot.visible &&
+          entry.key !== selected &&
+          entry.key !== hovered &&
+          boxCategories[entry.category] !== false
+      );
       ranked.sort((a, b) => camera.position.distanceToSquared(a.pivot.position) - camera.position.distanceToSquared(b.pivot.position));
       for (const entry of ranked.slice(0, 24)) wanted.add(entry.key);
     }
@@ -1036,11 +1059,21 @@ uniform float terrainRepeat;`
       terrainRoot = mergeStatic(template);
       terrainRoot.name = "terrain";
       terrainRoot.visible = showGround;
+      terrainRoot.renderOrder = 0;
       terrainRoot.raycast = () => {};
       terrainRoot.traverse((child) => {
         child.raycast = () => {};
         child.castShadow = false;
         child.receiveShadow = false;
+        child.renderOrder = 0;
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of materials) {
+          if (!material) continue;
+          material.transparent = false;
+          material.depthWrite = true;
+          material.side = THREE.FrontSide;
+          material.needsUpdate = true;
+        }
       });
       scene.add(terrainRoot);
       requestRender();
@@ -1105,13 +1138,14 @@ uniform float terrainRepeat;`
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
     if (ground !== undefined) showGround = Boolean(ground);
     if (water !== undefined) showWater = Boolean(water);
     if (next) Object.assign(categories, next);
+    if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
       const hiddenByStatus = entry.status === "hidden" && !showHidden;
       const hiddenByCategory = categories[entry.category] === "hide";
@@ -1283,7 +1317,11 @@ uniform float terrainRepeat;`
     const next = chooseHit(aimed(event));
     const key = next || null;
     if (key !== hovered) {
+      const previous = hovered ? entries.get(hovered) : null;
       hovered = key;
+      if (previous) syncGhost(previous);
+      const nextEntry = hovered ? entries.get(hovered) : null;
+      if (nextEntry) syncGhost(nextEntry);
       syncLabels();
       requestRender();
     }

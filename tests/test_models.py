@@ -592,10 +592,26 @@ def test_heightmap_without_an_index_is_earth_and_a_failed_tscb_is_not_the_proxy(
     stamp = flat.stat()
     os.utime(flat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
     model_mod._FILE_SIG.clear()
+    floor = describe_terrain(dump, KOKIRI_STATIC)
+    assert floor["status"] == "mesh"
+    assert "terrain proxy" not in (floor.get("reason") or "")
+    floor_row = next(row for row in floor["tiles"] if row.get("name") == "Flat_00")
+    assert floor_row["status"] == "drawn"
+    assert floor_row["holes"] == 0
+    floor_glb = (tmp_path / "cache" / floor["digest"][:2] / f"{floor['digest']}.glb").read_bytes()
+    floor_doc, floor_blob = _glb_parts(floor_glb)
+    floor_prim = floor_doc["meshes"][0]["primitives"][0]
+    floor_y = _accessor_floats(floor_doc, floor_blob, floor_prim["attributes"]["POSITION"], 3)
+    assert any(abs(point[1]) < 1e-3 for point in floor_y)
+    flat.write_bytes(_hght([float("nan")] * (SIZE * SIZE)))
+    stamp = flat.stat()
+    os.utime(flat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
+    model_mod._FILE_SIG.clear()
     empty = describe_terrain(dump, KOKIRI_STATIC)
     assert empty["status"] == "none"
     assert "terrain proxy" not in (empty.get("reason") or "")
-    assert any("height is 0" in (row.get("reason") or "") for row in empty["tiles"])
+    assert any("non-finite" in (row.get("reason") or "") for row in empty["tiles"])
+    assert all(row.get("holes") == SIZE * SIZE for row in empty["tiles"] if row.get("name") == "Flat_00")
 
 
 def test_swizzled_heights_round_trip():
@@ -616,6 +632,43 @@ def test_swizzled_heights_round_trip():
     assert "no material index" in note
     assert abs(decoded[20 * SIZE + 10] - 0.25) < 1e-5
     assert abs(decoded[0] - 0.5) < 1e-5
+
+
+def test_zero_is_ground_and_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
+    from bancwright.formats.terrain import SIZE, build_scene
+
+    coarse = [0.0] * (SIZE * SIZE)
+    hole = [float("nan")] * (SIZE * SIZE)
+    parts, reports = build_scene(
+        [
+            (0.0, 0.0, 32.0, "Coarse", coarse, None),
+            (0.0, 0.0, 8.0, "Fine", hole, None),
+        ],
+        1.0,
+        10.0,
+        origin=(0.0, 2.0, 0.0),
+    )
+    by_name = {row.name: row for row in reports}
+    assert by_name["Coarse"].status == "drawn"
+    assert by_name["Coarse"].dropped == 0
+    assert by_name["Coarse"].holes == 0
+    assert by_name["Fine"].status != "drawn"
+    assert by_name["Fine"].holes == SIZE * SIZE
+    assert "non-finite" in by_name["Fine"].reason
+    assert any(abs(y - 2.0) < 1e-4 for part in parts for _x, y, _z in part.positions)
+
+    fine = [0.2] * (SIZE * SIZE)
+    _punched, punched_reports = build_scene(
+        [
+            (0.0, 0.0, 32.0, "Coarse", coarse, None),
+            (0.0, 0.0, 8.0, "Fine", fine, None),
+        ],
+        1.0,
+        10.0,
+    )
+    punched_coarse = next(row for row in punched_reports if row.name == "Coarse")
+    assert punched_coarse.dropped > 0
+    assert punched_coarse.triangles < by_name["Coarse"].triangles
 
 
 def test_a_finer_tile_punches_the_coarser_one():

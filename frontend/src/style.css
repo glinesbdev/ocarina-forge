@@ -195,7 +195,23 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   color: var(--muted);
   font-size: 12px;
 }
-.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.legend-toggle:hover { background: rgba(224, 177, 90, 0.12); }
+.legend-toggle.is-off { opacity: 0.38; }
+.legend-toggle .eye { display: inline-flex; width: 14px; height: 14px; }
+.legend-toggle .eye svg { display: block; }
 .badge {
   font-family: var(--mono);
   font-size: 10px;
