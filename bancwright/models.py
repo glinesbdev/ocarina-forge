@@ -48,7 +48,7 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-15\0"
+_CACHE_VERSION = b"models-16\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -2206,6 +2206,7 @@ def _tile_row(info: heightmap.TileInfo, path: str = "") -> dict:
         "step": info.step,
         "holes": info.holes,
         "dropped": info.dropped,
+        "zeros": info.zeros,
     }
 
 
@@ -2448,7 +2449,20 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         )
         choice_notes.append(step_note)
         parts, reports = heightmap.build_scene(
-            [(item[0], item[1], item[2], item[3], item[4], item[5], item[6], item[7]) for item in loaded],
+            [
+                (
+                    item[0],
+                    item[1],
+                    item[2],
+                    item[3],
+                    item[4],
+                    item[5],
+                    item[6],
+                    item[7],
+                    1.0 if str(item[8].directory).endswith("_sub") else 0.0,
+                )
+                for item in loaded
+            ],
             scale,
             height_scale,
             located["origin"],
@@ -2506,8 +2520,9 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         notes.append("no material index in the heightmap, so the ground is a flat earth colour")
     notes.append(
         f"triplanar UV repeats every {heightmap._UV_METRES:.0f} m (a guess); "
-        "leaf tiles only where a finer sample is finite, one atlas draw, skirts on tile edges. "
-        "Height 0 is ground at the terrain origin; only a non-finite sample is a hole"
+        "leaf tiles only where a finer quad was emitted, one atlas draw, skirts on tile edges. "
+        "Height 0 is ground at the terrain origin; only a non-finite sample is a hole. "
+        "The partial last column is read from its packed GOB slot. The field is double-sided for this test"
     )
     notes.append("custom.extm is not decoded")
     reason = "terrain heightmap. " + " ".join(notes)
@@ -2615,11 +2630,12 @@ def _terrain_primitives(parts, images, layer_ids):
                     part.indices,
                     part.uvs,
                     alpha="opaque",
-                    double_sided=False,
+                    double_sided=True,
                     base_color=_EARTH,
                     name="terrain",
                     kind="terrain",
                     colors=part.colors,
+                    marks=part.marks,
                 )
             )
             triangles += len(part.indices) // 3
@@ -2688,13 +2704,14 @@ def _terrain_primitives(parts, images, layer_ids):
         merged_uv,
         png=png,
         alpha="opaque",
-        double_sided=False,
+        double_sided=True,
         base_color=(1.0, 1.0, 1.0, 1.0),
         name="terrain",
         kind="terrain",
         colors=merged_color or None,
         uvs2=merged_uv2,
         shades=merged_shade,
+        marks=[mark for part in parts for mark in (part.marks or [(0.0, 0.0)] * len(part.positions))],
         extras={"atlas": cols, "repeat": heightmap._UV_METRES},
     )
     return [primitive], positions, triangles, 1 if png else 0

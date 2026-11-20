@@ -536,6 +536,8 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
     assert factor[0] == 1.0 and factor[1] == 1.0
     assert "baseColorTexture" in document["materials"][0]["pbrMetallicRoughness"]
     primitive = document["meshes"][0]["primitives"][0]
+    assert document["materials"][0]["doubleSided"] is True
+    assert "TEXCOORD_3" in primitive["attributes"]
     positions = _accessor_floats(document, blob, primitive["attributes"]["POSITION"], 3)
     assert min(point[0] for point in positions) < -7
     assert max(point[0] for point in positions) > 7
@@ -669,6 +671,75 @@ def test_zero_is_ground_and_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
     punched_coarse = next(row for row in punched_reports if row.name == "Coarse")
     assert punched_coarse.dropped > 0
     assert punched_coarse.triangles < by_name["Coarse"].triangles
+
+
+def test_the_partial_column_odd_rows_are_not_zeros():
+    import struct
+
+    from bancwright.formats.swizzle import _gob_address, surface_bytes
+    from bancwright.formats.terrain import SIZE, _as_floats
+
+    log2 = 4
+    block_height = 1 << log2
+    need = surface_bytes(SIZE, SIZE, 1, 1, 4, log2)
+    buf = bytearray(need)
+    for y in range(SIZE):
+        for x in range(SIZE):
+            if x < SIZE - 1:
+                pos = _gob_address(x, y, SIZE, 4, block_height)
+            else:
+                pos = _gob_address(x, y - (y % 2), SIZE, 4, block_height) + (y % 2) * 4
+            struct.pack_into("<f", buf, pos, 0.08 + (x % 5) * 0.01 + (y % 7) * 0.002)
+    struct.pack_into("<f", buf, _gob_address(SIZE - 1, 0, SIZE, 4, block_height) + 4, 0.42)
+    values = _as_floats(bytes(buf))
+    assert values is not None
+    assert abs(values[1 * SIZE + (SIZE - 1)] - 0.42) < 1e-5
+    assert sum(1 for value in values if value == 0.0) == 0
+
+
+def test_a_dropped_mid_quad_does_not_take_the_coarse_ground_with_it():
+    from bancwright.formats.terrain import SIZE, build_scene
+
+    count = SIZE * SIZE
+    parts, reports = build_scene(
+        [
+            (0.0, 0.0, 32.0, "Coarse", [0.2] * count, None),
+            (0.0, 0.0, 16.0, "Mid", [0.4] * count, None),
+            (0.0, 0.0, 6.0, "Fine", [0.6] * count, None),
+        ],
+        1.0,
+        10.0,
+        steps={"Coarse": 8, "Mid": 64, "Fine": 8},
+    )
+    coarse = next(row for row in reports if row.name == "Coarse")
+    band = [
+        point
+        for part in parts
+        for point in part.positions
+        if abs(point[1] - 2.0) < 0.05 and 3.5 < abs(point[0]) < 4.5 and abs(point[2]) < 1.0
+    ]
+    assert coarse.status == "drawn"
+    assert band, "coarse ground just outside the fine tile should stay"
+
+
+def test_coverage_png_marks_the_emitted_quad(tmp_path):
+    from PIL import Image
+
+    from bancwright.formats.terrain import SIZE, build_scene, write_coverage_png
+
+    parts, _reports = build_scene([(0.0, 0.0, 1.0, "Tile", [0.5] * (SIZE * SIZE), None)], 1.0, 1.0)
+    positions = [point for part in parts for point in part.positions]
+    indices = []
+    base = 0
+    for part in parts:
+        indices.extend(base + item for item in part.indices)
+        base += len(part.positions)
+    path = tmp_path / "coverage.png"
+    stats = write_coverage_png(path, positions, indices, (0.0, 0.0, 0.0), 1.0, size=32)
+    image = Image.open(path)
+    assert image.getpixel((16, 16))[0] == 255
+    assert image.getpixel((0, 0))[0] == 0
+    assert stats["covered"] > 0
 
 
 def test_a_finer_tile_punches_the_coarser_one():
@@ -1927,7 +1998,7 @@ def test_leaf_tiles_stay_under_a_triangle_budget():
     assert "m apart" in note
     parts, reports = build_scene(tiles + [coarse], 1.0, 10.0, steps=steps)
     total = sum(len(part.indices) // 3 for part in parts)
-    assert total < 20000
+    assert total < 150000
     alone, _reports = build_scene([coarse], 1.0, 10.0, steps=steps)
     alone_tris = sum(len(part.indices) // 3 for part in alone)
     coarse_tris = next(row.triangles for row in reports if row.name == "Coarse")

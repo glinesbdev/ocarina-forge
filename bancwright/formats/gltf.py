@@ -26,6 +26,7 @@ class Primitive:
     colors: list[tuple[float, float, float]] | None = None
     uvs2: list[tuple[float, float]] | None = None
     shades: list[tuple[float, float]] | None = None
+    marks: list[tuple[float, float]] | None = None
     extras: dict | None = None
 
 
@@ -255,6 +256,9 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if prim.shades and len(prim.shades) == len(positions):
             shade_bytes = b"".join(struct.pack("<2f", weight, shade) for weight, shade in prim.shades)
             attributes["TEXCOORD_2"] = accessor(view(shade_bytes, 34962), len(prim.shades), "VEC2", 5126)
+        if prim.marks and len(prim.marks) == len(positions):
+            mark_bytes = b"".join(struct.pack("<2f", hue, folder) for hue, folder in prim.marks)
+            attributes["TEXCOORD_3"] = accessor(view(mark_bytes, 34962), len(prim.marks), "VEC2", 5126)
         if prim.colors and len(prim.colors) == len(positions):
             color_bytes = b"".join(struct.pack("<3f", red, green, blue) for red, green, blue in prim.colors)
             attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)

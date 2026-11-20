@@ -13,22 +13,26 @@ The layout was checked against the files the game ships, not against game code:
 - `TerrainArc/<scene>/<tile>.hght` starts with `TARB`. The u16 at `+0x0A`
   is the header size; the rest is a zstd frame. Unpacked, `+0x2C` is a
   relative offset to the height block and `+0x30` is its size. The block is
-  257 by 257 float32 heights, 0 meaning no ground, stored in the same
-  block-linear order as a texture (16 GOBs per block, so log2 4). Rows run
-  along z. A finite sample, including 0, is ground: the stored range on the
-  retail files is about 0..0.18, so 0 is the bottom of that range, at the
-  terrain origin. Only a non-finite sample (NaN or infinity) is a hole. The
-  header we read has no hole bitmap. An empty `.mate` texel is a missing
-  material, not a hole.
+  257 by 257 float32 heights, stored in the same block-linear order as a
+  texture (16 GOBs per block, so log2 4). Rows run along z. Columns 0..255
+  fill sixteen GOBs. Column 256 is one texel wide, and its odd rows are
+  packed 4 bytes after the even row; the ordinary GOB read lands on padding
+  and comes back as exact 0. That slot is read from the packed address, and
+  a leftover one-sample zero copies its horizontal neighbour. A finite
+  sample, including a real 0, is ground: the stored range on the retail
+  files is about 0..0.18, so 0 is the bottom of that range, at the terrain
+  origin. Only a non-finite sample (NaN or infinity) is a hole. The header
+  we read has no hole bitmap. An empty `.mate` texel is a missing material,
+  not a hole.
 
 A second scene named `<scene>_sub` (or a GameBancParam string that ends in
 `_sub`) lists the same quadtree. Fine tiles often have their `.hght` only
 under that directory, and the coarse tiles only under the main one. A tile
 is read from whichever directory has the file. A coarse cell is dropped only
-when its centre lands on a finer tile that has a finite height there. A
-finer tile that is missing or holed at that sample leaves the coarse ground
-in place. Every remaining tile that meets the placed actors, expanded by
-200 m, is meshed. There is no fixed tile cap. Samples are about 2 m apart
+when its centre lies in a quad that finer tile actually emitted. A finer
+sample that never became a triangle, because the tile was skipped or a
+coarser step dropped the whole quad, leaves the coarse ground in place.
+Every remaining tile that meets the placed actors, expanded by 200 m, is meshed. There is no fixed tile cap. Samples are about 2 m apart
 near the actors, 5 m in the middle distance, and 10 m at the edge of the
 margin, and never finer than step 8 on that path. Each tile grows a vertical
 skirt so a coarser neighbour does not leave a crack. Surface triangles are
@@ -96,6 +100,7 @@ class TileInfo:
     step: int = 0
     holes: int = 0
     dropped: int = 0
+    zeros: int = 0
 
 
 @dataclass
@@ -114,6 +119,7 @@ class HeightPart:
     colors: list[tuple[float, float, float]] | None = None
     layer_b: int | None = None
     weights: list[float] | None = None
+    marks: list[tuple[float, float]] | None = None
 
 
 @dataclass
@@ -200,17 +206,117 @@ def _block(data: bytes, at: int) -> bytes | None:
     return data[start : start + size]
 
 
+def _exact_zeros(values: list[float]) -> int:
+    return sum(1 for value in values if value == 0.0)
+
+
+def _roughness(values: list[float]) -> float:
+    """Mean absolute step between finite neighbours. A scrambled grid scores high."""
+    total = 0.0
+    count = 0
+    for z in range(SIZE - 1):
+        row = z * SIZE
+        for x in range(SIZE - 1):
+            here = values[row + x]
+            if not _finite(here):
+                continue
+            right = values[row + x + 1]
+            down = values[row + SIZE + x]
+            if _finite(right):
+                total += abs(here - right)
+                count += 1
+            if _finite(down):
+                total += abs(here - down)
+                count += 1
+    if not count:
+        return 1e9
+    return total / count
+
+
+def _decode_block(block: bytes, log2: int) -> list[float] | None:
+    """Untile one 257×257 float image.
+
+    Sixteen GOBs across hold columns 0..255. Column 256 is the first texel of
+    the next GOB, and its odd rows are packed 4 bytes after the even row.
+    The ordinary formula reads 16 bytes later, which is padding, so those
+    samples come back as exact 0 and the mesh drops a dashed wall to the
+    origin. When that read is 0, the packed address is used instead.
+    """
+    from bancwright.formats.swizzle import _gob_address
+
+    need = surface_bytes(SIZE, SIZE, 1, 1, 4, log2)
+    if len(block) < need:
+        return None
+    linear = deswizzle(SIZE, SIZE, 1, 1, 4, 0, log2, block)
+    tight = SIZE * SIZE * 4
+    if len(linear) < tight:
+        return None
+    values = list(struct.unpack_from(f"<{SIZE * SIZE}f", linear))
+    block_height = 1 << max(0, log2)
+    column = SIZE - 1
+    for y in range(1, SIZE, 2):
+        index = y * SIZE + column
+        if values[index] != 0.0:
+            continue
+        pos = _gob_address(column, y - 1, SIZE, 4, block_height) + 4
+        if pos < 0 or pos + 4 > len(block):
+            continue
+        packed = struct.unpack_from("<f", block, pos)[0]
+        if _finite(packed) and packed != 0.0:
+            values[index] = packed
+    return values
+
+
+def _fill_isolated_zeros(values: list[float]) -> list[float]:
+    """Copy a horizontal neighbour into an exact 0 that sits between real heights.
+
+    A dashed column is one sample wide. A broad patch of zeros is left alone,
+    so a tile that is actually flat at the origin stays flat.
+    """
+    out = list(values)
+    for _pass in range(2):
+        nxt = list(out)
+        for z in range(SIZE):
+            row = z * SIZE
+            for x in range(SIZE):
+                if nxt[row + x] != 0.0:
+                    continue
+                left = nxt[row + x - 1] if x else 0.0
+                right = nxt[row + x + 1] if x + 1 < SIZE else 0.0
+                if left != 0.0 and right != 0.0 and _finite(left) and _finite(right):
+                    nxt[row + x] = (left + right) * 0.5
+                elif x == SIZE - 1 and left != 0.0 and _finite(left):
+                    nxt[row + x] = left
+                elif x == 0 and right != 0.0 and _finite(right):
+                    nxt[row + x] = right
+        out = nxt
+    return out
+
+
 def _as_floats(block: bytes) -> list[float] | None:
     tight = SIZE * SIZE * 4
     if len(block) == tight:
         return list(struct.unpack_from(f"<{SIZE * SIZE}f", block))
-    need = surface_bytes(SIZE, SIZE, 1, 1, 4, _HEIGHT_LOG2)
-    if len(block) < need:
+    chosen = _decode_block(block, _HEIGHT_LOG2)
+    if chosen is None:
         return None
-    linear = deswizzle(SIZE, SIZE, 1, 1, 4, 0, _HEIGHT_LOG2, block)
-    if len(linear) < tight:
-        return None
-    return list(struct.unpack_from(f"<{SIZE * SIZE}f", linear))
+    zeros = _exact_zeros(chosen)
+    if zeros > 64:
+        best = chosen
+        best_zeros = zeros
+        best_rough = _roughness(chosen)
+        for log2 in (0, 1, 2, 3, 5):
+            alt = _decode_block(block, log2)
+            if alt is None:
+                continue
+            alt_zeros = _exact_zeros(alt)
+            alt_rough = _roughness(alt)
+            if alt_zeros * 2 < best_zeros and alt_rough <= best_rough:
+                best = alt
+                best_zeros = alt_zeros
+                best_rough = alt_rough
+        chosen = best
+    return _fill_isolated_zeros(chosen)
 
 
 def _accept_layers(values: list[int]) -> list[int] | None:
@@ -766,6 +872,7 @@ def sample_steps(tiles, scale: float, origin, focus: tuple[float, float]) -> tup
     near_spacing = 3.0 if near > 24 else 2.0
     steps: dict[str, int] = {}
     used: set[int] = set()
+    capped = False
     for name, distance, edge_metres in measured:
         if distance <= _NEAR_M:
             spacing = near_spacing
@@ -774,6 +881,15 @@ def sample_steps(tiles, scale: float, origin, focus: tuple[float, float]) -> tup
         else:
             spacing = 10.0
         step = _step_for(edge_metres, spacing)
+        # A short edge makes the spacing rule pick step 64, and the tile
+        # collapses to a 5×5 sheet. Keep small tiles on a lattice that
+        # still covers them.
+        if edge_metres <= 24 and step > 8:
+            step = 8
+            capped = True
+        elif edge_metres <= 80 and step > 16:
+            step = 16
+            capped = True
         steps[name] = step
         used.add(step)
     if not used:
@@ -783,6 +899,8 @@ def sample_steps(tiles, scale: float, origin, focus: tuple[float, float]) -> tup
         note += f" (step {min(used)} to {max(used)})"
     if near > 24:
         note += f" ({near} tiles within {_NEAR_M:.0f} m, so nearby samples are coarser)"
+    if capped:
+        note += "; small tiles stay on a finer lattice"
     return steps, note
 
 
@@ -827,28 +945,48 @@ def _finite(value: float) -> bool:
     return value == value and value not in (float("inf"), float("-inf"))
 
 
-def _covered_by_fine(unit_x: float, unit_z: float, edge: float, sources) -> bool:
-    """True when a finer tile has a finite height at this sample.
+def _bracket(samples: list[int], unit: float) -> int | None:
+    """Index of the sample span that contains ``unit`` on the 0..256 lattice."""
+    if not samples or unit < samples[0] or unit > samples[-1]:
+        return None
+    for index in range(len(samples) - 1):
+        if samples[index] <= unit <= samples[index + 1]:
+            return index
+    return None
 
-    The finer tile's box is not enough. A hole, or a tile that does not
-    actually contain this point, leaves the coarse sample in place.
+
+def _covered_by_mesh(unit_x: float, unit_z: float, edge: float, meshes) -> bool:
+    """True when a finer tile emitted a quad over this point.
+
+    A finite sample in the finer height grid is not enough. The quad has to
+    be in the mesh. A cell the finer tile skipped, or a coarse step whose
+    centre sits on a yet finer tile so the whole quad was dropped, leaves
+    this ground in place.
     """
-    for x0, z0, x1, z1, bedge, heights in sources:
-        if bedge >= edge - 1e-4 or bedge <= 0 or not heights:
+    for mesh in meshes:
+        if mesh["edge"] >= edge - 1e-4:
             continue
-        if not (x0 < unit_x < x1 and z0 < unit_z < z1):
+        if not (mesh["x0"] < unit_x < mesh["x1"] and mesh["z0"] < unit_z < mesh["z1"]):
             continue
-        span_x = x1 - x0
-        span_z = z1 - z0
+        span_x = mesh["x1"] - mesh["x0"]
+        span_z = mesh["z1"] - mesh["z0"]
         if span_x <= 0 or span_z <= 0:
             continue
-        sx = int(round((unit_x - x0) / span_x * (SIZE - 1)))
-        sz = int(round((unit_z - z0) / span_z * (SIZE - 1)))
-        sx = 0 if sx < 0 else SIZE - 1 if sx >= SIZE else sx
-        sz = 0 if sz < 0 else SIZE - 1 if sz >= SIZE else sz
-        if sz * SIZE + sx < len(heights) and _finite(heights[sz * SIZE + sx]):
+        column = _bracket(mesh["samples"], (unit_x - mesh["x0"]) / span_x * (SIZE - 1))
+        row = _bracket(mesh["samples"], (unit_z - mesh["z0"]) / span_z * (SIZE - 1))
+        if row is None or column is None:
+            continue
+        if (row, column) in mesh["kept"]:
             return True
     return False
+
+
+def _tile_hue(name: str) -> float:
+    acc = 2166136261
+    for byte in name.encode("utf-8", "replace"):
+        acc ^= byte
+        acc = (acc * 16777619) & 0xFFFFFFFF
+    return (acc % 1000) / 1000.0
 
 
 def _indices(step: int) -> list[int]:
@@ -930,26 +1068,22 @@ def build_scene(
     clip: tuple[float, float, float, float] | None = None,
     steps: dict[str, int] | None = None,
 ) -> tuple[list[HeightPart], list[TileInfo]]:
-    """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers, optional occlusion, optional pairs."""
+    """Mesh the tiles. Each item is centre x, centre z, edge, name, heights, layers, optional occlusion, optional pairs, optional sub-folder flag."""
     default_step = _sample_step(len(tiles))
-    sources = []
-    for tile in tiles:
-        center_x, center_z, edge = tile[0], tile[1], tile[2]
-        heights = tile[4] if len(tile) > 4 else None
-        sources.append((center_x - edge / 2, center_z - edge / 2, center_x + edge / 2, center_z + edge / 2, edge, heights))
-    grouped: dict[tuple[int | None, int | None], list] = {}
-    grouped_index: dict[tuple[int | None, int | None], list[int]] = {}
+    jobs = []
     reports: list[TileInfo] = []
     ox, oy, oz = origin
     for tile in tiles:
         center_x, center_z, edge, name, heights, layers = tile[:6]
         occlusion = tile[6] if len(tile) > 6 else None
         pairs = tile[7] if len(tile) > 7 else None
+        sub = float(tile[8]) if len(tile) > 8 and isinstance(tile[8], (int, float)) else 0.0
         step = int((steps or {}).get(name) or default_step)
         samples = _indices(step)
         count = len(samples)
         info = TileInfo(name=name, center=(center_x, center_z), edge=edge, step=step)
         info.holes = sum(1 for value in heights[: SIZE * SIZE] if not _finite(value))
+        info.zeros = sum(1 for value in heights[: SIZE * SIZE] if value == 0.0)
         present = [value for value in heights[: SIZE * SIZE] if _finite(value)]
         if present:
             info.height_min = min(present)
@@ -971,13 +1105,7 @@ def build_scene(
                 line.append(value if _finite(value) else None)
             grid.append(line)
 
-        def sample_pair(row: int, col: int) -> tuple[int, int, float]:
-            if not pairs:
-                return (-1, -1, 0.0)
-            found = pairs[samples[row] * SIZE + samples[col]]
-            return int(found[0]), int(found[1]), float(found[2])
-
-        keep = []
+        cells = []
         for row in range(count - 1):
             for col in range(count - 1):
                 corners = (
@@ -992,13 +1120,70 @@ def build_scene(
                 x1 = (center_x - edge / 2) + edge * samples[col + 1] / (SIZE - 1)
                 z0 = (center_z - edge / 2) + edge * samples[row] / (SIZE - 1)
                 z1 = (center_z - edge / 2) + edge * samples[row + 1] / (SIZE - 1)
-                if _covered_by_fine((x0 + x1) * 0.5, (z0 + z1) * 0.5, edge, sources):
-                    info.dropped += 1
-                    continue
-                keep.append((row, col))
+                cells.append((row, col, x0, z0, x1, z1))
+        jobs.append(
+            {
+                "center_x": center_x,
+                "center_z": center_z,
+                "edge": edge,
+                "name": name,
+                "samples": samples,
+                "count": count,
+                "grid": grid,
+                "pairs": pairs,
+                "occlusion": occlusion,
+                "info": info,
+                "cells": cells,
+                "mark": (_tile_hue(name), sub),
+                "keep": [],
+            }
+        )
+    meshes = []
+    for job in sorted(jobs, key=lambda item: (item["edge"], item["name"])):
+        kept = set()
+        keep = []
+        for row, col, x0, z0, x1, z1 in job["cells"]:
+            if _covered_by_mesh((x0 + x1) * 0.5, (z0 + z1) * 0.5, job["edge"], meshes):
+                job["info"].dropped += 1
+                continue
+            keep.append((row, col))
+            kept.add((row, col))
+        job["keep"] = keep
+        meshes.append(
+            {
+                "edge": job["edge"],
+                "x0": job["center_x"] - job["edge"] / 2,
+                "z0": job["center_z"] - job["edge"] / 2,
+                "x1": job["center_x"] + job["edge"] / 2,
+                "z1": job["center_z"] + job["edge"] / 2,
+                "samples": job["samples"],
+                "kept": kept,
+            }
+        )
+    grouped: dict[tuple[int | None, int | None], list] = {}
+    grouped_index: dict[tuple[int | None, int | None], list[int]] = {}
+    for job in jobs:
+        center_x = job["center_x"]
+        center_z = job["center_z"]
+        edge = job["edge"]
+        samples = job["samples"]
+        count = job["count"]
+        grid = job["grid"]
+        pairs = job["pairs"]
+        occlusion = job["occlusion"]
+        info = job["info"]
+        mark = job["mark"]
+        keep = job["keep"]
+
+        def sample_pair(row: int, col: int) -> tuple[int, int, float]:
+            if not pairs:
+                return (-1, -1, 0.0)
+            found = pairs[samples[row] * SIZE + samples[col]]
+            return int(found[0]), int(found[1]), float(found[2])
+
         if not keep:
             if info.dropped and info.holes < SIZE * SIZE:
-                info.reason = "a finer tile covers every finite sample"
+                info.reason = "a finer tile's mesh covers every finite sample"
             elif info.holes:
                 info.reason = "no valid height; a non-finite sample is a hole, and 0 is ground"
             else:
@@ -1039,7 +1224,7 @@ def build_scene(
                 _first, _second, weight = sample_pair(row, col)
                 index = len(bucket)
                 used[key] = index
-                bucket.append((position, uv, (amount, amount, amount), weight))
+                bucket.append((position, uv, (amount, amount, amount), weight, mark))
                 return index
 
             def drop(row: int, col: int, down: float) -> int:
@@ -1052,7 +1237,7 @@ def build_scene(
                 amount = shade[sz * SIZE + sx] if shade is not None else 1.0
                 _first, _second, weight = sample_pair(row, col)
                 index = len(bucket)
-                bucket.append((position, uv, (amount, amount, amount), weight))
+                bucket.append((position, uv, (amount, amount, amount), weight, mark))
                 return index
 
             def skirt_edge(r0: int, c0: int, r1: int, c1: int, outward: str) -> None:
@@ -1112,6 +1297,51 @@ def build_scene(
                 uvs=[item[1] for item in verts],
                 colors=[item[2] for item in verts] if colored else None,
                 weights=[item[3] for item in verts] if weighted else None,
+                marks=[item[4] for item in verts],
             )
         )
     return parts, reports
+
+
+def write_coverage_png(path, positions, indices, origin, scale: float, size: int = 1024) -> dict:
+    """Paint emitted triangles into a top-down image of terrain-unit space.
+
+    x increases to the right and z increases upward. The frame is -1..1.
+    A black pixel was not covered. Red means covered; green is the height.
+    """
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (size, size), (0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    ox, _oy, oz = origin
+    scale = scale or 1.0
+    triangles = []
+    heights = []
+    for start in range(0, len(indices) - 2, 3):
+        tri = []
+        for offset in range(3):
+            point = positions[indices[start + offset]]
+            tri.append(point)
+            heights.append(point[1])
+        triangles.append(tri)
+    if not triangles:
+        image.save(path)
+        return {"covered": 0, "pixels": size * size, "heightMin": 0.0, "heightMax": 0.0}
+    low = min(heights)
+    high = max(heights)
+    span = high - low or 1.0
+
+    def pixel(point):
+        unit_x = (point[0] - ox) / scale
+        unit_z = (point[2] - oz) / scale
+        x = int(round((unit_x + 1.0) * 0.5 * (size - 1)))
+        y = int(round((1.0 - (unit_z + 1.0) * 0.5) * (size - 1)))
+        return (x, y)
+
+    for tri in triangles:
+        green = int(max(0, min(255, round((sum(point[1] for point in tri) / 3 - low) / span * 255))))
+        draw.polygon([pixel(point) for point in tri], fill=(255, green, 48))
+    image.save(path)
+    raw = image.tobytes()
+    covered = sum(1 for index in range(0, len(raw), 3) if raw[index] > 0)
+    return {"covered": covered, "pixels": size * size, "heightMin": low, "heightMax": high}

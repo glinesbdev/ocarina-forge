@@ -24,6 +24,7 @@ const state = {
   hideVolumes: false,
   showGround: false,
   showWater: true,
+  terrainDebug: false,
   helperBoxes: null,
   terrain: null,
   nav: "orbit",
@@ -144,6 +145,10 @@ $("show-ground").addEventListener("change", (event) => {
 $("show-water").addEventListener("change", (event) => {
   state.showWater = event.target.checked;
   viewport.setFlags({ water: state.showWater });
+});
+$("terrain-debug").addEventListener("change", (event) => {
+  state.terrainDebug = event.target.checked;
+  viewport.setFlags({ terrainDebug: state.terrainDebug });
 });
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 document.querySelectorAll("[data-cat]").forEach((button) => {

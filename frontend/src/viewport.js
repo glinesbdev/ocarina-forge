@@ -105,6 +105,7 @@ export function createViewport(host, hooks) {
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
+  let showTerrainDebug = false;
   let generation = 0;
   let loadQueue = null;
   const loadDelta = new THREE.Vector3();
@@ -925,6 +926,16 @@ export function createViewport(host, hooks) {
       terrainTri(vTerrainLayer.y),
       clamp(vTerrainShade.x, 0.0, 1.0)
     );
+    if (terrainDebug > 0.5) {
+      float hue = vTerrainMark.x * 6.2831853;
+      vec3 ink = clamp(vec3(
+        0.55 + 0.45 * cos(hue),
+        0.55 + 0.45 * cos(hue + 2.094395),
+        0.55 + 0.45 * cos(hue + 4.188790)
+      ), 0.0, 1.0);
+      if (vTerrainMark.y > 0.5) ink = mix(ink, vec3(1.0), 0.45);
+      sampledDiffuseColor = vec4(ink, 1.0);
+    }
     diffuseColor *= sampledDiffuseColor;
   `;
 
@@ -933,6 +944,9 @@ export function createViewport(host, hooks) {
     const columns = Number(material.userData.atlas) || 1;
     const repeat = Number(material.userData.repeat) || 8;
     material.userData.terrainShader = true;
+    if (!material.userData.terrainDebugUniform) {
+      material.userData.terrainDebugUniform = { value: showTerrainDebug ? 1 : 0 };
+    }
     if (material.map) {
       material.map.wrapS = THREE.ClampToEdgeWrapping;
       material.map.wrapT = THREE.ClampToEdgeWrapping;
@@ -943,22 +957,26 @@ export function createViewport(host, hooks) {
       if (previous) previous(shader);
       shader.uniforms.terrainCols = { value: columns };
       shader.uniforms.terrainRepeat = { value: repeat };
+      shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <uv_pars_vertex>",
           `#include <uv_pars_vertex>
 attribute vec2 uv1;
 attribute vec2 uv2;
+attribute vec2 uv3;
 varying vec3 vTerrainWorld;
 varying vec3 vTerrainNormal;
 varying vec2 vTerrainLayer;
-varying vec2 vTerrainShade;`
+varying vec2 vTerrainShade;
+varying vec2 vTerrainMark;`
         )
         .replace(
           "#include <uv_vertex>",
           `#include <uv_vertex>
 vTerrainLayer = uv1;
 vTerrainShade = uv2;
+vTerrainMark = uv3;
 vTerrainWorld = (modelMatrix * vec4(position, 1.0)).xyz;
 vTerrainNormal = normalize(mat3(modelMatrix) * normal);`
         );
@@ -970,8 +988,10 @@ varying vec3 vTerrainWorld;
 varying vec3 vTerrainNormal;
 varying vec2 vTerrainLayer;
 varying vec2 vTerrainShade;
+varying vec2 vTerrainMark;
 uniform float terrainCols;
-uniform float terrainRepeat;`
+uniform float terrainRepeat;
+uniform float terrainDebug;`
         )
         .replace("#include <map_fragment>", TERRAIN_MAP);
     };
@@ -1071,7 +1091,7 @@ uniform float terrainRepeat;`
           if (!material) continue;
           material.transparent = false;
           material.depthWrite = true;
-          material.side = THREE.FrontSide;
+          material.side = THREE.DoubleSide;
           material.needsUpdate = true;
         }
       });
@@ -1138,12 +1158,26 @@ uniform float terrainRepeat;`
     transform.setSpace(mode === "rotate" ? "local" : "world");
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes }) {
+  function applyTerrainDebug() {
+    if (!terrainRoot) return;
+    const value = showTerrainDebug ? 1 : 0;
+    terrainRoot.traverse((child) => {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        if (material && material.userData && material.userData.terrainDebugUniform) {
+          material.userData.terrainDebugUniform.value = value;
+        }
+      }
+    });
+  }
+
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
     if (ground !== undefined) showGround = Boolean(ground);
     if (water !== undefined) showWater = Boolean(water);
+    if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
@@ -1157,6 +1191,7 @@ uniform float terrainRepeat;`
     syncBatchVisibility();
     applyGround();
     applyWater();
+    applyTerrainDebug();
     attach();
     syncLabels();
     requestRender();
