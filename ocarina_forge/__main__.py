@@ -3,6 +3,7 @@
 ``problems <banc>`` prints scene diagnostics. ``model-debug`` prints a bind-pose
 bake or the actors near a point. ``ground-debug <banc>`` prints the ground
 layer. ``material-debug`` prints the shader assign and the uniforms.
+``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
 With no subcommand, the server starts, which is what dev.sh runs.
 """
@@ -26,8 +27,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "tex-debug", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, and tex-debug print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "serve"],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, and tex-debug print reports. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, or bfres path.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
@@ -46,6 +47,7 @@ def main(argv: list[str] | None = None) -> None:
         help="material-debug also prints the whole BFRES string pool.",
     )
     parser.add_argument("--png", help="tex-debug writes the current decode to this PNG.")
+    parser.add_argument("--out", help="material-audit also writes the report to this file.")
     parser.add_argument("--project", help="Project folder. Defaults to the saved config, or an empty project.")
     parser.add_argument("--host", default=setting("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(setting("PORT", "47232") or "47232"))
@@ -76,6 +78,8 @@ def main(argv: list[str] | None = None) -> None:
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
         raise SystemExit(print_material_debug(args.banc, as_json=args.json, dump=args.dump, strings=args.strings))
+    if args.command == "material-audit":
+        raise SystemExit(print_material_audit(as_json=args.json, dump=args.dump, out=args.out))
     if args.command == "tex-debug":
         if not args.banc:
             parser.error("tex-debug needs a texture name or a Tex path")
@@ -258,6 +262,36 @@ def print_material_debug(target: str, *, as_json: bool = False, dump: str | None
         print(json.dumps(report, indent=2))
     else:
         print(render_text(report), end="")
+    return 0
+
+
+def print_material_audit(*, as_json: bool = False, dump: str | None = None, out: str | None = None) -> int:
+    """Group every model material. 2 when the dump or its Model folder is missing."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.materialaudit import audit, render_text
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    if not (opened.romfs / "Model").is_dir():
+        print(f"{opened.romfs} has no Model folder.", file=sys.stderr)
+        return 2
+    report = audit(opened)
+    text = json.dumps(report, indent=2) if as_json else render_text(report)
+    if out:
+        destination = Path(out).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    print(text, end="" if text.endswith("\n") else "\n")
     return 0
 
 
