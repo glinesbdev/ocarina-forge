@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, drawCount, rendererChoice, rendererSearch } from "./backend.js";
+import { backendLabel, drawCount, drawTotal, rendererChoice, rendererSearch } from "./backend.js";
 import { formatStats } from "./frame.js";
 
 test("WebGL is the default and WebGPU is opt-in", () => {
@@ -19,6 +19,8 @@ test("draw counts come from the backend that actually records them", () => {
   assert.equal(drawCount({ calls: 220 }, false), 220);
   assert.equal(drawCount({ calls: 1, drawCalls: 180 }, true), 180);
   assert.equal(drawCount(null, true), 0);
+  assert.equal(drawTotal({ drawCalls: 12 }, true, 40), 52);
+  assert.equal(drawTotal({ calls: 20 }, false, 40), 20);
 });
 
 test("the WebGL2 fallback is not labeled as real WebGPU", () => {
@@ -74,6 +76,7 @@ test("the default viewport still builds a WebGLRenderer", () => {
   assert.match(viewport, /attachTerrainColor\(material\)/);
   assert.match(viewport, /createBackendRenderer\(THREE/);
   assert.match(html, /id="use-webgpu"/);
+  assert.match(html, /src="\/src\/boot.js"/);
   const node = readFileSync(new URL("./terrain-node.js", import.meta.url), "utf8");
   assert.match(node, /attribute\("uv1", "vec2"\)/);
   assert.match(node, /attribute\("uv2", "vec2"\)/);
@@ -82,6 +85,9 @@ test("the default viewport still builds a WebGLRenderer", () => {
   assert.match(node, /material\.colorNode/);
   assert.match(node, /pow\(max\(abs\(normal\), vec3\(0\.0001\)\), vec3\(4\)\)/);
   assert.doesNotMatch(node, /(?<!\.)\bnormalize\s*\(/);
+  assert.doesNotMatch(node, /attribute\("uv"/);
+  assert.match(node, /material\.map = null/);
+  assert.match(node, /hasAttribute\("uv1"\)/);
   const called = new Set();
   for (const match of node.matchAll(/(?<!\.)\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) called.add(match[1]);
   const imported = new Set([...node.matchAll(/^\s+([A-Za-z_][A-Za-z0-9_]*),?$/gm)].map((match) => match[1]));

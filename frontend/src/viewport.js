@@ -10,9 +10,9 @@ import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-
 
 import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
 import { shouldReloadTerrain } from "./terrain.js";
-import { createBackendRenderer, drawCount } from "./backend.js";
+import { createBackendRenderer, drawTotal } from "./backend.js";
 import { formatStats, keepRendering } from "./frame.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, collapseSameGeometryDraw } from "./instance.js";
 import { chooseHit } from "./pick.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -782,7 +782,11 @@ export async function createViewport(host, hooks) {
         sphere,
         radius: sphere.radius,
         key: `${url}|${identity.lod}|${identity.family}|${index}`,
-        batchKey: batchKeyFor(material, geometry),
+        // One geometry per WebGPU batch, so the same-geometry fold is one draw
+        // for every copy. WebGL keeps material batches and multi-draw.
+        batchKey: renderer.backend && renderer.backend.isWebGPUBackend === true
+          ? `${batchKeyFor(material, geometry)}|${geometry.uuid}`
+          : batchKeyFor(material, geometry),
       });
       index += 1;
     });
@@ -991,6 +995,20 @@ export async function createViewport(host, hooks) {
     statCulled = instances - visible;
   }
 
+  function looseParts() {
+    let loose = 0;
+    for (const entry of entries.values()) {
+      if (!entry.pivot.visible || !entry.parts || !entry.parts.length) continue;
+      const covered = new Set();
+      for (const slot of entry.slots || []) covered.add(`${slot.family}|${slot.lod}`);
+      for (const part of entry.parts) {
+        if (part.lod !== 0) continue;
+        if (!covered.has(`${part.family}|${part.lod}`)) loose += 1;
+      }
+    }
+    return loose;
+  }
+
   function rebuildBatches() {
     const previous = batches.slice();
     const nextBatches = [];
@@ -1000,7 +1018,6 @@ export async function createViewport(host, hooks) {
     for (const entry of entries.values()) {
       syncGhost(entry);
       if (!entry.parts || !entry.parts.length) continue;
-      if (entry.pivot.visible) naiveDraws += entry.parts.filter((part) => part.lod === 0).length;
       entry.pivot.updateWorldMatrix(true, false);
       for (const part of entry.parts) {
         let group = groups.get(part.batchKey);
@@ -1042,6 +1059,13 @@ export async function createViewport(host, hooks) {
       // once the camera looks away from the origin.
       mesh.perObjectFrustumCulled = false;
       mesh.sortObjects = Boolean(group.material.transparent);
+      if (renderer.backend && renderer.backend.isWebGPUBackend === true) {
+        const previous = mesh.onBeforeRender.bind(mesh);
+        mesh.onBeforeRender = function collapseDraws(...args) {
+          previous(...args);
+          collapseSameGeometryDraw(mesh);
+        };
+      }
       mesh.renderOrder = 1;
       const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
       const water = tag === "water";
@@ -1105,6 +1129,7 @@ export async function createViewport(host, hooks) {
     }
     batches.length = 0;
     for (const batch of nextBatches) batches.push(batch);
+    naiveDraws = looseParts();
     for (const batch of previous) {
       batch.mesh.removeFromParent();
       batch.mesh.dispose();
@@ -1421,7 +1446,8 @@ uniform float terrainLayerMissing;`
     root.traverse((child) => {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const material of materials) {
-        if (material && material.map) maps.add(material.map);
+        const atlas = material && (material.map || (material.userData && material.userData.terrainMap));
+        if (atlas) maps.add(atlas);
       }
     });
     for (const map of maps) {
@@ -1935,7 +1961,13 @@ uniform float terrainLayerMissing;`
       rendering,
       fps,
       frameMs,
-      draws: drawCount(info, Boolean(renderer.isWebGPURenderer)),
+      draws: drawTotal(
+        info,
+        Boolean(renderer.isWebGPURenderer),
+        renderer.backend && renderer.backend.isWebGPUBackend === true
+          ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+          : 0,
+      ),
       instances: statInstances,
       culled: statCulled,
       separate: naiveDraws,

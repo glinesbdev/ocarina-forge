@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, collapseSameGeometryDraw } from "./instance.js";
 
 const open = { area: "show", system: "show", object: "show" };
 
@@ -114,6 +114,22 @@ test("a batched mesh has no instanceMatrix and the drag must not touch it", () =
   mesh.instanceMatrix = { needsUpdate: false };
   applyActorMatrix([{ actor: "grass-a", index: 2, mesh }], "grass-a", [1]);
   assert.equal(mesh.instanceMatrix.needsUpdate, true);
+});
+
+test("one geometry of copies collapses to a single WebGPU draw", () => {
+  const mesh = {
+    _multiDrawCount: 400,
+    _multiDrawStarts: new Int32Array(400).fill(0),
+    _multiDrawCounts: new Int32Array(400).fill(36),
+    _multiDrawInstances: null,
+  };
+  assert.equal(collapseSameGeometryDraw(mesh), 1);
+  assert.equal(mesh._multiDrawCount, 1);
+  assert.equal(mesh._multiDrawInstances[0], 400);
+  mesh._multiDrawStarts[3] = 90;
+  mesh._multiDrawCount = 4;
+  assert.equal(collapseSameGeometryDraw(mesh), 4);
+  assert.equal(mesh._multiDrawCount, 4);
 });
 
 test("copies that share an albedo share a batch key", () => {

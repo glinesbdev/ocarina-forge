@@ -1,6 +1,7 @@
 import { createReadStream, existsSync, cpSync } from "node:fs";
 import path from "node:path";
 import { defineConfig } from "vite";
+import { oneThreePlugin } from "./one-three.js";
 
 const basisDir = path.resolve("node_modules/three/examples/jsm/libs/basis");
 
@@ -27,8 +28,10 @@ function basisTranscoder() {
   };
 }
 
+const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js");
+
 export default defineConfig({
-  plugins: [basisTranscoder()],
+  plugins: [oneThreePlugin(threeWebgpu), basisTranscoder()],
   server: {
     host: "0.0.0.0",
     port: 47231,

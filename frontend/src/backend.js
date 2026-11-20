@@ -37,6 +37,14 @@ export function drawCount(info, webgpu) {
   return Number(info.calls) || 0;
 }
 
+/**
+ * r170's WebGPU backend does not add BatchedMesh draws to `drawCalls`.
+ * `extra` is the sum of those meshes' draw counts after the same-geometry fold.
+ */
+export function drawTotal(info, webgpu, extra = 0) {
+  return drawCount(info, webgpu) + (webgpu ? Number(extra) || 0 : 0);
+}
+
 /** Stats label. A WebGPURenderer on the WebGL2 backend must not read as real WebGPU. */
 export function backendLabel(renderer) {
   if (!renderer || renderer.isWebGPURenderer !== true) return "WebGL";

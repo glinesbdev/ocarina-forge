@@ -35,10 +35,10 @@ export function attachTerrainColor(material) {
   const debug = reference("value", "float", material.userData.terrainDebugUniform);
   const sub = reference("value", "float", material.userData.terrainSubUniform);
   const missing = reference("value", "float", material.userData.terrainLayerUniform);
-  const atlas = texture(material.userData.terrainMap || material.map);
-  const layer = attribute("uv1", "vec2");
-  const shade = attribute("uv2", "vec2");
-  const mark = attribute("uv3", "vec2");
+  const atlasTexture = material.userData.terrainMap || material.map;
+  // An explicit uv node. texture() with none reads attribute "uv", which
+  // terrain tiles do not have.
+  const atlas = texture(atlasTexture, vec2(0, 0));
   const world = positionWorld;
   const normal = normalLocal.transformDirection(modelWorldMatrix).normalize();
 
@@ -62,7 +62,16 @@ export function attachTerrainColor(material) {
     return alongX.mul(weight.x).add(alongY.mul(weight.y)).add(alongZ.mul(weight.z));
   });
 
-  material.colorNode = Fn(() => {
+  material.colorNode = Fn((builder) => {
+    const geometry = builder && builder.geometry;
+    const hasLayer = geometry && typeof geometry.hasAttribute === "function"
+      && geometry.hasAttribute("uv1")
+      && geometry.hasAttribute("uv2")
+      && geometry.hasAttribute("uv3");
+    if (!hasLayer) return vec4(0.36, 0.42, 0.32, 1);
+    const layer = attribute("uv1", "vec2");
+    const shade = attribute("uv2", "vec2");
+    const mark = attribute("uv3", "vec2");
     mark.y.greaterThan(0.5).and(missing.lessThan(0.5)).and(sub.lessThan(0.5)).discard();
     const sampled = mix(terrainTri(layer.x), terrainTri(layer.y), clamp(shade.x, 0, 1));
     const stripe = step(0.5, fract(world.x.add(world.z).mul(0.15)));
@@ -83,6 +92,9 @@ export function attachTerrainColor(material) {
     const tint = materialReference("color", "color", material);
     return vec4(sampledOrDebug.rgb.mul(tint), sampledOrDebug.a);
   })();
+  // The color node samples the atlas. Leaving map set makes the standard node
+  // material also sample attribute "uv".
+  material.map = null;
   material.userData.terrainNode = true;
   return material;
 }

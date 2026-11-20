@@ -34,6 +34,30 @@ export function batchKey({ image, alpha, side, tint, indexed, attributes }) {
 }
 
 /**
+ * r170's WebGPU backend issues one draw per BatchedMesh instance. When every
+ * visible instance shares one geometry range, fold them into a single instanced
+ * draw. `instance_index` still addresses the indirect texture. Mixed geometry
+ * stays one draw per instance, because one draw call has one index range.
+ * Returns the draw count the backend will issue.
+ */
+export function collapseSameGeometryDraw(mesh) {
+  const count = mesh && mesh._multiDrawCount ? mesh._multiDrawCount : 0;
+  if (count <= 1) return count;
+  const starts = mesh._multiDrawStarts;
+  const counts = mesh._multiDrawCounts;
+  if (!starts || !counts) return count;
+  const start = starts[0];
+  const length = counts[0];
+  for (let i = 1; i < count; i += 1) {
+    if (starts[i] !== start || counts[i] !== length) return count;
+  }
+  if (!mesh._multiDrawInstances) mesh._multiDrawInstances = new Int32Array(Math.max(count, 1));
+  mesh._multiDrawInstances[0] = count;
+  mesh._multiDrawCount = 1;
+  return 1;
+}
+
+/**
  * Write `matrix` onto the slots owned by `actorKey`. A shared slots list, or a
  * second copy of the same model, does not get the write. Hidden slots keep the
  * matrix for when they show again, and skip the GPU update.
