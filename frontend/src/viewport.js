@@ -865,33 +865,26 @@ export function createViewport(host, hooks) {
 
   function measureTemplate(template) {
     const box = new THREE.Box3();
-    const ys = [];
-    const point = new THREE.Vector3();
     template.updateWorldMatrix(true, true);
     template.traverse((child) => {
       if (!child.isMesh || !child.geometry) return;
-      const position = child.geometry.attributes.position;
-      if (!position) return;
-      const step = Math.max(1, Math.floor(position.count / 2500));
-      for (let i = 0; i < position.count; i += step) {
-        point.fromBufferAttribute(position, i).applyMatrix4(child.matrixWorld);
-        box.expandByPoint(point);
-        ys.push(point.y);
-      }
+      if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+      const childBox = child.geometry.boundingBox;
+      if (!childBox) return;
+      box.union(childBox.clone().applyMatrix4(child.matrixWorld));
     });
-    ys.sort((a, b) => a - b);
-    const height = ys.length ? ys[Math.floor(ys.length * 0.5)] : 0;
-    return { box, height };
+    return box;
   }
 
-  function placeGround(box, height) {
+  function placeGround(box) {
     clearGround();
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const span = Math.max(10, Math.ceil(Math.max(size.x, size.z)));
     const divisions = Math.min(120, Math.max(12, Math.round(span / 8)));
     const gridLines = new THREE.GridHelper(span, divisions, 0x9aa394, 0x3c4740);
-    gridLines.position.set(center.x, height, center.z);
+    // y = 0 is the terrain origin. The proxy mesh median sits above the walkable floor.
+    gridLines.position.set(center.x, 0, center.z);
     gridLines.visible = showGround;
     gridLines.raycast = () => {};
     gridLines.traverse((child) => {
@@ -901,7 +894,10 @@ export function createViewport(host, hooks) {
     groundGrid = gridLines;
   }
 
-  const TERRAIN_MAP = `
+  // These three are GLSL functions. They have to live outside main(). #include <map_fragment>
+  // is inside main(), so the atlas lookup stays in TERRAIN_MAP and the helpers are
+  // injected just before void main(), after the uniform declarations.
+  const TERRAIN_FUNCS = `
     vec2 terrainCell(vec2 worldUv, float slot) {
       float columns = max(terrainCols, 1.0);
       float column = mod(floor(slot + 0.5), columns);
@@ -922,6 +918,9 @@ export function createViewport(host, hooks) {
       vec4 alongZ = terrainSample(vTerrainWorld.xy / terrainRepeat, slot);
       return alongX * blend.x + alongY * blend.y + alongZ * blend.z;
     }
+  `;
+
+  const TERRAIN_MAP = `
     if (terrainLayerMissing < 0.5 && terrainSub < 0.5 && vTerrainMark.y > 0.5) discard;
     vec4 sampledDiffuseColor = mix(
       terrainTri(vTerrainLayer.x),
@@ -1010,6 +1009,7 @@ uniform float terrainDebug;
 uniform float terrainSub;
 uniform float terrainLayerMissing;`
         )
+        .replace("void main() {", `${TERRAIN_FUNCS}\nvoid main() {`)
         .replace("#include <map_fragment>", TERRAIN_MAP);
     };
     const previousKey = material.customProgramCacheKey ? material.customProgramCacheKey.bind(material) : null;
@@ -1088,11 +1088,12 @@ uniform float terrainLayerMissing;`
       });
       if (token !== generation) return;
       if (isTerrainProxy(meta)) {
-        const measured = measureTemplate(template);
-        if (!measured.box.isEmpty()) placeGround(measured.box, measured.height);
+        const box = measureTemplate(template);
+        if (!box.isEmpty()) placeGround(box);
         requestRender();
         return;
       }
+      // A heightmap mesh is the ground. Leave the proxy grid off so it cannot sit above the field.
       terrainRoot = mergeStatic(template);
       terrainRoot.name = "terrain";
       terrainRoot.visible = showGround;

@@ -81,7 +81,7 @@ const viewport = createViewport($("viewport"), {
     if (box) {
       box.checked = show;
       const title = proxy
-        ? "The static map has no albedo. On draws a neutral grid at its height instead of the green stand-in."
+        ? "The static map has no albedo. On draws a neutral grid on y = 0 instead of the green stand-in."
         : heightmap
           ? "Show the terrain heightmap. The untextured stand-in stays off."
           : "Show the static ground mesh";
