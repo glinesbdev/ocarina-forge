@@ -36,6 +36,7 @@ from ocarina_forge.models import (
 from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
+from ocarina_forge.streamlog import STREAM
 
 def _ignore_sigint() -> None:
     """Worker processes must not print KeyboardInterrupt when the terminal gets Ctrl+C."""
@@ -151,10 +152,17 @@ async def _convert(key: str, call):
         _CONVERTING.pop(key, None)
 
 
+def _note_stream(kind: str, name: str, info: dict) -> dict:
+    timing = info.get("timing") if isinstance(info, dict) else None
+    if isinstance(timing, dict) and timing.get("cache"):
+        STREAM.record(kind, name, timing)
+    return info
+
+
 async def _describe_model(gyaml: str) -> dict:
     dump = _open_dump()
     try:
-        return _publish(describe_actor(dump, gyaml, convert=False))
+        return _note_stream("model", gyaml, _publish(describe_actor(dump, gyaml, convert=False)))
     except CacheMiss:
         pass
 
@@ -166,13 +174,13 @@ async def _describe_model(gyaml: str) -> dict:
             info = await asyncio.wrap_future(pool.submit(describe_actor_at, str(dump.root), gyaml))
         return _publish(info)
 
-    return await _convert(f"model:{gyaml}", run)
+    return _note_stream("model", gyaml, await _convert(f"model:{gyaml}", run))
 
 
 async def _describe_terrain_model(banc: str) -> dict:
     dump = _open_dump()
     try:
-        return _publish(describe_terrain(dump, banc, convert=False))
+        return _note_stream("terrain", banc, _publish(describe_terrain(dump, banc, convert=False)))
     except CacheMiss:
         pass
 
@@ -184,7 +192,7 @@ async def _describe_terrain_model(banc: str) -> dict:
             info = await asyncio.wrap_future(pool.submit(describe_terrain_at, str(dump.root), banc))
         return _publish(info)
 
-    return await _convert(f"terrain:{banc}", run)
+    return _note_stream("terrain", banc, await _convert(f"terrain:{banc}", run))
 
 
 def _queued_model(gyaml: str) -> dict:
@@ -287,6 +295,12 @@ def _project_status() -> dict | None:
 @app.get("/api/health")
 def health():
     return {"ok": True, "version": __version__}
+
+
+@app.get("/api/stream")
+def stream_summary():
+    """Convert, texture-decode, and cache-hit totals since the server started."""
+    return STREAM.summary()
 
 
 @app.get("/api/status")

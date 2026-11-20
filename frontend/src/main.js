@@ -157,6 +157,7 @@ viewport = await createViewport($("viewport"), {
   onStats(text) {
     const readout = $("stats-readout");
     if (readout && readout.textContent !== text) readout.textContent = text;
+    refreshStreamLog();
   },
   onTransform: (id, translate, rotate) => {
     const actor = selectedActor();
@@ -170,6 +171,22 @@ viewport = await createViewport($("viewport"), {
     });
   },
 });
+
+let streamAt = 0;
+function refreshStreamLog() {
+  const box = $("stream-readout");
+  if (!box) return;
+  const now = performance.now();
+  if (now - streamAt < 1000) return;
+  streamAt = now;
+  api.stream()
+    .then((data) => {
+      const head = `server ${data.misses || 0} converted · ${data.hits || 0} cache hits · conv ${data.convertMs || 0} ms · tex ${data.textureMs || 0} ms`;
+      const lines = (data.lines || []).slice(-8);
+      box.textContent = lines.length ? `${head}\n${lines.join("\n")}` : head;
+    })
+    .catch(() => {});
+}
 
 $("undo").addEventListener("click", () => undo());
 $("redo").addEventListener("click", () => redo());

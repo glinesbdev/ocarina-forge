@@ -76,7 +76,7 @@ The viewer ignores that ranking. A 16-byte element is Switch 2. A line marked `d
 
 ## Cache
 
-The glb prefix is `models-40`. Decoded BNTX images are keyed with `bntx-5`, so an old `bntx/*.bwtx` is not reused. Older files in the cache folder are left on disk.
+The glb prefix is `models-41`. Decoded BNTX images are keyed with `bntx-5`, so an old `bntx/*.bwtx` is not reused. Older files in the cache folder are left on disk.
 
 ## Check on a dump
 

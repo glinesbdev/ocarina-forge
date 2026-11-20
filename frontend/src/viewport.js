@@ -701,6 +701,11 @@ export async function createViewport(host, hooks) {
     statQueued = 0;
     statLoading = 0;
     statLoaded = 0;
+    statConvert = 0;
+    statTexture = 0;
+    statDownload = 0;
+    statUpload = 0;
+    timedModels.clear();
     let done = 0;
     let boxes = 0;
     const progressLabel = (finished) => {
@@ -770,7 +775,7 @@ export async function createViewport(host, hooks) {
             }
           } else {
             try {
-              const template = await ensureTemplate(meta.url);
+              const template = await ensureTemplate(meta.url, meta);
               if (token !== generation) return;
               await deliver(gyaml, meta, template);
             } catch (error) {
@@ -829,6 +834,7 @@ export async function createViewport(host, hooks) {
         }
         if (templateCache.has(meta.url)) {
           try {
+            noteServerTiming(meta);
             const template = await templateCache.get(meta.url);
             if (token !== generation) return;
             await deliver(name, meta, template);
@@ -854,19 +860,36 @@ export async function createViewport(host, hooks) {
     run().finally(releaseLoad);
   }
 
-  function ensureTemplate(url) {
+  function noteServerTiming(meta) {
+    const key = (meta && meta.url) || (meta && meta.gyaml) || "";
+    if (!key || timedModels.has(key)) return;
+    const timing = meta && meta.timing;
+    if (!timing) return;
+    timedModels.add(key);
+    statConvert += Number(timing.convertMs) || 0;
+    statTexture += Number(timing.textureMs) || 0;
+  }
+
+  function ensureTemplate(url, meta) {
+    noteServerTiming(meta);
     let pending = templateCache.get(url);
     if (!pending) {
-      pending = new Promise((resolve, reject) => {
-        loader.load(
-          url,
-          (gltf) => {
-            bindSurfaceMaps(gltf).then(() => resolve(gltf.scene), reject);
-          },
-          undefined,
-          reject,
-        );
-      });
+      pending = (async () => {
+        const started = performance.now();
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`The model download failed (${response.status}).`);
+        const buffer = await response.arrayBuffer();
+        const downloaded = performance.now();
+        const gltf = await new Promise((resolve, reject) => {
+          loader.parse(buffer, "", resolve, reject);
+        });
+        await bindSurfaceMaps(gltf);
+        const uploaded = performance.now();
+        statDownload += downloaded - started;
+        statUpload += uploaded - downloaded;
+        requestRender();
+        return gltf.scene;
+      })();
       templateCache.set(url, pending);
     }
     return pending;
@@ -2501,6 +2524,13 @@ uniform float terrainLayerMissing;`
   let statQueued = 0;
   let statLoading = 0;
   let statLoaded = 0;
+  let statConvert = 0;
+  let statTexture = 0;
+  let statDownload = 0;
+  let statUpload = 0;
+  let statWarmDone = null;
+  let statWarmTotal = null;
+  const timedModels = new Set();
   let uvDirty = true;
 
   function guardMissingUv() {
@@ -2541,6 +2571,12 @@ uniform float terrainLayerMissing;`
       queued: statQueued,
       loading: statLoading,
       loaded: statLoaded,
+      convertMs: statConvert,
+      textureMs: statTexture,
+      downloadMs: statDownload,
+      uploadMs: statUpload,
+      warmDone: statWarmDone,
+      warmTotal: statWarmTotal,
     });
     if (showStats) statsEl.textContent = text;
     if (hooks.onStats) hooks.onStats(text);

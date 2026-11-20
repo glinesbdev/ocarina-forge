@@ -20,7 +20,26 @@ function formatMs(value) {
  * A frame that will not be followed by another one is `idle`, even if fps was just measured.
  * `backend` and `frameMs` are included when the caller has them.
  */
-export function formatStats({ rendering, fps, frameMs, backend, draws, instances, culled, separate, tris, queued, loading, loaded }) {
+export function formatStats({
+  rendering,
+  fps,
+  frameMs,
+  backend,
+  draws,
+  instances,
+  culled,
+  separate,
+  tris,
+  queued,
+  loading,
+  loaded,
+  convertMs,
+  textureMs,
+  downloadMs,
+  uploadMs,
+  warmDone,
+  warmTotal,
+}) {
   const rate = rendering ? (fps ? `${fps} fps` : "…") : "idle";
   const parts = [];
   if (backend) parts.push(backend);
@@ -33,5 +52,10 @@ export function formatStats({ rendering, fps, frameMs, backend, draws, instances
   if (queued != null) parts.push(`${queued} queued`);
   if (loading != null) parts.push(`${loading} loading`);
   if (loaded != null) parts.push(`${loaded} loaded`);
+  if (convertMs != null) parts.push(`conv ${formatMs(convertMs)} ms`);
+  if (textureMs != null) parts.push(`tex ${formatMs(textureMs)} ms`);
+  if (downloadMs != null) parts.push(`dl ${formatMs(downloadMs)} ms`);
+  if (uploadMs != null) parts.push(`up ${formatMs(uploadMs)} ms`);
+  if (warmTotal != null) parts.push(`warm ${warmDone || 0}/${warmTotal}`);
   return parts.join(" · ");
 }

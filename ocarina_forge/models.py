@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ocarina_forge.errors import BancError
 from ocarina_forge.locate import setting, user_cache_root
+from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
 from ocarina_forge.blend import color_span, overlay_plan
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
@@ -57,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-40\0"
+_CACHE_VERSION = b"models-41\0"
 _BNTX_VERSION = b"bntx-5\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -281,6 +282,7 @@ def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrai
             "url": url,
             "digest": digest,
             "textureLog": info.get("textureLog") or [],
+            "timing": info.get("timing") or {},
         }
     reason = errors[0] if len(errors) == 1 else " ".join(errors[:3])
     result = _box(label, reason or _missing(label, tried))
@@ -325,16 +327,31 @@ def describe_terrain_at(root: str, banc: str) -> dict:
     return describe_terrain(Dump(Path(root)), banc)
 
 
+def _with_timing(info: dict, cache: str, clock: ConvertClock) -> dict:
+    reported = dict(info)
+    reported["timing"] = clock.finish(cache)
+    return reported
+
+
 def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, convert: bool = True) -> tuple[str, dict]:
     if blob[:4] in (b"MCPK", b"FMSH"):
         raise FresError("this is a mesh-codec .bfres.mc stream, which this viewer does not decode")
+    clock = ConvertClock()
+    token = bind_clock(clock)
+    try:
+        return _convert_cached_timed(blob, dump, hint, terrain, convert, clock)
+    finally:
+        reset_clock(token)
+
+
+def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: bool, clock: ConvertClock) -> tuple[str, dict]:
     source = _source_id(blob, hint, terrain)
     pointer = cache_dir() / "src" / source[:2] / f"{source}.json"
     cached = _read_pointer(pointer, dump)
     if cached is not None:
         if cached.get("kind") == "box":
             raise UndecodedGeometry(cached.get("bounds"))
-        return cached["digest"], cached["info"]
+        return cached["digest"], _with_timing(cached["info"], "hit", clock)
     if not convert:
         raise CacheMiss()
     models = parse(blob)
@@ -362,8 +379,9 @@ def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, co
                 pointer,
                 {"kind": "mesh", "digest": digest, "info": info, "files": files, "texDir": _tex_token(dump)},
             )
-            return digest, info
+            return digest, _with_timing(info, "hit", clock)
     glb, info = _assemble(models, external, log)
+    info = _with_timing(info, "miss", clock)
     encoded = json.dumps(info)
     with _LOCK:
         if not (glb_path.is_file() and meta_path.is_file()):
@@ -475,8 +493,8 @@ def _file_sig(path: Path, st=None) -> str:
     return digest
 
 
-def _decode_bntx_cached(blob: bytes) -> list:
-    key = hashlib.sha256(_BNTX_VERSION + blob).hexdigest()
+def _decode_bntx_cached(blob: bytes, tex_path: str = "") -> list:
+    key = _bntx_cache_key(blob, tex_path)
     cached = _BNTX_MEM.get(key)
     if cached is not None:
         _touch_bntx(key)
@@ -486,10 +504,29 @@ def _decode_bntx_cached(blob: bytes) -> list:
     if loaded is not None:
         _remember_bntx(key, loaded)
         return loaded
-    decoded = list(read_bntx(blob))
+    clock = current_clock()
+    if clock is not None:
+        clock.begin_texture()
+    try:
+        decoded = list(read_bntx(blob))
+    finally:
+        if clock is not None:
+            clock.end_texture()
     _write_bwtx(path, decoded)
     _remember_bntx(key, decoded)
     return decoded
+
+
+def _bntx_cache_key(blob: bytes, tex_path: str = "", extra: bytes = b"") -> str:
+    """Whole-file key. A shared Tex path reuses one decode across models."""
+    if tex_path:
+        stamp = struct.pack("<Q", len(blob))
+        stamp += blob[:16]
+        stamp += blob[-16:] if len(blob) > 16 else b""
+        raw = _BNTX_VERSION + b"path\0" + tex_path.encode("utf-8", "replace") + b"\0" + stamp + extra
+    else:
+        raw = _BNTX_VERSION + blob + extra
+    return hashlib.sha256(raw).hexdigest()
 
 
 _BLOB_KEYS: dict[tuple, bytes] = {}
@@ -524,7 +561,14 @@ def _decode_layer_cached(blob: bytes, index: int, *, flatten_alpha: bool) -> obj
     if loaded:
         _remember_bntx(token, loaded)
         return loaded[0]
-    image = texture_layer(blob, index, flatten_alpha=flatten_alpha)
+    clock = current_clock()
+    if clock is not None:
+        clock.begin_texture()
+    try:
+        image = texture_layer(blob, index, flatten_alpha=flatten_alpha)
+    finally:
+        if clock is not None:
+            clock.end_texture()
     _write_bwtx(path, [image])
     _remember_bntx(token, [image])
     return image
@@ -2620,6 +2664,7 @@ def _height_response(banc: str, digest: str, info: dict) -> dict:
         "url": f"/api/terrain/model.glb?banc={banc}",
         "digest": digest,
         "textureLog": info.get("textureLog") or [],
+        "timing": info.get("timing") or {},
         "banc": banc,
         "tiles": info.get("tiles") or [],
         "terrain": info.get("terrain") or {},

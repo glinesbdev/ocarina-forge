@@ -25,6 +25,7 @@ export async function request(path, options = {}) {
 
 export const api = {
   status: () => request("/api/status"),
+  stream: () => request("/api/stream"),
   saveConfig: (body) => request("/api/config", { method: "PUT", body: JSON.stringify(body) }),
   sample: () => request("/api/setup/sample", { method: "POST", body: "{}" }),
   createProject: (body) => request("/api/project", { method: "POST", body: JSON.stringify(body) }),

@@ -69,6 +69,18 @@ Search over 8,000 actors took 0.16 ms to list and 0.02 ms for a query. That stay
 
 BC and ASTC decode, zstd, and pack reads run in the server process when a model or a scene is built. The browser receives PNG, JPEG, and meshopt glbs. A KTX2 client transcoder was already rejected (three r170 returns an empty image). Terrain atlases and LOD meshes are built at import and cached. There is no client-side copy of that work to move.
 
+## Stream timings
+
+Every model convert records two server times. `convertMs` is the whole conversion. `textureMs` is only the texture decode that missed the decoded-image cache, so a warm open stays near zero on that number. The glb meta keeps the cold timing. A later open replaces the timing it returns with `cache=hit` and does not add those milliseconds to the server totals.
+
+The server prints one line per convert on the process log:
+
+`model Npc_Kokiri_F_01 cache=miss convert=120.5ms texture=80.0ms`
+
+`GET /api/stream` is the same list, plus how many misses and hits this process has done and the summed miss times. **Stats** adds the scene's own sums: `conv` and `tex` from those timings, `dl` for the glb download, and `up` for glTF parse plus GPU upload. The Stats panel repeats the server summary under the line.
+
+The sample Kokiri scene on this machine (11 actors, two real meshes) was 103.6 ms cold and 1.3 ms warm before this instrumentation. Retail Kokiri Forest and Hyrule Castle are not in this checkout. Open those scenes on a dump and read **Stats** plus the server log: the first open is `cache=miss` with a texture time, and the next open of the same models is `cache=hit` with texture time 0.
+
 ## Model loading
 
 Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`), and the view downloads up to 8 of those files at once, nearest to the camera first. A name that is not converted yet is `queued`: one of those 8 slots calls `GET /api/models/<name>`, which converts it, and only a real mesh then downloads the glb. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Conversions run in the `OCARINA_FORGE_WORKERS` process pool (4 unless you set it; `0` or `1` stays in the server process) and the handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.
