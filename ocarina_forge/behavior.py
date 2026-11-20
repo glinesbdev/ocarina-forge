@@ -12,6 +12,7 @@ import io
 import re
 from pathlib import Path
 
+from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import dumps, loads
 
 OPS = ("add node", "connect", "set field")
@@ -35,7 +36,6 @@ _FRIENDLY = {
     "Demo_WaitFrame": "Wait",
 }
 
-_PATH = re.compile(r"[\w./\\-]+\.(?:ainb|bfevfl|evfl|evfc|bgyml)")
 _PARAM_LISTS = (
     ("int", "int_inputs", "int_outputs"),
     ("bool", "bool_inputs", "bool_outputs"),
@@ -93,21 +93,21 @@ def friendly_name(raw: str) -> tuple[str, bool]:
 def load_actor_graph(dump, *, gyaml: str = "", banc: str = "", actor_id: str = "") -> dict:
     """The base graph for this actor class, plus any path named on the placement."""
     actor = None
-    note = ""
     if banc and actor_id:
         actor = _actor_in(dump, banc, actor_id)
         if actor is None:
-            note = "That actor is not in this scene."
-        else:
-            gyaml = str(actor.get("Gyaml") or gyaml)
+            raise BancError(f"No actor {actor_id} in {banc}.", "actor")
+        gyaml = str(actor.get("Gyaml") or gyaml)
     gyaml = (gyaml or "").strip()
-    files = _collect(dump, gyaml, actor)
+    if not gyaml:
+        raise BancError("Which actor? Pass the actor class, the name of Pack/Actor/<name>.pack.zs.", "actor")
+    gyaml = _require_pack(dump, gyaml)
+    files, trace = _collect(dump, gyaml, actor)
     graph = _graph(gyaml, files)
     graph["actor"] = actor_id or ""
     graph["banc"] = banc or ""
-    if note:
-        graph["note"] = note
-    elif not graph["nodes"]:
+    graph["trace"] = trace
+    if not graph["nodes"]:
         graph["note"] = "This actor's pack has no AI graph, schedule, or event flow."
     return graph
 
@@ -145,6 +145,7 @@ def _graph(gyaml: str, files: list[dict]) -> dict:
         "nodes": nodes,
         "edges": edges,
         "note": "",
+        "trace": [],
     }
 
 
@@ -540,65 +541,287 @@ def _holder(value) -> str:
     return ""
 
 
-def _collect(dump, gyaml: str, actor: dict | None) -> list[dict]:
+def _require_pack(dump, gyaml: str) -> str:
+    """The dump's spelling of this actor, or an error that names the nearest packs."""
+    names = dump.actor_names()
+    for name in names:
+        if name == gyaml or name.lower() == gyaml.lower():
+            return name
+    suggestions = suggest_actors(gyaml, names)
+    listed = ", ".join(suggestions) if suggestions else "none"
+    raise BancError(
+        f"No actor pack for {gyaml}. Looked for Pack/Actor/{gyaml}.pack.zs. Close matches: {listed}.",
+        "actor",
+    )
+
+
+def suggest_actors(name: str, names: list[str], limit: int = 8) -> list[str]:
+    """Pack names that share a token or nearly spell this one."""
+    import difflib
+
+    folded = name.lower()
+    token = folded.split("_")[-1] if "_" in folded else folded
+    scored: list[tuple[int, str]] = []
+    for item in names:
+        low = item.lower()
+        score = 0
+        if folded and folded in low:
+            score += 100
+        if token and len(token) >= 4 and token in low:
+            score += 50
+        ratio = max(
+            difflib.SequenceMatcher(None, folded, low).ratio(),
+            difflib.SequenceMatcher(None, low, folded).ratio(),
+        )
+        if ratio >= 0.78:
+            score += 40
+        if score:
+            scored.append((score, item))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    found: list[str] = []
+    for item in [pair[1] for pair in scored]:
+        if item not in found:
+            found.append(item)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _collect(dump, gyaml: str, actor: dict | None) -> tuple[list[dict], list[str]]:
+    """Pack components, then the files After the Ocarina reads for this actor.
+
+    A schedule is ``Component/AIScheduleParam/<actor>.game__component__AIScheduleParam.bgyml``.
+    A talk flow is ``Event/EventFlow/<actor>.bfevfl.zs``, also reached from a
+    component's ``FlowchartFileName`` (``Work/Event/EventFlow/<actor>.evfc``)
+    or from a schedule ``EventName`` that points at an EventSetting gyml.
+    An AI graph is an ``.ainb`` named by an AIInfo ``AIProgram``, or a logic
+    module ``Logic/*<actor>*.logic.module.ainb``.
+    """
     found: list[dict] = []
     seen: set[str] = set()
-    texts: list[str] = []
+    logged: set[str] = set()
+    trace: list[str] = []
+    queue: list[tuple[str, str, str]] = []
+    pack_rel = f"Pack/Actor/{gyaml}.pack.zs"
+    if not (dump.romfs / pack_rel).is_file():
+        trace.append(f"pack {pack_rel} missing")
+    else:
+        trace.append(f"pack {pack_rel}")
+        _read_pack(dump, pack_rel, found, seen, trace, queue)
     if actor:
-        _walk(actor, texts)
-    pack_rel = f"Pack/Actor/{gyaml}.pack.zs" if gyaml else ""
-    if pack_rel and (dump.romfs / pack_rel).is_file():
-        payload, _dict_id = dump.read_file(pack_rel)
-        try:
-            from ocarina_forge.formats.sarc import Sarc
-
-            archive = Sarc(payload)
-        except ValueError:
-            archive = None
-        if archive is not None:
-            for name in archive.names():
-                blob = archive.read(name)
-                member = f"{pack_rel}:{name}"
-                kind = _sniff(name, blob)
-                if kind:
-                    _add_file(found, seen, kind, member, blob)
-                    continue
-                if blob[:2] == b"YB":
-                    try:
-                        document = loads(blob)
-                    except ValueError:
-                        continue
-                    if _is_schedule(document):
-                        _add_file(found, seen, "schedule", member, blob)
-                    _walk(document, texts)
-    for text in texts:
-        for relative in _candidates(text):
-            path = dump.romfs / relative
-            if not path.is_file():
-                continue
-            try:
-                blob, _dict_id = dump.read_file(relative)
-            except Exception as exc:
-                _add_missing(found, seen, _kind_for(relative), relative, str(exc))
-                break
-            kind = _sniff(relative, blob) or _kind_for(relative)
-            if kind == "schedule" or (kind is None and blob[:2] == b"YB"):
-                try:
-                    document = loads(blob)
-                except ValueError:
-                    document = None
-                if _is_schedule(document):
-                    kind = "schedule"
-            if kind:
-                _add_file(found, seen, kind, relative, blob)
-            break
+        for field, value, role in _refs_in(actor):
+            if role:
+                queue.append((role, value, f"placement {field or 'param'}"))
+                trace.append(f"reference {field or 'param'}={value} from placement role={role}")
+    for role, relative in _convention_paths(gyaml):
+        queue.append((role, relative, "actor name"))
+    _drain(dump, found, seen, logged, trace, queue)
+    for folder, suffixes, role in (
+        ("Logic", (".ainb",), "ainb"),
+        ("AI", (".ainb",), "ainb"),
+        ("Event/EventFlow", (".bfevfl", ".bfevfl.zs", ".evfl", ".evfl.zs"), "event"),
+        ("Component/AIScheduleParam", (".bgyml", ".bgyml.zs"), "schedule"),
+    ):
+        hits = _files_named_like(dump, folder, gyaml, suffixes)
+        if hits:
+            trace.append(f"scan {folder}/ for {gyaml}: {', '.join(hits)}")
         else:
-            hinted = _kind_for(text)
-            if hinted and _looks_like_path(text):
-                _add_missing(found, seen, hinted, text.replace("\\", "/"), "This path is not in the dump.")
-    if len(found) > 12:
-        return found[:12]
-    return found
+            trace.append(f"scan {folder}/ for {gyaml}: none")
+        for relative in hits:
+            queue.append((role, relative, f"name match in {folder}/"))
+    _drain(dump, found, seen, logged, trace, queue)
+    return found, trace
+
+
+def _read_pack(dump, pack_rel: str, found: list[dict], seen: set[str], trace: list[str], queue: list) -> None:
+    try:
+        payload, _dict_id = dump.read_file(pack_rel)
+    except Exception as exc:
+        trace.append(f"pack {pack_rel} rejected {exc}")
+        return
+    try:
+        from ocarina_forge.formats.sarc import Sarc
+
+        archive = Sarc(payload)
+    except ValueError as exc:
+        trace.append(f"pack {pack_rel} rejected not a SARC ({exc})")
+        return
+    for name in archive.names():
+        blob = archive.read(name)
+        member = f"{pack_rel}:{name}"
+        kind = _sniff(name, blob)
+        if kind:
+            trace.append(f"component {name} {_magic_label(blob)} opened {kind}")
+            _add_file(found, seen, kind, member, blob)
+            continue
+        if blob[:2] == b"YB":
+            try:
+                document = loads(blob)
+            except ValueError as exc:
+                trace.append(f"component {name} byml rejected {exc}")
+                continue
+            trace.append(f"component {name} {_describe_byml(document)}")
+            if _is_schedule(document):
+                trace.append(f"component {name} opened schedule")
+                _add_file(found, seen, "schedule", member, blob)
+                _enqueue_document(blob, "schedule", name, queue, trace)
+            for field, value, role in _refs_in(document):
+                if not role:
+                    continue
+                trace.append(f"reference {field}={value} from {name} role={role}")
+                queue.append((role, value, name))
+            continue
+        trace.append(f"component {name} {_magic_label(blob)} skipped not a behavior file")
+
+
+def _drain(dump, found: list[dict], seen: set[str], logged: set[str], trace: list[str], queue: list) -> None:
+    while queue:
+        role, text, why = queue.pop(0)
+        _try_reference(dump, found, seen, logged, trace, queue, role, text, why)
+
+
+def _try_reference(dump, found, seen, logged, trace, queue, role: str, text: str, why: str) -> None:
+    candidates = _candidates(text, role)
+    if candidates and candidates[0] in seen:
+        return
+    tried = False
+    for relative in candidates:
+        if relative in seen or relative in logged:
+            tried = True
+            continue
+        logged.add(relative)
+        blob, reason = _open_relative(dump, relative)
+        if blob is None:
+            trace.append(f"try {relative} rejected {reason} ({why})")
+            continue
+        kind, reject = _accept(role, relative, blob)
+        tried = True
+        if kind is None:
+            trace.append(f"try {relative} rejected {reject} ({why})")
+            if blob[:2] == b"YB":
+                _enqueue_document(blob, "", relative, queue, trace)
+            continue
+        trace.append(f"try {relative} opened {kind} ({why})")
+        _add_file(found, seen, kind, relative, blob)
+        _enqueue_document(blob, kind, relative, queue, trace)
+        return
+    named = why == "actor name" or why.startswith("name match")
+    if not tried and not named and _explicit_file(text):
+        trace.append(f"reference {text} missing ({why})")
+        hinted = role if role in ("ainb", "schedule", "event") else (_kind_for(text) or "ainb")
+        _add_missing(found, seen, hinted, text.replace("\\", "/"), "This path is not in the dump.")
+
+
+def _enqueue_document(blob: bytes, kind: str, where: str, queue: list, trace: list[str]) -> None:
+    if blob[:2] != b"YB":
+        return
+    try:
+        document = loads(blob)
+    except ValueError:
+        return
+    if kind == "schedule" or _is_schedule(document):
+        for field, value, role in _refs_in(document):
+            if role == "event" or "event" in field.lower():
+                queue.append(("event", value, f"{where} {field}"))
+                trace.append(f"reference {field}={value} from {where} role=event")
+    for field, value, role in _refs_in(document):
+        if field.lower() in ("flowchartfilename", "eventflow") and role:
+            queue.append((role, value, f"{where} {field}"))
+
+
+def _convention_paths(gyaml: str) -> list[tuple[str, str]]:
+    rows = [
+        ("schedule", f"Component/AIScheduleParam/{gyaml}.game__component__AIScheduleParam.bgyml"),
+        ("schedule", f"Component/AIScheduleParam/{gyaml}.game__component__AIScheduleParam.bgyml.zs"),
+        ("event", f"Event/EventFlow/{gyaml}.bfevfl.zs"),
+        ("event", f"Event/EventFlow/{gyaml}.bfevfl"),
+        ("event", f"Event/EventFlow/{gyaml}.evfl.zs"),
+        ("event", f"Event/EventFlow/{gyaml}.evfl"),
+        ("ainb", f"AI/{gyaml}.ainb"),
+        ("ainb", f"AI/{gyaml}.work.ainb"),
+        ("ainb", f"AI/{gyaml}.root.ainb"),
+        ("ainb", f"Logic/{gyaml}.logic.module.ainb"),
+        ("ainb", f"Logic/{gyaml}.ainb"),
+    ]
+    return rows
+
+
+def _files_named_like(dump, folder: str, gyaml: str, suffixes: tuple[str, ...]) -> list[str]:
+    root = dump.romfs / folder
+    if not root.is_dir():
+        return []
+    hits = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        lower = path.name.lower()
+        if not any(lower.endswith(suffix) for suffix in suffixes):
+            continue
+        if _actor_in_name(path.name, gyaml):
+            hits.append(path.relative_to(dump.romfs).as_posix())
+    return hits
+
+
+def _actor_in_name(filename: str, gyaml: str) -> bool:
+    low = filename.lower()
+    token = gyaml.lower()
+    start = 0
+    while True:
+        at = low.find(token, start)
+        if at < 0:
+            return False
+        after = at + len(token)
+        if after >= len(low) or not low[after].isalnum():
+            return True
+        start = at + 1
+
+
+def _open_relative(dump, relative: str) -> tuple[bytes | None, str]:
+    path = dump.romfs / relative
+    if not path.is_file():
+        return None, "not in the dump"
+    try:
+        blob, _dict_id = dump.read_file(relative)
+    except Exception as exc:
+        return None, str(exc)
+    return blob, ""
+
+
+def _accept(role: str, relative: str, blob: bytes) -> tuple[str | None, str]:
+    sniffed = _sniff(relative, blob)
+    if role == "ainb":
+        if sniffed == "ainb":
+            return "ainb", ""
+        if blob[:2] == b"YB":
+            return None, "BYML, not an AINB"
+        return None, f"magic {blob[:4]!r} is not AIB"
+    if role == "event":
+        if sniffed == "event":
+            return "event", ""
+        if blob[:2] == b"YB":
+            return None, "BYML event setting, not a flowchart"
+        return None, f"magic {blob[:4]!r} is not BFEVFL"
+    if role == "schedule":
+        if sniffed == "schedule":
+            return "schedule", ""
+        if blob[:2] == b"YB":
+            try:
+                document = loads(blob)
+            except ValueError as exc:
+                return None, str(exc)
+            if _is_schedule(document):
+                return "schedule", ""
+        return None, "not an AIScheduleParam"
+    if sniffed:
+        return sniffed, ""
+    if blob[:2] == b"YB":
+        try:
+            document = loads(blob)
+        except ValueError as exc:
+            return None, str(exc)
+        if _is_schedule(document):
+            return "schedule", ""
+    return None, "not an AI graph, schedule, or event flow"
 
 
 def _add_file(found: list[dict], seen: set[str], kind: str, path: str, data: bytes) -> None:
@@ -632,7 +855,7 @@ def _sniff(name: str, data: bytes) -> str | None:
     lower = name.lower()
     if data[:4] == b"AIB " or lower.endswith(".ainb"):
         return "ainb"
-    if data[:4] == b"EVFL" or lower.endswith((".bfevfl", ".evfl")):
+    if data[:8] == b"BFEVFL\x00\x00" or lower.endswith((".bfevfl", ".bfevfl.zs", ".evfl", ".evfl.zs")):
         return "event"
     if "aischedule" in lower:
         return "schedule"
@@ -650,8 +873,92 @@ def _kind_for(path: str) -> str | None:
     return None
 
 
-def _looks_like_path(text: str) -> bool:
-    return bool(_PATH.search(text)) and "/" in text.replace("\\", "/")
+_AI_KEYS = {
+    "aiprogram",
+    "aiprogramuser",
+    "residentai",
+    "residentprogram",
+    "logic",
+    "program",
+    "aipath",
+    "ainame",
+    "aifile",
+}
+_EVENT_KEYS = {
+    "flowchartfilename",
+    "eventflow",
+    "eventname",
+    "flowname",
+    "eventfile",
+    "flowchart",
+    "flowfile",
+}
+_SCHEDULE_KEYS = {"schedule", "aischedule", "actionschedule"}
+
+
+def _describe_byml(document) -> str:
+    if not isinstance(document, dict):
+        return type(document).__name__
+    kind = str(document.get("$type") or "")
+    parent = str(document.get("$parent") or "")
+    keys = ",".join(str(key) for key in list(document)[:12])
+    bits = ["byml"]
+    if kind:
+        bits.append(f"$type={kind}")
+    if parent:
+        bits.append(f"$parent={parent}")
+    bits.append(f"keys={keys}")
+    return " ".join(bits)
+
+
+def _magic_label(blob: bytes) -> str:
+    if blob[:4] == b"AIB ":
+        return "ainb"
+    if blob[:8] == b"BFEVFL\x00\x00":
+        return "bfevfl"
+    if blob[:2] == b"YB":
+        return "byml"
+    if blob[:4] == b"SARC":
+        return "sarc"
+    return f"magic {blob[:4]!r}"
+
+
+def _refs_in(document) -> list[tuple[str, str, str]]:
+    found: list[tuple[str, str, str]] = []
+
+    def walk(value, field: str) -> None:
+        if isinstance(value, str):
+            role = _role_of(field, value)
+            if role:
+                found.append((field, value, role))
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                walk(item, str(key))
+            return
+        if isinstance(value, list):
+            for item in value:
+                walk(item, field)
+
+    walk(document, "")
+    return found
+
+
+def _role_of(field: str, value: str) -> str:
+    key = re.sub(r"[^a-z0-9]", "", field.lower())
+    low = value.replace("\\", "/").lower()
+    if key in _SCHEDULE_KEYS or "aischedule" in low:
+        return "schedule"
+    if key in _EVENT_KEYS or any(token in low for token in (".bfevfl", ".evfl", ".evfc", "eventflow/", "eventsetting/")):
+        return "event"
+    if key in _AI_KEYS or ".ainb" in low or low.startswith("ai/") or low.startswith("logic/") or "/logic/" in low or ".logic.module" in low:
+        return "ainb"
+    return ""
+
+
+def _explicit_file(text: str) -> bool:
+    low = text.replace("\\", "/").lower()
+    return any(token in low for token in (".ainb", ".bfevfl", ".evfl", ".evfc", "aischedule"))
 
 
 def _is_schedule(document) -> bool:
@@ -660,42 +967,55 @@ def _is_schedule(document) -> bool:
     )
 
 
-def _walk(value, into: list[str]) -> None:
-    if isinstance(value, str):
-        for match in _PATH.findall(value):
-            into.append(match)
-        return
-    if isinstance(value, dict):
-        for item in value.values():
-            _walk(item, into)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _walk(item, into)
+def _candidates(text: str, role: str) -> list[str]:
+    raw = text.replace("\\", "/").strip().lstrip("/")
+    if raw.startswith("Work/"):
+        raw = raw[len("Work/") :]
+    names: list[str] = []
 
+    def add(item: str) -> None:
+        if item and item not in names and ".." not in item.split("/"):
+            names.append(item)
 
-def _candidates(text: str) -> list[str]:
-    path = text.replace("\\", "/").lstrip("/")
-    if path.startswith("Work/"):
-        path = path[len("Work/") :]
-    names = [path]
-    if path.endswith(".zs"):
-        names.append(path[:-3])
-    else:
-        names.append(path + ".zs")
-    if path.endswith(".evfc"):
-        stem = path[:-5]
-        names.extend((stem + ".bfevfl", stem + ".bfevfl.zs"))
-    base = path.split("/")[-1]
-    for folder in ("AI/", "Logic/", "Event/EventFlow/", "Component/AIScheduleParam/", "AS/"):
-        names.append(folder + base)
-        if not base.endswith(".zs"):
-            names.append(folder + base + ".zs")
-    unique = []
-    for name in names:
-        if name not in unique:
-            unique.append(name)
-    return unique
+    looks_like_file = "/" in raw or raw.endswith(
+        (".ainb", ".bfevfl", ".evfl", ".evfc", ".bgyml", ".gyml", ".zs")
+    )
+    if looks_like_file:
+        add(raw)
+        if raw.endswith(".zs"):
+            add(raw[:-3])
+        else:
+            add(raw + ".zs")
+        if raw.endswith(".gyml"):
+            add(raw[:-5] + ".bgyml")
+            add(raw[:-5] + ".bgyml.zs")
+        if raw.endswith(".evfc"):
+            add(raw[:-5] + ".bfevfl")
+            add(raw[:-5] + ".bfevfl.zs")
+        return names
+    base = raw.split("/")[-1]
+    if base.endswith(".zs"):
+        base = base[:-3]
+    for suffix in (".gyml", ".bgyml", ".evfc", ".bfevfl", ".evfl", ".ainb"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
+    if ".engine__" in base:
+        base = base.split(".engine__", 1)[0]
+    if role in ("ainb", ""):
+        add(f"AI/{base}.work.ainb")
+        add(f"AI/{base}.root.ainb")
+        add(f"AI/{base}.ainb")
+        add(f"Logic/{base}.logic.module.ainb")
+    if role in ("event", ""):
+        add(f"Event/EventFlow/{base}.bfevfl.zs")
+        add(f"Event/EventFlow/{base}.bfevfl")
+        add(f"Event/EventFlow/{base}.evfl.zs")
+        add(f"Event/EventFlow/{base}.evfl")
+    if role in ("schedule", ""):
+        add(f"Component/AIScheduleParam/{base}.game__component__AIScheduleParam.bgyml")
+        add(f"Component/AIScheduleParam/{base}.game__component__AIScheduleParam.bgyml.zs")
+    return names
 
 
 def _actor_in(dump, banc: str, actor_id: str):

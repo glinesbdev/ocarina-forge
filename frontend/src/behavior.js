@@ -106,7 +106,10 @@ export function renderBehavior(host, model) {
     ? graph.note
     : "Read only. A later edit stores add node, connect, and set field against these ids.";
   host.append(bar, hint);
-  if (!graph.nodes || !graph.nodes.length) return;
+  if (!graph.nodes || !graph.nodes.length) {
+    if (graph.trace && graph.trace.length) host.append(traceBlock(graph.trace));
+    return;
+  }
 
   const laid = layoutGraph(graph);
   const canvas = document.createElement("div");
@@ -215,6 +218,13 @@ function detail(node, graph) {
   ident.textContent = node.id;
   wrap.append(ident);
   return wrap;
+}
+
+function traceBlock(lines) {
+  const block = document.createElement("pre");
+  block.className = "trace";
+  block.textContent = lines.join("\n");
+  return block;
 }
 
 function note(text) {

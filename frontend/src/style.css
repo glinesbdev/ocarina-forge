@@ -363,6 +363,16 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .graph-node.is-undecoded { border-style: dashed; }
 .pin { font-size: 11px; line-height: 16px; color: var(--muted); }
 .pin-out { text-align: right; }
+pre.trace {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+}
 .pin-in { text-align: left; }
 .identity { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .identity h3 { margin: 0; font-size: 22px; }

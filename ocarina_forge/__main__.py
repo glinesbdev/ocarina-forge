@@ -33,6 +33,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
+    parser.add_argument("--trace", action="store_true", help="behavior prints the pack, each component, and every path it tried.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     parser.add_argument(
         "--banc",
@@ -92,6 +93,7 @@ def main(argv: list[str] | None = None) -> None:
                 banc=args.scene_banc or "",
                 as_json=args.json,
                 dump=args.dump,
+                trace=args.trace,
             )
         )
     if args.command == "tex-debug":
@@ -137,7 +139,15 @@ def print_problems(banc: str, *, as_json: bool = False, dump: str | None = None,
     return 1 if any(row.get("severity") == "error" for row in report["diagnostics"]) else 0
 
 
-def print_behavior(target: str, *, actor_id: str = "", banc: str = "", as_json: bool = False, dump: str | None = None) -> int:
+def print_behavior(
+    target: str,
+    *,
+    actor_id: str = "",
+    banc: str = "",
+    as_json: bool = False,
+    dump: str | None = None,
+    trace: bool = False,
+) -> int:
     """Print the read-only behavior graph. 2 when the dump is missing."""
     from ocarina_forge.behavior import load_actor_graph
     from ocarina_forge.config import load_config
@@ -170,6 +180,9 @@ def print_behavior(target: str, *, actor_id: str = "", banc: str = "", as_json: 
         print(f"{source['kind']} {source['status']} {source['path']}")
     print(f"nodes {len(graph.get('nodes') or [])}")
     print(f"edges {len(graph.get('edges') or [])}")
+    if trace or not graph.get("nodes"):
+        for line in graph.get("trace") or []:
+            print(line)
     for node in graph.get("nodes") or []:
         mark = "raw" if not node.get("decoded") else "friendly" if node.get("known") else "named"
         print(f"  {mark} {node.get('raw')} -> {node.get('name')}  {node.get('id')}")
