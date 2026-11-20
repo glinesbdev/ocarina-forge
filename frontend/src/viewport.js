@@ -341,6 +341,7 @@ export async function createViewport(host, hooks) {
     const recipe = actor.status === "recipe";
     const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
     const volume = Boolean(actor.volume);
+    const region = Boolean(actor.region);
     const material = new THREE.MeshBasicMaterial({
       color,
       transparent: true,
@@ -386,6 +387,7 @@ export async function createViewport(host, hooks) {
       category: actor.category,
       status: actor.status,
       volume,
+      region,
       companion: Boolean(actor.companion),
       parts: null,
       farNames: null,
@@ -458,6 +460,7 @@ export async function createViewport(host, hooks) {
     entry.category = actor.category;
     entry.gyaml = actor.gyaml;
     if (!entry.parts || !entry.parts.length) entry.volume = Boolean(actor.volume);
+    if (actor.region !== undefined) entry.region = Boolean(actor.region);
     entry.companion = Boolean(actor.companion);
     entry.pickable = actor.pickable !== false;
     entry.color = color;
@@ -519,6 +522,7 @@ export async function createViewport(host, hooks) {
   }
 
   function adoptModel(entry) {
+    if (entry.region) return false;
     const sibling = [...entries.values()].find(
       (other) => other !== entry && other.gyaml === entry.gyaml && other.parts && other.parts.length,
     );
@@ -655,6 +659,13 @@ export async function createViewport(host, hooks) {
       for (const entry of entries.values()) {
         if (entry.gyaml !== gyaml) continue;
         entry.modelMeta = { ...meta, status: "mesh" };
+        // Areas, air walls, and other regions stay wireframes. Their packs
+        // often contain a solid cube, and one castle cube also carries a
+        // miniature of the courtyard. The Volumes and category toggles hide them.
+        if (entry.region) {
+          fitBounds(entry, meta.bounds);
+          continue;
+        }
         if (template) attachModel(entry, template, meta.url);
         else fitBounds(entry, meta.bounds);
       }

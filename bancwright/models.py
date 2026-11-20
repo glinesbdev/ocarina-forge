@@ -53,7 +53,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-22\0"
+_CACHE_VERSION = b"models-23\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -62,13 +62,28 @@ _TERRAIN = (0.36, 0.45, 0.28, 1.0)
 _EARTH = (0.40, 0.36, 0.22, 1.0)
 _GROUND_GYAML = re.compile(r"land|ground|terra|cliff|field|path|moss|paving|earth|road|hill|mound", re.IGNORECASE)
 # Unlit translucent water when the shader cannot be reproduced.
-_WATER = (0.35, 0.55, 0.55, 0.2)
+# Deep enough that a moat does not read as a pale sheet, with a generated ripple.
+_WATER = (0.18, 0.42, 0.48, 0.62)
+_WATER_TEX = "bancwright-water"
 _ROCK = (0.45, 0.40, 0.34, 1.0)
 _VINE = (0.28, 0.42, 0.22, 1.0)
 _CLOTH = (0.55, 0.42, 0.28, 1.0)
 _BROW = (0.25, 0.16, 0.10, 1.0)
 _TERRA_LAYER = re.compile(r"terra[_]?material[^\d]*(\d+)", re.IGNORECASE)
-_WATER_TOKENS = {"water", "lake", "waterfall", "ocean", "pond", "sea", "river"}
+_WATER_TOKENS = {
+    "water",
+    "lake",
+    "waterfall",
+    "ocean",
+    "pond",
+    "sea",
+    "river",
+    "stream",
+    "moat",
+    "aqua",
+    "mizu",
+    "brook",
+}
 
 
 def _converter_files() -> tuple[Path, ...]:
@@ -633,15 +648,18 @@ def _remember_img(token: str, encoded: bytes) -> None:
         _IMG_MEM.pop(_IMG_ORDER.pop(0), None)
 
 
-def _apply_stand_in(part, choice: dict) -> None:
+def _apply_stand_in(part, choice: dict, images: dict | None = None) -> None:
     if choice.get("kind") != "water":
         return
     part.stand_in = "water"
     part.alpha = "blend"
     part.proxy = False
+    part.base_color = _WATER
     if choice.get("image") is None:
-        part.texture = ""
-        part.base_color = _WATER
+        part.texture = _WATER_TEX
+        part.wrap = "repeat"
+        if images is not None and _WATER_TEX not in images:
+            images[_WATER_TEX] = _water_ripple()
 
 
 def _consider_water(names: list[str], binds, result: dict) -> dict:
@@ -672,6 +690,49 @@ def _consider_water(names: list[str], binds, result: dict) -> dict:
         entry["error"] = extra if not previous else f"{previous}. {extra}"
     result["entry"] = entry
     return result
+
+
+def _water_ripple():
+    """A small tiled colour so a moat is not a flat sheet when the albedo is missing."""
+    from bancwright.formats.bntx import Texture
+
+    width = height = 16
+    rgba = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            wave = ((x * 3 + y * 5) % 8) / 7
+            band = 1 if (x // 4 + y // 4) % 2 == 0 else 0
+            red = int(18 + wave * 20)
+            green = int(70 + wave * 40 + band * 12)
+            blue = int(88 + wave * 36)
+            at = (y * width + x) * 4
+            rgba[at : at + 4] = bytes((red, green, blue, 210))
+    return Texture(_WATER_TEX, width, height, bytes(rgba), 0, "generated water stand-in")
+
+
+def _span(positions) -> float:
+    if not positions:
+        return 0.0
+    axes = []
+    for axis in range(3):
+        values = [point[axis] for point in positions]
+        axes.append(max(values) - min(values))
+    return max(axes)
+
+
+def _untextured_bounds_box(part, labeled) -> bool:
+    """A coarse untextured box sitting under a smaller detailed mesh.
+
+    Hyrule Castle draws a solid cream cube with a miniature courtyard on it
+    when a bounds or occluder shape shares a model with the real mesh and
+    never receives an albedo. The detailed mesh stays.
+    """
+    if part.uvs or len(part.positions) > 24 or _span(part.positions) < 4:
+        return False
+    return any(
+        other is not part and other.uvs and len(other.positions) > len(part.positions)
+        for other, _name in labeled
+    )
 
 
 def _water_names(*names: str) -> bool:
@@ -811,6 +872,19 @@ def _omit_reason(shape: str, material: str) -> str:
         return "inner mesh is not drawn"
     if "eyeouter" in compact or "eyeshadow" in compact:
         return "eye overlay is not drawn"
+    for word, reason in (
+        ("occluder", "occluder is not drawn"),
+        ("navmesh", "navmesh proxy is not drawn"),
+        ("minimap", "minimap model is not drawn"),
+        ("mapicon", "map icon is not drawn"),
+        ("sightblock", "sight blocker is not drawn"),
+        ("charactersight", "sight blocker is not drawn"),
+        ("collision", "collision mesh is not drawn"),
+        ("collider", "collision mesh is not drawn"),
+        ("impostor", "impostor is not drawn"),
+    ):
+        if word in compact:
+            return reason
     return ""
 
 
@@ -834,6 +908,8 @@ def _mark_omitted(models) -> None:
             low = f"{part.name} {name}".lower()
             if not reason and front and "back" in low and ("water" in low or "flow" in low):
                 reason = "back water layer is not drawn"
+            if not reason and _untextured_bounds_box(part, labeled):
+                reason = "untextured bounds box is not drawn"
             if reason:
                 part.omit = True
                 part.omit_reason = reason
@@ -874,10 +950,10 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 image = None
             png = None
             water = part.stand_in == "water"
-            if water and image is None:
+            if water and (image is None or part.texture == _WATER_TEX):
                 if "water stand-in" not in notes:
                     notes.append("water stand-in")
-            elif image is not None:
+            if image is not None:
                 png = png_for.get(id(image))
                 if png is None:
                     # A terra array layer is stored as PNG. Opaque JPEG is for ordinary albedos.
@@ -902,7 +978,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             unlit = False
             kind = ""
             if water:
-                color = _WATER
+                # A real albedo keeps the previous pale multiply so a forest
+                # stream does not change. The stand-in ripple uses the deeper tint.
+                color = _WATER if part.texture == _WATER_TEX or image is None else (0.35, 0.55, 0.55, 0.2)
                 alpha = "blend"
                 unlit = True
                 kind = "water"
@@ -1031,7 +1109,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                         part.proxy = True
                         part.base_color = _TERRAIN
                         part.texture = ""
-                    _apply_stand_in(part, choice)
+                    _apply_stand_in(part, choice, external)
                     if choice.get("image") is not None:
                         external[choice["wanted"]] = choice["image"]
         else:
@@ -1040,7 +1118,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 log.append(choice["entry"])
                 part.texture = choice["wanted"]
                 part.alpha = choice["alpha"]
-                _apply_stand_in(part, choice)
+                _apply_stand_in(part, choice, external)
                 if choice.get("image") is not None and choice["wanted"]:
                     external[choice["wanted"]] = choice["image"]
     return external, log, raws

@@ -6,7 +6,7 @@ from pathlib import Path
 from bancwright.actors import is_volume, view_actor
 from bancwright.dump import Dump
 from bancwright.fixtures import KOKIRI_STATIC, build_fixture
-from bancwright.formats.bfres import _rigid, base_color_name, parse, rank_albedo, sample_bfres
+from bancwright.formats.bfres import _bind_pose, _euler_quat, _rigid, base_color_name, parse, rank_albedo, sample_bfres
 from bancwright.formats.bntx import _decode
 from bancwright.formats.gltf import Primitive, png_rgba, to_glb
 from bancwright.formats.swizzle import deswizzle, swizzle
@@ -48,6 +48,48 @@ def test_rigid_bone_is_applied_once():
     assert abs(point[0] - 1.0) < 1e-4
     assert abs(point[1] - 2.0) < 1e-4
     assert abs(point[2]) < 1e-4
+
+
+def test_euler_bone_and_per_vertex_rigid_skin():
+    """A door panel is often Euler XYZ, and each vertex names one rigid bone."""
+    import math
+
+    quat = _euler_quat(0.0, math.pi / 2, 0.0)
+    bones = [
+        (-1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0, 0),
+        (0, (0.0, 0.0, 0.0), quat, (1.0, 1.0, 1.0), 0x1000, 0),
+        (0, (4.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0, -1),
+    ]
+    turned = _bind_pose([(1.0, 0.0, 0.0)], bones, [], 1, None)[0]
+    assert abs(turned[0]) < 1e-4
+    assert abs(turned[1]) < 1e-4
+    assert abs(turned[2] + 1.0) < 1e-4
+    # Palette slot 0 is bone 1. Bone 2 is not rigid, so its vertex stays put.
+    placed = _bind_pose(
+        [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        bones,
+        [1, 2],
+        0,
+        [0, 1],
+    )
+    assert abs(placed[0][2] + 1.0) < 1e-4
+    assert abs(placed[1][0]) < 1e-4
+    assert abs(placed[1][1] - 1.0) < 1e-4
+
+
+def test_moat_and_stream_count_as_water_and_a_bounds_box_is_omitted():
+    from bancwright.models import _omit_reason, _untextured_bounds_box, _water_names
+    from bancwright.formats.bfres import Part
+
+    assert _water_names("Mt_HrlCastle_Moat")
+    assert _water_names("Cliff", "HrlCastle_Stream_A")
+    assert not _water_names("Npc_River_A")
+    assert _omit_reason("Occluder_A", "Mt_White") == "occluder is not drawn"
+    assert _omit_reason("MiniMap_Castle", "") == "minimap model is not drawn"
+    box = Part("Bounds", [(0, 0, 0), (8, 0, 0), (8, 4, 6)], [0, 1, 2], None, "", "")
+    tiny = Part("Courtyard", [(i * 0.01, 0, 0) for i in range(30)], [0, 1, 2], [(0, 0)] * 30, "alb", "")
+    assert _untextured_bounds_box(box, [(box, ""), (tiny, "alb")])
+    assert not _untextured_bounds_box(tiny, [(box, ""), (tiny, "alb")])
 
 
 def test_base_color_prefers_albedo():
@@ -143,7 +185,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-22", "af5c1c171d75e360bf10fc3893febff6883ba642ec7a037321336416f01d7806")
+    pinned = ("models-23", "895e8d12d649b6f92223a062c60b4b3074a15bbab69bc6292be2b5af9bb88209")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -198,11 +240,17 @@ def test_volume_flags():
     area = view_actor({"Gyaml": "Area_Kokiri_Town", "Hash": 1, "Translate": [0, 0, 0], "Scale": [30, 8, 30]}, "vanilla")
     assert area["category"] == "area"
     assert area["volume"] is True
+    assert area["region"] is True
     start = view_actor({"Gyaml": "StartPos", "Hash": 2, "Translate": [0, 0, 0]}, "vanilla")
     assert start["category"] == "system"
     assert start["volume"] is True
     ground = view_actor({"Gyaml": "Land_Kokiri_Ground", "Hash": 3, "Translate": [0, 0, 0], "Scale": [20, 1, 20]}, "vanilla")
     assert ground["volume"] is True
+    assert ground["region"] is False
+    air = view_actor({"Gyaml": "FldObj_AirWall_CharacterSight_GenerateNavMesh_Body", "Hash": 7, "Translate": [0, 0, 0]}, "vanilla")
+    assert air["category"] == "system"
+    assert air["region"] is True
+    assert view_actor({"Gyaml": "BGM_Silence", "Hash": 8, "Translate": [0, 0, 0]}, "vanilla")["region"] is True
     pot = view_actor({"Gyaml": "Obj_Pot", "Hash": 4, "Translate": [0, 0, 0]}, "vanilla")
     assert pot["volume"] is False
     fog = view_actor({"Gyaml": "VolumeFogArea", "Hash": 5, "Translate": [0, 0, 0], "Scale": [100, 40, 100]}, "vanilla")
@@ -1682,14 +1730,14 @@ def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
 
     for gyaml in ("Fld_WaterSheet", "Fld_WaterNorm", "Fld_WaterBlue"):
         info = describe_actor(dump, gyaml)
-        assert info["textures"] == 0, gyaml
+        assert info["textures"] == 1, gyaml
         assert "water stand-in" in (info["reason"] or ""), gyaml
         assert info["textureLog"][0].get("standIn") == "water"
         doc = _document((tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes())
         mat = doc["materials"][0]
         factor = mat["pbrMetallicRoughness"]["baseColorFactor"]
         assert mat["alphaMode"] == "BLEND"
-        assert "baseColorTexture" not in mat["pbrMetallicRoughness"]
+        assert "baseColorTexture" in mat["pbrMetallicRoughness"]
         assert factor[1] > factor[0]
         assert factor[2] > factor[0]
         assert factor[3] < 0.8
@@ -1986,10 +2034,11 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
     assert any("Front" in name for name in names)
     assert not any("Back" in name for name in names)
     factor = doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
-    assert abs(factor[0] - 0.35) < 0.02
-    assert abs(factor[1] - 0.55) < 0.02
-    assert abs(factor[2] - 0.55) < 0.02
-    assert abs(factor[3] - 0.2) < 0.02
+    assert abs(factor[0] - 0.18) < 0.02
+    assert abs(factor[1] - 0.42) < 0.02
+    assert abs(factor[2] - 0.48) < 0.02
+    assert abs(factor[3] - 0.62) < 0.02
+    assert "baseColorTexture" in doc["materials"][0]["pbrMetallicRoughness"]
     assert doc["materials"][0]["alphaMode"] == "BLEND"
     assert doc["materials"][0]["extras"]["banc"] == "water"
 

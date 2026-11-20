@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 
-from bancwright.actors import category, is_volume
+from bancwright.actors import category, is_region, is_volume
 from bancwright.errors import BancError
 from bancwright.project import load_yaml
 from bancwright.values import get_path, set_path, tag, to_yaml, untag
@@ -202,6 +202,7 @@ def _placement(data, row, banc, relative, key, index, used: set[str]) -> dict | 
         "rotate": rotate,
         "scale": scale,
         "volume": is_volume(gyaml.strip(), scale),
+        "region": is_region(gyaml.strip()),
         "srtHash": None,
         "status": "recipe",
         "params": tag(_plain(params)),

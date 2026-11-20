@@ -5,9 +5,13 @@ KillzXGaming/BfresLibrary (MIT): version 8, 9, and 10 headers, FMDL, FVTX,
 FSHP, FMAT, and the GPU buffer. Vertex formats are the Switch attribute ids
 from that library. This file is an original reader, not a copy of the C#.
 
-Smooth-skinned vertices are already stored in model space, so they are the
-bind pose. A shape with no per-vertex skin (skin count 0) is moved by its
-single bone. Skeletal animation is not read.
+Smooth-skinned vertices (skin count 2–4) are already stored in model space,
+so they are the bind pose and are not moved again. Skin count 0 is one rigid
+bone, the shape’s bone. Skin count 1 stores each vertex in one bone’s space;
+`_i0` indexes the skeleton matrix palette, and only a bone with a rigid
+palette slot is applied. Bone flag 0x1000 stores Euler XYZ radians in the
+rotation floats; anything else is a quaternion. Flag 0x800000 is segment-scale
+compensation. Skeletal animation is not read.
 
 `sample_bfres` writes a tiny file the reader understands. It is synthetic.
 Nothing in it comes from a game.
@@ -277,7 +281,7 @@ class _File:
             cursor += 2 + 4 + 4
         end = cursor
         del vtx_count, shape_count
-        bones = self._bones(skel) if skel else []
+        bones, palette = self._bones(skel) if skel else ([], [])
         materials = self._materials(mat_values, mat_dict, material_count)
         if not any(material.binds or material.albedo for material in materials):
             scanned = self._scan_fmats()
@@ -288,7 +292,7 @@ class _File:
         undecoded: list[dict] = []
         shape_at = shape_values
         for index, shape_name in enumerate(shape_names):
-            made, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, materials)
+            made, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, palette, materials)
             if made:
                 parts.extend(made)
             elif info.get("flags", 0) & 0x10:
@@ -316,9 +320,9 @@ class _File:
             model.notes.append(f"{model.name or fallback}: no drawable shape")
         return model, end
 
-    def _bones(self, at: int) -> list[tuple[int, tuple, tuple, tuple]]:
+    def _bones(self, at: int) -> tuple[list[tuple], list[int]]:
         if at + 4 > len(self.data) or self.data[at : at + 4] != b"FSKL":
-            return []
+            return [], []
         cursor = at + 4
         if self.major >= 9:
             cursor += 4
@@ -342,16 +346,35 @@ class _File:
             cursor += 2  # index
             parent = self.i16(cursor)
             cursor += 2
-            cursor += 8  # smooth, rigid, billboard, user count
-            cursor += 4  # flags
+            cursor += 2  # smooth palette index
+            rigid = self.i16(cursor)
+            cursor += 2
+            cursor += 4  # billboard, user count
+            flags = self.u32(cursor)
+            cursor += 4
             scale = (self.f32(cursor), self.f32(cursor + 4), self.f32(cursor + 8))
             cursor += 12
-            rot = (self.f32(cursor), self.f32(cursor + 4), self.f32(cursor + 8), self.f32(cursor + 12))
+            raw_rot = (self.f32(cursor), self.f32(cursor + 4), self.f32(cursor + 8), self.f32(cursor + 12))
             cursor += 16
             pos = (self.f32(cursor), self.f32(cursor + 4), self.f32(cursor + 8))
             cursor += 12
-            bones.append((parent, pos, rot, scale))
-        return bones
+            # 0x1000: the first three floats are Euler XYZ radians. The fourth is unused.
+            rot = _euler_quat(raw_rot[0], raw_rot[1], raw_rot[2]) if flags & 0x1000 else raw_rot
+            bones.append((parent, pos, rot, scale, flags, rigid))
+        return bones, self._matrix_palette(at, len(bones))
+
+    def _matrix_palette(self, at: int, bone_count: int) -> list[int]:
+        """u16 bone index per rigid or smooth matrix. `_i0` indexes this list."""
+        if self.major < 9 or bone_count <= 0 or at + 0x40 > len(self.data):
+            return []
+        palette_at = self.u64(at + 0x18)
+        count = self.u16(at + 0x3A) + self.u16(at + 0x3C)
+        if not palette_at or count <= 0 or count > 4096 or palette_at + count * 2 > len(self.data):
+            return []
+        palette = list(struct.unpack_from(f"<{count}H", self.data, palette_at))
+        if any(index >= bone_count for index in palette):
+            return []
+        return palette
 
     def _materials(self, values: int, dictionary: int, declared: int = 0) -> list[Material]:
         names = self.dict_keys(dictionary)
@@ -682,7 +705,7 @@ class _File:
             start = at + 4
         return found
 
-    def _shape(self, at: int, name: str, bones, materials: list[Material]) -> tuple[list[Part], int, dict]:
+    def _shape(self, at: int, name: str, bones, palette, materials: list[Material]) -> tuple[list[Part], int, dict]:
         if self.data[at : at + 4] != b"FSHP":
             raise FresError(f"expected a shape at {at:#x}")
         flags = self.u32(at + 4) if self.major >= 9 else 0
@@ -734,8 +757,9 @@ class _File:
                 info["bounds"] = self._shape_bounds(at)
             return [], end, info
         positions, uvs = self._vertices(fvtx, lod)
-        if skin_count == 0 and bones:
-            positions = _rigid(positions, bones, bone_index)
+        if bones and skin_count in (0, 1):
+            slots = self._skin_slots(fvtx, len(positions)) if skin_count == 1 else None
+            positions = _bind_pose(positions, bones, palette, bone_index, slots)
         material = materials[material_index] if 0 <= material_index < len(materials) else None
         if not positions or not lod["indices"]:
             if flags & 0x10:
@@ -761,8 +785,9 @@ class _File:
                     far_positions, far_uvs = self._vertices(fvtx, coarser)
                 except (FresError, struct.error, IndexError, OSError):
                     continue
-                if skin_count == 0 and bones:
-                    far_positions = _rigid(far_positions, bones, bone_index)
+                if bones and skin_count in (0, 1):
+                    far_slots = self._skin_slots(fvtx, len(far_positions)) if skin_count == 1 else None
+                    far_positions = _bind_pose(far_positions, bones, palette, bone_index, far_slots)
                 if not far_positions:
                     continue
                 best = (far_positions, far_uvs, coarser["indices"])
@@ -917,12 +942,46 @@ class _File:
             raise FresError("an index points past the vertex buffer")
         return positions, uvs
 
+    def _skin_slots(self, fvtx: dict, count: int) -> list[int] | None:
+        """Raw `_i0` palette slots. The attribute is an index, not a 0–1 colour."""
+        attribute = _attr(fvtx["attributes"], ("_i0", "i0", "_i"))
+        if attribute is None:
+            return None
+        slots = []
+        for index in range(count):
+            try:
+                slots.append(_read_index(fvtx, attribute, index))
+            except FresError:
+                return None
+        return slots
+
 
 def _attr(attributes: list[dict], names: tuple[str, ...]) -> dict | None:
     for attribute in attributes:
         if attribute["name"] in names:
             return attribute
     return None
+
+
+def _read_index(fvtx: dict, attribute: dict, index: int) -> int:
+    buffer_index = attribute["buffer"]
+    if buffer_index >= len(fvtx["buffers"]):
+        raise FresError(f"attribute {attribute['name']} names a missing buffer")
+    stride = fvtx["strides"][buffer_index] or _format_size(attribute["format"])
+    blob = fvtx["buffers"][buffer_index]
+    at = index * stride + attribute["offset"]
+    fmt = attribute["format"]
+    size = _format_size(fmt)
+    if size <= 0 or at + size > len(blob):
+        raise FresError(f"vertex format 0x{fmt:04X} does not fit in its buffer")
+    if fmt == _U8:
+        return blob[at]
+    if fmt in (_U8_2, _U8_4, _S8_4):
+        return blob[at]
+    if fmt == _U16_2:
+        return struct.unpack_from("<H", blob, at)[0]
+    raw = _decode(blob, at, fmt)
+    return int(raw[0]) if raw else 0
 
 
 def _read_attr(fvtx: dict, attribute: dict, index: int) -> tuple[float, ...]:
@@ -1016,30 +1075,99 @@ def _triangles(indices: list[int], primitive: int) -> list[int]:
 
 def _rigid(positions, bones, bone_index: int) -> list[tuple[float, float, float]]:
     """Move a rigid shape by one bone's bind-pose matrix. Each local TRS is applied once."""
-    if bone_index < 0 or bone_index >= len(bones):
+    return _bind_pose(positions, bones, [], bone_index, None)
+
+
+def _bind_pose(positions, bones, palette, bone_index: int, slots: list[int] | None):
+    """Bake skin count 0 or 1 into model space. Smooth skin is left where it is.
+
+    `slots` is one palette index per vertex. None means every vertex uses the
+    shape bone. A bone whose rigid index is -1 is already in model space.
+    """
+    if not bones:
         return positions
-    local = [_trs(pos, rot, scale) for _parent, pos, rot, scale in bones]
-    worlds: list[list[list[float]] | None] = [None] * len(bones)
+    worlds = _worlds(bones)
+
+    def matrix_for(slot: int | None):
+        index = bone_index
+        if slot is not None:
+            if palette and 0 <= slot < len(palette):
+                index = palette[slot]
+            elif 0 <= slot < len(bones):
+                index = slot
+        if index < 0 or index >= len(bones) or index >= len(worlds):
+            return None
+        rigid = bones[index][5] if len(bones[index]) > 5 else 0
+        if rigid < 0:
+            return None
+        return worlds[index]
+
+    if slots is None:
+        matrix = matrix_for(None)
+        if matrix is None:
+            return positions
+        return [_apply(matrix, point) for point in positions]
+    out = []
+    for index, point in enumerate(positions):
+        matrix = matrix_for(slots[index] if index < len(slots) else None)
+        out.append(_apply(matrix, point) if matrix is not None else point)
+    return out
+
+
+def _worlds(bones) -> list:
+    worlds: list = [None] * len(bones)
     pending = set(range(len(bones)))
-    for _pass in range(len(bones)):
+    for _pass in range(len(bones) + 1):
         if not pending:
             break
         ready = []
         for index in pending:
-            parent = bones[index][0]
+            parent, pos, rot, scale = bones[index][0], bones[index][1], bones[index][2], bones[index][3]
+            flags = bones[index][4] if len(bones[index]) > 4 else 0
+            spinning = _trs((0.0, 0.0, 0.0), rot, scale)
+            if flags & 0x800000 and 0 <= parent < len(bones) and parent != index:
+                # T · inverse(parent scale) · R · S, then the parent world.
+                spinning = _mul(_scale_inverse(bones[parent][3]), spinning)
+            transform = _mul(_trs(pos, (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0)), spinning)
             if parent == index or parent < 0 or parent >= len(bones):
-                worlds[index] = local[index]
+                worlds[index] = transform
                 ready.append(index)
             elif worlds[parent] is not None:
-                worlds[index] = _mul(worlds[parent], local[index])
+                worlds[index] = _mul(worlds[parent], transform)
                 ready.append(index)
         if not ready:
             break
         pending.difference_update(ready)
     for index in pending:
-        worlds[index] = local[index]
-    matrix = worlds[bone_index]
-    return [_apply(matrix, point) for point in positions]
+        bone = bones[index]
+        worlds[index] = _trs(bone[1], bone[2], bone[3])
+    return worlds
+
+
+def _scale_inverse(scale) -> list[list[float]]:
+    def inv(value: float) -> float:
+        return 1.0 / value if abs(value) > 1e-8 else 1.0
+
+    sx, sy, sz = (scale + (1.0, 1.0, 1.0))[:3]
+    return [
+        [inv(sx), 0.0, 0.0, 0.0],
+        [0.0, inv(sy), 0.0, 0.0],
+        [0.0, 0.0, inv(sz), 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def _euler_quat(x: float, y: float, z: float) -> tuple[float, float, float, float]:
+    """XYZ radians to the quaternion `_trs` expects. Rest pose is Rz · Ry · Rx."""
+    cx, sx = math.cos(x * 0.5), math.sin(x * 0.5)
+    cy, sy = math.cos(y * 0.5), math.sin(y * 0.5)
+    cz, sz = math.cos(z * 0.5), math.sin(z * 0.5)
+    return (
+        sx * cy * cz - cx * sy * sz,
+        cx * sy * cz + sx * cy * sz,
+        cx * cy * sz - sx * sy * cz,
+        cx * cy * cz + sx * sy * sz,
+    )
 
 
 def _trs(pos, rot, scale) -> list[list[float]]:

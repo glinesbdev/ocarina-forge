@@ -38,12 +38,28 @@ _PREFIXES = (
 
 def category(gyaml: str) -> str:
     name = gyaml or ""
+    # FldObj_AirWall and BGM_Silence are regions. The FldObj_ prefix would
+    # otherwise call the air wall an ordinary object and draw its cube solid.
+    if "AirWall" in name or name.startswith(("BGM", "Bgm")):
+        return "system"
     for label, prefixes in _PREFIXES:
         if name.startswith(prefixes):
             return label
     if "Anchor" in name or name.endswith("Actor"):
         return "system"
     return "other"
+
+
+def is_region(gyaml: str) -> bool:
+    """A volume that is a region, not a prop that happens to be scaled up.
+
+    These stay wireframes. A land mesh scaled past 8 metres still draws.
+    """
+    name = gyaml or ""
+    if category(name) in ("area", "system"):
+        return True
+    lowered = name.lower()
+    return any(word in lowered for word in _VOLUME_WORDS)
 
 
 # Names that are regions, not props. They are drawn as outlines.
@@ -148,6 +164,7 @@ def view_actor(actor: dict, status: str) -> dict:
         "rotate": read_vec(actor, "Rotate", [0.0, 0.0, 0.0]),
         "scale": scale,
         "volume": is_volume(gyaml, scale),
+        "region": is_region(gyaml),
         "srtHash": f"0x{int(srt) & 0xFFFFFFFF:08x}" if srt is not None else None,
         "status": status,
         "params": tag(params),
