@@ -15,6 +15,7 @@ import { formatStats, keepRendering } from "./frame.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { chooseHit } from "./pick.js";
+import { chooseSnap } from "./snap.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -147,6 +148,7 @@ export async function createViewport(host, hooks) {
   const loadDelta = new THREE.Vector3();
   const loadForward = new THREE.Vector3();
   let terrainRoot = null;
+  let snapOn = false;
   let terrainBanc = null;
   let terrainToken = 0;
   let groundGrid = null;
@@ -334,79 +336,83 @@ export async function createViewport(host, hooks) {
     scene.add(grid);
   }
 
+  function mountActor(actor, index) {
+    const key = actor.id || `locked-${index}`;
+    const recipe = actor.status === "recipe";
+    const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
+    const volume = Boolean(actor.volume);
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.04,
+      depthWrite: false,
+      depthTest: true,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(boxGeometry, material);
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: false,
+    });
+    const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
+    const pivot = new THREE.Group();
+    pivot.add(mesh);
+    pivot.add(edges);
+    const [x, y, z] = actor.translate;
+    const [rx, ry, rz] = actor.rotate;
+    const [sx, sy, sz] = actor.scale;
+    pivot.position.set(x, y, z);
+    pivot.rotation.set(rx, ry, rz);
+    pivot.scale.set(sx || 1, sy || 1, sz || 1);
+    pivot.userData.actorId = actor.id;
+    const gate = {
+      status: actor.status,
+      category: actor.category,
+      volume,
+      showHidden,
+      categories,
+      hideVolumes,
+      companion: Boolean(actor.companion),
+      pickable: actor.pickable !== false,
+    };
+    pivot.visible = actorShown(gate);
+    scene.add(pivot);
+    const entry = {
+      key,
+      id: actor.id,
+      gyaml: actor.gyaml,
+      category: actor.category,
+      status: actor.status,
+      volume,
+      companion: Boolean(actor.companion),
+      parts: null,
+      farNames: null,
+      slots: [],
+      pickable: actor.pickable !== false,
+      locked: actorLocked(gate),
+      color,
+      pivot,
+      mesh,
+      material,
+      edges,
+      edgeMaterial,
+      model: null,
+      modelMeta: metaCache.get(actor.gyaml) || null,
+      label: null,
+      labelText: actorLabel(actor, recipe),
+    };
+    entries.set(key, entry);
+    return entry;
+  }
+
   function setActors(actors, options = {}) {
     clearActors({ keepBatches: true });
     // The field is not part of the actor diff. Clearing it here is what turned
     // the ground black for a couple of seconds after POST /api/scene/edit.
     const token = ++generation;
-    actors.forEach((actor, index) => {
-      const key = actor.id || `locked-${index}`;
-      const recipe = actor.status === "recipe";
-      const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
-      const volume = Boolean(actor.volume);
-      const material = new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.04,
-        depthWrite: false,
-        depthTest: true,
-        side: THREE.DoubleSide,
-      });
-      const mesh = new THREE.Mesh(boxGeometry, material);
-      const edgeMaterial = new THREE.LineBasicMaterial({
-        color,
-        transparent: true,
-        opacity: 0.82,
-        depthWrite: false,
-      });
-      const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
-      const pivot = new THREE.Group();
-      pivot.add(mesh);
-      pivot.add(edges);
-      const [x, y, z] = actor.translate;
-      const [rx, ry, rz] = actor.rotate;
-      const [sx, sy, sz] = actor.scale;
-      pivot.position.set(x, y, z);
-      pivot.rotation.set(rx, ry, rz);
-      pivot.scale.set(sx || 1, sy || 1, sz || 1);
-      pivot.userData.actorId = actor.id;
-      const gate = {
-        status: actor.status,
-        category: actor.category,
-        volume,
-        showHidden,
-        categories,
-        hideVolumes,
-        companion: Boolean(actor.companion),
-        pickable: actor.pickable !== false,
-      };
-      pivot.visible = actorShown(gate);
-      scene.add(pivot);
-      entries.set(key, {
-        key,
-        id: actor.id,
-        gyaml: actor.gyaml,
-        category: actor.category,
-        status: actor.status,
-        volume,
-        companion: Boolean(actor.companion),
-        parts: null,
-        farNames: null,
-        slots: [],
-        pickable: actor.pickable !== false,
-        locked: actorLocked(gate),
-        color,
-        pivot,
-        mesh,
-        material,
-        edges,
-        edgeMaterial,
-        model: null,
-        modelMeta: metaCache.get(actor.gyaml) || null,
-        label: null,
-        labelText: actorLabel(actor, recipe),
-      });
-    });
+    actors.forEach((actor, index) => mountActor(actor, index));
     if (selected && !entries.has(selected)) selected = null;
     for (const entry of entries.values()) paint(entry);
     attach();
@@ -502,6 +508,67 @@ export async function createViewport(host, hooks) {
       entry.edges.scale.copy(entry.mesh.scale);
       entry.edges.position.copy(entry.mesh.position);
     }
+  }
+
+  function hideSlots(entry) {
+    for (const slot of entry.slots || []) {
+      slot.shown = false;
+      if (slot.mesh && slot.mesh.setVisibleAt) slot.mesh.setVisibleAt(slot.index, false);
+      if (slot.mesh) slot.mesh._visibilityChanged = true;
+    }
+  }
+
+  function adoptModel(entry) {
+    const sibling = [...entries.values()].find(
+      (other) => other !== entry && other.gyaml === entry.gyaml && other.parts && other.parts.length,
+    );
+    if (!sibling) return false;
+    entry.parts = sibling.parts;
+    entry.farNames = sibling.farNames;
+    entry.templateUrl = sibling.templateUrl;
+    entry.modelMeta = sibling.modelMeta;
+    entry.volume = false;
+    entry.mesh.visible = false;
+    queueRebuild();
+    return true;
+  }
+
+  function reconcileActors(actors) {
+    if (!entries.size || !Array.isArray(actors)) return false;
+    const wanted = new Map();
+    actors.forEach((actor, index) => wanted.set(actor.id || `locked-${index}`, { actor, index }));
+    for (const [key, entry] of [...entries.entries()]) {
+      if (wanted.has(key)) continue;
+      hideSlots(entry);
+      disposeEntry(entry);
+      entries.delete(key);
+    }
+    const fresh = [];
+    for (const [key, item] of wanted) {
+      const entry = entries.get(key);
+      if (entry && entry.gyaml === item.actor.gyaml) {
+        applyActorRecord(entry, item.actor);
+        continue;
+      }
+      if (entry) {
+        hideSlots(entry);
+        disposeEntry(entry);
+        entries.delete(key);
+      }
+      fresh.push({ entry: mountActor(item.actor, item.index), actor: item.actor });
+    }
+    const loading = [];
+    for (const item of fresh) {
+      paint(item.entry);
+      if (!adoptModel(item.entry)) loading.push(item.actor);
+    }
+    if (loading.length) loadModels(generation, loading);
+    if (selected && !entries.has(selected)) selected = null;
+    syncBatchVisibility();
+    syncLabels();
+    attach();
+    requestRender();
+    return true;
   }
 
   function report(info) {
@@ -1715,8 +1782,52 @@ uniform float terrainLayerMissing;`
     else frameObjects([...entries.values()].filter((entry) => entry.pivot.visible).map((entry) => entry.pivot));
   }
 
+  function isCollisionEntry(entry) {
+    const name = String(entry.gyaml || "").toLowerCase();
+    return name.includes("collision") || name.includes("collider");
+  }
+
+  function surfaceAt(x, y, z, ignoreId) {
+    const hits = [];
+    snapRay.ray.origin.set(x, y + 80, z);
+    snapRay.ray.direction.set(0, -1, 0);
+    if (terrainRoot) {
+      terrainRoot.traverse((child) => {
+        if (!child.isMesh || !child.visible || !child.geometry) return;
+        const found = [];
+        try {
+          acceleratedRaycast.call(child, snapRay, found);
+        } catch {
+          return;
+        }
+        for (const hit of found) {
+          if (hit.point) hits.push({ y: hit.point.y });
+        }
+      });
+    }
+    for (const entry of entries.values()) {
+      if (!isCollisionEntry(entry) || !entry.pivot.visible) continue;
+      if (entry.key === ignoreId || entry.id === ignoreId) continue;
+      const top = volumeSurfaceY(entry, snapRay);
+      if (top != null) hits.push({ y: top });
+    }
+    return chooseSnap(y, hits);
+  }
+
+  function maybeSnap(entry) {
+    if (!snapOn || !entry || transform.mode !== "translate") return;
+    const p = entry.pivot.position;
+    const y = surfaceAt(p.x, p.y, p.z, entry.id);
+    if (y == null) return;
+    p.y = y;
+  }
+
   function spawnPoint() {
-    return [round(orbit.target.x), round(orbit.target.y), round(orbit.target.z)];
+    const point = [round(orbit.target.x), round(orbit.target.y), round(orbit.target.z)];
+    if (!snapOn) return point;
+    const y = surfaceAt(point[0], point[1], point[2], null);
+    if (y == null) return point;
+    return [point[0], round(y), point[2]];
   }
 
   function round(value) {
@@ -1733,6 +1844,7 @@ uniform float terrainLayerMissing;`
   }
 
   const raycaster = new THREE.Raycaster();
+  const snapRay = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
 
   function aimed(event) {
@@ -1773,6 +1885,15 @@ uniform float terrainLayerMissing;`
     }
     found.sort((a, b) => a.distance - b.distance);
     return found;
+  }
+
+  function volumeSurfaceY(entry, ray) {
+    if (!entry.mesh) return null;
+    entry.mesh.updateWorldMatrix(true, false);
+    localInverse.copy(entry.mesh.matrixWorld).invert();
+    localRay.copy(ray.ray).applyMatrix4(localInverse);
+    if (!localRay.intersectBox(unitBox, localPoint)) return null;
+    return localPoint.clone().applyMatrix4(entry.mesh.matrixWorld).y;
   }
 
   function idOfHit(hit) {
@@ -1902,6 +2023,8 @@ uniform float terrainLayerMissing;`
   transform.addEventListener("objectChange", () => {
     const entry = selected ? entries.get(selected) : null;
     if (!entry) return;
+    const axis = transform.axis;
+    if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) maybeSnap(entry);
     const p = entry.pivot.position;
     const r = entry.pivot.rotation;
     hooks.onPreview(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
@@ -1917,6 +2040,7 @@ uniform float terrainLayerMissing;`
     }
     const entry = selected ? entries.get(selected) : null;
     if (!entry || !entry.id) return;
+    maybeSnap(entry);
     const p = entry.pivot.position;
     const r = entry.pivot.rotation;
     hooks.onTransform(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
@@ -2082,6 +2206,10 @@ uniform float terrainLayerMissing;`
     backendNote,
     setActors,
     patchActors,
+    reconcileActors,
+    setSnap(on) {
+      snapOn = Boolean(on);
+    },
     select,
     setNav,
     setGizmo,

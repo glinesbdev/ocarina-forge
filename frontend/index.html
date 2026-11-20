@@ -25,8 +25,8 @@
           <span id="project-name" class="muted"></span>
         </button>
         <div class="top-actions">
-          <button id="undo" type="button" class="ghost" title="Undo the last edit in this scene (this session)" disabled>Undo</button>
-          <button id="redo" type="button" class="ghost" title="Redo" disabled>Redo</button>
+          <button id="undo" type="button" class="ghost" title="Undo the last edit (Ctrl+Z)" disabled>Undo</button>
+          <button id="redo" type="button" class="ghost" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>Redo</button>
           <button id="build-open" type="button" class="primary" hidden>Build mod</button>
           <button id="open-scenes" type="button" class="ghost mobile-only">Scenes</button>
           <button id="open-side" type="button" class="ghost mobile-only">Actors</button>
@@ -72,12 +72,13 @@
               <button type="button" data-gizmo="translate" class="is-on">Move</button>
               <button type="button" data-gizmo="rotate">Rotate</button>
             </div>
+            <label class="check" title="Drop and move onto the terrain or a collision volume. V toggles this."><input id="snap-surface" type="checkbox" /> Snap</label>
             <label class="check"><input id="show-hidden" type="checkbox" /> Show hidden</label>
             <label class="check"><input id="show-labels" type="checkbox" checked /> All labels</label>
             <label class="check"><input id="show-companions" type="checkbox" checked /> Companion banc</label>
             <label class="check"><input id="companion-pick" type="checkbox" checked /> Pick companions</label>
             <label class="check"><input id="show-stats" type="checkbox" /> Stats</label>
-            <label class="check" title="Reload with WebGPU. WebGL stays the default. If the browser has no WebGPU, the view stays on WebGL."><input id="use-webgpu" type="checkbox" /> WebGPU</label>
+            <label class="check" title="Experimental. WebGL stays the default. The Kokiri WebGPU trial stayed slower, so this path is shelved."><input id="use-webgpu" type="checkbox" /> WebGPU <span class="muted">experimental</span></label>
             <label class="check" title="Auto uses the size rules. A metre cap also hides anything farther than that, except the selection.">Draw
               <select id="draw-distance">
                 <option value="0" selected>Auto</option>

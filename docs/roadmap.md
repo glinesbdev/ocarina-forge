@@ -1,18 +1,20 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass and the WebGPU trial are in this build. Editing UX and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, and ground snap in this build. Cmd-K, live validation, hot reload, grid snap, and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
 Render on change, so an idle view does not redraw. Instance repeated models on the GPU. Frustum and occlusion culling. Real LODs: the game’s LOD meshes where the file has them, and a generated mesh otherwise, with low-mip textures at distance. A GPU-ready import cache (glTF with meshopt, and KTX2). Nearest-first streaming. Prebaked terrain and atlases per scene.
 
-## 2. WebGPU trial
+## 2. WebGPU trial (shelved)
 
-In this build, as an opt-in. Three stays on r170. **WebGPU** in the stage bar, or `?gpu=1`, reloads on `WebGPURenderer`. The default is the existing `WebGLRenderer`. No adapter keeps `WebGPURenderer` on its WebGL2 backend, and the stats line says `WebGPU (WebGL2 fallback)`. The terrain atlas has a TSL port; instancing, picking, the gizmo, LOD, culling, and render-on-change are the same scene code on both. Water and leaf alpha go through the node material when WebGPU is on. r170 does not count `BatchedMesh` draws in the WebGPU info counters, so compare fps, frame time, `inst`, and the picture, not `tris`. How to switch, and the gaps, are in [performance.md](performance.md). A Kokiri A/B is still the thing that decides whether WebGPU becomes the default.
+The opt-in stays, labelled experimental, and WebGL stays the default. Three stays on r170. **WebGPU** in the stage bar, or `?gpu=1`, still reloads on `WebGPURenderer`. No adapter keeps that renderer on its WebGL2 backend, and the stats line says `WebGPU (WebGL2 fallback)`. On a real Kokiri GPU the frame stayed 3–12× slower than WebGL (the last pass was 247.9 ms and 338 draws, against WebGL under 30 ms). r170 has no multi-draw, so one shared material is still one draw per index range. The render-call loop (up to about 80 `render()` calls in a frame) and the remaining solid grass cards are unresolved. Revisit this on a newer three. The measurements are in [performance.md](performance.md).
 
 ## 3. Editing UX
 
-Instant undo and redo on the diff model. Hot-reload of changed files into the Longshot mod folder. Cmd-K search across actors, flags, messages, and scenes. Snap to the ground, to a surface, and to a grid. Live validation for bad flag references, missing models, and unreachable events.
+In this build: instant undo and redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) for a move, a rotate, a property edit, add, delete, duplicate, hide, and the Areas / System lock. The stack is in memory and the project diff is written from the same shot, so a transform undo patches the instance matrix and does not reload the scene. **Changes** lists that session above the project diff. **Snap** (checkbox, or V) raycasts the terrain and collision volumes while a move or a new actor is dropped.
+
+Still later, after this undo and snap are checked on a real dump: hot-reload of changed files into the Longshot mod folder, Cmd-K search across actors, flags, messages, and scenes, snap to a grid, and live validation for bad flag references, missing models, and unreachable events.
 
 ## 4. Behavior editor
 

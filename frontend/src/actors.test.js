@@ -66,4 +66,13 @@ test("a saved transform does not clear the actor batches", () => {
   assert.match(patch, /syncInstanceMatrix\(entry\)/);
   assert.doesNotMatch(patch, /clearBatches\(/);
   assert.doesNotMatch(patch, /loadModels\(/);
+  const reconcile = viewport.slice(viewport.indexOf("function reconcileActors"), viewport.indexOf("function report"));
+  assert.doesNotMatch(reconcile, /clearActors\(/);
+  assert.doesNotMatch(reconcile, /clearBatches\(/);
+  const undo = main.slice(main.indexOf("function undo("), main.indexOf("function redo("));
+  const redo = main.slice(main.indexOf("function redo("), main.indexOf("function removeRecipe"));
+  assert.doesNotMatch(undo, /api\.scene/);
+  assert.doesNotMatch(redo, /api\.scene/);
+  assert.match(undo, /applyLocal\(/);
+  assert.match(main, /viewport\.reconcileActors\(/);
 });

@@ -1,6 +1,7 @@
 import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
 import { rendererChoice, rendererSearch } from "./backend.js";
+import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { createViewport } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -17,7 +18,7 @@ const state = {
   banc: null,
   view: null,
   selected: null,
-  history: { undo: [], redo: [] },
+  history: blankHistory(null),
   showHidden: false,
   showLabels: true,
   showCompanions: true,
@@ -159,10 +160,10 @@ if (gpuBox) {
   const gpuLabel = gpuBox.parentElement;
   if (gpuLabel) {
     gpuLabel.title = viewport.backend === "WebGPU"
-      ? "WebGPU is drawing. Uncheck to reload on WebGL."
+      ? "Experimental. This page is on WebGPU. Uncheck to reload WebGL. The Kokiri trial stayed slower, so this path is shelved."
       : viewport.backend === "WebGPU (WebGL2 fallback)"
-        ? "WebGPURenderer is on its WebGL2 backend, not a WebGPU device. Uncheck to reload the default WebGL renderer."
-        : "Reload and try WebGPU. WebGL stays the default, and a missing GPU falls back here.";
+        ? "Experimental. WebGPURenderer is on its WebGL2 backend, not a WebGPU device. Uncheck to reload the default WebGL renderer."
+        : "Experimental. WebGL stays the default. The Kokiri WebGPU trial stayed slower, so this path is shelved.";
   }
   gpuBox.addEventListener("change", () => {
     const next = rendererSearch(window.location.search, gpuBox.checked ? "webgpu" : "webgl");
@@ -190,6 +191,10 @@ $("terrain-debug").addEventListener("change", (event) => {
   viewport.setFlags({ terrainDebug: state.terrainDebug });
 });
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
+const snapBox = $("snap-surface");
+if (snapBox) {
+  snapBox.addEventListener("change", () => viewport.setSnap(snapBox.checked));
+}
 document.querySelectorAll("[data-cat]").forEach((button) => {
   button.addEventListener("click", () => {
     setCategory(button.dataset.cat, button.dataset.mode);
@@ -252,6 +257,12 @@ window.addEventListener("keydown", (event) => {
     if (!actor) return;
     if (actor.status === "recipe") removeRecipe(actor);
     else edit({ command: "remove", id: state.selected });
+  } else if (event.key.toLowerCase() === "v" && !meta) {
+    const box = $("snap-surface");
+    if (!box) return;
+    box.checked = !box.checked;
+    viewport.setSnap(box.checked);
+    toast(box.checked ? "Snap to ground and collision is on." : "Snap is off.");
   } else if (event.key === "Escape") {
     state.selected = null;
     viewport.select(null);
@@ -672,11 +683,13 @@ async function openScene(banc, options = {}) {
   try {
     const view = await api.scene(banc);
     state.banc = banc;
-    if (!options.keepHistory) state.history = { undo: [], redo: [] };
+    if (!options.keepHistory) state.history = blankHistory(null);
     const interesting = view.actors.find((actor) => actor.status === "edited" || actor.status === "added");
     applyView(view, { frame: Boolean(options.frame), select: interesting ? interesting.id : null });
+    if (!options.keepHistory) state.history = blankHistory(captureShot());
     renderScenes();
     updateHistoryButtons();
+    renderChanges();
   } catch (error) {
     toast(error.message);
     $("warnings").hidden = false;
@@ -759,7 +772,11 @@ function applyView(view, { frame = false, select } = {}) {
   if (state.selected && !composed.actors.some((actor) => actor.id === state.selected)) state.selected = null;
   const plan = frame ? { mode: "rebuild" } : planActorRefresh(previousActors, composed.actors);
   const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
-  if (!patched) viewport.setActors(composed.actors, { frame, banc: view.banc });
+  // A new or deleted actor joins the batches that are already on screen.
+  // Opening a scene still goes through setActors, which is the one full load.
+  if (!patched && (frame || !viewport.reconcileActors(composed.actors))) {
+    viewport.setActors(composed.actors, { frame, banc: view.banc });
+  }
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
   const warnings = $("warnings");
@@ -820,6 +837,112 @@ function snapshot() {
   };
 }
 
+function captureShot() {
+  const file = snapshot();
+  return {
+    ...file,
+    select: state.selected,
+    viewActors: structuredClone((state.view && state.view.actors) || []),
+  };
+}
+
+let persistChain = Promise.resolve();
+let persistToken = 0;
+
+function persistShot(shot, rollback) {
+  const token = ++persistToken;
+  const banc = state.banc;
+  const leaving = rollback && rollback.shot;
+  const writeRecipes = shotHasRecipes(shot) || shotHasRecipes(leaving);
+  persistChain = persistChain.then(async () => {
+    try {
+      await writeShot(banc, shot, writeRecipes);
+    } catch (error) {
+      if (token !== persistToken) return;
+      toast(error.message || "The project file did not save.");
+      if (!rollback) return;
+      state.history = rollback.history;
+      if (rollback.shot) applyLocal(rollback.shot);
+      updateHistoryButtons();
+    }
+  });
+}
+
+function shotHasRecipes(shot) {
+  if (!shot) return false;
+  if (shot.recipes && shot.recipes.length) return true;
+  return (shot.companions || []).some((item) => item.recipes && item.recipes.length);
+}
+
+async function writeShot(banc, shot, writeRecipes) {
+  if (!banc || !shot) return;
+  await api.putDiff(banc, shot.actors || {});
+  if (writeRecipes) await api.putRecipes(banc, shot.recipes || []);
+  for (const item of shot.companions || []) {
+    if (!item.banc || item.banc === banc) continue;
+    await api.putDiff(item.banc, item.actors || {});
+    if (writeRecipes && Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
+  }
+  if (state.banc === banc) loadChanges(banc);
+}
+
+function applyLocal(shot) {
+  if (!shot || !state.raw) return;
+  const previousActors = state.view ? state.view.actors : null;
+  const nextActors = structuredClone(shot.viewActors || []);
+  const hostActors = nextActors.filter((actor) => !actor.companion).map((actor) => {
+    const copy = { ...actor };
+    delete copy.companion;
+    delete copy.companionLabel;
+    delete copy.banc;
+    return copy;
+  });
+  const companionActors = new Map();
+  for (const actor of nextActors) {
+    if (!actor.companion) continue;
+    const list = companionActors.get(actor.banc) || [];
+    const copy = { ...actor, id: actor.placementId || String(actor.id).split("::").pop() };
+    delete copy.companion;
+    delete copy.companionLabel;
+    delete copy.pickable;
+    list.push(copy);
+    companionActors.set(actor.banc, list);
+  }
+  state.raw = {
+    ...state.raw,
+    actors: hostActors,
+    diff: { ...(state.raw.diff || {}), actors: structuredClone(shot.actors || {}) },
+    recipes: structuredClone(shot.recipes || []),
+    companions: (state.raw.companions || []).map((item) => {
+      const saved = (shot.companions || []).find((entry) => entry.banc === item.banc);
+      const listed = companionActors.get(item.banc);
+      return {
+        ...item,
+        ...(saved ? { diff: { ...(item.diff || {}), actors: structuredClone(saved.actors || {}) } } : {}),
+        ...(listed ? { actors: listed } : {}),
+      };
+    }),
+  };
+  state.view = { ...(state.view || {}), actors: nextActors };
+  const plan = planActorRefresh(previousActors, nextActors);
+  const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
+  if (!patched && !viewport.reconcileActors(nextActors)) {
+    viewport.setActors(nextActors, { frame: false, banc: state.banc });
+  }
+  state.selected = shot.select && nextActors.some((actor) => actor.id === shot.select) ? shot.select : null;
+  viewport.select(state.selected);
+  const diff = (state.raw.diff && state.raw.diff.actors) || {};
+  if (state.banc) {
+    if (Object.keys(diff).length) state.modified.add(state.banc);
+    else state.modified.delete(state.banc);
+  }
+  renderOutliner();
+  renderProps();
+  renderScenes();
+  renderChanges();
+  noteCompanion();
+}
+
 async function edit(command) {
   if (!state.banc) return;
   if (!projectReady()) {
@@ -828,9 +951,9 @@ async function edit(command) {
     return;
   }
   const target = commandTarget(command);
-  const before = snapshot();
-  state.history.undo.push(before);
-  state.history.redo = [];
+  const subject = actorRecord(command.id) || { gyaml: command.actor || command.gyaml || "" };
+  const label = editLabel(command, subject, { gizmo: state.gizmo });
+  await persistChain;
   try {
     const view = await api.edit(target.banc, target.command);
     if (target.banc !== state.banc && state.raw) {
@@ -847,9 +970,10 @@ async function edit(command) {
         { select: view.focus || state.selected },
       );
     }
+    state.history = pushEdit(state.history, { label, shot: captureShot() });
     renderScenes();
+    renderChanges();
   } catch (error) {
-    state.history.undo.pop();
     toast(error.message);
     if (state.view && !viewport.patchActors(state.view.actors)) {
       viewport.setActors(state.view.actors, { frame: false, banc: state.banc });
@@ -859,39 +983,39 @@ async function edit(command) {
   updateHistoryButtons();
 }
 
-async function undo() {
-  if (!state.history.undo.length || !state.banc) return;
-  state.history.redo.push(snapshot());
-  const previous = state.history.undo.pop();
-  await restore(previous);
-}
-
-async function redo() {
-  if (!state.history.redo.length || !state.banc) return;
-  state.history.undo.push(snapshot());
-  const next = state.history.redo.pop();
-  await restore(next);
-}
-
-async function restore(shot) {
-  const actors = shot && shot.actors ? shot.actors : shot || {};
-  const recipes = shot && Array.isArray(shot.recipes) ? shot.recipes : null;
-  const hadRecipes = ((state.view && state.view.actors) || []).some((actor) => actor.status === "recipe");
-  try {
-    await api.putDiff(state.banc, actors);
-    if (recipes && (recipes.length || hadRecipes)) await api.putRecipes(state.banc, recipes);
-    for (const item of shot.companions || []) {
-      if (!item.banc) continue;
-      await api.putDiff(item.banc, item.actors || {});
-      if (Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
-    }
-    const view = await api.scene(state.banc);
-    applyView(view, { select: state.selected });
-    renderScenes();
-  } catch (error) {
-    toast(error.message);
-  }
+function undo() {
+  if (!state.banc) return;
+  const previousHistory = state.history;
+  const step = popUndo(state.history);
+  if (!step) return;
+  state.history = step.history;
   updateHistoryButtons();
+  if (step.entry.local) {
+    setCategory(step.entry.category, step.entry.before, { record: false });
+    renderOutliner();
+    renderChanges();
+    return;
+  }
+  if (!step.scene) return;
+  applyLocal(step.scene);
+  persistShot(step.scene, { history: previousHistory, shot: step.entry.shot });
+}
+
+function redo() {
+  if (!state.banc) return;
+  const previousHistory = state.history;
+  const step = popRedo(state.history);
+  if (!step) return;
+  state.history = step.history;
+  updateHistoryButtons();
+  if (step.entry.local) {
+    setCategory(step.entry.category, step.entry.after, { record: false });
+    renderOutliner();
+    renderChanges();
+    return;
+  }
+  applyLocal(step.entry.shot);
+  persistShot(step.entry.shot, { history: previousHistory, shot: step.scene });
 }
 
 function removeRecipe(actor) {
@@ -981,12 +1105,20 @@ state.helperBoxes = loadHelperBoxes();
 viewport.setFlags({ boxes: state.helperBoxes });
 renderLegend();
 
-function setCategory(cat, mode) {
+function setCategory(cat, mode, options = {}) {
+  const previous = state.categories[cat] || "show";
+  if (previous === mode) return;
   state.categories[cat] = mode;
   document.querySelectorAll(`[data-cat="${cat}"]`).forEach((item) => {
     item.classList.toggle("is-on", item.dataset.mode === mode);
   });
   viewport.setFlags({ categories: { [cat]: mode } });
+  if (options.record === false || !state.banc) return;
+  const name = (CATEGORY_FILTERS.find(([id]) => id === cat) || [cat, cat])[1];
+  const label = mode === "lock" ? `Lock ${name}` : mode === "hide" ? `Hide ${name}` : `Show ${name}`;
+  state.history = pushEdit(state.history, { label, local: true, category: cat, before: previous, after: mode });
+  updateHistoryButtons();
+  renderChanges();
 }
 
 function updateHistoryButtons() {
@@ -1553,12 +1685,13 @@ function renderChanges() {
   const total = report && report.counts ? report.counts.total : 0;
   badge.hidden = !total;
   badge.textContent = total ? String(total) : "";
+  panel.append(sessionBlock());
   if (!state.banc) {
     panel.append(empty("Open a scene to see what the project changed."));
     return;
   }
   if (!report) {
-    panel.append(empty("Loading changes…"));
+    panel.append(empty("Loading the project diff…"));
     return;
   }
   if (report.error) {
@@ -1570,6 +1703,47 @@ function renderChanges() {
     return;
   }
   panel.append(changeGroups(report.groups || []));
+}
+
+function sessionBlock() {
+  const root = document.createElement("div");
+  root.className = "change-list";
+  const heading = document.createElement("div");
+  heading.className = "area";
+  heading.textContent = "This session";
+  root.append(heading);
+  const rows = historyRows(state.history);
+  if (!rows.length) {
+    root.append(empty("No edits this sitting. Ctrl+Z steps back through a move, a property, add, delete, duplicate, hide, and lock."));
+    return root;
+  }
+  for (const row of rows) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = row.place === "redo" ? "change-row is-redo" : "change-row";
+    if (row.latest) button.classList.add("is-current");
+    const text = document.createElement("span");
+    text.className = "grow";
+    const strong = document.createElement("strong");
+    strong.textContent = row.entry.label;
+    const small = document.createElement("small");
+    small.textContent = row.place === "redo" ? "Redo" : row.latest ? "Latest · Ctrl+Z" : "Undo";
+    text.append(strong, small);
+    button.append(text);
+    button.addEventListener("click", () => focusHistory(row.entry));
+    root.append(button);
+  }
+  return root;
+}
+
+function focusHistory(entry) {
+  const id = entry.shot && entry.shot.select;
+  if (!id || !state.view || !state.view.actors.some((actor) => actor.id === id)) return;
+  state.selected = id;
+  viewport.select(id);
+  viewport.frame(id);
+  renderOutliner();
+  renderProps();
 }
 
 function changeGroups(groups) {
