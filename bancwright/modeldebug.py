@@ -27,15 +27,23 @@ from bancwright.scene import sibling_bancs
 
 
 def load_bytes(dump, target: str) -> tuple[str, bytes]:
-    """A gyaml through the actor plan, or a bfres path on disk."""
+    """A gyaml through the actor plan, a file on disk, or a dump-relative bfres path.
+
+    ``Model/Project.Name.bfres.zs`` is that file. It is not a gyaml, so it is
+    not prefixed with ``Model/`` and ``.bfres.zs`` a second time.
+    """
     path = Path(target).expanduser()
     if path.is_file():
-        raw = path.read_bytes()
-        if raw.startswith(b"\x28\xb5\x2f\xfd"):
-            raw, _dict_id = decompress(raw, dump.dicts() if dump is not None else None)
-        if not raw.startswith(b"FRES"):
-            raise FresError(f"{target} is not a BFRES file")
-        return str(path), raw
+        return str(path), _fres_bytes(path.read_bytes(), dump, target)
+    relative = target.replace("\\", "/").strip()
+    if relative.startswith("./"):
+        relative = relative[2:]
+    relative = relative.lstrip("/")
+    if _model_path(relative):
+        if dump is None or not (dump.romfs / relative).is_file():
+            raise BancError(f"No model file {relative} in this dump.", "not_found")
+        raw, _dict_id = dump.read_file(relative)
+        return relative, _fres_bytes(raw, None, relative)
     from bancwright.models import _actor_plan, _realize
 
     plan, tried = _actor_plan(dump, target)
@@ -45,6 +53,22 @@ def load_bytes(dump, target: str) -> tuple[str, bytes]:
         tried_text = ", ".join(tried[:6]) or "Pack/Actor and Model"
         raise BancError(f"No model for {target}. Tried {tried_text}.", "not_found")
     return found[0]
+
+
+def _model_path(relative: str) -> bool:
+    """A bfres or pack path, not an actor gyaml."""
+    if not relative or ".." in relative.split("/"):
+        return False
+    lower = relative.lower()
+    return lower.endswith((".bfres", ".bfres.zs", ".pack", ".pack.zs"))
+
+
+def _fres_bytes(raw: bytes, dump, label: str) -> bytes:
+    if raw.startswith(b"\x28\xb5\x2f\xfd"):
+        raw, _dict_id = decompress(raw, dump.dicts() if dump is not None else None)
+    if not raw.startswith(b"FRES"):
+        raise FresError(f"{label} is not a BFRES file")
+    return raw
 
 
 def debug_bytes(label: str, blob: bytes) -> dict:

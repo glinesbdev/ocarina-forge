@@ -83,6 +83,8 @@ class Part:
     emission_texture: str = ""
     # Every `_uN` channel in the vertex buffer, with min/max. Not the channel the mesh is drawn with.
     uv_sets: list[dict] = field(default_factory=list)
+    # Every vertex attribute (name, format, min/max). The drawn UV stays `_u0`.
+    vertex_attributes: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -111,6 +113,8 @@ class Material:
     states: list[str] = field(default_factory=list)
     # One line per unread v10 header qword, set only when no shader assign matched.
     slots: list[str] = field(default_factory=list)
+    # Retail v10 shader-info blocks (+0x10 and +0xA8). A reading, not applied to the mesh.
+    shader_blocks: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -609,11 +613,23 @@ class _File:
             alpha, cutoff, sided = _alpha_state({}, {}, "", name)
             mode = ""
         note = self._render_info_note(at)
+        blocks = self._retail_shader_blocks(at)
+        primary = next(
+            (block for block in blocks if block.get("slot") == "+0x10" and (block.get("attributeNames") or block.get("samplerNames"))),
+            None,
+        )
         try:
-            archive, model, attributes, assign, options, params, slots = self._probe_v10_shader(at)
+            if primary:
+                archive = primary.get("archive") or ""
+                model = primary.get("model") or ""
+                attributes, assign, options = {}, {}, {}
+                params = self._probe_params(self._header_pointers(at))
+                slots = self._header_lines(at)
+            else:
+                archive, model, attributes, assign, options, params, slots = self._probe_v10_shader(at)
         except (FresError, struct.error, IndexError, OSError, ValueError):
             archive, model, attributes, assign, options, params, slots = "", "", {}, {}, {}, [], []
-        return Material(
+        material = Material(
             name,
             binds,
             albedo,
@@ -633,6 +649,8 @@ class _File:
             states,
             slots,
         )
+        material.shader_blocks = blocks
+        return material
 
     def _render_info_note(self, at: int) -> str:
         """Why a v10 material has no render-info keys.
@@ -776,6 +794,113 @@ class _File:
                 found[key] = target
         return found
 
+    def _retail_shader_blocks(self, header: int) -> list[dict]:
+        """FMAT +0x10 and +0xA8 when they are string lists plus a byte map.
+
+        The version-9 assign stores the archive string at +0x00 of its block.
+        That record is left for ``_probe_v10_shader``. This reading is not
+        applied to the mesh.
+        """
+        found = []
+        for slot in (0x10, 0xA8):
+            if header + slot + 8 > len(self.data):
+                continue
+            block = self._retail_shader_block(self.u64(header + slot))
+            if not block:
+                continue
+            block["slot"] = f"+0x{slot:02X}"
+            found.append(block)
+        return found
+
+    def _retail_shader_block(self, ptr: int) -> dict | None:
+        if not ptr or ptr + 0x20 > len(self.data) or self._is_string(ptr) or self._dict_ok(ptr):
+            return None
+        first, second, byte_at, samplers_at = (self.u64(ptr + off) for off in (0, 8, 0x10, 0x18))
+        if self._is_string(first) and self._is_string(second):
+            return None
+        labels = self._string_pointer_list(first, 4)
+        attributes = self._string_pointer_list(second, 32)
+        samplers = self._string_pointer_list(samplers_at, 32)
+        if not labels and not attributes and not samplers:
+            return None
+        byte_map: list[dict] = []
+        byte_note = ""
+        if byte_at and not self._is_string(byte_at) and not self._dict_ok(byte_at) and not self._string_pointer_list(byte_at, 1):
+            byte_map, byte_note = self._index_bytes(byte_at)
+        children = []
+        for off, child, used in ((8, second, bool(attributes)), (0x10, byte_at, bool(byte_map)), (0x18, samplers_at, bool(samplers))):
+            if used or not child:
+                continue
+            children.append(
+                {
+                    "offset": off,
+                    "at": child,
+                    "text": self._describe_pointer(child),
+                    "dwords": self._leading_dwords(child, 8),
+                }
+            )
+        return {
+            "at": ptr,
+            "archive": labels[0] if labels else "",
+            "model": labels[1] if len(labels) > 1 else "",
+            "labels": labels,
+            "attributeNames": attributes,
+            "samplerNames": samplers,
+            "byteMap": byte_map,
+            "byteNote": byte_note,
+            "children": children,
+        }
+
+    def _string_pointer_list(self, at: int, limit: int) -> list[str]:
+        """u64 slots that each point at a BFRES string. Stop at null or a non-string."""
+        if not at or limit <= 0 or self._is_string(at) or self._dict_ok(at):
+            return []
+        names = []
+        for index in range(min(limit, 32)):
+            slot = at + index * 8
+            if slot + 8 > len(self.data):
+                break
+            ptr = self.u64(slot)
+            if not ptr or not self._is_string(ptr):
+                break
+            text = self.string(ptr)
+            if not text:
+                break
+            names.append(text)
+        return names
+
+    def _index_bytes(self, ptr: int) -> tuple[list[dict], str]:
+        """The first 32 bytes at ``ptr``. 0xFF is unused. Not applied to the mesh."""
+        if ptr < 0 or ptr + 4 > len(self.data):
+            return [], ""
+        raw = self.data[ptr : min(ptr + 32, len(self.data))]
+        rows = [{"index": index, "value": byte, "unused": byte == 0xFF} for index, byte in enumerate(raw)]
+        note = (
+            "Reading of these bytes, not applied to the mesh. 0xFF is unused. "
+            "One reading is an index per attribute name, then an index per sampler name "
+            "(a vertex buffer slot or a UV channel). That split is not confirmed."
+        )
+        return rows, note
+
+    def _leading_dwords(self, ptr: int, count: int) -> list[int]:
+        found = []
+        for index in range(count):
+            at = ptr + index * 4
+            if at < 0 or at + 4 > len(self.data):
+                break
+            found.append(self.u32(at))
+        return found
+
+    def _header_pointers(self, header: int) -> list[int]:
+        slots = (0x10, 0x18, 0x28, 0x30, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA8)
+        pointers: list[int] = []
+        for slot in slots:
+            ptr = self.u64(header + slot) if header + slot + 8 <= len(self.data) else 0
+            for candidate in self._pointer_candidates(header, slot, ptr):
+                if candidate not in pointers:
+                    pointers.append(candidate)
+        return pointers
+
     def _probe_v10_shader(self, header: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str], list[dict]]:
         """Find a shader-assign block and shader-param array in a v10 header.
 
@@ -787,13 +912,7 @@ class _File:
         length is the count in that case. A complete miss returns one line
         per header qword so the next dump shows the real slot.
         """
-        slots = (0x10, 0x18, 0x28, 0x30, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA8)
-        pointers: list[int] = []
-        for slot in slots:
-            ptr = self.u64(header + slot) if header + slot + 8 <= len(self.data) else 0
-            for candidate in self._pointer_candidates(header, slot, ptr):
-                if candidate not in pointers:
-                    pointers.append(candidate)
+        pointers = self._header_pointers(header)
         best = self._best_assign(pointers)
         nested: list[int] = []
         if best is None:
@@ -1230,9 +1349,11 @@ class _File:
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
             return [], end, info
-        uv_sets = _uv_ranges(fvtx)
+        attributes = _attr_ranges(fvtx)
+        uv_sets = [item for item in attributes if _UV_ATTR.fullmatch(item.get("name") or "")]
         made = [_part_from(name, positions, lod["indices"], uvs, material, material_index, 0)]
         made[0].uv_sets = uv_sets
+        made[0].vertex_attributes = attributes
         # LOD meshes are a contiguous array of 0x38-byte headers. Drawing every
         # level at once stacks the coarse mesh on the fine one. Keep LOD 0 for
         # near, and the coarsest smaller level for far.
@@ -1282,6 +1403,7 @@ class _File:
             if best is not None:
                 far = _part_from(name, best[0], best[2], best[1], material, material_index, best_level)
                 far.uv_sets = uv_sets
+                far.vertex_attributes = attributes
                 made.append(far)
         return made, end, info
 
@@ -1445,37 +1567,38 @@ class _File:
         return slots
 
 
-def _uv_ranges(fvtx: dict) -> list[dict]:
-    """Min and max of every `_uN` channel. The drawn mesh still uses `_u0`."""
+def _attr_ranges(fvtx: dict) -> list[dict]:
+    """Min and max of every vertex attribute. The drawn UV stays `_u0`."""
     found = []
+    count_in = int(fvtx.get("count") or 0)
     for attribute in fvtx.get("attributes") or []:
         name = attribute.get("name") or ""
-        if not _UV_ATTR.fullmatch(name):
-            continue
-        umin = vmin = math.inf
-        umax = vmax = -math.inf
+        fmt = int(attribute.get("format") or 0)
+        lows: list[float] = []
+        highs: list[float] = []
         count = 0
-        for index in range(int(fvtx.get("count") or 0)):
+        for index in range(count_in):
             try:
                 raw = _read_attr(fvtx, attribute, index)
             except (FresError, struct.error, IndexError):
                 break
-            if len(raw) < 2 or not math.isfinite(raw[0]) or not math.isfinite(raw[1]):
+            if not raw or any(not math.isfinite(value) for value in raw):
                 continue
-            umin = min(umin, raw[0])
-            umax = max(umax, raw[0])
-            vmin = min(vmin, raw[1])
-            vmax = max(vmax, raw[1])
+            if not lows:
+                lows = [math.inf] * len(raw)
+                highs = [-math.inf] * len(raw)
+            for slot, value in enumerate(raw):
+                lows[slot] = min(lows[slot], value)
+                highs[slot] = max(highs[slot], value)
             count += 1
         if not count:
             continue
-        fmt = int(attribute.get("format") or 0)
         found.append(
             {
                 "name": name,
                 "format": f"0x{fmt:04X} {_format_name(fmt)}",
-                "min": [round(umin, 5), round(vmin, 5)],
-                "max": [round(umax, 5), round(vmax, 5)],
+                "min": [round(value, 5) for value in lows],
+                "max": [round(value, 5) for value in highs],
                 "count": count,
                 "samples": _uv_samples(fvtx, attribute),
             }

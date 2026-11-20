@@ -266,7 +266,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-29", "23ca1dcc2f438ed776b7152d241f29001237f873159283a4b32c566efdec3ebb")
+    pinned = ("models-30", "3c3a80412bec2377781b793d923cd769999886ce589812fd84e4f87073be1625")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -2012,6 +2012,146 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
     struct.pack_into("<Q", blank, param_array + 8, 0)
     struct.pack_into("<Q", blank, param_array + 0x20 + 8, 0)
     assert parse(bytes(blank))[0].materials[0].params == []
+
+
+def test_material_debug_opens_a_dump_relative_bfres_and_keeps_gyaml_lookup(tmp_path, capsys):
+    from bancwright.__main__ import print_material_debug
+    from bancwright.formats.bfres import sample_v10_bfres
+    from bancwright.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    mesh = sample_v10_bfres("Garden", [{"name": "Mt_Garden", "samplers": [("_a0", "Garden_Alb")]}])
+    _install(dump, "GardenActor", mesh)
+    assert print_material_debug("GardenActor", dump=str(dump.root)) == 0
+    text = capsys.readouterr().out
+    assert "Model/GardenActor.GardenActor.bfres.zs" in text
+    assert "Model/Model/" not in text
+
+    relative = "Model/Land_HrlCastle_HyruleCastle_A.Land_HrlCastle_Corridor_Garden_A_01.bfres.zs"
+    dest = dump.romfs / relative
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(compress(mesh, 1, dump.dicts(), level=3))
+    assert print_material_debug(relative, dump=str(dump.root), strings=True) == 0
+    text = capsys.readouterr().out
+    assert relative in text
+    assert "Model/Model/" not in text
+    assert "string pool" in text
+    assert print_material_debug("Model/Missing.bfres.zs", dump=str(dump.root)) == 2
+    err = capsys.readouterr().err
+    assert "Model/Model/" not in err
+    assert "Missing.bfres.zs" in err
+
+
+def _retail_assign(mesh: bytes) -> bytes:
+    """Point FMAT +0x10 and +0xA8 at a string-list assign and a count block."""
+    import struct
+
+    blob = bytearray(mesh)
+
+    def align() -> None:
+        while len(blob) % 8:
+            blob.append(0)
+
+    def add_string(text: str) -> int:
+        if len(blob) % 2:
+            blob.append(0)
+        at = len(blob)
+        raw = text.encode()
+        blob.extend(struct.pack("<H", len(raw)) + raw + b"\0")
+        return at
+
+    def string_list(names: list[str]) -> int:
+        offsets = [add_string(name) for name in names]
+        align()
+        at = len(blob)
+        for offset in offsets:
+            blob.extend(struct.pack("<Q", offset))
+        blob.extend(struct.pack("<Q", 0))
+        return at
+
+    labels = string_list(["Model", "model"])
+    attributes = string_list(["_p0", "_n0", "_t0", "_u0", "_c0", "bake"])
+    samplers = string_list(["_a0", "_n0", "_rah0", "_a1", "_n1", "_rah1"])
+    align()
+    byte_at = len(blob)
+    blob.extend(bytes([0x00, 0x01, 0x02, 0x03, 0x06, 0x05, 0x00, 0x01, 0x02, 0x03, 0xFF, 0x05, 0x04, 0x00, 0x00, 0x00]))
+    align()
+    info = len(blob)
+    blob.extend(struct.pack("<IIII", 0x00031B98, 0x000197F0, 9, 1))
+    align()
+    block = len(blob)
+    blob.extend(struct.pack("<QQQQ", labels, attributes, byte_at, samplers))
+    align()
+    side = len(blob)
+    blob.extend(struct.pack("<QQQQ", labels, info, 0, 0))
+    at = blob.find(b"FMAT")
+    struct.pack_into("<Q", blob, at + 0x10, block)
+    struct.pack_into("<Q", blob, at + 0xA8, side)
+    return bytes(blob)
+
+
+def test_retail_v10_shader_block_is_printed_and_not_applied(tmp_path, capsys):
+    import json
+
+    from bancwright.__main__ import print_material_debug
+    from bancwright.formats.bfres import parse, sample_v10_bfres
+
+    mesh = _retail_assign(
+        sample_v10_bfres("Roof", [{"name": "Mt_Roof", "samplers": [("_a0", "Slate_Alb")]}], shapes=[{"name": "pCube", "material": 0}])
+    )
+    path = tmp_path / "roof.bfres"
+    path.write_bytes(mesh)
+    model = parse(mesh)[0]
+    assert model.parts[0].uvs == [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    names = [item["name"] for item in model.parts[0].vertex_attributes]
+    assert names == ["_p0", "_u0"]
+    assert model.parts[0].uv_sets[0]["name"] == "_u0"
+    material = model.materials[0]
+    primary = next(block for block in material.shader_blocks if block["slot"] == "+0x10")
+    assert primary["attributeNames"] == ["_p0", "_n0", "_t0", "_u0", "_c0", "bake"]
+    assert primary["samplerNames"] == ["_a0", "_n0", "_rah0", "_a1", "_n1", "_rah1"]
+    unused = [item for item in primary["byteMap"] if item["unused"]]
+    assert unused and unused[0]["value"] == 0xFF
+    assert "not applied" in primary["byteNote"]
+    side = next(block for block in material.shader_blocks if block["slot"] == "+0xA8")
+    assert side["labels"] == ["Model", "model"]
+    assert 9 in side["children"][0]["dwords"]
+    assert 1 in side["children"][0]["dwords"]
+    assert print_material_debug(str(path), as_json=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["shapes"][0]["attributes"][0]["name"] == "_p0"
+    assert "_c0" in report["materials"][0]["shaderBlocks"][0]["attributeNames"]
+
+
+def test_tex_debug_prints_the_header_and_writes_the_current_png(tmp_path, capsys):
+    import struct
+
+    from bancwright.__main__ import print_tex_debug
+    from bancwright.formats.bntx import texture_headers, write_rgba
+    from bancwright.formats.zsio import compress
+
+    stored = write_rgba("Slate_Alb", 8, 8, bytes([11, 22, 33, 255]) * 64)
+    patched = bytearray(stored)
+    at = patched.find(b"BRTI")
+    struct.pack_into("<ii", patched, at + 0x24, 455, 455)
+    header = texture_headers(bytes(patched))[0]
+    assert header["width"] == 455 and header["height"] == 455
+    assert header["format"] == 0x0B01
+    assert header["depth"] == 1
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dest = dump.romfs / "Tex" / "Slate_Alb.bntx.zs"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(compress(stored, 1, dump.dicts(), level=3))
+    png = tmp_path / "slate.png"
+    assert print_tex_debug("Slate_Alb", png=str(png), dump=str(dump.root)) == 0
+    text = capsys.readouterr().out
+    assert "8x8" in text
+    assert "format 0x0B01" in text
+    assert "tile mode" in text
+    assert "block height" in text
+    assert "alignment shift" in text
+    assert png.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_a_normal_named_texture_is_not_albedo_on_a0():

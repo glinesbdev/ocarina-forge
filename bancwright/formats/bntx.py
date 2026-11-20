@@ -10,7 +10,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-from bancwright.formats.swizzle import block_log2, deswizzle, div_up, surface_bytes
+from bancwright.formats.swizzle import _stored_log2, block_log2, deswizzle, div_up, surface_bytes
 
 try:
     import texture2ddecoder
@@ -173,6 +173,78 @@ def texture_layer(data: bytes, index: int, *, flatten_alpha: bool = False) -> Te
     if not brti:
         raise BntxError("BNTX has no textures")
     return _texture(data, brti, layer=index, flatten_alpha=flatten_alpha)
+
+
+def texture_headers(data: bytes) -> list[dict]:
+    """BRTI fields this decoder reads. Texels are not decoded and the offsets stay put.
+
+    ``depth`` is the i32 at BRTI+0x2C. ``alignmentShift`` is the byte at BNTX+0x0E.
+    ``blockHeightLog2`` is the layout-byte reading, before the decoder picks a height.
+    """
+    if len(data) < 0x40 or data[:4] != b"BNTX":
+        return []
+    alignment = data[0x0E] if len(data) > 0x0E else 0
+    count = _i32(data, 0x24)
+    table = _u64(data, 0x28)
+    if count <= 0 or count > 4096 or table <= 0:
+        return []
+    found = []
+    for index in range(count):
+        at = table + index * 8
+        if at + 8 > len(data):
+            break
+        brti = _u64(data, at)
+        if not brti or brti + 0x80 > len(data) or data[brti : brti + 4] != b"BRTI":
+            continue
+        fmt = _u32(data, brti + 0x1C)
+        info, family_note = _format_info(fmt)
+        layout = data[brti + 0x34 : brti + 0x3C]
+        stored = _stored_log2(layout)
+        image = 0
+        mip_table = _u64(data, brti + 0x70)
+        if mip_table and mip_table + 8 <= len(data):
+            image = _u64(data, mip_table)
+        found.append(
+            {
+                "name": _string(data, _u64(data, brti + 0x60)),
+                "format": fmt,
+                "formatName": info[0] if info else "",
+                "formatNote": family_note,
+                "width": _i32(data, brti + 0x24),
+                "height": _i32(data, brti + 0x28),
+                "depth": _i32(data, brti + 0x2C) if brti + 0x30 <= len(data) else 0,
+                "mips": _mip_count(data, brti),
+                "tileMode": _u16(data, brti + 0x12),
+                "layout": layout.hex(),
+                "blockHeightLog2": stored,
+                "blockHeight": (1 << stored) if stored is not None else None,
+                "arrayCount": _u32(data, brti + 0x30) if brti + 0x34 <= len(data) else 0,
+                "imageSize": _u32(data, brti + 0x50) if brti + 0x54 <= len(data) else 0,
+                "mip0Size": _mip0_bytes(data, brti, image),
+                "alignmentShift": alignment,
+            }
+        )
+    return found
+
+
+def _mip_count(data: bytes, at: int) -> int:
+    if at + 0x78 > len(data):
+        return 0
+    table = _u64(data, at + 0x70)
+    if not table:
+        return 0
+    count = 0
+    previous = 0
+    for index in range(17):
+        slot = table + index * 8
+        if slot + 8 > len(data):
+            break
+        value = _u64(data, slot)
+        if value <= 0 or value > len(data) or (previous and value <= previous):
+            break
+        previous = value
+        count += 1
+    return count
 
 
 def image_sizes(data: bytes) -> list[dict]:

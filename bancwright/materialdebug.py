@@ -7,10 +7,13 @@ and shading model, the attribute assign (``_u0`` / ``_u1`` / ``_u2`` are UV
 channels), the sampler assign, the option strings, and the shader parameters.
 Each sampler line names the UV channel when the assign says one, the texture
 SRT whose name matches that sampler, and the options that look like a
-projection mode. Each shape lists the UV sets in its vertex buffer, their format, min/max, and
-a few raw samples. The ranked albedo is the texture the viewer binds, with
-its pixel size when the Tex file is in the dump. ``--strings`` prints the
-whole string pool. None of that is applied to the mesh.
+projection mode. A retail v10 ``+0x10`` block is printed as attribute names,
+sampler names, and the byte index table (``0xFF`` unused). ``+0xA8`` is
+printed the same way. Each shape lists every vertex attribute and the UV
+sets, with format and min/max. The ranked albedo is the texture the viewer
+binds, with its pixel size when the Tex file is in the dump. ``--strings``
+prints the whole string pool. A dump-relative ``Model/...bfres.zs`` path is
+that file. None of that is applied to the mesh.
 """
 
 from __future__ import annotations
@@ -150,6 +153,7 @@ def _row(model: str, material, dump=None) -> dict:
         "baseColor": list(material.base_color) if material.base_color else None,
         "note": material.note,
         "slots": list(getattr(material, "slots", []) or []),
+        "shaderBlocks": list(getattr(material, "shader_blocks", []) or []),
         "viewerAlbedo": albedo,
     }
 
@@ -217,6 +221,7 @@ def _shapes(models) -> list[dict]:
                     "name": part.name,
                     "material": part.material,
                     "uvs": list(getattr(part, "uv_sets", []) or []),
+                    "attributes": list(getattr(part, "vertex_attributes", []) or []),
                 }
             )
     return rows
@@ -246,8 +251,10 @@ def render_text(report: dict) -> str:
                 lines.append(f"  archive {archive}")
         else:
             lines.append("  shader (no shader assign in this file)")
+        for block in row.get("shaderBlocks") or []:
+            lines.extend(_shader_block_lines(block))
         slots = row.get("slots") or []
-        if slots and not (shader or archive):
+        if slots:
             lines.append("  header")
             for slot in slots:
                 lines.append(f"    {slot}")
@@ -338,18 +345,19 @@ def render_text(report: dict) -> str:
             uvs = shape.get("uvs") or []
             if not uvs:
                 lines.append("    uv (none)")
-                continue
             for item in uvs:
-                low = item.get("min") or [0, 0]
-                high = item.get("max") or [0, 0]
-                lines.append(
-                    f"    {item.get('name') or '?'}  {item.get('format') or 'format ?'}  "
-                    f"u {low[0]}..{high[0]}  v {low[1]}..{high[1]}  n={item.get('count') or 0}"
-                )
+                lines.append("    " + _attr_line(item, uv=True))
                 for sample in item.get("samples") or []:
-                    decoded = sample.get("decoded")
-                    shown = " ".join(str(value) for value in decoded) if isinstance(decoded, list) else "not decoded"
-                    lines.append(f"      [{sample.get('index')}] raw {sample.get('raw') or ''}  decoded {shown}")
+                    lines.append("      " + _sample_line(sample))
+            attributes = shape.get("attributes") or []
+            if attributes:
+                lines.append("    attributes")
+                for item in attributes:
+                    lines.append("      " + _attr_line(item, uv=False))
+                    if _UV_NAME.fullmatch(str(item.get("name") or "")):
+                        continue
+                    for sample in (item.get("samples") or [])[:4]:
+                        lines.append("        " + _sample_line(sample))
     strings = report.get("strings") or []
     lines.append("")
     lines.append("strings")
@@ -371,6 +379,51 @@ def render_text(report: dict) -> str:
             lines.append(f"  ... {len(pool) - len(shown)} more")
     lines.append("")
     return "\n".join(lines)
+
+
+def _shader_block_lines(block: dict) -> list[str]:
+    slot = block.get("slot") or "?"
+    at = block.get("at") or 0
+    lines = [f"  shader block {slot} at {at:#x} (not applied to the mesh)"]
+    labels = block.get("labels") or []
+    if labels:
+        lines.append("    names " + ", ".join(str(name) for name in labels))
+    attributes = block.get("attributeNames") or []
+    if attributes:
+        lines.append("    attribute names " + ", ".join(str(name) for name in attributes))
+    samplers = block.get("samplerNames") or []
+    if samplers:
+        lines.append("    sampler names " + ", ".join(str(name) for name in samplers))
+    byte_map = block.get("byteMap") or []
+    if byte_map:
+        shown = " ".join("ff" if item.get("unused") else f"{int(item.get('value') or 0):02x}" for item in byte_map)
+        lines.append(f"    byte map {shown}")
+        if block.get("byteNote"):
+            lines.append(f"    {block['byteNote']}")
+    for child in block.get("children") or []:
+        dwords = " ".join(f"{int(value):08x}" for value in child.get("dwords") or [])
+        lines.append(f"    +{int(child.get('offset') or 0):#x} {child.get('text') or ''}  dwords {dwords}".rstrip())
+    return lines
+
+
+def _attr_line(item: dict, *, uv: bool) -> str:
+    low = item.get("min") or []
+    high = item.get("max") or []
+    if uv and len(low) >= 2 and len(high) >= 2:
+        span = f"u {low[0]}..{high[0]}  v {low[1]}..{high[1]}"
+    else:
+        span = f"min {_nums(low)}  max {_nums(high)}"
+    return f"{item.get('name') or '?'}  {item.get('format') or 'format ?'}  {span}  n={item.get('count') or 0}"
+
+
+def _sample_line(sample: dict) -> str:
+    decoded = sample.get("decoded")
+    shown = " ".join(str(value) for value in decoded) if isinstance(decoded, list) else "not decoded"
+    return f"[{sample.get('index')}] raw {sample.get('raw') or ''}  decoded {shown}"
+
+
+def _nums(values) -> str:
+    return " ".join(str(value) for value in values)
 
 
 def _param_line(item: dict) -> str:
