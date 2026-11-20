@@ -72,6 +72,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | `examples/after-the-ocarina/` | The imported After the Ocarina project (Bradyn's YAML only). |
 | `vendor/after_ocarina/` | Bradyn's build library, plus the MIT community tools the pipeline shells out to. |
 | `docs/formats.md` | The container rules this version implements, reconciled with `game-formats.md`. |
+| `docs/textures.md` | Switch 2 GOB order for 16-byte blocks, and what `tex-audit` prints. |
 | `docs/equivalence.md` | How to diff this build against After the Ocarina's own `scripts/build.py`. |
 
 Import a simple scene YAML from the project menu, or open **After the Ocarina** to load the full project. The project panel lists its text, events, and quests. Scene recipes are marked in the scene list.

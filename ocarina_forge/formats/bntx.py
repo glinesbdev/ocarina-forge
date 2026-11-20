@@ -17,6 +17,7 @@ from ocarina_forge.formats.swizzle import (
     deswizzle,
     div_up,
     fill_partial_gob,
+    gob_order,
     inferred_block_log2,
     layout_words,
     surface_bytes,
@@ -209,6 +210,7 @@ def texture_headers(data: bytes) -> list[dict]:
         fmt = _u32(data, brti + 0x1C)
         info, family_note = _format_info(fmt)
         layout = data[brti + 0x34 : brti + 0x3C]
+        tile = _u16(data, brti + 0x12)
         texture_layout, size_range = layout_words(layout)
         stored = _stored_log2(layout)
         image = 0
@@ -236,7 +238,12 @@ def texture_headers(data: bytes) -> list[dict]:
                 "height": height,
                 "depth": _i32(data, brti + 0x2C) if brti + 0x30 <= len(data) else 0,
                 "mips": _mip_count(data, brti),
-                "tileMode": _u16(data, brti + 0x12),
+                "tileMode": tile,
+                "flags": data[brti + 0x10] if brti + 0x11 <= len(data) else 0,
+                "dim": data[brti + 0x11] if brti + 0x12 <= len(data) else 0,
+                "swizzleValue": _u16(data, brti + 0x14) if brti + 0x16 <= len(data) else 0,
+                "bytesPer": bytes_per or None,
+                "gobOrder": "linear" if tile == 1 else (gob_order(bytes_per) if bytes_per else ""),
                 "layout": layout.hex(),
                 "textureLayout": texture_layout,
                 "sizeRange": size_range,
@@ -399,7 +406,10 @@ def _texture(data: bytes, at: int, *, layer: int | None = None, flatten_alpha: b
     if family_note:
         note = f"{note}. {family_note}".strip(". ")
     block_height = 1 << max(0, log2)
-    swizzle = "linear" if tile == 1 else f"deswizzled tile {tile}"
+    if tile == 1:
+        swizzle = "linear"
+    else:
+        swizzle = f"deswizzled tile {tile} gob {gob_order(bytes_per)}"
     return Texture(
         name=name,
         width=width,
@@ -570,6 +580,173 @@ def _noise(rgba: bytes, width: int, height: int) -> float:
                 total += abs(rgba[left + channel] - rgba[below + channel])
                 count += 2
     return total / max(count, 1)
+
+
+def edge_scores(
+    codec: str,
+    width: int,
+    height: int,
+    block_w: int,
+    block_h: int,
+    bytes_per: int,
+    tile: int,
+    log2: int,
+    raw: bytes,
+    fmt: int,
+    channels: bytes = b"",
+) -> dict:
+    """Edge score of one mip in each GOB order. The lower score is smoother.
+
+    This is the same neighbour difference ``_noise`` uses. It does not pick
+    the order the viewer decodes with. A 16-byte element is always the Switch
+    2 order. The scores are what ``tex-audit`` prints.
+    """
+    scores: dict[str, float | None] = {"tegra": None, "switch2": None}
+    error = ""
+    for order in ("tegra", "switch2"):
+        linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw, order=order)
+        if codec != "rgba8":
+            linear = fill_partial_gob(linear, width, height, block_w, block_h, bytes_per)
+        try:
+            rgba, _note = _decode(codec, width, height, linear, fmt)
+        except BntxError as exc:
+            error = str(exc)
+            continue
+        rgba = _channels(rgba, width, height, channels)
+        scores[order] = round(_noise(rgba, width, height), 2)
+    tegra = scores["tegra"]
+    alt = scores["switch2"]
+    if tegra is None or alt is None:
+        smoother = "unscored"
+    elif abs(tegra - alt) < 0.005:
+        smoother = "tie"
+    elif alt < tegra:
+        smoother = "switch2"
+    else:
+        smoother = "tegra"
+    return {"tegra": tegra, "switch2": alt, "smoother": smoother, "error": error}
+
+
+def score_gob_orders(data: bytes) -> list[dict]:
+    """One row per BRTI: header flags and which GOB order decodes smoother.
+
+    Mip 0 of layer 0 is scored. The viewer still uses ``gob_order``, not the
+    lower score. A ``disagree`` row is a texture whose smoother order is not
+    that rule.
+    """
+    if len(data) < 0x40 or data[:4] != b"BNTX":
+        return []
+    count = _i32(data, 0x24)
+    table = _u64(data, 0x28)
+    if count <= 0 or count > 4096 or table <= 0:
+        return []
+    rows = []
+    for index in range(count):
+        at = table + index * 8
+        if at + 8 > len(data):
+            break
+        brti = _u64(data, at)
+        if not brti or brti + 0x80 > len(data) or data[brti : brti + 4] != b"BRTI":
+            continue
+        try:
+            rows.append(_score_brti(data, brti))
+        except BntxError as exc:
+            name, fmt = _identity(data, brti)
+            rows.append(
+                {
+                    "name": name,
+                    "format": fmt,
+                    "formatName": "",
+                    "width": 0,
+                    "height": 0,
+                    "footprint": "",
+                    "bytesPer": None,
+                    "flags": 0,
+                    "dim": 0,
+                    "swizzleValue": 0,
+                    "tileMode": 0,
+                    "decoderOrder": "",
+                    "smoother": "unscored",
+                    "tegra": None,
+                    "switch2": None,
+                    "error": str(exc),
+                }
+            )
+    return rows
+
+
+def _score_brti(data: bytes, at: int) -> dict:
+    tile = _u16(data, at + 0x12)
+    fmt = _u32(data, at + 0x1C)
+    width = _i32(data, at + 0x24)
+    height = _i32(data, at + 0x28)
+    name = _string(data, _u64(data, at + 0x60))
+    channels = data[at + 0x58 : at + 0x5C]
+    layout = data[at + 0x34 : at + 0x3C]
+    flags = data[at + 0x10] if at + 0x11 <= len(data) else 0
+    dim = data[at + 0x11] if at + 0x12 <= len(data) else 0
+    swizzle_value = _u16(data, at + 0x14) if at + 0x16 <= len(data) else 0
+    info, _family = _format_info(fmt)
+    row = {
+        "name": name,
+        "format": fmt,
+        "formatName": info[0] if info else "",
+        "width": width,
+        "height": height,
+        "footprint": "",
+        "bytesPer": None,
+        "flags": flags,
+        "dim": dim,
+        "swizzleValue": swizzle_value,
+        "tileMode": tile,
+        "decoderOrder": "",
+        "smoother": "unscored",
+        "tegra": None,
+        "switch2": None,
+        "error": "",
+    }
+    if info is None:
+        row["error"] = f"texture format 0x{fmt:04X} is not decoded"
+        return row
+    if width <= 0 or height <= 0 or width > 16384 or height > 16384:
+        row["error"] = f"size {width}x{height} is not usable"
+        return row
+    codec, block_w, block_h, bytes_per = info
+    row["bytesPer"] = bytes_per
+    row["footprint"] = f"{block_w}x{block_h}"
+    row["decoderOrder"] = "linear" if tile == 1 else gob_order(bytes_per)
+    mip_table = _u64(data, at + 0x70)
+    image = _u64(data, mip_table) if mip_table and mip_table + 8 <= len(data) else 0
+    if image <= 0 or image >= len(data):
+        row["error"] = "image data is missing"
+        return row
+    mip_bytes = _mip0_bytes(data, at, image)
+    array_count = _u32(data, at + 0x30) if at + 0x34 <= len(data) else 1
+    if array_count <= 0 or array_count > 4096:
+        array_count = 1
+    if array_count > 1:
+        image_size = _u32(data, at + 0x50) if at + 0x54 <= len(data) else 0
+        if image_size <= 0 or image_size % array_count != 0:
+            row["error"] = f"array of {array_count} has no per-layer size"
+            return row
+        stride = image_size // array_count
+        if mip_bytes <= 0 or mip_bytes > stride:
+            mip_bytes = stride
+        raw = data[image : image + mip_bytes]
+    else:
+        raw = data[image : image + mip_bytes] if mip_bytes > 0 else data[image:]
+    log2 = block_log2(
+        height,
+        block_h,
+        layout,
+        width=width,
+        block_width=block_w,
+        bytes_per=bytes_per,
+        mip_bytes=mip_bytes,
+    )
+    scored = edge_scores(codec, width, height, block_w, block_h, bytes_per, tile, log2, raw, fmt, channels)
+    row.update(scored)
+    return row
 
 
 def _decode(

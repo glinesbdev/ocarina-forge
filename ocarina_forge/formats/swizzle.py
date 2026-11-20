@@ -1,8 +1,10 @@
-"""Tegra X1 block-linear address calculation.
+"""Tegra X1 block-linear address calculation, plus the Switch 2 GOB order.
 
-The GOB address is the one published in the Tegra X1 Technical Reference
-Manual (GPU block-linear layout). This is an original implementation of that
-formula. It is not taken from the GPL BNTX extractors.
+The Tegra address is the one published in the Tegra X1 Technical Reference
+Manual (GPU block-linear layout). 16-byte elements use the Switch 2 order
+instead: bit 5 is y1 and bit 6 is x0. ``docs/textures.md`` records how that
+was measured. This is an original implementation of those formulas. It is
+not taken from the GPL BNTX extractors.
 """
 
 from __future__ import annotations
@@ -146,22 +148,59 @@ def block_log2(
     return default_block_log2(height, pixel_block_height)
 
 
-def _gob_address(x: int, y: int, width_blocks: int, bytes_per: int, block_height: int) -> int:
+# Tegra X1 keeps y1 at bit 6 (64) and x0 at bit 5 (32). Switch 2 swaps those
+# two bits. See docs/textures.md.
+GOB_TEGRA = "tegra"
+GOB_SWITCH2 = "switch2"
+
+
+def gob_order(bytes_per: int) -> str:
+    """Which GOB order an element of this size was swizzled with.
+
+    16-byte elements (ASTC and BC2/BC3/BC5/BC6/BC7) use the Switch 2 order.
+    BC1, BC4, RGBA8, and height samples are 8 or 4 bytes and stay on Tegra X1.
+    """
+    return GOB_SWITCH2 if bytes_per >= 16 else GOB_TEGRA
+
+
+def _gob_local(xx: int, y: int, order: str) -> int:
+    """Offset of byte ``xx`` on row ``y`` inside one GOB."""
+    if order == GOB_SWITCH2:
+        # bit 5 = y1, bit 6 = x0. y2 stays at 128 and x1 stays at 256.
+        return (
+            ((xx % 64) // 32) * 256
+            + ((y % 8) // 4) * 128
+            + ((xx % 32) // 16) * 64
+            + ((y % 4) // 2) * 32
+            + (y % 2) * 16
+            + (xx % 16)
+        )
+    return (
+        ((xx % 64) // 32) * 256
+        + ((y % 8) // 2) * 64
+        + ((xx % 32) // 16) * 32
+        + (y % 2) * 16
+        + (xx % 16)
+    )
+
+
+def _gob_address(
+    x: int,
+    y: int,
+    width_blocks: int,
+    bytes_per: int,
+    block_height: int,
+    order: str | None = None,
+) -> int:
+    """Address of element (x, y). ``order`` defaults to ``gob_order(bytes_per)``."""
+    chosen = order or gob_order(bytes_per)
     image_width_in_gobs = div_up(width_blocks * bytes_per, 64)
     gob = (
         (y // (8 * block_height)) * 512 * block_height * image_width_in_gobs
         + (x * bytes_per // 64) * 512 * block_height
         + ((y % (8 * block_height)) // 8) * 512
     )
-    xx = x * bytes_per
-    return (
-        gob
-        + ((xx % 64) // 32) * 256
-        + ((y % 8) // 2) * 64
-        + ((xx % 32) // 16) * 32
-        + (y % 2) * 16
-        + (xx % 16)
-    )
+    return gob + _gob_local(x * bytes_per, y, chosen)
 
 
 def swizzle(
@@ -173,9 +212,16 @@ def swizzle(
     tile_mode: int,
     log2: int,
     linear: bytes,
+    order: str | None = None,
 ) -> bytes:
-    """Pack linear blocks into Tegra order. Tile mode 1 is already linear."""
-    return _move(width, height, block_w, block_h, bytes_per, tile_mode, log2, linear, to_swizzle=True)
+    """Pack linear blocks. Tile mode 1 is already linear.
+
+    ``order`` defaults to ``gob_order``. Swizzle and deswizzle use the same
+    address, so an export writes the order the decoder reads.
+    """
+    return _move(
+        width, height, block_w, block_h, bytes_per, tile_mode, log2, linear, to_swizzle=True, order=order
+    )
 
 
 def deswizzle(
@@ -187,9 +233,12 @@ def deswizzle(
     tile_mode: int,
     log2: int,
     swizzled: bytes,
+    order: str | None = None,
 ) -> bytes:
-    """Unpack Tegra block-linear data into linear blocks, one block after another."""
-    return _move(width, height, block_w, block_h, bytes_per, tile_mode, log2, swizzled, to_swizzle=False)
+    """Unpack block-linear data into linear blocks, one block after another."""
+    return _move(
+        width, height, block_w, block_h, bytes_per, tile_mode, log2, swizzled, to_swizzle=False, order=order
+    )
 
 
 def fill_partial_gob(
@@ -261,6 +310,7 @@ def _move(
     log2: int,
     data: bytes,
     to_swizzle: bool,
+    order: str | None = None,
 ) -> bytes:
     blocks_x = max(1, div_up(width, block_w))
     blocks_y = max(1, div_up(height, block_h))
@@ -276,7 +326,7 @@ def _move(
         out = bytearray(tight)
     for y in range(blocks_y):
         for x in range(blocks_x):
-            pos = _gob_address(x, y, blocks_x, bytes_per, block_height)
+            pos = _gob_address(x, y, blocks_x, bytes_per, block_height, order)
             linear = (y * blocks_x + x) * bytes_per
             if to_swizzle:
                 if pos + bytes_per <= len(out):

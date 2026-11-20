@@ -318,7 +318,7 @@ def test_nonsquare_astc_keeps_the_layout_height_and_the_wide_axis():
     packed = swizzle(width, height, block_w, block_h, 16, 0, 0, bytes(linear))
     assert deswizzle(width, height, block_w, block_h, 16, 0, 0, packed) == bytes(linear)
     assert deswizzle(width, height, block_h, block_w, 16, 0, 0, packed) != bytes(linear)
-    assert _bytewise_deswizzle(packed, blocks_x, blocks_y, 16, 1) == bytes(linear)
+    assert _bytewise_deswizzle(packed, blocks_x, blocks_y, 16, 1, "switch2") == bytes(linear)
     assert not _quieter(40, 30)
     assert _quieter(40, 12)
 
@@ -414,8 +414,15 @@ def test_a_455_wide_bc1_surface_roundtrips_and_log2_0_is_its_own_size():
     assert block_log2(height, 4, layout, width=width, block_width=4, bytes_per=8, mip_bytes=115200) == 0
 
 
-def _bytewise_deswizzle(data: bytes, blocks_x: int, blocks_y: int, bytes_per: int, block_height: int) -> bytes:
-    """One byte at a time, the Tegra X1 GOB address. Independent of the block copy."""
+def _bytewise_deswizzle(
+    data: bytes,
+    blocks_x: int,
+    blocks_y: int,
+    bytes_per: int,
+    block_height: int,
+    order: str = "tegra",
+) -> bytes:
+    """One byte at a time. Independent of the block copy. ``order`` is tegra or switch2."""
     out = bytearray(blocks_x * blocks_y * bytes_per)
     width_bytes = blocks_x * bytes_per
     width_in_gobs = (width_bytes + 63) // 64
@@ -427,17 +434,168 @@ def _bytewise_deswizzle(data: bytes, blocks_x: int, blocks_y: int, bytes_per: in
                 + (x_byte // 64) * block_size
                 + ((y % (8 * block_height)) // 8) * 512
             )
-            offset = (
-                ((x_byte % 64) // 32) * 256
-                + ((y % 8) // 2) * 64
-                + ((x_byte % 32) // 16) * 32
-                + (y % 2) * 16
-                + (x_byte % 16)
-            )
+            if order == "switch2":
+                offset = (
+                    ((x_byte % 64) // 32) * 256
+                    + ((y % 8) // 4) * 128
+                    + ((x_byte % 32) // 16) * 64
+                    + ((y % 4) // 2) * 32
+                    + (y % 2) * 16
+                    + (x_byte % 16)
+                )
+            else:
+                offset = (
+                    ((x_byte % 64) // 32) * 256
+                    + ((y % 8) // 2) * 64
+                    + ((x_byte % 32) // 16) * 32
+                    + (y % 2) * 16
+                    + (x_byte % 16)
+                )
             pos = gob + offset
             if pos < len(data):
                 out[y * width_bytes + x_byte] = data[pos]
     return bytes(out)
+
+
+def test_sixteen_byte_elements_swap_gob_bits_5_and_6():
+    """Switch 2 puts y1 at bit 5 and x0 at bit 6. 8-byte elements stay on Tegra.
+
+    The pattern is the one in docs/textures.md. Block (0, 2) is at byte 32,
+    not 64. Block (1, 0) is at byte 64, not 32. An 8-byte block at the same
+    places keeps 64 and 32. Swizzle and deswizzle are the same map.
+    """
+    from ocarina_forge.formats.swizzle import GOB_SWITCH2, GOB_TEGRA, _gob_address, deswizzle, gob_order, swizzle
+
+    assert gob_order(16) == GOB_SWITCH2
+    assert gob_order(8) == GOB_TEGRA
+    assert gob_order(4) == GOB_TEGRA
+    assert _gob_address(0, 2, 8, 16, 1) == 32
+    assert _gob_address(0, 2, 8, 16, 1, order="tegra") == 64
+    assert _gob_address(1, 0, 8, 16, 1) == 64
+    assert _gob_address(1, 0, 8, 16, 1, order="tegra") == 32
+    # Both bits set: the two orders land on the same byte.
+    assert _gob_address(1, 2, 8, 16, 1) == _gob_address(1, 2, 8, 16, 1, order="tegra") == 96
+    assert _gob_address(0, 2, 16, 8, 1) == 64
+    assert _gob_address(2, 0, 16, 8, 1) == 32
+
+    blocks_x = blocks_y = 8
+    linear = bytearray(blocks_x * blocks_y * 16)
+    for y in range(blocks_y):
+        for x in range(blocks_x):
+            at = (y * blocks_x + x) * 16
+            linear[at : at + 16] = bytes((x, y, 0xA5)) + bytes(range(13))
+    packed = swizzle(32, 32, 4, 4, 16, 0, 0, bytes(linear))
+    assert packed[32] == 0 and packed[33] == 2 and packed[34] == 0xA5
+    assert packed[64] == 1 and packed[65] == 0
+    assert packed[96] == 1 and packed[97] == 2
+    assert deswizzle(32, 32, 4, 4, 16, 0, 0, packed) == bytes(linear)
+    assert deswizzle(32, 32, 4, 4, 16, 0, 0, packed, order="tegra") != bytes(linear)
+    tegra = swizzle(32, 32, 4, 4, 16, 0, 0, bytes(linear), order="tegra")
+    assert tegra[64] == 0 and tegra[65] == 2
+    assert tegra[32] == 1 and tegra[33] == 0
+    assert deswizzle(32, 32, 4, 4, 16, 0, 0, tegra, order="tegra") == bytes(linear)
+
+
+def test_gob_order_scores_follow_the_order_the_bytes_were_packed_with():
+    """A gradient packed as Tegra scores smoother as Tegra. An ASTC stripe packed as Switch 2 does not.
+
+    The castle bricks only win by about a point, so the audit reports the
+    lower score and the decoder does not switch on it.
+    """
+    from ocarina_forge.formats.bntx import edge_scores, score_gob_orders, texture_headers, write_rgba
+    from ocarina_forge.formats.swizzle import swizzle
+    from ocarina_forge.texaudit import render_text
+
+    width = height = 32
+    rgba = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            at = (y * width + x) * 4
+            rgba[at : at + 4] = bytes((x * 8, y * 8, 40, 255))
+    blob = bytearray(write_rgba("Grad", width, height, bytes(rgba), swizzled=True, log2=0))
+    at = blob.find(b"BRTI")
+    blob[at + 0x10] = 0x09
+    blob[at + 0x11] = 0x02
+    header = texture_headers(bytes(blob))[0]
+    assert header["flags"] == 0x09
+    assert header["dim"] == 2
+    assert header["swizzleValue"] == 0
+    assert header["gobOrder"] == "tegra"
+    assert header["bytesPer"] == 4
+    scored = score_gob_orders(bytes(blob))[0]
+    assert scored["decoderOrder"] == "tegra"
+    assert scored["smoother"] == "tegra"
+    assert scored["tegra"] < scored["switch2"]
+    assert scored["flags"] == 0x09
+
+    # Patching the format id does not change the pixels. It does change the
+    # order the header says a 16-byte element would use.
+    import struct
+
+    struct.pack_into("<I", blob, at + 0x1C, 0x3206)
+    astc_header = texture_headers(bytes(blob))[0]
+    assert astc_header["formatName"] == "astc8x5"
+    assert astc_header["gobOrder"] == "switch2"
+    assert astc_header["blockWidth"] == 8 and astc_header["blockHeightPixels"] == 5
+
+    try:
+        import texture2ddecoder  # noqa: F401
+    except ImportError:
+        text = render_text(
+            {
+                "checked": 1,
+                "flagged": [],
+                "orders": [scored | {"path": "Tex/Grad.bntx", "disagree": False}],
+                "errors": [],
+            }
+        )
+        assert "decoder tegra" in text and "smoother tegra" in text
+        assert "flags 0x09" in text and "swizzle 0x0000" in text
+        return
+
+    green = bytes([0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 255, 0, 0, 255, 0, 0, 255, 255])
+    red = bytes([0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 255, 255, 0, 0, 0, 255, 255])
+    blocks_x, blocks_y = 8, 8
+    tiles = bytearray(blocks_x * blocks_y * 16)
+    for y in range(blocks_y):
+        for x in range(blocks_x):
+            # Rows 0–1 red, 2–3 green. (0, 2) and (1, 0) differ, so the bit swap is visible.
+            block = green if (y % 4) >= 2 else red
+            tiles[(y * blocks_x + x) * 16 : (y * blocks_x + x) * 16 + 16] = block
+    packed = swizzle(64, 40, 8, 5, 16, 0, 0, bytes(tiles))
+    assert packed[32:48] == green
+    assert packed[512:528] == red
+    scores = edge_scores("astc8x5", 64, 40, 8, 5, 16, 0, 0, packed, 0x3201)
+    assert scores["smoother"] == "switch2"
+    assert scores["switch2"] < scores["tegra"]
+    text = render_text(
+        {
+            "checked": 1,
+            "flagged": [],
+            "orders": [
+                {
+                    "name": "Land_HrlCastle_Wall_Brick_A_Lighter_Alb",
+                    "width": 1024,
+                    "height": 1024,
+                    "formatName": "astc8x5",
+                    "footprint": "8x5",
+                    "bytesPer": 16,
+                    "flags": 0x09,
+                    "swizzleValue": 0,
+                    "decoderOrder": "switch2",
+                    "smoother": "switch2",
+                    "tegra": 12.10,
+                    "switch2": 11.23,
+                    "path": "Tex/Land_HrlCastle_Wall_Brick_A_Lighter_Alb.bntx.zs",
+                    "disagree": False,
+                }
+            ],
+            "errors": [],
+        }
+    )
+    assert "tegra 12.10  switch2 11.23" in text
+    assert "flags 0x09" in text
+    assert "disagree" not in text.split("gob order\n", 1)[1]
 
 
 def test_converter_output_is_pinned_to_the_cache_version():
@@ -454,6 +612,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
         "surface.py",
         "bfres.py",
         "bntx.py",
+        "swizzle.py",
         "terrain.py",
         "gltf.py",
         "meshopt.py",
@@ -462,7 +621,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-39", "3758ca81bdbce16d961cd0a9d7a87e582aadd2e36daf797fcb39c2771c8699e9")
+    pinned = ("models-40", "f0b54023eda6d3efb206baed36e23011091b94e958a12c7586d903c9bd559c99")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."

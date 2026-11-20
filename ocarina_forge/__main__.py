@@ -5,7 +5,7 @@ bake or the actors near a point. ``ground-debug <banc>`` prints the ground
 layer. ``material-debug`` prints the shader assign and the uniforms.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
-``tex-audit`` flags textures whose mip-0 size implies a different block height than usual.
+``tex-audit`` flags a mip-0 size that implies a different block height than usual, and scores the Tegra and Switch 2 GOB orders.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
 ``behavior-export`` writes saved set-field ops into the project build folder.
@@ -443,7 +443,7 @@ def print_material_audit(*, as_json: bool = False, dump: str | None = None, out:
 
 
 def print_tex_audit(*, as_json: bool = False, dump: str | None = None, out: str | None = None) -> int:
-    """Flag textures whose size-inferred block height is not the usual one. 2 when Tex/ is missing."""
+    """Block-height flags and GOB-order scores. 2 when Tex/ is missing."""
     from ocarina_forge.config import load_config
     from ocarina_forge.dump import Dump
     from ocarina_forge.errors import BancError
@@ -573,6 +573,12 @@ def _render_tex(report: dict) -> str:
         if header.get("blockWidth") and header.get("blockHeightPixels"):
             lines.append(f"  footprint {header['blockWidth']}x{header['blockHeightPixels']}")
         lines.append(f"  mips {header.get('mips')}  tile mode {header.get('tileMode')}")
+        lines.append(
+            f"  flags 0x{int(header.get('flags') or 0):02X}  dim {header.get('dim')}  "
+            f"swizzle 0x{int(header.get('swizzleValue') or 0):04X}  "
+            f"gob {header.get('gobOrder') or '?'}"
+            + (f"  {header.get('bytesPer')} bytes per element" if header.get("bytesPer") else "")
+        )
         log2 = header.get("blockHeightLog2")
         height = header.get("blockHeight")
         lines.append(

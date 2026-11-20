@@ -57,8 +57,8 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-39\0"
-_BNTX_VERSION = b"bntx-4\0"
+_CACHE_VERSION = b"models-40\0"
+_BNTX_VERSION = b"bntx-5\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
 _TERRAIN = (0.36, 0.45, 0.28, 1.0)
@@ -98,6 +98,7 @@ def _converter_files() -> tuple[Path, ...]:
         root / "surface.py",
         root / "formats" / "bfres.py",
         root / "formats" / "bntx.py",
+        root / "formats" / "swizzle.py",
         root / "formats" / "terrain.py",
         root / "formats" / "gltf.py",
         root / "formats" / "meshopt.py",
