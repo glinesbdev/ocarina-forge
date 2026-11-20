@@ -6,15 +6,15 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from bancwright.actors import format_hash
-from bancwright.dump import Dump
-from bancwright.errors import BancError
-from bancwright.fixtures import FADO, KOKIRI_STATIC, build_fixture
-from bancwright.formats.byml import loads
-from bancwright.formats.zsio import decompress
-from bancwright.hotreload import MANIFEST, Publisher, destination_for, publish
-from bancwright.project import Project
-from bancwright.scene import apply_command
+from ocarina_forge.actors import format_hash
+from ocarina_forge.dump import Dump
+from ocarina_forge.errors import BancError
+from ocarina_forge.fixtures import FADO, KOKIRI_STATIC, build_fixture
+from ocarina_forge.formats.byml import loads
+from ocarina_forge.formats.zsio import decompress
+from ocarina_forge.hotreload import MANIFEST, Publisher, destination_for, publish
+from ocarina_forge.project import Project
+from ocarina_forge.scene import apply_command
 
 
 def _dump(tmp_path):
@@ -35,7 +35,7 @@ def _project(tmp_path):
 
 def test_publish_replaces_owned_files_and_leaves_the_rest(tmp_path):
     project, dump = _project(tmp_path)
-    folder = tmp_path / "mods" / "Bancwright"
+    folder = tmp_path / "mods" / "OcarinaForge"
     keep = folder / "romfs" / "Keep" / "note.txt"
     keep.parent.mkdir(parents=True)
     keep.write_text("stay", encoding="utf-8")
@@ -90,15 +90,15 @@ def test_a_burst_of_saves_publishes_once():
 
 
 def test_hot_reload_setting_round_trips_and_is_kept_when_the_dump_changes(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.chdir(tmp_path)
-    from bancwright.server import app
+    from ocarina_forge.server import app
 
     client = TestClient(app)
     dump = Dump(build_fixture(tmp_path / "dump"))
     project = Project.create(tmp_path / "mod", name="kokiri-notes", title="Kokiri notes", author="Ada", version="0.1.0")
     client.put("/api/config", json={"dump": str(dump.root), "project": str(project.root)})
-    folder = tmp_path / "mods" / "Bancwright"
+    folder = tmp_path / "mods" / "OcarinaForge"
     saved = client.put("/api/hot-reload", json={"enabled": True, "path": str(folder)})
     assert saved.status_code == 200
     body = saved.json()

@@ -1,4 +1,4 @@
-# Comparing a Bancwright build with After the Ocarina
+# Comparing an Ocarina Forge build with After the Ocarina
 
 The goal is the same romfs After the Ocarina's own build writes. This machine has no dump, so the check runs on yours.
 
@@ -38,7 +38,7 @@ cd ~/Work/ocarina-forge
 python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina --skip-ato-build
 ```
 
-`--project` selects a different Bancwright project. `--romfs` overrides the dump only for the Bancwright half; After the Ocarina's `scripts/build.py` still reads its `config.toml`. Use the same dump for both.
+`--project` selects a different Ocarina Forge project. `--romfs` overrides the dump only for the Ocarina Forge half; After the Ocarina's `scripts/build.py` still reads its `config.toml`. Use the same dump for both.
 
 `Defeat_Ganon` Complete on the first epilogue load is still a hypothesis in After the Ocarina's own notes. The build emits it. It has not been re-checked in game here.
 

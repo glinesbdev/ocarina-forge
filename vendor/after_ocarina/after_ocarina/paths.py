@@ -45,7 +45,7 @@ def configure(src: Path) -> None:
     """Point the source directories at a project. ROOT and the tools stay put.
 
     ``tables/`` is accepted as the RSDB directory when ``rsdb/`` is absent.
-    Callers that imported these names must rebind them; see bancwright.engine.ato.
+    Callers that imported these names must rebind them; see ocarina_forge.engine.ato.
     """
     global SRC, TEXT_DIR, EVENTS_DIR, RSDB_DIR, GAMEDATA_DIR
     global EVENTS_PATH, SCENES_PATH, TAPESTRY_PATH, MOD_TOML

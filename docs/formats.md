@@ -1,14 +1,14 @@
 # Formats this version reads and writes
 
-The container rules below were reconciled with After the Ocarina's `docs/game-formats.md` and `docs/blockers.md` (branch `m8-navi-rumors`, commit `ad60e27`). Those notes were verified in game. An earlier Bancwright write-up used the public MIT notes instead, and its resource-size formula was wrong. The checklist is [testing-on-real-dump.md](testing-on-real-dump.md). The equivalence command is [equivalence.md](equivalence.md).
+The container rules below were reconciled with After the Ocarina's `docs/game-formats.md` and `docs/blockers.md` (branch `m8-navi-rumors`, commit `ad60e27`). Those notes were verified in game. An earlier Ocarina Forge write-up used the public MIT notes instead, and its resource-size formula was wrong. The checklist is [testing-on-real-dump.md](testing-on-real-dump.md). The equivalence command is [equivalence.md](equivalence.md).
 
-`bancwright/formats/LICENSE-oot-remake-modding.txt` is that MIT license. The code here is a fresh implementation of those layouts, not a copy of the third-party tree, so the editor’s library can stand on its own.
+`ocarina_forge/formats/LICENSE-oot-remake-modding.txt` is that MIT license. The code here is a fresh implementation of those layouts, not a copy of the third-party tree, so the editor’s library can stand on its own.
 
 Nothing in this repository is extracted from a game dump.
 
 ## Where files live
 
-Dump root (the folder Bancwright stores in config):
+Dump root (the folder Ocarina Forge stores in config):
 
 ```text
 romfs/Banc/<Area>/<Scene>.bcett.byml.zs
@@ -24,7 +24,7 @@ A scene name looks like `KokiriForest_Child_Static` or `HyruleField_Adult_Dynami
 
 ## BYML
 
-Version 7, little endian, magic `YB`. Bancwright reads and writes hash maps (`0x20` u32 keys, `0x21` u64 keys) as well as the usual arrays, dicts, strings, and numeric types. Identical containers are shared. Bool is not stored as an int.
+Version 7, little endian, magic `YB`. Ocarina Forge reads and writes hash maps (`0x20` u32 keys, `0x21` u64 keys) as well as the usual arrays, dicts, strings, and numeric types. Identical containers are shared. Bool is not stored as an int.
 
 `Hash32` and `Hash64` in Python are dict subclasses so a rebuilt banc can keep `AuxFlags` and anything else keyed by hash. The public `byml.py` writer did not emit hash maps; this one does, because dropping them would change the file.
 

@@ -1,6 +1,9 @@
 import { rendererChoice, stripLegacyGpu } from "./backend.js";
+import { migrateStorage } from "./storage.js";
 
 try {
+  migrateStorage(localStorage);
+  localStorage.removeItem("ocarinaforge.webgpu");
   localStorage.removeItem("bancwright.webgpu");
 } catch {
   /* private mode has no storage */

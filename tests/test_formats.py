@@ -5,11 +5,11 @@ import struct
 import pytest
 import zstandard
 
-from bancwright.errors import BancError
-from bancwright.formats.byml import F64, Hash32, Hash64, S64, U32, U64, dumps, loads, same
-from bancwright.formats.restbl import ResourceSizeTable, entry_for_byml, load_table, save_table
-from bancwright.formats.sarc import Sarc, pack
-from bancwright.formats.zsio import DictSet, compress, decompress
+from ocarina_forge.errors import BancError
+from ocarina_forge.formats.byml import F64, Hash32, Hash64, S64, U32, U64, dumps, loads, same
+from ocarina_forge.formats.restbl import ResourceSizeTable, entry_for_byml, load_table, save_table
+from ocarina_forge.formats.sarc import Sarc, pack
+from ocarina_forge.formats.zsio import DictSet, compress, decompress
 
 
 def test_byml_roundtrip_keeps_types():

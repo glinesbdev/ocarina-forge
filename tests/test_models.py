@@ -3,14 +3,14 @@
 import os
 from pathlib import Path
 
-from bancwright.actors import is_volume, view_actor
-from bancwright.dump import Dump
-from bancwright.fixtures import KOKIRI_STATIC, build_fixture
-from bancwright.formats.bfres import _apply, _bind_pose, _euler_quat, _rigid, _trs, base_color_name, parse, rank_albedo, sample_bfres
-from bancwright.formats.bntx import _decode
-from bancwright.formats.gltf import Primitive, png_rgba, to_glb
-from bancwright.formats.swizzle import deswizzle, swizzle
-from bancwright.models import cache_dir, describe_actor, describe_terrain
+from ocarina_forge.actors import is_volume, view_actor
+from ocarina_forge.dump import Dump
+from ocarina_forge.fixtures import KOKIRI_STATIC, build_fixture
+from ocarina_forge.formats.bfres import _apply, _bind_pose, _euler_quat, _rigid, _trs, base_color_name, parse, rank_albedo, sample_bfres
+from ocarina_forge.formats.bntx import _decode
+from ocarina_forge.formats.gltf import Primitive, png_rgba, to_glb
+from ocarina_forge.formats.swizzle import deswizzle, swizzle
+from ocarina_forge.models import cache_dir, describe_actor, describe_terrain
 
 
 def test_swizzle_round_trip():
@@ -149,8 +149,8 @@ def test_ivy_rotate_hangs_the_sheet_down_the_cliff():
 
 
 def test_moat_and_stream_count_as_water_and_a_bounds_box_is_omitted():
-    from bancwright.models import _omit_reason, _untextured_bounds_box, _water_names
-    from bancwright.formats.bfres import Part
+    from ocarina_forge.models import _omit_reason, _untextured_bounds_box, _water_names
+    from ocarina_forge.formats.bfres import Part
 
     assert _water_names("Mt_HrlCastle_Moat")
     assert _water_names("Cliff", "HrlCastle_Stream_A")
@@ -197,7 +197,7 @@ def test_bc1_punch_through_is_transparent():
 
 
 def test_astc_ids_and_partial_gob_row():
-    from bancwright.formats.bntx import _FORMATS, _repair_astc_partial_gob
+    from ocarina_forge.formats.bntx import _FORMATS, _repair_astc_partial_gob
 
     assert _FORMATS[0x3701][1:3] == (10, 8)
     assert _FORMATS[0x3801][1:3] == (10, 10)
@@ -216,7 +216,7 @@ def test_astc_ids_and_partial_gob_row():
 
 
 def test_block_height_uses_layout_low_bits_and_mip_size():
-    from bancwright.formats.bntx import textures, write_rgba
+    from ocarina_forge.formats.bntx import textures, write_rgba
 
     width, height = 20, 20
     rgba = bytearray([40, 40, 40, 255] * width * height)
@@ -237,7 +237,7 @@ def test_block_height_uses_layout_low_bits_and_mip_size():
 
 
 def test_sparse_heightmap_is_a_few_files_inside_a_large_index():
-    from bancwright.models import _sparse_heightmap
+    from ocarina_forge.models import _sparse_heightmap
 
     castle = [{"status": "drawn", "reason": ""}] * 14 + [{"status": "skipped", "reason": "no heightmap file"}] * 583
     assert _sparse_heightmap(castle) is True
@@ -253,7 +253,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     the pin below is updated in the same edit. Reusing the previous version with
     a new stamp is a failure: the prefix has to move so a reader can see the rebuild.
     """
-    from bancwright.models import _CACHE_VERSION, _cache_prefix, _converter_files, _converter_stamp
+    from ocarina_forge.models import _CACHE_VERSION, _cache_prefix, _converter_files, _converter_stamp
 
     assert [path.name for path in _converter_files()] == [
         "models.py",
@@ -266,7 +266,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-31", "1f018c034470d9175560e720fd116f348ba16b3a2e6f51e05002b721f09d9093")
+    pinned = ("models-32", "fa979aaaa1d60022f46fcddd4faee343082eac0e69e1bddcc3c0774575d424d5")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -275,7 +275,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
 
 def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
     cache = tmp_path / "model-cache"
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(cache))
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(cache))
     dump = Dump(build_fixture(tmp_path / "dump"))
     fado = describe_actor(dump, "Npc_Kokiri_F_01")
     assert fado["status"] == "mesh"
@@ -314,7 +314,7 @@ def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
     assert terrain["source"].endswith("Model/KokiriForest_01.KokiriForest_01.bfres.zs")
     assert terrain["textures"] >= 1
     assert describe_terrain(dump, "Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs")["status"] == "none"
-    assert os.environ["BANCWRIGHT_CACHE"] == str(cache)
+    assert os.environ["OCARINA_FORGE_CACHE"] == str(cache)
 
 
 def test_volume_flags():
@@ -344,11 +344,11 @@ def test_volume_flags():
 
 def test_modelinfo_names_the_real_bfres_and_tex(tmp_path, monkeypatch):
     """The path a 1.1.1 dump actually uses: Model/<Project>.<Fmdb>.bfres.zs plus Tex/."""
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bntx import write_rgba
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.sarc import pack
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     gyaml = "Obj_LiftRock_A_01"
@@ -394,7 +394,7 @@ def test_modelinfo_names_the_real_bfres_and_tex(tmp_path, monkeypatch):
     assert resolved["textures"] == 1
     assert "untextured" not in (resolved["reason"] or "")
 
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     (dump.romfs / "Model" / "Obj_Rock_A.Obj_LiftRock_A_01.bfres.zs").unlink()
@@ -416,8 +416,8 @@ def test_modelinfo_names_the_real_bfres_and_tex(tmp_path, monkeypatch):
 
 
 def test_old_single_name_model_still_resolves(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     rgba = bytes([20, 80, 200, 255]) * 4
@@ -430,8 +430,8 @@ def test_old_single_name_model_still_resolves(tmp_path, monkeypatch):
 
 
 def test_spirit_stone_is_a_read_only_ghost():
-    from bancwright.project import Project
-    from bancwright.recipes import recipe_actors
+    from ocarina_forge.project import Project
+    from ocarina_forge.recipes import recipe_actors
 
     project = Project(Path(__file__).resolve().parents[1] / "examples" / "after-the-ocarina")
     stones = recipe_actors(project, KOKIRI_STATIC)
@@ -450,12 +450,12 @@ def test_spirit_stone_is_a_read_only_ghost():
 
 
 def test_version_10_reads_every_material_and_skips_runtime_names(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.bntx import write_rgba
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.sarc import pack
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
 
     bark = [
         ("_a0", "Tree_KokiriBark_A_Alb"),
@@ -505,7 +505,7 @@ def test_version_10_reads_every_material_and_skips_runtime_names(tmp_path, monke
     (dump.romfs / "Tex" / "Tree_KokiriBark_A_Alb.bntx.zs").write_bytes(compress(write_rgba("Tree_KokiriBark_A_Alb", 2, 2, green), 1, dicts, level=3))
     (dump.romfs / "Tex" / "MaterialAlb.bntx.zs").write_bytes(compress(write_rgba("MaterialAlb", 2, 2, magenta), 1, dicts, level=3))
     (dump.romfs / "Tex" / "Pool_Alb.bntx.zs").write_bytes(compress(write_rgba("Pool_Alb", 2, 2, magenta), 1, dicts, level=3))
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -524,7 +524,7 @@ def test_version_10_reads_every_material_and_skips_runtime_names(tmp_path, monke
 
 
 def test_v10_render_state_drops_the_opaque_twin():
-    from bancwright.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bfres import sample_v10_bfres
 
     data = sample_v10_bfres(
         "FarView",
@@ -562,10 +562,10 @@ def test_v10_render_state_drops_the_opaque_twin():
 
 
 def test_dummy_terrain_is_an_earth_green_proxy(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.bntx import write_rgba
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     dicts = dump.dicts()
@@ -585,7 +585,7 @@ def test_dummy_terrain_is_an_earth_green_proxy(tmp_path, monkeypatch):
     (dump.romfs / "Tex" / "KokiriForest_01_Alb.bntx.zs").write_bytes(
         compress(write_rgba("KokiriForest_01_Alb", 2, 2, green), 1, dicts, level=3)
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -611,13 +611,13 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
     import json
     import struct
 
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.bntx import write_rgba
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.terrain import SIZE, level_stems
-    from bancwright.formats.zsio import compress
-    from bancwright.models import CacheMiss
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.terrain import SIZE, level_stems
+    from ocarina_forge.formats.zsio import compress
+    from ocarina_forge.models import CacheMiss
 
     assert level_stems(KOKIRI_STATIC)[0] == "KokiriForest_Child"
     dump = Dump(build_fixture(tmp_path / "dump"))
@@ -655,7 +655,7 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
     (dump.romfs / "Tex" / "MaterialAlb.bntx.zs").write_bytes(
         compress(_array_bntx("MaterialAlb", [green, red], 2, 2), 1, dicts, level=3)
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -711,10 +711,10 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
 def test_heightmap_without_an_index_is_earth_and_a_failed_tscb_is_not_the_proxy(tmp_path, monkeypatch):
     import struct
 
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.terrain import SIZE
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.terrain import SIZE
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     dicts = dump.dicts()
@@ -729,7 +729,7 @@ def test_heightmap_without_an_index_is_earth_and_a_failed_tscb_is_not_the_proxy(
     folder.mkdir(parents=True)
     (dump.romfs / "TerrainArc" / "KokiriForest.tscb").write_bytes(_tscb(1.0, 4.0, [(0.0, 0.0, 16.0, "Flat_00")]))
     (folder / "Flat_00.hght").write_bytes(_hght([0.5] * (SIZE * SIZE)))
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     info = describe_terrain(dump, KOKIRI_STATIC)
@@ -772,8 +772,8 @@ def test_heightmap_without_an_index_is_earth_and_a_failed_tscb_is_not_the_proxy(
 def test_swizzled_heights_round_trip():
     import struct
 
-    from bancwright.formats.swizzle import swizzle
-    from bancwright.formats.terrain import SIZE, read_height_file
+    from ocarina_forge.formats.swizzle import swizzle
+    from ocarina_forge.formats.terrain import SIZE, read_height_file
 
     heights = [0.5] * (SIZE * SIZE)
     heights[20 * SIZE + 10] = 0.25
@@ -790,7 +790,7 @@ def test_swizzled_heights_round_trip():
 
 
 def test_zero_is_ground_and_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
-    from bancwright.formats.terrain import SIZE, build_scene
+    from ocarina_forge.formats.terrain import SIZE, build_scene
 
     coarse = [0.0] * (SIZE * SIZE)
     hole = [float("nan")] * (SIZE * SIZE)
@@ -829,8 +829,8 @@ def test_zero_is_ground_and_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
 def test_the_partial_column_odd_rows_are_not_zeros():
     import struct
 
-    from bancwright.formats.swizzle import _gob_address, surface_bytes
-    from bancwright.formats.terrain import SIZE, _as_floats
+    from ocarina_forge.formats.swizzle import _gob_address, surface_bytes
+    from ocarina_forge.formats.terrain import SIZE, _as_floats
 
     log2 = 4
     block_height = 1 << log2
@@ -851,7 +851,7 @@ def test_the_partial_column_odd_rows_are_not_zeros():
 
 
 def test_a_dropped_mid_quad_does_not_take_the_coarse_ground_with_it():
-    from bancwright.formats.terrain import SIZE, build_scene
+    from ocarina_forge.formats.terrain import SIZE, build_scene
 
     count = SIZE * SIZE
     parts, reports = build_scene(
@@ -876,7 +876,7 @@ def test_a_dropped_mid_quad_does_not_take_the_coarse_ground_with_it():
 
 
 def test_a_uv_seam_is_closed_and_a_full_chart_is_left_alone():
-    from bancwright.formats.bfres import _close_uv_seams
+    from ocarina_forge.formats.bfres import _close_uv_seams
 
     positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
     seam = _close_uv_seams(positions, [(0.02, 0.2), (0.98, 0.2), (0.04, 0.8)], [0, 1, 2])
@@ -903,9 +903,9 @@ def test_tiled_roof_uvs_match_the_served_glb_on_both_lods():
     The served file is the meshopt glb. TEXCOORD_0 is float, not a normalized
     uint16, and the far mesh does not bridge a UV seam.
     """
-    from bancwright.formats.bfres import parse, sample_bfres
-    from bancwright.formats.meshopt import simplify_mesh
-    from bancwright.models import _assemble
+    from ocarina_forge.formats.bfres import parse, sample_bfres
+    from ocarina_forge.formats.meshopt import simplify_mesh
+    from ocarina_forge.models import _assemble
 
     cols, rows = 20, 12
     positions = []
@@ -993,7 +993,7 @@ def test_tiled_roof_uvs_match_the_served_glb_on_both_lods():
 def test_coverage_png_marks_the_emitted_quad(tmp_path):
     from PIL import Image
 
-    from bancwright.formats.terrain import SIZE, build_scene, write_coverage_png
+    from ocarina_forge.formats.terrain import SIZE, build_scene, write_coverage_png
 
     parts, _reports = build_scene([(0.0, 0.0, 1.0, "Tile", [0.5] * (SIZE * SIZE), None)], 1.0, 1.0)
     positions = [point for part in parts for point in part.positions]
@@ -1012,7 +1012,7 @@ def test_coverage_png_marks_the_emitted_quad(tmp_path):
 
 
 def test_a_finer_tile_punches_the_coarser_one():
-    from bancwright.formats.terrain import SIZE, build_scene
+    from ocarina_forge.formats.terrain import SIZE, build_scene
 
     coarse = [0.5] * (SIZE * SIZE)
     fine = [0.8] * (SIZE * SIZE)
@@ -1032,7 +1032,7 @@ def test_a_finer_tile_punches_the_coarser_one():
 
 
 def test_mate_blend_uses_the_second_index_and_rejects_noise():
-    from bancwright.formats.terrain import SIZE, read_mate
+    from ocarina_forge.formats.terrain import SIZE, read_mate
 
     count = SIZE * SIZE
     raw = bytearray()
@@ -1053,8 +1053,8 @@ def test_mate_blend_uses_the_second_index_and_rejects_noise():
 def test_swizzled_mate_keeps_material_a_and_lists_material_b():
     import struct
 
-    from bancwright.formats.swizzle import swizzle
-    from bancwright.formats.terrain import SIZE, read_mate, read_occlusion, split_histogram
+    from ocarina_forge.formats.swizzle import swizzle
+    from ocarina_forge.formats.terrain import SIZE, read_mate, read_occlusion, split_histogram
 
     count = SIZE * SIZE
     raw = bytearray()
@@ -1090,7 +1090,7 @@ def test_swizzled_mate_keeps_material_a_and_lists_material_b():
 
 
 def test_tiles_inside_the_clip_are_not_capped():
-    from bancwright.models import _choose_tiles
+    from ocarina_forge.models import _choose_tiles
 
     tiles = [(float(index), 0.0, 4.0, f"T{index:02d}") for index in range(40)]
     chosen, skipped, notes = _choose_tiles(tiles, 1.0, (0.0, 0.0, 0.0), (-10.0, -10.0, 200.0, 10.0))
@@ -1100,9 +1100,9 @@ def test_tiles_inside_the_clip_are_not_capped():
 
 
 def test_sub_scene_supplies_the_fine_height_and_the_mate(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.terrain import SIZE
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.terrain import SIZE
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     dicts = dump.dicts()
@@ -1137,7 +1137,7 @@ def test_sub_scene_supplies_the_fine_height_and_the_mate(tmp_path, monkeypatch):
     (dump.romfs / "Tex" / "MaterialAlb.bntx.zs").write_bytes(
         compress(_array_bntx("MaterialAlb", [green, red], 2, 2), 1, dicts, level=3)
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -1174,8 +1174,8 @@ def test_sub_scene_supplies_the_fine_height_and_the_mate(tmp_path, monkeypatch):
 
 
 def test_sub_overlay_keeps_the_main_floor(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.terrain import SIZE
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.terrain import SIZE
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     main = dump.romfs / "TerrainArc" / "KokiriForest"
@@ -1196,7 +1196,7 @@ def test_sub_overlay_keeps_the_main_floor(tmp_path, monkeypatch):
     (sub / "Floor.mate").write_bytes(bytes([9, 0, 0, 0]) * count)
     (sub / "Rim.mate").write_bytes(bytes([2, 0, 0, 0]) * count)
     (main / "Rim.mate").write_bytes(bytes([9, 0, 0, 0]) * count)
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -1262,7 +1262,7 @@ def _hght(heights: list[float], layers: bytes | None = None) -> bytes:
         blob.extend(layers)
         struct.pack_into("<I", blob, 0x1C, start - 0x1C)
         struct.pack_into("<I", blob, 0x20, len(layers))
-    from bancwright.formats.zsio import compress
+    from ocarina_forge.formats.zsio import compress
 
     frame = compress(bytes(blob), 0, None, level=1)
     wrapped = bytearray(16)
@@ -1274,7 +1274,7 @@ def _hght(heights: list[float], layers: bytes | None = None) -> bytes:
 def _array_bntx(name: str, layers: list[bytes], width: int, height: int) -> bytes:
     import struct
 
-    from bancwright.formats.bntx import write_rgba
+    from ocarina_forge.formats.bntx import write_rgba
 
     blob = bytearray(write_rgba(name, width, height, layers[0]))
     layer_bytes = width * height * 4
@@ -1289,7 +1289,7 @@ def _array_bntx(name: str, layers: list[bytes], width: int, height: int) -> byte
 
 def _stored(glb: bytes) -> bytes:
     """The cache file is meshopt-compressed. Tests read the decoded floats and the original image."""
-    from bancwright.formats.meshopt import plain_glb
+    from ocarina_forge.formats.meshopt import plain_glb
 
     return plain_glb(glb)
 
@@ -1316,11 +1316,11 @@ def _accessor_floats(document, blob: bytes, index: int, width: int):
 
 
 def test_alb_suffix_and_bundle_resolve(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bntx import write_rgba
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.sarc import pack
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     gyaml = "Obj_Tree"
@@ -1360,11 +1360,11 @@ def test_alb_suffix_and_bundle_resolve(tmp_path, monkeypatch):
 def test_recipe_edits_round_trip_and_keep_comments(tmp_path):
     import shutil
 
-    from bancwright.changes import scene_changes
-    from bancwright.dump import Dump
-    from bancwright.fixtures import build_fixture
-    from bancwright.project import Project
-    from bancwright.recipes import apply_recipe_command, recipe_actors
+    from ocarina_forge.changes import scene_changes
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.fixtures import build_fixture
+    from ocarina_forge.project import Project
+    from ocarina_forge.recipes import apply_recipe_command, recipe_actors
 
     source = Path(__file__).resolve().parents[1] / "examples" / "after-the-ocarina"
     root = tmp_path / "project"
@@ -1430,14 +1430,14 @@ def test_untextured_mesh_is_flat_color_and_cutout_is_masked(tmp_path, monkeypatc
     import json
     import struct
 
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bntx import write_rgba
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.gltf import Primitive, to_glb
-    from bancwright.formats.sarc import pack
-    from bancwright.formats.zsio import compress
-    from bancwright.models import pick_image
-    from bancwright.formats.bntx import Texture
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bntx import write_rgba
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.gltf import Primitive, to_glb
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
+    from ocarina_forge.models import pick_image
+    from ocarina_forge.formats.bntx import Texture
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     dicts = dump.dicts()
@@ -1497,7 +1497,7 @@ def test_untextured_mesh_is_flat_color_and_cutout_is_masked(tmp_path, monkeypatc
     )
     (dump.romfs / "Model" / "Obj_Tree.Obj_Tree.bfres.zs").write_bytes(compress(missing, 1, dicts, level=3))
     (dump.romfs / "Tex" / "MissingPaint.bntx.zs").write_bytes(compress(write_rgba("MissingPaint", 2, 2, magenta), 1, dicts, level=3))
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -1558,7 +1558,7 @@ def test_check_models_script(tmp_path, monkeypatch):
     import subprocess
     import sys
 
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
     dump = build_fixture(tmp_path / "dump")
     script = Path(__file__).resolve().parents[1] / "scripts" / "check_models.py"
     result = subprocess.run(
@@ -1583,7 +1583,7 @@ def test_check_models_script(tmp_path, monkeypatch):
 def test_v10_material_dictionary_is_at_0x40_and_count_cross_checks():
     import struct
 
-    from bancwright.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bfres import sample_v10_bfres
 
     materials = [
         {"name": "Bark", "samplers": [("_a0", "Tree_Alb")], "mode": "mask", "cull": "both"},
@@ -1612,11 +1612,11 @@ def test_v10_material_dictionary_is_at_0x40_and_count_cross_checks():
 def test_flag_0x10_exact_file_is_a_bounds_box_not_a_sibling(tmp_path, monkeypatch):
     import struct
 
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.sarc import pack
-    from bancwright.formats.zsio import compress
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
 
     outside = bytearray(
         sample_v10_bfres("Outside", [{"name": "Wall", "samplers": []}], shapes=[{"name": "House", "material": 0}])
@@ -1660,7 +1660,7 @@ def test_flag_0x10_exact_file_is_a_bounds_box_not_a_sibling(tmp_path, monkeypatc
     (dump.romfs / "Model" / "Land_Kokiri_House.Land_Kokiri_House_Inside_C_03.bfres.zs").write_bytes(
         compress(inside, 1, dicts, level=3)
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     resolved = describe_actor(dump, gyaml)
@@ -1676,9 +1676,9 @@ def test_only_the_near_lod_is_the_full_mesh_and_images_shrink():
     import json
     import struct
 
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.gltf import encode_albedo, limit_rgba, to_glb
-    from bancwright.formats.gltf import Primitive
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.gltf import encode_albedo, limit_rgba, to_glb
+    from ocarina_forge.formats.gltf import Primitive
 
     positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)]
     data = sample_v10_bfres(
@@ -1718,7 +1718,7 @@ def test_only_the_near_lod_is_the_full_mesh_and_images_shrink():
 
 
 def test_cluster_lod_shrinks_a_dense_mesh():
-    from bancwright.formats.gltf import cluster_lod
+    from ocarina_forge.formats.gltf import cluster_lod
 
     positions = [(float(x), float(y), 0.0) for y in range(40) for x in range(40)]
     indices = []
@@ -1739,7 +1739,7 @@ def test_cluster_lod_shrinks_a_dense_mesh():
 
 
 def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
-    from bancwright.formats.meshopt import simplify_mesh
+    from ocarina_forge.formats.meshopt import simplify_mesh
 
     positions = [(float(x), float(y), 0.0) for y in range(40) for x in range(40)]
     indices = []
@@ -1762,9 +1762,9 @@ def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
 def test_ground_debug_height_and_extent(tmp_path, capsys):
     import json
 
-    from bancwright.__main__ import print_ground_debug
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.terrain import SIZE
+    from ocarina_forge.__main__ import print_ground_debug
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.terrain import SIZE
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     parent = dumps({"TerrainSceneName": "KokiriField", "TerrainScenePosition": {"X": 0.0, "Y": 2.0, "Z": 0.0}})
@@ -1796,8 +1796,8 @@ def test_ground_debug_height_and_extent(tmp_path, capsys):
 
 
 def test_terrain_atlas_is_cached_apart_from_the_glb(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.models import _CACHE_VERSION, _pack_atlas, _solid_cell
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.models import _CACHE_VERSION, _pack_atlas, _solid_cell
 
     cells = [_solid_cell((1, 0, 0)), _solid_cell((0, 1, 0))]
     png, cols = _pack_atlas(cells)
@@ -1816,8 +1816,8 @@ def test_terrain_atlas_is_cached_apart_from_the_glb(tmp_path, monkeypatch):
 def test_model_debug_prints_skin_and_the_actor_placement(tmp_path, capsys):
     import json
 
-    from bancwright.__main__ import print_model_debug
-    from bancwright.formats.bfres import _shape_report, _worlds, inspect
+    from ocarina_forge.__main__ import print_model_debug
+    from ocarina_forge.formats.bfres import _shape_report, _worlds, inspect
 
     rgba = bytes([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255])
     blob = sample_bfres("Pyramid", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], rgba, 2, 2)
@@ -1862,7 +1862,7 @@ def test_model_debug_prints_skin_and_the_actor_placement(tmp_path, capsys):
 def test_model_debug_near_lists_the_model_file(tmp_path, capsys):
     import json
 
-    from bancwright.__main__ import print_model_debug
+    from ocarina_forge.__main__ import print_model_debug
 
     dump = build_fixture(tmp_path / "dump")
     assert print_model_debug(None, dump=str(dump), banc=KOKIRI_STATIC, near="2,0,3", radius=4) == 0
@@ -1886,7 +1886,7 @@ def test_model_debug_near_lists_the_model_file(tmp_path, capsys):
 
 
 def _fork_pack(glb, conn):
-    from bancwright.formats.meshopt import finish_glb
+    from ocarina_forge.formats.meshopt import finish_glb
 
     packed = finish_glb(glb)
     conn.send(b"EXT_meshopt_compression" in packed)
@@ -1900,8 +1900,8 @@ def test_a_dead_meshopt_helper_restarts_without_a_broken_pipe(monkeypatch, tmp_p
     import os
     import sys
 
-    from bancwright.formats import meshopt
-    from bancwright.formats.gltf import Primitive, png_rgba, to_glb
+    from ocarina_forge.formats import meshopt
+    from ocarina_forge.formats.gltf import Primitive, png_rgba, to_glb
 
     log = tmp_path / "meshopt.log"
     monkeypatch.setattr(meshopt, "_LOG", log)
@@ -1937,8 +1937,8 @@ def test_a_forked_worker_does_not_kill_the_parent_meshopt_helper():
     import multiprocessing
     import os
 
-    from bancwright.formats.gltf import Primitive, png_rgba, to_glb
-    from bancwright.formats.meshopt import _PROCS, finish_glb
+    from ocarina_forge.formats.gltf import Primitive, png_rgba, to_glb
+    from ocarina_forge.formats.meshopt import _PROCS, finish_glb
 
     png = png_rgba(2, 2, bytes([4, 5, 6, 255]) * 4)
     glb = to_glb([Primitive([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], png=png, name="Lamp")])
@@ -1959,8 +1959,8 @@ def test_a_forked_worker_does_not_kill_the_parent_meshopt_helper():
 
 
 def test_import_cache_stores_meshopt_geometry_and_keeps_the_texture():
-    from bancwright.formats.gltf import Primitive, png_rgba, to_glb
-    from bancwright.formats.meshopt import finish_glb
+    from ocarina_forge.formats.gltf import Primitive, png_rgba, to_glb
+    from ocarina_forge.formats.meshopt import finish_glb
 
     png = png_rgba(8, 8, bytes([220, 20, 20, 255]) * 64)
     positions = [(0.0, 6.0, 0.0), (1.0, 6.0, 0.0), (0.0, 7.0, 0.0)]
@@ -1991,9 +1991,9 @@ def _packed_document(glb: bytes) -> dict:
 
 
 def _install(dump, gyaml: str, mesh: bytes, textures: dict[str, bytes] | None = None) -> None:
-    from bancwright.formats.byml import dumps
-    from bancwright.formats.sarc import pack
-    from bancwright.formats.zsio import compress
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
 
     dicts = dump.dicts()
     info = dumps({"FmdbName": gyaml, "ModelProjectName": gyaml})
@@ -2010,7 +2010,7 @@ def _install(dump, gyaml: str, mesh: bytes, textures: dict[str, bytes] | None = 
 
 
 def test_a_busy_albedo_keeps_the_stored_block_height():
-    from bancwright.formats.bntx import textures, write_rgba
+    from ocarina_forge.formats.bntx import textures, write_rgba
 
     width = height = 64
     rgba = bytearray(width * height * 4)
@@ -2028,8 +2028,8 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
     import json
     import struct
 
-    from bancwright.__main__ import print_material_debug
-    from bancwright.formats.bfres import parse, sample_bfres, sample_v10_bfres
+    from ocarina_forge.__main__ import print_material_debug
+    from ocarina_forge.formats.bfres import parse, sample_bfres, sample_v10_bfres
 
     shader = {
         "archive": "Land.sharc",
@@ -2125,9 +2125,9 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
 
 
 def test_material_debug_opens_a_dump_relative_bfres_and_keeps_gyaml_lookup(tmp_path, capsys):
-    from bancwright.__main__ import print_material_debug
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.zsio import compress
+    from ocarina_forge.__main__ import print_material_debug
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.zsio import compress
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     mesh = sample_v10_bfres("Garden", [{"name": "Mt_Garden", "samplers": [("_a0", "Garden_Alb")]}])
@@ -2203,8 +2203,8 @@ def _retail_assign(mesh: bytes) -> bytes:
 def test_retail_v10_shader_block_is_printed_and_not_applied(tmp_path, capsys):
     import json
 
-    from bancwright.__main__ import print_material_debug
-    from bancwright.formats.bfres import parse, sample_v10_bfres
+    from ocarina_forge.__main__ import print_material_debug
+    from ocarina_forge.formats.bfres import parse, sample_v10_bfres
 
     mesh = _retail_assign(
         sample_v10_bfres("Roof", [{"name": "Mt_Roof", "samplers": [("_a0", "Slate_Alb")]}], shapes=[{"name": "pCube", "material": 0}])
@@ -2236,9 +2236,9 @@ def test_retail_v10_shader_block_is_printed_and_not_applied(tmp_path, capsys):
 def test_tex_debug_prints_the_header_and_writes_the_current_png(tmp_path, capsys):
     import struct
 
-    from bancwright.__main__ import print_tex_debug
-    from bancwright.formats.bntx import texture_headers, write_rgba
-    from bancwright.formats.zsio import compress
+    from ocarina_forge.__main__ import print_tex_debug
+    from ocarina_forge.formats.bntx import texture_headers, write_rgba
+    from ocarina_forge.formats.zsio import compress
 
     stored = write_rgba("Slate_Alb", 8, 8, bytes([11, 22, 33, 255]) * 64)
     patched = bytearray(stored)
@@ -2269,9 +2269,9 @@ def test_a_normal_named_texture_is_not_albedo_on_a0():
 
 
 def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.bntx import write_rgba
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bntx import write_rgba
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     green = bytes([20, 140, 60, 255]) * (8 * 8)
@@ -2325,7 +2325,7 @@ def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
             shapes=[{"name": "Body", "material": 0}],
         ),
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -2365,7 +2365,7 @@ def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
 
 
 def test_wrong_block_height_that_matches_the_mip_size_is_retried():
-    from bancwright.formats.bntx import textures, write_rgba
+    from ocarina_forge.formats.bntx import textures, write_rgba
 
     width = height = 64
     rgba = bytearray(width * height * 4)
@@ -2384,7 +2384,7 @@ def test_wrong_block_height_that_matches_the_mip_size_is_retried():
 def test_unlisted_channel_type_uses_the_known_block_family():
     import struct
 
-    from bancwright.formats.bntx import textures, write_rgba
+    from ocarina_forge.formats.bntx import textures, write_rgba
 
     rgba = bytes([10, 20, 30, 255]) * 16
     stored = bytearray(write_rgba("Flat", 4, 4, rgba))
@@ -2398,9 +2398,9 @@ def test_unlisted_channel_type_uses_the_known_block_family():
 
 
 def test_warm_cache_does_not_decode_textures_again(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.bntx import write_rgba
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bntx import write_rgba
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     green = bytes([12, 90, 40, 255]) * 4
@@ -2414,7 +2414,7 @@ def test_warm_cache_does_not_decode_textures_again(tmp_path, monkeypatch):
         ),
         {"CacheRock_Alb": write_rgba("CacheRock_Alb", 2, 2, green)},
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -2434,7 +2434,7 @@ def test_warm_cache_does_not_decode_textures_again(tmp_path, monkeypatch):
     assert again["digest"] == first["digest"]
     assert calls["n"] == 0
     red = bytes([200, 20, 20, 255]) * 4
-    from bancwright.formats.zsio import compress
+    from ocarina_forge.formats.zsio import compress
     import os
 
     path = dump.romfs / "Tex" / "CacheRock_Alb.bntx.zs"
@@ -2453,7 +2453,7 @@ def _array_rgba(name: str, colors: list[bytes]) -> bytes:
     """One BNTX whose first BRTI is an array of 2x2 images, one colour per layer."""
     import struct
 
-    from bancwright.formats.bntx import write_rgba
+    from ocarina_forge.formats.bntx import write_rgba
 
     width = height = 2
     stride = width * height * 4
@@ -2482,7 +2482,7 @@ def _png_pixel(glb: bytes) -> tuple[int, int, int, int]:
 
 
 def test_texture_layer_reads_one_slice_and_forces_alpha():
-    from bancwright.formats.bntx import BntxError, texture_layer, textures
+    from ocarina_forge.formats.bntx import BntxError, texture_layer, textures
 
     red = bytes((200, 20, 30, 10))
     green = bytes((20, 140, 40, 0))
@@ -2503,13 +2503,13 @@ def test_texture_layer_reads_one_slice_and_forces_alpha():
         assert "outside" in str(exc)
     else:
         raise AssertionError("layer 2 should be rejected")
-    single = __import__("bancwright.formats.bntx", fromlist=["write_rgba"]).write_rgba("Flat", 2, 2, red * 4, swizzled=False)
+    single = __import__("ocarina_forge.formats.bntx", fromlist=["write_rgba"]).write_rgba("Flat", 2, 2, red * 4, swizzled=False)
     assert texture_layer(single, 0).rgba == textures(single)[0].rgba
 
 
 def test_terra_array_sand_guess_and_helper_shapes(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres, texture_rank
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres, texture_rank
 
     red = bytes((200, 20, 30, 10))
     green = bytes((20, 140, 40, 0))
@@ -2550,9 +2550,9 @@ def test_terra_array_sand_guess_and_helper_shapes(tmp_path, monkeypatch):
             ],
             shapes=[{"name": "Rock", "material": 0}, {"name": "BakeShadowProxy", "material": 1}],
         ),
-        {"Gate_Rock_Alb": __import__("bancwright.formats.bntx", fromlist=["write_rgba"]).write_rgba("Gate_Rock_Alb", 2, 2, rock * 4)},
+        {"Gate_Rock_Alb": __import__("ocarina_forge.formats.bntx", fromlist=["write_rgba"]).write_rgba("Gate_Rock_Alb", 2, 2, rock * 4)},
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -2619,8 +2619,8 @@ def test_terra_array_sand_guess_and_helper_shapes(tmp_path, monkeypatch):
 
 
 def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     _install(
@@ -2635,7 +2635,7 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
             shapes=[{"name": "Back", "material": 0}, {"name": "Front", "material": 1}],
         ),
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -2658,9 +2658,9 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
 
 
 def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    from bancwright.formats.bfres import sample_v10_bfres
-    from bancwright.formats.bntx import write_rgba
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import sample_v10_bfres
+    from ocarina_forge.formats.bntx import write_rgba
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     borrowed = bytes((40, 80, 120, 255))
@@ -2711,7 +2711,7 @@ def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeyp
         ),
         {"Face_Alb": write_rgba("Face_Alb", 2, 2, face * 4)},
     )
-    from bancwright import models as model_mod
+    from ocarina_forge import models as model_mod
 
     model_mod._LISTING.clear()
     model_mod._TEX_INDEX.clear()
@@ -2749,8 +2749,8 @@ def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeyp
 
 
 def test_empty_mask_alpha_stays_a_cutout_and_bc4_is_not_colour():
-    from bancwright.formats.bntx import Texture
-    from bancwright.models import _accept
+    from ocarina_forge.formats.bntx import Texture
+    from ocarina_forge.models import _accept
 
     rgba = bytearray()
     for x in range(4):
@@ -2770,8 +2770,8 @@ def test_empty_mask_alpha_stays_a_cutout_and_bc4_is_not_colour():
 
 
 def test_sparse_magenta_on_an_opaque_albedo_is_filled_not_punched():
-    from bancwright.formats.bntx import Texture
-    from bancwright.models import _accept
+    from ocarina_forge.formats.bntx import Texture
+    from ocarina_forge.models import _accept
 
     rgba = bytearray([20, 90, 30, 255]) * 4
     rgba[4:8] = bytes([220, 10, 210, 255])
@@ -2794,7 +2794,7 @@ def test_sparse_magenta_on_an_opaque_albedo_is_filled_not_punched():
 
 
 def test_neutral_blend_keeps_both_materials_and_holes_copy_a_neighbour():
-    from bancwright.formats.terrain import SIZE, _fill_pairs, read_terrain_material
+    from ocarina_forge.formats.terrain import SIZE, _fill_pairs, read_terrain_material
 
     raw = bytes([15, 11, 0x7F, 0x7F]) * (SIZE * SIZE)
     layers, pairs, note = read_terrain_material(raw)
@@ -2811,7 +2811,7 @@ def test_neutral_blend_keeps_both_materials_and_holes_copy_a_neighbour():
 
 
 def test_leaf_tiles_stay_under_a_triangle_budget():
-    from bancwright.formats.terrain import SIZE, build_scene, sample_steps
+    from ocarina_forge.formats.terrain import SIZE, build_scene, sample_steps
 
     quads = []
     tiles = []
@@ -2837,7 +2837,7 @@ def test_leaf_tiles_stay_under_a_triangle_budget():
 def test_workers_ignore_sigint_and_the_pool_closes_quietly():
     import signal
 
-    from bancwright.server import _close_pool, _ignore_sigint
+    from ocarina_forge.server import _close_pool, _ignore_sigint
 
     previous = signal.getsignal(signal.SIGINT)
     try:

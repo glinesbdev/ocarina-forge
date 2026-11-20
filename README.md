@@ -1,10 +1,10 @@
-# Bancwright
+# Ocarina Forge
 
-Bancwright is a local workbench for placing actors in the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
+Ocarina Forge is a local workbench for placing actors in the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
 
-This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Actor meshes come from `Model/<Project>.<Fmdb>.bfres.zs` and the albedo sampler from `Tex/`, loaded at runtime (bind pose, no animation) and cached under `~/.cache/bancwright/models`. A second open reuses that cache without converting again. A missing texture borrows a sibling albedo or a rock, vine, or cloth colour. Numbered terra materials use one layer of the `MaterialAlb` array. The field itself is the TerrainArc heightmap, with those same layers when the tile carries an index, and Ground starts on for it. Water is a single faint sheet (the viewport toggle starts on), and alpha-tested foliage is a cutout. Areas and other volumes are outlines, and the untextured `KokiriForest_01` stand-in stays hidden until Ground is turned on. The scene stays usable while the nearest models load first. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches, and a recipe that places an actor (the Spiritual Stones) can be moved like any actor, with the new transform written back to the recipe YAML. The build still produces those files. Dialog editing, event-flow graphs, and a desktop package are later stages.
+This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Actor meshes come from `Model/<Project>.<Fmdb>.bfres.zs` and the albedo sampler from `Tex/`, loaded at runtime (bind pose, no animation) and cached under `~/.cache/ocarina-forge/models`. A second open reuses that cache without converting again. A missing texture borrows a sibling albedo or a rock, vine, or cloth colour. Numbered terra materials use one layer of the `MaterialAlb` array. The field itself is the TerrainArc heightmap, with those same layers when the tile carries an index, and Ground starts on for it. Water is a single faint sheet (the viewport toggle starts on), and alpha-tested foliage is a cutout. Areas and other volumes are outlines, and the untextured `KokiriForest_01` stand-in stays hidden until Ground is turned on. The scene stays usable while the nearest models load first. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches, and a recipe that places an actor (the Spiritual Stones) can be moved like any actor, with the new transform written back to the recipe YAML. The build still produces those files. Dialog editing, event-flow graphs, and a desktop package are later stages.
 
-Bancwright reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
+Ocarina Forge reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
 
 ## Run it on Linux
 
@@ -32,11 +32,11 @@ The first screen asks for the dump folder, the one that contains `romfs`. On a t
 ~/Games/Longshot/rc/v3.0.0
 ```
 
-Mods are written to `~/Games/Longshot/rc/v3.0.0/mods/<project name>/romfs`. Longshot ignores a mod folder whose name starts with `_` or `-`, and Bancwright refuses those names.
+Mods are written to `~/Games/Longshot/rc/v3.0.0/mods/<project name>/romfs`. Longshot ignores a mod folder whose name starts with `_` or `-`, and Ocarina Forge refuses those names.
 
 If you do not have a dump on this machine, choose **Use the bundled sample dump**. It builds a tiny synthetic Kokiri Forest (no Nintendo data) and opens the sample project.
 
-The dump path and the open project are stored in `./bancwright.local.yaml` (gitignored), or in `~/.config/bancwright/config.yaml` if that file already exists. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` override them. Converted models are written to `$BANCWRIGHT_CACHE`, or `$XDG_CACHE_HOME/bancwright/models`, or `~/.cache/bancwright/models`. That cache stays outside the repo.
+The dump path and the open project are stored in `./ocarina-forge.local.yaml` (gitignored), or in `~/.config/ocarina-forge/config.yaml` if that file already exists. A `bancwright.local.yaml` or `~/.config/bancwright/config.yaml` from the previous name is still read, and the home config is renamed on first use. `OCARINA_FORGE_CONFIG`, `OCARINA_FORGE_DUMP`, and `OCARINA_FORGE_PROJECT` override them. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` still work for this release. Converted models are written to `$OCARINA_FORGE_CACHE`, or `$XDG_CACHE_HOME/ocarina-forge/models`, or `~/.cache/ocarina-forge/models`. If `~/.cache/bancwright` is still there and the new folder is not, it is renamed across. `$BANCWRIGHT_CACHE` is still honored. That cache stays outside the repo. `python -m bancwright` prints a deprecation note and runs the same commands as `python -m ocarina_forge`.
 
 ## What you can do
 
@@ -63,9 +63,9 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 
 | Path | Role |
 | --- | --- |
-| `bancwright/` | Python library and FastAPI server. This is the piece that can later replace a mod’s build step. |
-| `bancwright/formats/` | BYML, SARC, zstd dictionaries, RESTBL. |
-| `bancwright/domains.py` | Where a future dialog, event, or table exporter plugs into the build. |
+| `ocarina_forge/` | Python library and FastAPI server. This is the piece that can later replace a mod’s build step. |
+| `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL. |
+| `ocarina_forge/domains.py` | Where a future dialog, event, or table exporter plugs into the build. |
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. |
 | `examples/sample-project/` | A small project in the format. |
 | `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the simple scene importer. |

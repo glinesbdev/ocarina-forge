@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-from bancwright.actors import format_hash
-from bancwright.changes import project_report, scene_changes
-from bancwright.dump import Dump
-from bancwright.fixtures import CUCCO, FADO, KOKIRI_STATIC, build_fixture
-from bancwright.project import Project
-from bancwright.scene import apply_command
+from ocarina_forge.actors import format_hash
+from ocarina_forge.changes import project_report, scene_changes
+from ocarina_forge.dump import Dump
+from ocarina_forge.fixtures import CUCCO, FADO, KOKIRI_STATIC, build_fixture
+from ocarina_forge.project import Project
+from ocarina_forge.scene import apply_command
 
 ROOT = Path(__file__).resolve().parents[1]
 

@@ -161,13 +161,13 @@ $("companion-pick").addEventListener("change", (event) => {
 });
 const statsBox = $("show-stats");
 if (statsBox) {
-  const statsOn = storedFlag("bancwright.stats", true);
+  const statsOn = storedFlag("ocarinaforge.stats", true);
   statsBox.checked = statsOn;
   viewport.setShowStats(statsOn);
   statsBox.addEventListener("change", () => {
     viewport.setShowStats(statsBox.checked);
     try {
-      localStorage.setItem("bancwright.stats", statsBox.checked ? "1" : "0");
+      localStorage.setItem("ocarinaforge.stats", statsBox.checked ? "1" : "0");
     } catch {
       /* private mode */
     }
@@ -304,7 +304,7 @@ async function boot() {
     state.status = await api.status();
   } catch (error) {
     $("gate").hidden = false;
-    $("gate").replaceChildren(gateMessage("Bancwright could not reach its server.", error.message));
+    $("gate").replaceChildren(gateMessage("Ocarina Forge could not reach its server.", error.message));
     return;
   }
   renderChrome();
@@ -379,7 +379,7 @@ function renderChrome() {
     $("project-name").textContent = project.manifest.name;
     $("build-open").hidden = false;
   } else {
-    $("project-title").textContent = dumpReady() ? "No project" : "Set up Bancwright";
+    $("project-title").textContent = dumpReady() ? "No project" : "Set up Ocarina Forge";
     $("project-name").textContent = dump && dump.root ? dump.root : "";
     $("build-open").hidden = true;
   }
@@ -392,10 +392,10 @@ function showGate() {
   const card = document.createElement("div");
   card.className = "gate-card";
   const title = document.createElement("h1");
-  title.textContent = "Point Bancwright at your dump";
+  title.textContent = "Point Ocarina Forge at your dump";
   const lede = document.createElement("p");
   lede.className = "lede";
-  lede.textContent = "The dump is the Longshot folder that contains romfs. Bancwright only reads it. Edits go into a project folder, and Build writes a mod Longshot can load.";
+  lede.textContent = "The dump is the Longshot folder that contains romfs. Ocarina Forge only reads it. Edits go into a project folder, and Build writes a mod Longshot can load.";
   const path = document.createElement("input");
   path.placeholder = "~/Games/Longshot/rc/v3.0.0";
   path.value = (state.status.config && state.status.config.dump) || "";
@@ -1152,7 +1152,7 @@ const HELPER_DEFAULTS = {
 function loadHelperBoxes() {
   const next = { ...HELPER_DEFAULTS };
   try {
-    const raw = localStorage.getItem("bancwright.helperBoxes");
+    const raw = localStorage.getItem("ocarinaforge.helperBoxes");
     if (!raw) return next;
     const parsed = JSON.parse(raw);
     for (const key of Object.keys(HELPER_DEFAULTS)) {
@@ -1193,7 +1193,7 @@ function renderLegend() {
     button.append(swatch, name, eye);
     button.addEventListener("click", () => {
       state.helperBoxes[id] = !on;
-      localStorage.setItem("bancwright.helperBoxes", JSON.stringify(state.helperBoxes));
+      localStorage.setItem("ocarinaforge.helperBoxes", JSON.stringify(state.helperBoxes));
       viewport.setFlags({ boxes: { [id]: state.helperBoxes[id] } });
       renderLegend();
     });
@@ -1540,7 +1540,7 @@ function materialBlock(info) {
   if (useful.length > 8) {
     const more = document.createElement("p");
     more.className = "muted";
-    more.textContent = `${useful.length - 8} more. python -m bancwright material-debug prints every material.`;
+    more.textContent = `${useful.length - 8} more. python -m ocarina_forge material-debug prints every material.`;
     wrap.append(more);
   }
   return wrap;

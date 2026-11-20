@@ -5,14 +5,14 @@ import struct
 
 from fastapi.testclient import TestClient
 
-from bancwright.actors import format_hash
-from bancwright.dump import Dump
-from bancwright.fixtures import FADO, HOUSE, KOKIRI_STATIC, SIGN, build_fixture
-from bancwright.formats.byml import U32, U64, dumps
-from bancwright.project import Project
-from bancwright.scene import apply_command
-from bancwright.validate import GAMEDATA_REL, FlagCatalog, byml_strings, diagnose, hash_values, issues_for, murmur3_32
-from bancwright.values import tag
+from ocarina_forge.actors import format_hash
+from ocarina_forge.dump import Dump
+from ocarina_forge.fixtures import FADO, HOUSE, KOKIRI_STATIC, SIGN, build_fixture
+from ocarina_forge.formats.byml import U32, U64, dumps
+from ocarina_forge.project import Project
+from ocarina_forge.scene import apply_command
+from ocarina_forge.validate import GAMEDATA_REL, FlagCatalog, byml_strings, diagnose, hash_values, issues_for, murmur3_32
+from ocarina_forge.values import tag
 
 
 def _dump(tmp_path):
@@ -144,9 +144,9 @@ def test_duplicate_hash_and_skipped_checks_when_catalogs_are_absent():
 
 
 def test_problems_endpoint(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.chdir(tmp_path)
-    from bancwright.server import app
+    from ocarina_forge.server import app
 
     client = TestClient(app)
     dump = _dump(tmp_path)
@@ -279,7 +279,7 @@ def test_hash_fields_are_read_from_a_big_endian_list():
 def test_problems_command_prints_markdown_and_json(tmp_path, capsys):
     dump = _dump(tmp_path)
     project = _project(tmp_path)
-    from bancwright.__main__ import print_problems
+    from ocarina_forge.__main__ import print_problems
 
     code = print_problems(KOKIRI_STATIC, dump=str(dump.root), project=str(project.root))
     assert code == 0

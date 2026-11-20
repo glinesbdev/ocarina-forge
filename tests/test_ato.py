@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from bancwright.catalog import catalog
-from bancwright.engine.ato import bind_project, vendor_root
-from bancwright.importers.ato_project import import_ato_project
-from bancwright.project import Project
+from ocarina_forge.catalog import catalog
+from ocarina_forge.engine.ato import bind_project, vendor_root
+from ocarina_forge.importers.ato_project import import_ato_project
+from ocarina_forge.project import Project
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "after-the-ocarina"
@@ -89,7 +89,7 @@ def test_size_rule_matches_the_vendored_pipeline():
         sys.path.insert(0, root)
     from after_ocarina.rstb import rewrite_hashed, target_entry
 
-    from bancwright.formats.restbl import entry_for_byml
+    from ocarina_forge.formats.restbl import entry_for_byml
 
     assert entry_for_byml(14448, 3316, 3384) == target_entry(14448, 3384, old_unpacked=3316) == 15544
     assert entry_for_byml(12984, 12598, 13189) == 14600

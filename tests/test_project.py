@@ -5,10 +5,10 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 
-from bancwright.actors import actor_id, format_hash, read_vec
-from bancwright.dump import Dump
-from bancwright.export import build
-from bancwright.fixtures import (
+from ocarina_forge.actors import actor_id, format_hash, read_vec
+from ocarina_forge.dump import Dump
+from ocarina_forge.export import build
+from ocarina_forge.fixtures import (
     CUCCO,
     FADO,
     FIELD_STATIC,
@@ -20,12 +20,12 @@ from bancwright.fixtures import (
     build_fixture,
     kokiri_static,
 )
-from bancwright.formats.byml import loads, same
-from bancwright.formats.restbl import load_table
-from bancwright.formats.zsio import decompress
-from bancwright.importers.ato import import_scenes
-from bancwright.project import Project
-from bancwright.scene import apply_command, export_document, scene_view
+from ocarina_forge.formats.byml import loads, same
+from ocarina_forge.formats.restbl import load_table
+from ocarina_forge.formats.zsio import decompress
+from ocarina_forge.importers.ato import import_scenes
+from ocarina_forge.project import Project
+from ocarina_forge.scene import apply_command, export_document, scene_view
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -124,7 +124,7 @@ def test_set_param_keeps_the_byml_type(tmp_path):
     )
     exported, _warnings = export_document(document, diff)
     fado = next(actor for actor in exported["Actors"] if actor_id(actor) == format_hash(FADO))
-    from bancwright.formats.byml import U32
+    from ocarina_forge.formats.byml import U32
 
     assert type(fado["Dynamic"]["DefaultDungeonRoomIndex"]) is U32
     assert int(fado["Dynamic"]["DefaultDungeonRoomIndex"]) == 4
@@ -188,7 +188,7 @@ def test_export_installs_and_zips_without_touching_other_files(tmp_path):
 
 
 def test_mod_name_cannot_be_disabled(tmp_path):
-    from bancwright.errors import BancError
+    from ocarina_forge.errors import BancError
     import pytest
 
     with pytest.raises(BancError, match="disabled"):
@@ -196,7 +196,7 @@ def test_mod_name_cannot_be_disabled(tmp_path):
 
 
 def test_missing_dump_is_explicit(tmp_path):
-    from bancwright.errors import BancError
+    from ocarina_forge.errors import BancError
     import pytest
 
     with pytest.raises(BancError, match="romfs") as caught:
@@ -221,9 +221,9 @@ def test_import_ato_yaml(tmp_path):
 
 
 def test_api_sample_edit_and_export(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.chdir(tmp_path)
-    from bancwright.server import app
+    from ocarina_forge.server import app
 
     client = TestClient(app)
     missing = client.get("/api/scenes")
@@ -303,11 +303,11 @@ def test_sample_project_ids_exist_in_the_fixture(tmp_path):
 
 
 def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CONFIG", str(tmp_path / "config.yaml"))
-    monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
-    monkeypatch.setenv("BANCWRIGHT_WORKERS", "1")
+    monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("OCARINA_FORGE_WORKERS", "1")
     monkeypatch.chdir(tmp_path)
-    from bancwright.server import app, describe_actor
+    from ocarina_forge.server import app, describe_actor
 
     dump = _dump(tmp_path)
     client = TestClient(app)
@@ -328,7 +328,7 @@ def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch
             calls["n"] += 1
         return real(dump, gyaml, convert=convert)
 
-    monkeypatch.setattr("bancwright.server.describe_actor", counting)
+    monkeypatch.setattr("ocarina_forge.server.describe_actor", counting)
     import asyncio
     from httpx import ASGITransport, AsyncClient
 
@@ -359,7 +359,7 @@ def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch
 
 
 def test_sibling_bancs_swap_static_and_dynamic():
-    from bancwright.scene import sibling_bancs
+    from ocarina_forge.scene import sibling_bancs
 
     static = "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs"
     dynamic = "Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs"

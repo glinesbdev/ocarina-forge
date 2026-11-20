@@ -2,7 +2,7 @@ format: 1
 name: sample-kokiri
 title: Sample Kokiri edits
 version: 0.1.0
-author: Bancwright
+author: Ocarina Forge
 target:
   game: oot-switch2
   version: "1.1.1"

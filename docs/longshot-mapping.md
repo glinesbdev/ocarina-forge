@@ -1,6 +1,6 @@
 # Longshot mapping
 
-Bancwright keeps its own project folder. [The Longshot Modding API spec](https://git.magicbean.dev/MagicBeanDev/Longshot/wiki/Modding-API-Spec), revision 4 (as built 2026-11-19), is the package a later exporter writes. It is not the on-disk format. Conforming is an exporter change. The YAML in [project-format.md](project-format.md) stays the source.
+Ocarina Forge keeps its own project folder. [The Longshot Modding API spec](https://git.magicbean.dev/MagicBeanDev/Longshot/wiki/Modding-API-Spec), revision 4 (as built 2026-11-19), is the package a later exporter writes. It is not the on-disk format. Conforming is an exporter change. The YAML in [project-format.md](project-format.md) stays the source.
 
 This note does not change that YAML. It records where each edit lands in the spec, and the gaps that an exporter cannot paper over by replacing a whole game file.
 
@@ -18,7 +18,7 @@ The project never stores the merged romfs. A whole-file replacement, when the ho
 
 ## Where each edit goes
 
-| Bancwright edit | Project today | Spec | Gap |
+| Ocarina Forge edit | Project today | Spec | Gap |
 | --- | --- | --- | --- |
 | Actor placement: move, rotate, scale, hide, remove | `scenes/<Area>/<Scene>.yaml`, actors keyed by the banc `Hash` | §6.1 map placements: add, move, remove, and change, folded in load order by `Hash` | §6.1.1 does not key placements by `Hash` yet. Typed patches reach a file by path. The exporter turns one hash record into those ops. It does not write the banc. |
 | Params | `set` on an edited actor (dotted path, `$u32` and the other type tags). `params` on an added actor | §6.1 parameter patches: `set`, `add`, `remove`, plus `type` when the value's type changes. A component file such as an enemy param is the same patch on a pack member (§6.1.1) | Placement fields are part of the placement op, not a second file. Dotted paths become the spec's JSON-Pointer paths (`~0`, `~1`, `-`). The type tag becomes `type`. |
@@ -53,7 +53,7 @@ The editor in [roadmap.md](roadmap.md) draws AINB, event flows, and schedule gra
 
 ## Validation
 
-`bancwright.validate.diagnose` is the check. It returns a dict. It does not print.
+`ocarina_forge.validate.diagnose` is the check. It returns a dict. It does not print.
 
 ```text
 {
@@ -72,4 +72,4 @@ The editor in [roadmap.md](roadmap.md) draws AINB, event flows, and schedule gra
 }
 ```
 
-`field` and `pointer` are the same JSON pointer. `python -m bancwright problems <banc> --json` prints that object and exits 1 when any row is an error. That is the same job as `longshot-mod check --json`: a library result a tool can read, not a line in a log. The Problems list and the actor's Properties panel read this list.
+`field` and `pointer` are the same JSON pointer. `python -m ocarina_forge problems <banc> --json` prints that object and exits 1 when any row is an error. That is the same job as `longshot-mod check --json`: a library result a tool can read, not a line in a log. The Problems list and the actor's Properties panel read this list.

@@ -3,8 +3,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+ocarina-forge.local.yaml
 bancwright.local.yaml
 projects/
+.ocarina-forge/
 .bancwright/
 fixtures/dump/
 frontend/node_modules/

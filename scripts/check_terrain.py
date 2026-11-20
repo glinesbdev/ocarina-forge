@@ -37,10 +37,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bancwright.dump import Dump  # noqa: E402
-from bancwright.errors import BancError  # noqa: E402
-from bancwright.formats.terrain import write_coverage_png  # noqa: E402
-from bancwright.models import cache_dir, describe_terrain, flag10_ground  # noqa: E402
+from ocarina_forge.dump import Dump  # noqa: E402
+from ocarina_forge.errors import BancError  # noqa: E402
+from ocarina_forge.formats.terrain import write_coverage_png  # noqa: E402
+from ocarina_forge.models import cache_dir, describe_terrain, flag10_ground  # noqa: E402
 
 KOKIRI = "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs"
 

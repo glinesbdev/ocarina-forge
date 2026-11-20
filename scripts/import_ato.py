@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn an After the Ocarina checkout into a Bancwright project.
+"""Turn an After the Ocarina checkout into an Ocarina Forge project.
 
     python scripts/import_ato.py ~/Work/after-the-ocarina examples/after-the-ocarina
 
@@ -16,8 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from bancwright.errors import BancError
-from bancwright.importers.ato_project import import_ato_project
+from ocarina_forge.errors import BancError
+from ocarina_forge.importers.ato_project import import_ato_project
 
 
 def main(argv: list[str] | None = None) -> int:

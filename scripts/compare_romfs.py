@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build After the Ocarina and the Bancwright project, then diff the romfs trees.
+"""Build After the Ocarina and the Ocarina Forge project, then diff the romfs trees.
 
 From an ocarina-forge checkout, with the game dump already named in the
 After the Ocarina config.toml:
@@ -35,9 +35,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from bancwright.engine.ato import build_project
-from bancwright.equiv import diff_trees, summarize
-from bancwright.project import Project
+from ocarina_forge.engine.ato import build_project
+from ocarina_forge.equiv import diff_trees, summarize
+from ocarina_forge.project import Project
 
 
 def _ato_romfs(ato: Path) -> Path:
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         "--project",
         type=Path,
         default=ROOT / "examples" / "after-the-ocarina",
-        help="Bancwright project (default: examples/after-the-ocarina)",
+        help="Ocarina Forge project (default: examples/after-the-ocarina)",
     )
     parser.add_argument("--romfs", type=Path, default=None, help="dump romfs, if it should override config.toml")
     parser.add_argument("--skip-ato-build", action="store_true", help="reuse the checkout's existing build/romfs")
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             install=False,
         )
     except Exception as exc:
-        print(f"Bancwright build failed: {exc}", file=sys.stderr)
+        print(f"Ocarina Forge build failed: {exc}", file=sys.stderr)
         return 1
     diffs = diff_trees(ato_out, out, romfs)
     mismatches, explained = summarize(diffs)
