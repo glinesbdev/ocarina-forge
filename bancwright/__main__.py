@@ -1,9 +1,8 @@
 """python -m bancwright  —  start the local server.
 
-``problems <banc>`` prints scene diagnostics. ``model-debug <gyaml or bfres>``
-prints the bind-pose bake for one model. ``model-debug --near x,y,z --banc <scene>``
-lists the actors near that point. With no subcommand, the server starts,
-which is what dev.sh runs.
+``problems <banc>`` prints scene diagnostics. ``model-debug`` prints a bind-pose
+bake or the actors near a point. ``ground-debug <banc>`` prints the ground
+layer. With no subcommand, the server starts, which is what dev.sh runs.
 """
 
 from __future__ import annotations
@@ -23,8 +22,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "serve"],
-        help="problems and model-debug print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "serve"],
+        help="problems, model-debug, and ground-debug print reports. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, or bfres path.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
@@ -35,6 +34,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--near", help="x,y,z in metres. List actors within --radius of this point. No gyaml is required.")
     parser.add_argument("--radius", type=float, default=10.0, help="Metres around --near. Default 10.")
+    parser.add_argument("--at", action="append", default=[], help="x,z in metres. ground-debug prints the ground height there. Repeat for another point.")
     parser.add_argument("--dump", help="Dump folder. Defaults to the saved config.")
     parser.add_argument("--project", help="Project folder. Defaults to the saved config, or an empty project.")
     parser.add_argument("--host", default=os.environ.get("BANCWRIGHT_HOST", "127.0.0.1"))
@@ -58,6 +58,10 @@ def main(argv: list[str] | None = None) -> None:
                 radius=args.radius,
             )
         )
+    if args.command == "ground-debug":
+        if not args.banc:
+            parser.error("ground-debug needs a banc path")
+        raise SystemExit(print_ground_debug(args.banc, points=args.at, as_json=args.json, dump=args.dump))
     if args.static:
         from bancwright.server import mount_frontend
 
@@ -167,6 +171,43 @@ def print_model_debug(
             print(render_near(point, radius, near_rows), end="")
         if report is not None:
             print(render_text(report, placed), end="")
+    return 0
+
+
+def print_ground_debug(banc: str, *, points: list[str] | None = None, as_json: bool = False, dump: str | None = None) -> int:
+    """Print the ground layer. 2 when the dump is missing or a point is not x,z."""
+    from bancwright.config import load_config
+    from bancwright.dump import Dump
+    from bancwright.errors import BancError
+    from bancwright.formats.terrain import TerrainError
+    from bancwright.grounddebug import inspect_ground, parse_at, render_text
+
+    parsed = []
+    try:
+        for text in points or []:
+            parsed.append(parse_at(text))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    try:
+        report = inspect_ground(opened, banc, parsed)
+    except (BancError, TerrainError, OSError, ValueError) as exc:
+        print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
+        return 2
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_text(report), end="")
     return 0
 
 

@@ -1637,6 +1637,42 @@ def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
     assert min(ys) == 0 and max(ys) == 39
 
 
+def test_ground_debug_height_and_extent(tmp_path, capsys):
+    import json
+
+    from bancwright.__main__ import print_ground_debug
+    from bancwright.formats.byml import dumps
+    from bancwright.formats.terrain import SIZE
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    parent = dumps({"TerrainSceneName": "KokiriField", "TerrainScenePosition": {"X": 0.0, "Y": 2.0, "Z": 0.0}})
+    child = dumps({"$parent": "Work/Banc/GameBancParam/KokiriForest_Base.game__banc__GameBancParam.gyml"})
+    param = dump.romfs / "Banc" / "GameBancParam"
+    param.mkdir(parents=True)
+    (param / "KokiriForest_Base.game__banc__GameBancParam.bgyml").write_bytes(parent)
+    (param / "KokiriForest_Child.game__banc__GameBancParam.bgyml").write_bytes(child)
+    folder = dump.romfs / "TerrainArc" / "KokiriField"
+    folder.mkdir(parents=True)
+    (dump.romfs / "TerrainArc" / "KokiriField.tscb").write_bytes(
+        _tscb(1.0, 10.0, [(0.0, 0.0, 16.0, "Tile_00"), (8000.0, 8000.0, 20.0, "Far_00")])
+    )
+    (folder / "Tile_00.hght").write_bytes(_hght([0.4] * (SIZE * SIZE), bytes([1]) * (SIZE * SIZE)))
+    assert print_ground_debug(KOKIRI_STATIC, points=["0,0", "100,100"], as_json=True, dump=str(dump.romfs.parent)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "heightmap"
+    assert payload["source"].endswith("TerrainArc/KokiriField.tscb")
+    assert payload["origin"] == [0.0, 2.0, 0.0]
+    assert payload["readableExtent"]["minX"] == -8
+    assert payload["readableExtent"]["maxX"] == 8
+    assert abs(payload["heights"]["minY"] - 6.0) < 1e-4
+    drawn = payload["samples"][0]["drawn"]
+    assert drawn["name"] == "Tile_00"
+    assert abs(drawn["worldY"] - 6.0) < 1e-4
+    assert payload["samples"][1]["drawn"] is None
+    assert all("heights" not in tile or tile["heights"] is None for tile in payload["tiles"])
+    assert print_ground_debug(KOKIRI_STATIC, points=["nope"], dump=str(dump.romfs.parent)) == 2
+
+
 def test_terrain_atlas_is_cached_apart_from_the_glb(tmp_path, monkeypatch):
     monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
     from bancwright.models import _CACHE_VERSION, _pack_atlas, _solid_cell
