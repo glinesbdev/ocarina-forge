@@ -100,15 +100,15 @@ The server prints one line per convert on the process log:
 The sample Kokiri scene on this machine (11 actors, two real meshes) was 103.6 ms cold and 1.3 ms warm before this instrumentation. Retail Kokiri Forest and Hyrule Castle are not in this checkout. On a dump, the first run is cold and the second is warm:
 
 ```bash
-.venv/bin/python -m ocarina_forge warm Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs --dump ~/Games/Longshot/rc/v3.0.0
-.venv/bin/python -m ocarina_forge warm Banc/HyruleCastle/HyruleCastle_Field_Static.bcett.byml.zs --dump ~/Games/Longshot/rc/v3.0.0
+.venv/bin/python -m ocarina_forge warm Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs --scene-only --dump ~/Games/Longshot/rc/v3.0.0
+.venv/bin/python -m ocarina_forge warm Banc/HyruleCastle/HyruleCastle_Dynamic.bcett.byml.zs --scene-only --dump ~/Games/Longshot/rc/v3.0.0
 ```
 
-If the castle file has a different name, use the path from the scene list. `warm --all` walks every scene. A cold line says `cache=miss` and has a texture time. The next run of the same models says `cache=hit` and texture time 0.
+Those are the placement files. The Static files in the same folders have no Actors array; warm skips them. `--scene-only` times that scene and does not walk neighbors. Each model prints `name cache=… convert=…ms texture=…ms` as it finishes. The last line is `warm done` and includes the wall time. Run a command twice. A cold line says `cache=miss` and has a texture time. The next run of the same models says `cache=hit` and texture time 0. `warm --all` walks every scene.
 
 ## Background warm-up
 
-Opening a scene queues the rest of that scene's models, nearest to the camera first, and then the other scenes in the same folder, then the rest of the dump. The queue runs one model at a time and waits while an interactive convert is in flight, so it does not take a worker from the view. **Stats** shows `warm 12/80`. The same queue is `POST /api/warm`. `ocarina-forge warm <scene|--all>` does the walk in the foreground and prints each timing.
+Opening a scene queues that scene's models, nearest to the camera first. Neighboring scenes are markers until those models have started, and a file with no Actors array is skipped. The queue runs one model at a time and waits while an interactive convert is in flight, so it does not take a worker from the view. **Stats** shows `warm 12/80`. The same queue is `POST /api/warm`. `ocarina-forge warm <scene|--all>` does the walk in the foreground and prints each model as it finishes. `warm --scene-only <scene>` does not walk neighbors.
 
 ## Model loading
 

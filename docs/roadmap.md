@@ -39,3 +39,11 @@ An asset library browser. Drag an actor from the library onto the scene the way 
 ## 6. New level
 
 **New level** starts from an existing area's setup (terrain, climate, and the actor packs that area already uses) instead of an empty banc. This stays on the roadmap. It is not in this build.
+
+## 7. Run without the Python server
+
+Later. Not started. The frontend stays JavaScript and three.js.
+
+Step one ports the hot paths to a Rust crate and calls that crate from Python with PyO3 and maturin. The paths are swizzle and deswizzle, BNTX and ASTC decode, BFRES mesh conversion, and zstd and archive reading. The per-model convert and texture times in [performance.md](performance.md) decide which of those moves first.
+
+Step two compiles that same crate to WebAssembly and moves parsing and conversion into the browser. The dump folder is picked with the File System Access API. Opening the page is the whole install.

@@ -38,7 +38,7 @@ from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
-from ocarina_forge.warm import neighbor_bancs, scene_model_names, warm_queue
+from ocarina_forge.warm import queue_warm, scene_model_names
 
 def _ignore_sigint() -> None:
     """Worker processes must not print KeyboardInterrupt when the terminal gets Ctrl+C."""
@@ -228,6 +228,7 @@ async def _warm_loop() -> None:
             _WARM_QUEUE.insert(0, (kind, name))
             continue
         if kind == "scene":
+            # A Static file has no Actors array. Skip it and keep the queue moving.
             try:
                 extra = await asyncio.to_thread(scene_model_names, _open_dump(), name)
             except Exception:
@@ -480,9 +481,8 @@ async def start_warm(body: dict):
         scenes = [item["path"] for item in dump.list_scenes()]
         if banc and banc not in scenes and banc not in {"all", "--all"}:
             raise BancError(f"No scene {banc}.", "not_found")
-        if banc in {"all", "--all"}:
-            return warm_queue([], [], scenes)
-        return warm_queue(nearest, scene_model_names(dump, banc) if banc else [], neighbor_bancs(banc, scenes) if banc else [])
+        # Neighbor files stay as markers. The loop parses one after the target's models start.
+        return queue_warm(dump, banc, nearest, neighbors=True)
 
     _WARM_QUEUE = await asyncio.to_thread(plan)
     _WARM_DONE = 0

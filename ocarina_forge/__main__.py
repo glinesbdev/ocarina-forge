@@ -6,7 +6,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
 ``tex-audit`` flags a mip-0 size that implies a different block height than usual, and scores the Tegra and Switch 2 GOB orders.
-``warm <scene>`` converts that scene's models, then neighboring scenes. ``warm --all`` converts every scene.
+``warm <scene>`` converts that scene's models, then neighboring scenes. ``warm --scene-only <scene>`` skips the neighbors. ``warm --all`` converts every scene. A file with no Actors array is skipped.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
 ``behavior-export`` writes saved set-field ops into the project build folder.
@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--out", help="material-audit also writes the report to this file.")
     parser.add_argument("--project", help="Project folder. Defaults to the saved config, or an empty project.")
     parser.add_argument("--all", action="store_true", help="warm converts every scene instead of one banc and its neighbors.")
+    parser.add_argument("--scene-only", action="store_true", help="warm converts the named scene and does not walk neighboring scenes.")
     parser.add_argument("--host", default=setting("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(setting("PORT", "47232") or "47232"))
     parser.add_argument("--static", help="Serve a built frontend from this directory.")
@@ -116,7 +117,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "warm":
         if not args.all and not args.banc:
             parser.error("warm needs a banc path or --all")
-        raise SystemExit(print_warm("all" if args.all else args.banc, dump=args.dump))
+        raise SystemExit(print_warm("all" if args.all else args.banc, dump=args.dump, scene_only=args.scene_only))
     if args.static:
         from ocarina_forge.server import mount_frontend
 
@@ -448,7 +449,7 @@ def print_material_audit(*, as_json: bool = False, dump: str | None = None, out:
     return 0
 
 
-def print_warm(target: str, *, dump: str | None = None) -> int:
+def print_warm(target: str, *, dump: str | None = None, scene_only: bool = False) -> int:
     """Convert one scene and its neighbors, or every scene. Prints each model's timing."""
     from ocarina_forge.config import load_config
     from ocarina_forge.dump import Dump
@@ -466,7 +467,7 @@ def print_warm(target: str, *, dump: str | None = None) -> int:
         print(exc.message, file=sys.stderr)
         return 2
     try:
-        run_warm(opened, target)
+        run_warm(opened, target, neighbors=not scene_only)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return 2

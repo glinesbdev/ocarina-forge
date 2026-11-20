@@ -25,10 +25,20 @@ def model_names(view: dict) -> list[str]:
 
 
 def scene_model_names(dump, banc: str) -> list[str]:
+    """Actor classes in one scene. A file with no Actors array contributes none.
+
+    Static setup files are in the scene list and are not placement files.
+    One of those must not abort the walk.
+    """
     if not banc:
         return []
-    document, _dict_id, _raw = dump.read_byml(banc)
-    return model_names(scene_view(document, {}))
+    from ocarina_forge.errors import BancError
+
+    try:
+        document, _dict_id, _raw = dump.read_byml(banc)
+        return model_names(scene_view(document, {"banc": banc}))
+    except BancError:
+        return []
 
 
 def neighbor_bancs(banc: str, scenes: list[str]) -> list[str]:
@@ -60,31 +70,47 @@ def warm_queue(nearest: list[str], scene_names: list[str], neighbors: list[str])
     return queue
 
 
-def run_warm(dump, target: str, *, log=print) -> dict:
-    """Convert now, in this process. ``target`` is a banc path or ``all``."""
-    from ocarina_forge.models import describe_actor
-
+def queue_warm(dump, target: str, nearest: list[str] | None = None, *, neighbors: bool = True) -> list[tuple[str, str]]:
+    """Target models first. Neighbor scenes stay as markers until those finish."""
     scenes = [item["path"] for item in dump.list_scenes()]
     if target in {"all", "--all"}:
-        bancs = scenes
-    else:
-        if target not in scenes:
-            raise SystemExit(f"No scene {target}. Pass a banc path or --all.")
-        bancs = [target, *neighbor_bancs(target, scenes)]
-    names: list[str] = []
-    seen: set[str] = set()
-    groups = [scene_model_names(dump, banc) for banc in bancs]
-    for group in groups:
-        for name in group:
-            if name in seen:
-                continue
-            seen.add(name)
-            names.append(name)
+        return warm_queue([], [], scenes)
+    if target and target not in scenes:
+        raise SystemExit(f"No scene {target}. Pass a banc path or --all.")
+    extra = neighbor_bancs(target, scenes) if neighbors and target else []
+    return warm_queue(list(nearest or []), scene_model_names(dump, target) if target else [], extra)
+
+
+def run_warm(dump, target: str, *, log=print, neighbors: bool = True) -> dict:
+    """Convert now, in this process. ``target`` is a banc path or ``all``.
+
+    The target's models are converted before any neighbor file is parsed.
+    ``neighbors=False`` is the ``--scene-only`` timing walk.
+    """
+    import sys
+    import time
+
+    from ocarina_forge.models import describe_actor
+
+    queue = queue_warm(dump, target, neighbors=neighbors)
+    seen = {name for kind, name in queue if kind == "model"}
+    started = time.perf_counter()
     misses = 0
     hits = 0
     convert_ms = 0.0
     texture_ms = 0.0
-    for index, name in enumerate(names, start=1):
+    count = 0
+    while queue:
+        kind, name = queue.pop(0)
+        if kind == "scene":
+            fresh = []
+            for item in scene_model_names(dump, name):
+                if item in seen:
+                    continue
+                seen.add(item)
+                fresh.append(("model", item))
+            queue[0:0] = fresh
+            continue
         info = describe_actor(dump, name)
         timing = info.get("timing") or {}
         cache = timing.get("cache") or info.get("status")
@@ -94,19 +120,22 @@ def run_warm(dump, target: str, *, log=print) -> dict:
             misses += 1
             convert_ms += float(timing.get("convertMs") or 0)
             texture_ms += float(timing.get("textureMs") or 0)
-        log(
-            f"{index}/{len(names)} {name} {info.get('status')} cache={cache} "
-            f"convert={timing.get('convertMs', 0)}ms texture={timing.get('textureMs', 0)}ms"
-        )
+        count += 1
+        log(f"{name} cache={cache} convert={timing.get('convertMs', 0)}ms texture={timing.get('textureMs', 0)}ms")
+        sys.stdout.flush()
+    wall_ms = round((time.perf_counter() - started) * 1000, 1)
     summary = {
-        "models": len(names),
+        "models": count,
         "misses": misses,
         "hits": hits,
         "convertMs": round(convert_ms, 1),
         "textureMs": round(texture_ms, 1),
+        "wallMs": wall_ms,
     }
     log(
         f"warm done {summary['models']} models, {summary['misses']} converted, "
-        f"{summary['hits']} cached, conv {summary['convertMs']} ms, tex {summary['textureMs']} ms"
+        f"{summary['hits']} cached, conv {summary['convertMs']} ms, tex {summary['textureMs']} ms, "
+        f"wall {summary['wallMs']} ms"
     )
+    sys.stdout.flush()
     return summary
