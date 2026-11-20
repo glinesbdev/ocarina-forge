@@ -402,9 +402,13 @@ export async function createViewport(host, hooks) {
       edgeMaterial,
       model: null,
       modelMeta: metaCache.get(actor.gyaml) || null,
+      name: actor.name || "",
+      companionLabel: actor.companionLabel || "",
+      recipeNote: (actor.recipe && actor.recipe.note) || "",
       label: null,
-      labelText: actorLabel(actor, recipe),
+      labelText: "",
     };
+    paintLabel(entry);
     entries.set(key, entry);
     return entry;
   }
@@ -441,10 +445,30 @@ export async function createViewport(host, hooks) {
     }
   }
 
-  function actorLabel(actor, recipe) {
-    if (actor.companion) return `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`;
-    if (recipe) return `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`;
-    return actor.name || actor.gyaml;
+  function actorLabel(actor, recipe, source) {
+    let text;
+    if (actor.companion) text = `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`;
+    else if (recipe) text = `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`;
+    else if (actor.name && actor.name !== actor.gyaml) text = `${actor.name} · ${actor.gyaml}`;
+    else text = actor.name || actor.gyaml;
+    if (source) text += ` · ${source}`;
+    return text;
+  }
+
+  function paintLabel(entry) {
+    const source = entry.modelMeta && entry.modelMeta.source;
+    entry.labelText = actorLabel(
+      {
+        name: entry.name,
+        gyaml: entry.gyaml,
+        companion: entry.companion,
+        companionLabel: entry.companionLabel,
+        recipe: entry.recipeNote ? { note: entry.recipeNote } : null,
+      },
+      entry.status === "recipe",
+      source,
+    );
+    if (entry.label) entry.label.element.textContent = entry.labelText;
   }
 
   function applyActorRecord(entry, actor) {
@@ -459,6 +483,9 @@ export async function createViewport(host, hooks) {
     entry.status = actor.status;
     entry.category = actor.category;
     entry.gyaml = actor.gyaml;
+    entry.name = actor.name || "";
+    entry.companionLabel = actor.companionLabel || "";
+    entry.recipeNote = (actor.recipe && actor.recipe.note) || "";
     if (!entry.parts || !entry.parts.length) entry.volume = Boolean(actor.volume);
     if (actor.region !== undefined) entry.region = Boolean(actor.region);
     entry.companion = Boolean(actor.companion);
@@ -479,8 +506,7 @@ export async function createViewport(host, hooks) {
       categories,
       hideVolumes,
     });
-    entry.labelText = actorLabel(actor, recipe);
-    if (entry.label) entry.label.element.textContent = entry.labelText;
+    paintLabel(entry);
     paint(entry);
     syncInstanceMatrix(entry);
   }
@@ -651,6 +677,7 @@ export async function createViewport(host, hooks) {
     };
     const failEntry = (entry, meta, message) => {
       entry.modelMeta = { ...(meta || entry.modelMeta || {}), status: "box", reason: message };
+      paintLabel(entry);
       entry.mesh.visible = true;
       fitBounds(entry, entry.modelMeta.bounds);
       if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
@@ -659,6 +686,7 @@ export async function createViewport(host, hooks) {
       for (const entry of entries.values()) {
         if (entry.gyaml !== gyaml) continue;
         entry.modelMeta = { ...meta, status: "mesh" };
+        paintLabel(entry);
         // Areas, air walls, and other regions stay wireframes. Their packs
         // often contain a solid cube, and one castle cube also carries a
         // miniature of the courtyard. The Volumes and category toggles hide them.
@@ -694,6 +722,7 @@ export async function createViewport(host, hooks) {
             for (const entry of entries.values()) {
               if (entry.gyaml !== gyaml) continue;
               entry.modelMeta = meta;
+              paintLabel(entry);
               fitBounds(entry, meta.bounds);
             }
           } else {

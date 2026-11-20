@@ -1363,11 +1363,8 @@ function renderProps() {
   head.className = "identity";
   const title = document.createElement("h3");
   title.textContent = actor.name || actor.gyaml;
-  const gyaml = document.createElement("div");
-  gyaml.textContent = actor.gyaml;
-  const hash = document.createElement("div");
-  hash.className = "hash";
-  hash.textContent = actor.id || "No instance hash. This actor cannot be edited until the file has a Hash.";
+  const info = viewport.modelInfo(actor.id);
+  const modelFile = info && info.source ? info.source : info && info.status === "loading" ? "still loading" : "no model file";
   const meta = document.createElement("div");
   const cat = document.createElement("span");
   cat.className = "badge";
@@ -1379,7 +1376,14 @@ function renderProps() {
     status.textContent = actor.status === "recipe" ? "build" : actor.status;
     meta.append(" ", status);
   }
-  head.append(title, gyaml, hash, meta);
+  head.append(
+    title,
+    identityRow("Name", actor.name || "(no instance name)"),
+    identityRow("Gyaml", actor.gyaml),
+    identityRow("Hash", actor.id || "none. This actor cannot be edited until the file has a Hash.", true),
+    identityRow("Model", modelFile, true),
+    meta,
+  );
   panel.append(head);
   const notes = actorProblems(actor);
   if (notes.length) panel.append(problemNotes(notes));
@@ -1441,6 +1445,15 @@ function renderProps() {
     srt.textContent = `SRT hash ${actor.srtHash}. The instance id is left alone; the project uses it as the key.`;
     panel.append(srt);
   }
+}
+
+function identityRow(caption, value, mono = false) {
+  const row = document.createElement("div");
+  row.className = mono ? "id-row hash" : "id-row";
+  const label = document.createElement("span");
+  label.textContent = caption;
+  row.append(label, document.createTextNode(value));
+  return row;
 }
 
 function recipeNote(actor) {

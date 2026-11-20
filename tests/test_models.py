@@ -1630,6 +1630,32 @@ def test_model_debug_prints_skin_and_the_actor_placement(tmp_path, capsys):
     assert payload["files"][0]["models"][0]["shapes"]
 
 
+def test_model_debug_near_lists_the_model_file(tmp_path, capsys):
+    import json
+
+    from bancwright.__main__ import print_model_debug
+
+    dump = build_fixture(tmp_path / "dump")
+    assert print_model_debug(None, dump=str(dump), banc=KOKIRI_STATIC, near="2,0,3", radius=4) == 0
+    text = capsys.readouterr().out
+    assert "Npc_Kokiri_F_01" in text
+    assert "Model/Npc_Kokiri_F.Npc_Kokiri_F_01.bfres.zs" in text
+    assert "Fado" in text
+    assert "Presence=Default" in text
+    assert "Npc_Kokiri_M_01" not in text
+    assert "Obj_Tree" not in text
+    capsys.readouterr()
+    assert print_model_debug(None, as_json=True, dump=str(dump), banc=KOKIRI_STATIC, near="2, 0, 3", radius=4) == 0
+    payload = json.loads(capsys.readouterr().out)
+    gyamls = [row["gyaml"] for row in payload["near"]["actors"]]
+    assert "Npc_Kokiri_F_01" in gyamls
+    assert "Npc_Kokiri_M_01" not in gyamls
+    fado = next(row for row in payload["near"]["actors"] if row["gyaml"] == "Npc_Kokiri_F_01")
+    assert fado["model"].endswith("Npc_Kokiri_F.Npc_Kokiri_F_01.bfres.zs")
+    assert fado["distance"] == 0
+    assert print_model_debug(None, dump=str(dump), near="2,0,3") == 2
+
+
 def _fork_pack(glb, conn):
     from bancwright.formats.meshopt import finish_glb
 
