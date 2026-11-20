@@ -49,9 +49,9 @@ The editor shows this same list with ? or the Shortcuts button.
 
 ## Windows
 
-- Window menu: Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Edits, Problems, and Stats
+- Window menu: Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, Problems, and Stats
 - Drag a tab: Dock that panel beside another, or drop it on a tab to share the group
 - Drag a split: Resize the panels
 - Double-click a tab, or Max: Fill the window with that group. Do it again to restore
-- Window, Pop out Behavior: Open the behavior graph in its own window. Inspector has the same command. Selection, edits, and undo stay in sync
+- Window, Pop out Behavior: Open the behavior graph in its own window. Details and Inspector have the same command. Selection, edits, and undo stay in sync
 - Window, Reset layout: Put the panels back, with the behavior graph under the view. This browser remembers the layout

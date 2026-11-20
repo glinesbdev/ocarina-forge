@@ -23,6 +23,7 @@ test("the old side tabs open the docked panels", () => {
   assert.equal(panelIdForTab("props"), "inspector");
   assert.equal(panelIdForTab("changes"), "edits");
   assert.equal(panelIdForTab("behavior"), "behavior");
+  assert.equal(panelIdForTab("details"), "details");
   assert.equal(panelIdForTab("problems"), "problems");
   assert.equal(tabForPanel("actors"), "outliner");
   assert.equal(tabForPanel("inspector"), "props");
@@ -32,7 +33,7 @@ test("the old side tabs open the docked panels", () => {
 
 test("the default panels cover the workbench", () => {
   const ids = PANELS.map((panel) => panel.id);
-  for (const id of ["viewport", "inspector", "behavior", "edits", "problems", "scenes", "actors", "stats"]) {
+  for (const id of ["viewport", "inspector", "behavior", "details", "edits", "problems", "scenes", "actors", "stats"]) {
     assert.ok(ids.includes(id), id);
   }
 });

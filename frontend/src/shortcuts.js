@@ -69,11 +69,11 @@ export const SHORTCUT_GROUPS = [
     id: "windows",
     label: "Windows",
     items: [
-      { keys: "Window menu", action: "Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Edits, Problems, and Stats" },
+      { keys: "Window menu", action: "Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, Problems, and Stats" },
       { keys: "Drag a tab", action: "Dock that panel beside another, or drop it on a tab to share the group" },
       { keys: "Drag a split", action: "Resize the panels" },
       { keys: "Double-click a tab, or Max", action: "Fill the window with that group. Do it again to restore" },
-      { keys: "Window, Pop out Behavior", action: "Open the behavior graph in its own window. Inspector has the same command. Selection, edits, and undo stay in sync" },
+      { keys: "Window, Pop out Behavior", action: "Open the behavior graph in its own window. Details and Inspector have the same command. Selection, edits, and undo stay in sync" },
       { keys: "Window, Reset layout", action: "Put the panels back, with the behavior graph under the view. This browser remembers the layout" },
     ],
   },

@@ -5,6 +5,7 @@ import { planActorRefresh } from "./actors.js";
 import { renderBehavior } from "./behavior.js";
 import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
+import { modelLine } from "./inspector.js";
 import { paletteRows } from "./palette.js";
 import { groupModelErrors } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
@@ -1405,6 +1406,7 @@ function renderFilters() {
 
 function renderProps() {
   if (dock.isOpen("behavior")) refreshBehavior();
+  renderDetails();
   const panel = $("props-panel");
   panel.replaceChildren();
   const actor = selectedActor();
@@ -1417,7 +1419,10 @@ function renderProps() {
   const title = document.createElement("h3");
   title.textContent = actor.name || actor.gyaml;
   const info = viewport.modelInfo(actor.id);
-  const modelFile = info && info.source ? info.source : info && info.status === "loading" ? "still loading" : "no model file";
+  const line = document.createElement("p");
+  line.className = "model-line";
+  line.textContent = modelLine(info);
+  line.title = (info && info.source) || line.textContent;
   const meta = document.createElement("div");
   const cat = document.createElement("span");
   cat.className = "badge";
@@ -1431,23 +1436,19 @@ function renderProps() {
   }
   head.append(
     title,
-    identityRow("Name", actor.name || "(no instance name)"),
+    line,
     identityRow("Gyaml", actor.gyaml),
     identityRow("Hash", actor.id || "none. This actor cannot be edited until the file has a Hash.", true),
-    identityRow("Model", modelFile, true),
     meta,
   );
   panel.append(head);
-  const behavior = document.createElement("div");
-  behavior.className = "actions";
-  behavior.append(action("Behavior", () => showTab("behavior")));
-  panel.append(behavior);
+  const jumps = document.createElement("div");
+  jumps.className = "actions";
+  jumps.append(action("Behavior", () => showTab("behavior")), action("Details", () => showTab("details")));
+  panel.append(jumps);
   const notes = actorProblems(actor);
   if (notes.length) panel.append(problemNotes(notes));
   if (actor.status === "recipe") panel.append(recipeNote(actor));
-  panel.append(modelBlock(actor));
-  const materials = materialBlock(info);
-  if (materials) panel.append(materials);
 
   if (!actor.id || actor.status === "locked") return;
 
@@ -1538,10 +1539,26 @@ function recipeNote(actor) {
   return wrap;
 }
 
+function renderDetails() {
+  const panel = $("details-panel");
+  if (!panel) return;
+  panel.replaceChildren();
+  const actor = selectedActor();
+  if (!actor) {
+    panel.append(empty("Select an actor to read its model."));
+    return;
+  }
+  const title = document.createElement("h3");
+  title.textContent = actor.name || actor.gyaml;
+  panel.append(title, modelBlock(actor));
+  const materials = materialBlock(viewport.modelInfo(actor.id));
+  if (materials) panel.append(materials);
+}
+
 function modelBlock(actor) {
   const wrap = document.createElement("div");
   wrap.className = "model-note";
-  const info = viewport.modelInfo(actor.id) || { status: "loading", reason: "Looking up the model." };
+  const info = viewport.modelInfo(actor.id) || { status: "loading", reason: "Waiting to convert" };
   const title = document.createElement("div");
   title.className = "axis-label";
   title.textContent = "Model";
@@ -1551,8 +1568,8 @@ function modelBlock(actor) {
     if (info.textures) bits.push(info.textures === 1 ? "1 base color" : `${info.textures} base colors`);
     if (info.source) bits.push(info.source);
     body.textContent = bits.join(" · ");
-  } else if (info.status === "loading") {
-    body.textContent = info.reason || "Looking up the model.";
+  } else if (info.status === "loading" || info.status === "queued") {
+    body.textContent = "Waiting to convert";
   } else {
     wrap.classList.add("is-box");
     body.textContent = info.reason || "This actor stays a labeled box.";
@@ -2545,6 +2562,7 @@ function runCommand(id) {
   } else if (id === "changes") showTab("changes");
   else if (id === "problems") showTab("problems");
   else if (id === "behavior") showTab("behavior");
+  else if (id === "details") showTab("details");
   else if (id === "project") openProjectDialog();
   else if (id === "build") $("build-dialog").showModal();
   else if (id === "ground") {
@@ -2562,6 +2580,7 @@ function showTab(name) {
   state.tab = name;
   dock.reveal(panelIdForTab(name));
   if (name === "behavior") refreshBehavior();
+  if (name === "details") renderDetails();
   if (viewport) viewport.resize();
 }
 
@@ -2605,7 +2624,7 @@ function renderWindowMenu() {
     });
     return button;
   };
-  menu.append(rule(), command("Pop out Behavior", () => popOutPanel("behavior")), command("Pop out Inspector", () => popOutPanel("inspector")), rule(), command("Reset layout", () => {
+  menu.append(rule(), command("Pop out Behavior", () => popOutPanel("behavior")), command("Pop out Details", () => popOutPanel("details")), command("Pop out Inspector", () => popOutPanel("inspector")), rule(), command("Reset layout", () => {
     dock.reset();
     toast("Layout reset. The behavior graph is under the view.");
   }));
