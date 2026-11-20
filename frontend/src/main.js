@@ -160,7 +160,9 @@ if (gpuBox) {
   if (gpuLabel) {
     gpuLabel.title = viewport.backend === "WebGPU"
       ? "WebGPU is drawing. Uncheck to reload on WebGL."
-      : "Reload and try WebGPU. WebGL stays the default, and a missing GPU falls back here.";
+      : viewport.backend === "WebGPU (WebGL2 fallback)"
+        ? "WebGPURenderer is on its WebGL2 backend, not a WebGPU device. Uncheck to reload the default WebGL renderer."
+        : "Reload and try WebGPU. WebGL stays the default, and a missing GPU falls back here.";
   }
   gpuBox.addEventListener("change", () => {
     const next = rendererSearch(window.location.search, gpuBox.checked ? "webgpu" : "webgl");

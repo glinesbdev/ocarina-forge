@@ -1,7 +1,8 @@
 /**
  * WebGL stays the default. WebGPU is opt-in (`?gpu=1` or `?renderer=webgpu`)
  * because r170's WebGPU backend is a trial, not a proven win on Kokiri.
- * A missing adapter falls back to the same WebGLRenderer the default uses.
+ * No navigator.gpu at all still uses WebGLRenderer. A missing adapter keeps
+ * WebGPURenderer on its WebGL2 backend and the stats line says so.
  */
 
 export function rendererChoice(search) {
@@ -27,12 +28,20 @@ export function rendererSearch(search, choice) {
 
 /**
  * WebGL counts draws in `calls`. WebGPU counts them in `drawCalls` and uses
- * `calls` for how many times render() ran.
+ * `calls` for how many times render() ran. The WebGL2 fallback is still a
+ * WebGPURenderer, so it uses the same counters.
  */
 export function drawCount(info, webgpu) {
   if (!info) return 0;
   if (webgpu) return Number(info.drawCalls) || 0;
   return Number(info.calls) || 0;
+}
+
+/** Stats label. A WebGPURenderer on the WebGL2 backend must not read as real WebGPU. */
+export function backendLabel(renderer) {
+  if (!renderer || renderer.isWebGPURenderer !== true) return "WebGL";
+  if (renderer.backend && renderer.backend.isWebGPUBackend === true) return "WebGPU";
+  return "WebGPU (WebGL2 fallback)";
 }
 
 export async function createBackendRenderer(THREE, search) {
@@ -57,7 +66,16 @@ export async function createBackendRenderer(THREE, search) {
       setTimeout(() => reject(new Error("WebGPU init timed out")), 8000);
     });
     await Promise.race([gpuRenderer.init(), timeout]);
-    if (!gpuRenderer.backend || gpuRenderer.backend.isWebGPUBackend !== true) {
+    const backend = backendLabel(gpuRenderer);
+    if (backend === "WebGPU (WebGL2 fallback)") {
+      return {
+        renderer: gpuRenderer,
+        backend,
+        note: "No WebGPU adapter. Drawing with the WebGL2 fallback, not a WebGPU device.",
+        nodes: true,
+      };
+    }
+    if (backend !== "WebGPU") {
       gpuRenderer.dispose();
       gpuRenderer = null;
       return {
@@ -67,7 +85,7 @@ export async function createBackendRenderer(THREE, search) {
         nodes: false,
       };
     }
-    return { renderer: gpuRenderer, backend: "WebGPU", note: "", nodes: true };
+    return { renderer: gpuRenderer, backend, note: "", nodes: true };
   } catch (error) {
     console.warn(error);
     if (gpuRenderer && typeof gpuRenderer.dispose === "function") {

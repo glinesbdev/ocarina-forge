@@ -54,7 +54,7 @@ export function attachTerrainColor(material) {
   const terrainSample = Fn(([worldUv, slot]) => atlas.uv(terrainCell(worldUv, slot)));
 
   const terrainTri = Fn(([slot]) => {
-    const blend = pow(max(abs(normalize(normal)), vec3(0.0001)), vec3(4));
+    const blend = pow(max(abs(normal), vec3(0.0001)), vec3(4));
     const weight = blend.div(blend.x.add(blend.y).add(blend.z));
     const alongX = terrainSample(world.zy.div(repeat), slot);
     const alongY = terrainSample(world.xz.div(repeat), slot);

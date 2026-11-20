@@ -8,7 +8,7 @@ Render on change, so an idle view does not redraw. Instance repeated models on t
 
 ## 2. WebGPU trial
 
-In this build, as an opt-in. Three stays on r170. **WebGPU** in the stage bar, or `?gpu=1`, reloads on `WebGPURenderer`. The default, and any failed start, is the existing `WebGLRenderer`. The terrain atlas has a TSL port; instancing, picking, the gizmo, LOD, culling, and render-on-change are the same scene code on both. Water and leaf alpha go through the node material when WebGPU is on. r170 does not count `BatchedMesh` draws in the WebGPU info counters, so compare fps, frame time, `inst`, and the picture, not `tris`. How to switch, and the gaps, are in [performance.md](performance.md). A Kokiri A/B is still the thing that decides whether WebGPU becomes the default.
+In this build, as an opt-in. Three stays on r170. **WebGPU** in the stage bar, or `?gpu=1`, reloads on `WebGPURenderer`. The default is the existing `WebGLRenderer`. No adapter keeps `WebGPURenderer` on its WebGL2 backend, and the stats line says `WebGPU (WebGL2 fallback)`. The terrain atlas has a TSL port; instancing, picking, the gizmo, LOD, culling, and render-on-change are the same scene code on both. Water and leaf alpha go through the node material when WebGPU is on. r170 does not count `BatchedMesh` draws in the WebGPU info counters, so compare fps, frame time, `inst`, and the picture, not `tris`. How to switch, and the gaps, are in [performance.md](performance.md). A Kokiri A/B is still the thing that decides whether WebGPU becomes the default.
 
 ## 3. Editing UX
 
