@@ -80,6 +80,7 @@
             <label class="check"><input id="companion-pick" type="checkbox" checked /> Pick companions</label>
             <label class="check"><input id="show-stats" type="checkbox" /> Stats</label>
             <label class="check" title="Experimental. WebGL stays the default. The Kokiri WebGPU trial stayed slower, so this path is shelved."><input id="use-webgpu" type="checkbox" /> WebGPU <span class="muted">experimental</span></label>
+            <span id="hot-status" class="hot-status" hidden></span>
             <label class="check" title="Auto uses the size rules. A metre cap also hides anything farther than that, except the selection.">Draw
               <select id="draw-distance">
                 <option value="0" selected>Auto</option>
@@ -209,6 +210,13 @@
             <button id="import-example" type="button" class="ghost">Import the bundled example</button>
           </div>
           <pre id="import-log" class="log"></pre>
+        </fieldset>
+        <fieldset>
+          <legend>Hot reload</legend>
+          <label class="check"><input id="hot-enabled" type="checkbox" /> Write the built mod into a Longshot folder on save</label>
+          <label>Mod folder<input id="hot-path" placeholder="~/Games/Longshot/mods/Bancwright" /></label>
+          <p class="muted tight">Off until you turn it on. A save waits a moment, then writes the built files into that folder, one file at a time, so a burst of undos is a single write. To see the change in game, leave the map and enter it again. Longshot reads the mod when the map loads, and it ignores a folder whose name starts with _ or -.</p>
+          <button id="hot-save" type="button">Save hot reload</button>
         </fieldset>
         <details>
           <summary>Change dump folder</summary>

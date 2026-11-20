@@ -33,6 +33,8 @@ export const api = {
   scene: (banc) => request(`/api/scene?banc=${encodeURIComponent(banc)}`),
   sceneChanges: (banc) => request(`/api/scene/changes?banc=${encodeURIComponent(banc)}`),
   problems: (banc) => request(`/api/scene/problems?banc=${encodeURIComponent(banc)}`),
+  hotReload: () => request("/api/hot-reload"),
+  saveHotReload: (body) => request("/api/hot-reload", { method: "PUT", body: JSON.stringify(body) }),
   projectChanges: () => request("/api/changes"),
   edit: (banc, command) => request("/api/scene/edit", { method: "POST", body: JSON.stringify({ banc, command }) }),
   putDiff: (banc, actors) => request("/api/scene/diff", { method: "PUT", body: JSON.stringify({ banc, actors }) }),

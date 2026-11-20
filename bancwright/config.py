@@ -24,6 +24,13 @@ def config_path() -> Path:
     return home
 
 
+def hot_reload_settings(data: dict | None) -> dict:
+    raw = data.get("hotReload") if isinstance(data, dict) else None
+    if not isinstance(raw, dict):
+        raw = {}
+    return {"enabled": bool(raw.get("enabled")), "path": str(raw.get("path") or "")}
+
+
 def load_config() -> dict:
     path = config_path()
     data: dict = {}
@@ -38,18 +45,25 @@ def load_config() -> dict:
     return {
         "dump": data.get("dump") or "",
         "project": data.get("project") or "",
+        "hotReload": hot_reload_settings(data),
         "path": str(path),
     }
 
 
-def save_config(dump: str | None = None, project: str | None = None) -> dict:
+def save_config(dump: str | None = None, project: str | None = None, hot_reload: dict | None = None) -> dict:
     current = load_config()
     if dump is not None:
         current["dump"] = dump
     if project is not None:
         current["project"] = project
+    if hot_reload is not None:
+        current["hotReload"] = hot_reload_settings({"hotReload": hot_reload})
     path = Path(current["path"])
-    payload = {"dump": current["dump"], "project": current["project"]}
+    payload = {
+        "dump": current["dump"],
+        "project": current["project"],
+        "hotReload": current["hotReload"],
+    }
     atomic_write(path, dump_yaml(payload))
     current.update(payload)
     return current

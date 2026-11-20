@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, and live validation in this build. Hot reload, grid snap, and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, live validation, and opt-in hot reload in this build. Grid snap and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
@@ -18,7 +18,9 @@ In this build: Ctrl+K (or the Search button) opens a palette. It fuzzy-matches a
 
 In this build: **Problems** (and the same lines under the selected actor in Properties) lists diagnostics from the open scene. Each one names a file, a JSON pointer or an actor hash, a code, a message, and a severity. The list is fetched again after an edit and after undo. It reports an unknown actor class, a class with no model file, a duplicate hash, a parameter whose kind does not match the scene file, a link to a hash that is not in the scene, and a flag name that is not in GameDataList. A dump without `GameData/GameDataList.Product.110.byml.zs` or without `Pack/Actor` gets one warning instead of a row per actor. Volumes and areas are not flagged for a missing model.
 
-Still later: hot-reload of changed files into the Longshot mod folder, and snap to a grid.
+In this build: **Project → Hot reload** is off until a Longshot mod folder is saved. A scene save waits a moment, builds the mod, and writes each file into that folder with an atomic replace. Files this editor wrote last time, and that the new build no longer contains, are removed. Other files in the folder stay. The stage bar says how many files were written. Longshot reads placement when the map loads, so leave the map and enter it again to see the change. A folder whose name starts with `_` or `-` is refused, because Longshot ignores it. An After the Ocarina project still builds with that pipeline, which does not merge scene actor diffs.
+
+Still later: snap to a grid.
 
 ## 4. Behavior editor
 

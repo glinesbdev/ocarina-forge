@@ -229,6 +229,31 @@ def _open_project() -> Project:
     return Project(config["project"])
 
 
+def _schedule_hot_reload() -> None:
+    """Queue one publish. The request returns before the build finishes."""
+    from bancwright.hotreload import publish, publisher, describe
+
+    config = load_config()
+    hot = config.get("hotReload") or {}
+    if not hot.get("enabled") or not hot.get("path"):
+        return
+
+    def run() -> None:
+        current = load_config().get("hotReload") or {}
+        if not current.get("enabled") or not current.get("path"):
+            publisher.mark(status="off", message="Hot reload is off.", files=0)
+            return
+        try:
+            result = publish(_open_project(), _open_dump(), current["path"])
+            publisher.mark(status="ok", message=describe(result), files=len(result["files"]))
+        except BancError as exc:
+            publisher.mark(status="error", message=f"Hot reload: {exc.message}", files=0)
+        except Exception as exc:
+            publisher.mark(status="error", message=f"Hot reload: {exc}", files=0)
+
+    publisher.schedule(run)
+
+
 def _dump_status() -> dict | None:
     config = load_config()
     if not config["dump"]:
@@ -298,6 +323,44 @@ def put_config(body: dict):
     _dump_cache["key"] = None
     saved = save_config(dump=dump_to_save, project=project_to_save)
     return {"config": saved, "dump": _dump_status(), "project": _project_status()}
+
+
+@app.get("/api/hot-reload")
+def get_hot_reload():
+    from bancwright.hotreload import publisher
+
+    return publisher.public(load_config().get("hotReload") or {})
+
+
+@app.put("/api/hot-reload")
+def put_hot_reload(body: dict):
+    from bancwright.hotreload import destination_for, publisher
+
+    current = load_config()
+    stored = current.get("hotReload") or {}
+    enabled = bool(body["enabled"]) if "enabled" in body else bool(stored.get("enabled"))
+    path = str(body["path"]) if "path" in body else str(stored.get("path") or "")
+    if enabled:
+        dump = current.get("dump") or ""
+        project = current.get("project") or ""
+        destination_for(
+            path,
+            dump_root=Path(dump) if dump else None,
+            project_root=Path(project) if project else None,
+        )
+    saved = save_config(hot_reload={"enabled": enabled, "path": path})
+    if enabled:
+        publisher.mark(
+            status="idle",
+            message=(
+                f"Hot reload is on. The next save writes into {path}. "
+                "Leave the map and enter it again to see a change."
+            ),
+            files=0,
+        )
+    else:
+        publisher.mark(status="off", message="Hot reload is off.", files=0)
+    return publisher.public(saved["hotReload"])
 
 
 @app.post("/api/setup/sample")
@@ -472,6 +535,7 @@ def edit_scene(body: dict):
         view = scene_view(document, project.load_scene_diff(banc))
         view["banc"] = banc
         view["focus"] = focus
+        _schedule_hot_reload()
         return _attach_recipes(view, banc)
     document, _dict_id, _raw = dump.read_byml(banc)
     diff = project.load_scene_diff(banc)
@@ -480,6 +544,7 @@ def edit_scene(body: dict):
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
     view["focus"] = focus
+    _schedule_hot_reload()
     return _attach_recipes(view, banc)
 
 
@@ -495,6 +560,7 @@ def put_diff(body: dict):
     project.save_scene_diff(updated)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
+    _schedule_hot_reload()
     return _attach_recipes(view, banc)
 
 
@@ -511,6 +577,7 @@ def put_recipes(body: dict):
     document, _dict_id, _raw = dump.read_byml(banc)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
+    _schedule_hot_reload()
     return _attach_recipes(view, banc)
 
 

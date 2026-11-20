@@ -18,6 +18,8 @@ const state = {
   changeToken: 0,
   problems: null,
   problemToken: 0,
+  hot: null,
+  hotToken: 0,
   banc: null,
   view: null,
   selected: null,
@@ -234,6 +236,7 @@ $("import-example").addEventListener("click", () => {
   importAto(`${root}/examples/ato-scenes`);
 });
 $("save-dump").addEventListener("click", saveDump);
+$("hot-save").addEventListener("click", saveHotReload);
 $("use-sample").addEventListener("click", useSample);
 $("palette-open").addEventListener("click", () => openPalette());
 $("palette-search").addEventListener("input", () => {
@@ -298,6 +301,7 @@ async function boot() {
     return;
   }
   renderChrome();
+  refreshHotReload();
   if (!dumpReady()) {
     showGate();
     return;
@@ -457,6 +461,72 @@ async function useSample() {
   }
 }
 
+async function refreshHotReload() {
+  try {
+    state.hot = await api.hotReload();
+  } catch (error) {
+    const missing = /404/.test(error.message || "");
+    state.hot = {
+      enabled: false,
+      status: "error",
+      message: missing ? "Restart the editor (./scripts/dev.sh) so hot reload can run." : error.message,
+    };
+  }
+  renderHotStatus();
+  fillHotReload();
+}
+
+function fillHotReload() {
+  const hot = state.hot;
+  const path = $("hot-path");
+  const enabled = $("hot-enabled");
+  if (!hot || !path || !enabled) return;
+  enabled.checked = Boolean(hot.enabled);
+  if (document.activeElement !== path) path.value = hot.path || "";
+}
+
+function renderHotStatus() {
+  const node = $("hot-status");
+  if (!node) return;
+  const hot = state.hot;
+  const show = Boolean(hot && (hot.enabled || hot.status === "error"));
+  node.hidden = !show;
+  node.textContent = show ? hot.message || "" : "";
+  node.classList.toggle("is-error", Boolean(hot && hot.status === "error"));
+}
+
+async function saveHotReload() {
+  try {
+    state.hot = await api.saveHotReload({
+      enabled: $("hot-enabled").checked,
+      path: $("hot-path").value.trim(),
+    });
+    renderHotStatus();
+    toast(state.hot.message || "Hot reload saved.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function noteHotReload() {
+  if (!state.hot || !state.hot.enabled) return;
+  const token = ++state.hotToken;
+  const delays = [800, 2000, 5000, 12000];
+  (async () => {
+    for (const delay of delays) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (token !== state.hotToken) return;
+      try {
+        state.hot = await api.hotReload();
+      } catch (error) {
+        state.hot = { ...(state.hot || {}), status: "error", message: error.message };
+      }
+      renderHotStatus();
+      if (!state.hot || state.hot.status !== "pending") return;
+    }
+  })();
+}
+
 async function saveDump() {
   try {
     state.status = await api.saveConfig({ dump: $("dump-path").value.trim() });
@@ -489,6 +559,7 @@ function openProjectDialog() {
     summary.textContent = "No project is open.";
   }
   if (state.status.dump && state.status.dump.root) $("dump-path").value = state.status.dump.root;
+  fillHotReload();
   if (state.status.repo) $("import-path").placeholder = `${state.status.repo}/examples/ato-scenes`;
   const catalog = $("project-catalog");
   catalog.replaceChildren();
@@ -903,6 +974,7 @@ async function writeShot(banc, shot, writeRecipes) {
   if (state.banc === banc) {
     loadChanges(banc);
     loadProblems(banc);
+    noteHotReload();
   }
 }
 
@@ -993,6 +1065,7 @@ async function edit(command) {
     state.history = pushEdit(state.history, { label, shot: captureShot() });
     renderScenes();
     renderChanges();
+    noteHotReload();
   } catch (error) {
     toast(error.message);
     if (state.view && !viewport.patchActors(state.view.actors)) {
