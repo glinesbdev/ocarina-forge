@@ -6,7 +6,7 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
-import { chooseLod, isTerrainProxy } from "./cull.js";
+import { instanceLod, isTerrainProxy } from "./cull.js";
 import { formatStats, keepRendering } from "./frame.js";
 import { chooseHit } from "./pick.js";
 
@@ -107,6 +107,7 @@ export function createViewport(host, hooks) {
   let showGround = false;
   let showWater = true;
   let showSub = false;
+  let drawDistance = 0;
   let showTerrainDebug = false;
   let generation = 0;
   let loadQueue = null;
@@ -707,30 +708,49 @@ export function createViewport(host, hooks) {
     return projectedPixels(radius, distance);
   }
 
-  function lodFor(entry, part, distance) {
+  const cullFrustum = new THREE.Frustum();
+  const cullMatrix = new THREE.Matrix4();
+  const cullSphere = new THREE.Sphere();
+
+  function lodFor(entry, part, distance, inFrustum) {
     const scale = actorScale(entry);
     const radius = part.radius * scale;
-    return chooseLod({
+    return instanceLod({
       distance,
       radius,
       pixels: screenPixels(radius, distance),
       hasFar: Boolean(entry.farNames && entry.farNames.has(part.family)),
       selected: entry.key === selected,
+      inFrustum,
+      maxDistance: drawDistance,
     });
   }
 
   function syncBatchVisibility() {
+    camera.updateMatrixWorld();
+    cullMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    cullFrustum.setFromProjectionMatrix(cullMatrix);
     let instances = 0;
+    let visible = 0;
     for (const entry of entries.values()) {
       if (!entry.slots || !entry.slots.length) continue;
+      entry.pivot.updateWorldMatrix(true, false);
       const distance = camera.position.distanceTo(entry.pivot.position);
       for (const slot of entry.slots) {
         instances += 1;
-        const lod = entry.pivot.visible ? lodFor(entry, slot, distance) : null;
-        slot.mesh.setVisibleAt(slot.index, lod === slot.lod);
+        let inFrustum = true;
+        if (slot.sphere) {
+          cullSphere.copy(slot.sphere).applyMatrix4(entry.pivot.matrixWorld);
+          inFrustum = cullFrustum.intersectsSphere(cullSphere);
+        }
+        const lod = entry.pivot.visible ? lodFor(entry, slot, distance, inFrustum) : null;
+        const show = lod === slot.lod;
+        if (show) visible += 1;
+        slot.mesh.setVisibleAt(slot.index, show);
       }
     }
     statInstances = instances;
+    statCulled = instances - visible;
   }
 
   function rebuildBatches() {
@@ -814,6 +834,7 @@ export function createViewport(host, hooks) {
           lod: record.part.lod,
           family: record.part.family,
           radius: record.part.radius,
+          sphere: record.part.geometry.boundingSphere,
         });
       }
       mesh.userData.pick = { ids, geometries, spheres, count };
@@ -1227,7 +1248,7 @@ uniform float terrainLayerMissing;`
     });
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, distance }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
@@ -1235,6 +1256,7 @@ uniform float terrainLayerMissing;`
     if (water !== undefined) showWater = Boolean(water);
     if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
     if (subTerrain !== undefined) showSub = Boolean(subTerrain);
+    if (distance !== undefined) drawDistance = Number(distance) || 0;
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
@@ -1519,6 +1541,7 @@ uniform float terrainLayerMissing;`
   const frameTimes = [];
   let fps = 0;
   let statInstances = 0;
+  let statCulled = 0;
 
   function requestRender() {
     if (!running || frameHandle) return;
@@ -1539,6 +1562,7 @@ uniform float terrainLayerMissing;`
       fps,
       draws: info.calls,
       instances: statInstances,
+      culled: statCulled,
       separate: naiveDraws,
       tris: info.triangles,
     });
@@ -1555,9 +1579,9 @@ uniform float terrainLayerMissing;`
       lastCullAt = now;
       lastCull.copy(camera.position);
       prioritizeLoad();
-      syncBatchVisibility();
       syncLabels();
     }
+    syncBatchVisibility();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
       const distance = camera.position.distanceTo(entry.pivot.position);

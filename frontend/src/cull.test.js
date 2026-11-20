@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chooseLod, isTerrainProxy } from "./cull.js";
+import { chooseLod, instanceLod, isTerrainProxy } from "./cull.js";
 
 test("a selected actor keeps the full mesh", () => {
   assert.equal(chooseLod({ distance: 400, radius: 0.4, pixels: 1, hasFar: true, selected: true }), 0);
@@ -23,6 +23,15 @@ test("the coarse mesh starts just past the actor", () => {
 test("a tiny screen size hides a modest prop and keeps a huge one", () => {
   assert.equal(chooseLod({ distance: 12, radius: 4, pixels: 1, hasFar: false, selected: false }), null);
   assert.equal(chooseLod({ distance: 80, radius: 40, pixels: 1, hasFar: true, selected: false }), 1);
+});
+
+test("an instance outside the frustum or past the draw distance is dropped", () => {
+  const near = { distance: 30, radius: 8, pixels: 80, hasFar: true, selected: false, inFrustum: true, maxDistance: 0 };
+  assert.equal(instanceLod(near), 0);
+  assert.equal(instanceLod({ ...near, inFrustum: false }), null);
+  assert.equal(instanceLod({ ...near, distance: 500, maxDistance: 400 }), null);
+  assert.equal(instanceLod({ ...near, distance: 500, maxDistance: 400, selected: true }), 0);
+  assert.equal(instanceLod({ ...near, distance: 50 }), 1);
 });
 
 test("the terrain proxy is the untextured static map", () => {

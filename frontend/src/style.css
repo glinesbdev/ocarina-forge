@@ -288,6 +288,7 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .seg button { background: transparent; border: 0; padding: 7px 10px; min-height: 34px; color: var(--muted); }
 .seg button.is-on { background: #2a362e; color: var(--text); }
 .check { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; min-height: 34px; }
+.check select { font: inherit; color: var(--text); background: #1a221c; border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; }
 .hint { color: var(--faint); font-size: 12px; margin-left: auto; }
 .cat-toggle span { padding: 0 8px; color: var(--muted); font-size: 12px; align-self: center; }
 .filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }

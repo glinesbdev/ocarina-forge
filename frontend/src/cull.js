@@ -19,6 +19,18 @@ export function chooseLod({ distance, radius, pixels, hasFar, selected }) {
   return 0;
 }
 
+/**
+ * LOD after frustum and draw-distance cuts. `null` means the instance is not drawn.
+ * `maxDistance` of 0 keeps the size rules only. A selected actor is not distance-culled.
+ * Occlusion is not tested here.
+ */
+export function instanceLod({ distance, radius, pixels, hasFar, selected, inFrustum, maxDistance }) {
+  if (!inFrustum) return null;
+  const cap = Number(maxDistance);
+  if (!selected && Number.isFinite(cap) && cap > 0 && distance > cap) return null;
+  return chooseLod({ distance, radius, pixels, hasFar, selected });
+}
+
 /** Retail KokiriForest_01 is an untextured stand-in. The reason string is the marker. */
 export function isTerrainProxy(meta) {
   return Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));

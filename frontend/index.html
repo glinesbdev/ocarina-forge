@@ -77,6 +77,14 @@
             <label class="check"><input id="show-companions" type="checkbox" checked /> Companion banc</label>
             <label class="check"><input id="companion-pick" type="checkbox" checked /> Pick companions</label>
             <label class="check"><input id="show-stats" type="checkbox" /> Stats</label>
+            <label class="check" title="Auto uses the size rules. A metre cap also hides anything farther than that, except the selection.">Draw
+              <select id="draw-distance">
+                <option value="0" selected>Auto</option>
+                <option value="200">200 m</option>
+                <option value="400">400 m</option>
+                <option value="800">800 m</option>
+              </select>
+            </label>
             <label class="check" title="Show the ground. A heightmap is on by default. An untextured stand-in is a neutral grid, not a green sheet."><input id="show-ground" type="checkbox" /> Ground</label>
             <label class="check" title="Off by default. The _sub overlay is a separate sheet above the actors, not the walkable floor."><input id="show-sub" type="checkbox" /> Sub terrain</label>
             <label class="check" title="Draw water. The front sheet is a faint desaturated layer and does not write depth."><input id="show-water" type="checkbox" checked /> Water</label>

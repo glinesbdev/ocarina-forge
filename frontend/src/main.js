@@ -149,6 +149,9 @@ $("companion-pick").addEventListener("change", (event) => {
 $("show-stats").addEventListener("change", (event) => {
   viewport.setShowStats(event.target.checked);
 });
+$("draw-distance").addEventListener("change", (event) => {
+  viewport.setFlags({ distance: Number(event.target.value) || 0 });
+});
 $("show-ground").addEventListener("change", (event) => {
   state.showGround = event.target.checked;
   viewport.setFlags({ ground: state.showGround });
