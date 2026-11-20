@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, and ground snap in this build. Cmd-K, live validation, hot reload, grid snap, and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, and Ctrl+K search in this build. Live validation, hot reload, grid snap, and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
@@ -14,7 +14,9 @@ The opt-in stays, labelled experimental, and WebGL stays the default. Three stay
 
 In this build: instant undo and redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) for a move, a rotate, a property edit, add, delete, duplicate, hide, and the Areas / System lock. The stack is in memory and the project diff is written from the same shot, so a transform undo patches the instance matrix and does not reload the scene. **Changes** lists that session above the project diff. **Snap** (checkbox, or V) raycasts the terrain and collision volumes while a move or a new actor is dropped.
 
-Still later, after this undo and snap are checked on a real dump: hot-reload of changed files into the Longshot mod folder, Cmd-K search across actors, flags, messages, and scenes, snap to a grid, and live validation for bad flag references, missing models, and unreachable events.
+In this build: Ctrl+K (or the Search button) opens a palette. It fuzzy-matches actors in the open scene by name, class, and hash, plus scene files and editor commands. Enter frames the actor, opens the scene, or runs the command.
+
+Still later: hot-reload of changed files into the Longshot mod folder, snap to a grid, and live validation for bad flag references, missing models, and unreachable events.
 
 ## 4. Behavior editor
 

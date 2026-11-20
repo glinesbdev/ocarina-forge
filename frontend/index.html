@@ -25,6 +25,7 @@
           <span id="project-name" class="muted"></span>
         </button>
         <div class="top-actions">
+          <button id="palette-open" type="button" class="ghost" title="Search actors, scenes, and commands (Ctrl+K)">Search</button>
           <button id="undo" type="button" class="ghost" title="Undo the last edit (Ctrl+Z)" disabled>Undo</button>
           <button id="redo" type="button" class="ghost" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>Redo</button>
           <button id="build-open" type="button" class="primary" hidden>Build mod</button>
@@ -129,6 +130,18 @@
 
       <section id="gate" class="gate" hidden></section>
     </div>
+
+    <dialog id="palette-dialog">
+      <form method="dialog" class="dialog-card wide" id="palette-form">
+        <header>
+          <h2>Search</h2>
+          <button type="button" class="ghost" data-close>Close</button>
+        </header>
+        <p class="muted">Actors in this scene, scene files, and editor commands. Enter selects and frames an actor, opens a scene, or runs the command.</p>
+        <input id="palette-search" type="search" placeholder="Fado, Npc_Kokiri, a hash, Kokiri, undo…" autocomplete="off" />
+        <div id="palette-results" class="scroll dialog-list" role="listbox" aria-label="Search results"></div>
+      </form>
+    </dialog>
 
     <dialog id="add-dialog">
       <form method="dialog" class="dialog-card">

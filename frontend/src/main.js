@@ -2,6 +2,7 @@ import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
 import { rendererChoice, rendererSearch } from "./backend.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
+import { paletteRows } from "./palette.js";
 import { createViewport } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -231,10 +232,25 @@ $("import-example").addEventListener("click", () => {
 });
 $("save-dump").addEventListener("click", saveDump);
 $("use-sample").addEventListener("click", useSample);
+$("palette-open").addEventListener("click", () => openPalette());
+$("palette-search").addEventListener("input", () => {
+  paletteIndex = 0;
+  renderPalette();
+});
+$("palette-search").addEventListener("keydown", onPaletteKey);
+$("palette-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runPalette(paletteCache[paletteIndex]);
+});
 
 window.addEventListener("keydown", (event) => {
-  if (isTyping(event)) return;
   const meta = event.metaKey || event.ctrlKey;
+  if (meta && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openPalette();
+    return;
+  }
+  if (isTyping(event)) return;
   if (meta && event.key.toLowerCase() === "z" && !event.shiftKey) {
     event.preventDefault();
     undo();
@@ -258,12 +274,9 @@ window.addEventListener("keydown", (event) => {
     if (actor.status === "recipe") removeRecipe(actor);
     else edit({ command: "remove", id: state.selected });
   } else if (event.key.toLowerCase() === "v" && !meta) {
-    const box = $("snap-surface");
-    if (!box) return;
-    box.checked = !box.checked;
-    viewport.setSnap(box.checked);
-    toast(box.checked ? "Snap to ground and collision is on." : "Snap is off.");
+    toggleSnap();
   } else if (event.key === "Escape") {
+    if (document.querySelector("dialog[open]")) return;
     state.selected = null;
     viewport.select(null);
     renderOutliner();
@@ -1877,6 +1890,165 @@ function projectChangeList(report) {
     root.append(details);
   }
   return root;
+}
+
+let paletteIndex = 0;
+let paletteCache = [];
+
+function openPalette() {
+  paletteIndex = 0;
+  const dialog = $("palette-dialog");
+  const input = $("palette-search");
+  if (!dialog || !input) return;
+  input.value = "";
+  renderPalette();
+  if (!dialog.open) dialog.showModal();
+  input.focus();
+  input.select();
+}
+
+function renderPalette() {
+  const host = $("palette-results");
+  const input = $("palette-search");
+  if (!host || !input) return;
+  paletteCache = paletteRows({
+    actors: paletteActors(),
+    scenes: state.scenes || [],
+    query: input.value,
+  });
+  host.replaceChildren();
+  if (!paletteCache.length) {
+    host.append(empty("Nothing matches. Try a name, an actor class, a hash, a scene, or a command."));
+    return;
+  }
+  if (paletteIndex >= paletteCache.length) paletteIndex = paletteCache.length - 1;
+  paletteCache.forEach((row, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = index === paletteIndex ? "palette-row is-on" : "palette-row";
+    button.setAttribute("role", "option");
+    const kind = document.createElement("span");
+    kind.className = "palette-kind";
+    kind.textContent = row.kind;
+    const text = document.createElement("span");
+    text.className = "grow";
+    const strong = document.createElement("strong");
+    strong.textContent = row.label;
+    const small = document.createElement("small");
+    small.textContent = row.detail;
+    text.append(strong, small);
+    button.append(kind, text);
+    button.addEventListener("click", () => runPalette(row));
+    button.addEventListener("mouseenter", () => {
+      paletteIndex = index;
+      host.querySelectorAll(".palette-row").forEach((item, itemIndex) => item.classList.toggle("is-on", itemIndex === index));
+    });
+    host.append(button);
+  });
+  const current = host.querySelector(".is-on");
+  if (current && current.scrollIntoView) current.scrollIntoView({ block: "nearest" });
+}
+
+function onPaletteKey(event) {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    paletteIndex = Math.min(paletteIndex + 1, Math.max(paletteCache.length - 1, 0));
+    renderPalette();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    paletteIndex = Math.max(paletteIndex - 1, 0);
+    renderPalette();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    runPalette(paletteCache[paletteIndex]);
+  }
+}
+
+function paletteActors() {
+  const rows = [...((state.view && state.view.actors) || [])];
+  if (state.showCompanions === false && state.raw) {
+    const seen = new Set(rows.map((actor) => actor.id).filter(Boolean));
+    for (const extra of state.raw.companions || []) {
+      for (const actor of extra.actors || []) {
+        const id = actor.id && !String(actor.id).includes("::") ? `${extra.banc}::${actor.id}` : actor.id;
+        if (id && seen.has(id)) continue;
+        rows.push({ ...actor, id, companionLabel: bancKind(extra.banc) });
+        if (id) seen.add(id);
+      }
+    }
+  }
+  return rows;
+}
+
+function runPalette(row) {
+  const dialog = $("palette-dialog");
+  if (dialog && dialog.open) dialog.close();
+  if (!row) return;
+  if (row.kind === "actor") {
+    if (!row.id) {
+      toast("That actor has no hash, so it cannot be selected.");
+      return;
+    }
+    state.selected = row.id;
+    viewport.select(row.id);
+    viewport.frame(row.id);
+    renderOutliner();
+    renderProps();
+    noteCompanion();
+    showTab("props");
+    return;
+  }
+  if (row.kind === "scene") {
+    openScene(row.id, { frame: true });
+    return;
+  }
+  runCommand(row.id);
+}
+
+function toggleSnap() {
+  const box = $("snap-surface");
+  if (!box) return;
+  box.checked = !box.checked;
+  viewport.setSnap(box.checked);
+  toast(box.checked ? "Snap to ground and collision is on." : "Snap is off.");
+}
+
+function runCommand(id) {
+  if (id === "undo") undo();
+  else if (id === "redo") redo();
+  else if (id === "frame") viewport.frame(state.selected);
+  else if (id === "snap") toggleSnap();
+  else if (id === "add") openAdd("add");
+  else if (id === "hide") {
+    const actor = selectedActor();
+    if (!actor) toast("Select an actor first.");
+    else if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: actor.id });
+  } else if (id === "duplicate") {
+    const actor = selectedActor();
+    if (!actor || !actor.id) toast("Select an actor first.");
+    else edit({ command: "duplicate", id: actor.id });
+  } else if (id === "delete") {
+    const actor = selectedActor();
+    if (!actor || !actor.id) toast("Select an actor first.");
+    else if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: "remove", id: actor.id });
+  } else if (id === "hidden") {
+    const box = $("show-hidden");
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  } else if (id === "changes") showTab("changes");
+  else if (id === "project") openProjectDialog();
+  else if (id === "build") $("build-dialog").showModal();
+  else if (id === "ground") {
+    const box = $("show-ground");
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  } else if (id === "stats") {
+    const box = $("show-stats");
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  }
 }
 
 function showTab(name) {
