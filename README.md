@@ -83,4 +83,4 @@ python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 
 ## Not in this version
 
-Skeletal animation, a dialog editor, an event-flow graph, and desktop packaging. Those advanced patches build, and they are not edited on screen yet. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
+Skeletal animation, a dialog editor, and desktop packaging. The Behavior tab draws an actor's AI graph, schedule, and event-flow hooks, and it does not edit them yet. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).

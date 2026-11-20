@@ -638,6 +638,13 @@ async def terrain_file(banc: str, request: Request):
     return _cached_file(request, path, "terrain.glb", digest)
 
 
+@app.get("/api/behavior")
+def behavior(gyaml: str = "", banc: str = "", id: str = ""):
+    from ocarina_forge.behavior import load_actor_graph
+
+    return load_actor_graph(_open_dump(), gyaml=gyaml, banc=banc, actor_id=id)
+
+
 @app.get("/api/actors")
 def actors(q: str = ""):
     dump = _open_dump()

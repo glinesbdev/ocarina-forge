@@ -1,5 +1,6 @@
 import { api } from "./api.js";
 import { planActorRefresh } from "./actors.js";
+import { renderBehavior } from "./behavior.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { paletteRows } from "./palette.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
@@ -18,6 +19,12 @@ const state = {
   changeToken: 0,
   problems: null,
   problemToken: 0,
+  behavior: null,
+  behaviorKey: "",
+  behaviorLayer: "curated",
+  behaviorNode: "",
+  behaviorError: "",
+  behaviorLoading: false,
   showProblemNotes: false,
   hot: null,
   hotToken: 0,
@@ -209,6 +216,7 @@ document.querySelectorAll("[data-cat]").forEach((button) => {
 });
 $("tab-outliner").addEventListener("click", () => showTab("outliner"));
 $("tab-props").addEventListener("click", () => showTab("props"));
+$("tab-behavior").addEventListener("click", () => showTab("behavior"));
 $("tab-changes").addEventListener("click", () => showTab("changes"));
 $("tab-problems").addEventListener("click", () => showTab("problems"));
 $("shortcuts-open").addEventListener("click", () => openShortcuts());
@@ -279,6 +287,8 @@ window.addEventListener("keydown", (event) => {
     setGizmo("translate");
   } else if (event.key === "r") {
     setGizmo("rotate");
+  } else if (event.key === "b" && state.selected) {
+    showTab("behavior");
   } else if (event.key === "h" && state.selected) {
     const actor = selectedActor();
     if (!actor) return;
@@ -1361,6 +1371,7 @@ function renderFilters() {
 }
 
 function renderProps() {
+  if (state.tab === "behavior") refreshBehavior();
   const panel = $("props-panel");
   panel.replaceChildren();
   const actor = selectedActor();
@@ -1394,6 +1405,10 @@ function renderProps() {
     meta,
   );
   panel.append(head);
+  const behavior = document.createElement("div");
+  behavior.className = "actions";
+  behavior.append(action("Behavior", () => showTab("behavior")));
+  panel.append(behavior);
   const notes = actorProblems(actor);
   if (notes.length) panel.append(problemNotes(notes));
   if (actor.status === "recipe") panel.append(recipeNote(actor));
@@ -2395,6 +2410,7 @@ function runCommand(id) {
     box.dispatchEvent(new Event("change"));
   } else if (id === "changes") showTab("changes");
   else if (id === "problems") showTab("problems");
+  else if (id === "behavior") showTab("behavior");
   else if (id === "project") openProjectDialog();
   else if (id === "build") $("build-dialog").showModal();
   else if (id === "ground") {
@@ -2412,20 +2428,77 @@ function showTab(name) {
   state.tab = name;
   $("outliner-panel").hidden = name !== "outliner";
   $("props-panel").hidden = name !== "props";
+  $("behavior-panel").hidden = name !== "behavior";
   $("changes-panel").hidden = name !== "changes";
   $("problems-panel").hidden = name !== "problems";
   $("tab-outliner").classList.toggle("is-on", name === "outliner");
   $("tab-props").classList.toggle("is-on", name === "props");
+  $("tab-behavior").classList.toggle("is-on", name === "behavior");
   $("tab-changes").classList.toggle("is-on", name === "changes");
   $("tab-problems").classList.toggle("is-on", name === "problems");
   $("tab-outliner").setAttribute("aria-selected", name === "outliner" ? "true" : "false");
   $("tab-props").setAttribute("aria-selected", name === "props" ? "true" : "false");
+  $("tab-behavior").setAttribute("aria-selected", name === "behavior" ? "true" : "false");
   $("tab-changes").setAttribute("aria-selected", name === "changes" ? "true" : "false");
   $("tab-problems").setAttribute("aria-selected", name === "problems" ? "true" : "false");
+  if (name === "behavior") refreshBehavior();
   if (mobileQuery.matches) {
     $("side-pane").classList.remove("shut");
     $("scene-pane").classList.add("shut");
   }
+}
+
+function refreshBehavior() {
+  const host = $("behavior-panel");
+  if (!host) return;
+  const actor = selectedActor();
+  const key = actor ? `${state.banc || ""}|${actor.id || ""}|${actor.gyaml || ""}` : "";
+  if (key !== state.behaviorKey) {
+    state.behaviorKey = key;
+    state.behavior = null;
+    state.behaviorNode = "";
+    state.behaviorError = "";
+    state.behaviorLoading = Boolean(actor);
+    if (actor) {
+      const requestKey = key;
+      api
+        .behavior({ banc: state.banc || "", id: actor.id || "", gyaml: actor.gyaml || "" })
+        .then((graph) => {
+          if (state.behaviorKey !== requestKey) return;
+          state.behavior = graph;
+          state.behaviorLoading = false;
+          drawBehavior();
+        })
+        .catch((error) => {
+          if (state.behaviorKey !== requestKey) return;
+          state.behaviorError = error.message || "The behavior graph could not be read.";
+          state.behaviorLoading = false;
+          drawBehavior();
+        });
+    }
+  }
+  drawBehavior();
+}
+
+function drawBehavior() {
+  const host = $("behavior-panel");
+  if (!host) return;
+  renderBehavior(host, {
+    actor: selectedActor(),
+    graph: state.behavior,
+    layer: state.behaviorLayer,
+    selectedId: state.behaviorNode,
+    loading: state.behaviorLoading,
+    error: state.behaviorError,
+    onLayer: (layer) => {
+      state.behaviorLayer = layer;
+      drawBehavior();
+    },
+    onSelect: (id) => {
+      state.behaviorNode = id;
+      drawBehavior();
+    },
+  });
 }
 
 function openShortcuts() {

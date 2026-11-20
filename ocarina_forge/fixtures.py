@@ -198,7 +198,12 @@ def build_fixture(root: Path) -> Path:
     }
     actor_params = {}
     for name in CATALOG:
-        actor_params[name] = dumps({"Name": name, "Synthetic": True})
+        body = {"Name": name, "Synthetic": True}
+        if name == "Npc_Kokiri_F_01":
+            from ocarina_forge.behavior import fado_behavior_refs
+
+            body.update(fado_behavior_refs())
+        actor_params[name] = dumps(body)
     dictionaries = _train(list(scenes.values()) + list(actor_params.values()))
     dict_bytes = {dict_id: dictionaries[dict_id] for dict_id in dictionaries}
     zsdic = pack({("zs.zsdic" if i == 1 else "bkprb.zsdic" if i == 2 else "bcett.byml.zsdic" if i == 3 else "pack.zsdic"): raw for i, raw in dict_bytes.items()})
@@ -250,6 +255,27 @@ def build_fixture(root: Path) -> Path:
         _terrain_model(),
         _terrain_rgba(),
     )
+    from ocarina_forge.behavior import (
+        FADO_AI,
+        FADO_BROKEN,
+        FADO_FLOW,
+        FADO_SCHEDULE,
+        sample_ai_bytes,
+        sample_broken_ainb,
+        sample_flow_bytes,
+        sample_schedule_bytes,
+    )
+
+    for relative, payload in (
+        (FADO_AI, sample_ai_bytes()),
+        (FADO_SCHEDULE, sample_schedule_bytes()),
+        (FADO_FLOW, sample_flow_bytes()),
+        (FADO_BROKEN, sample_broken_ainb()),
+    ):
+        destination = romfs / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+
     # A truncated header at the path ModelInfo names, so the viewer can show a box and a reason.
     (model_dir / "Enemy_DekuBaba.Enemy_DekuBaba.bfres.zs").write_bytes(
         compress(b"FRES    " + bytes(48), 1, loaded, level=3)

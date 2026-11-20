@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, live validation, and opt-in hot reload in this build. Grid snap and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, live validation, and opt-in hot reload in this build. Grid snap is not started. The behavior editor's read-only panel is in this build. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
@@ -24,4 +24,14 @@ Still later: snap to a grid.
 
 ## 4. Behavior editor
 
-A Blueprint-style editor over AINB and event flows. A raw layer that exposes every node, and a curated friendly layer. Stages: a read-only panel, then editing nodes, then custom graphs, with a flags and quests picker. Live previews of AI schedules, event flows, and dialog. Graph edits are typed ops with stable ids, not a replaced file. The mapping to the Longshot package is [longshot-mapping.md](longshot-mapping.md).
+In this build: the **Behavior** tab (or B) draws the selected actor's AINB AI graph, its schedule rows, and its event-flow hooks. **Friendly** uses the curated names. **Raw** shows every node, including ones that did not decode. Node, pin, and edge ids come from the dump file and stay put when the graph is drawn again. The panel does not edit. A later edit is a typed op (`add node`, `connect`, or `set field`) stored beside the base graph, not a replaced file. The mapping to the Longshot package is [longshot-mapping.md](longshot-mapping.md).
+
+Still later: editing those nodes, custom graphs, a flags and quests picker, and live previews of schedules, event flows, and dialog.
+
+## 5. Asset library
+
+An asset library browser. Drag an actor from the library onto the scene the way Unity drops a prefab. This stays on the roadmap. It is not in this build.
+
+## 6. New level
+
+**New level** starts from an existing area's setup (terrain, climate, and the actor packs that area already uses) instead of an empty banc. This stays on the roadmap. It is not in this build.

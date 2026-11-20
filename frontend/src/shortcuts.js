@@ -24,6 +24,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "Alt-click, or click again", action: "Cycle overlapping actors" },
       { keys: "H", action: "Hide or show the selection" },
       { keys: "Delete", action: "Delete the selection" },
+      { keys: "B", action: "Open the behavior graph for the selection" },
     ],
   },
   {

@@ -20,6 +20,7 @@ The editor shows this same list with ? or the Shortcuts button.
 - Alt-click, or click again: Cycle overlapping actors
 - H: Hide or show the selection
 - Delete: Delete the selection
+- B: Open the behavior graph for the selection
 
 ## Gizmo
 

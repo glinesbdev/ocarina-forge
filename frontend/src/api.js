@@ -40,6 +40,8 @@ export const api = {
   putDiff: (banc, actors) => request("/api/scene/diff", { method: "PUT", body: JSON.stringify({ banc, actors }) }),
   putRecipes: (banc, recipes) => request("/api/scene/recipes", { method: "PUT", body: JSON.stringify({ banc, recipes }) }),
   actors: (q) => request(`/api/actors?q=${encodeURIComponent(q)}`),
+  behavior: ({ banc = "", id = "", gyaml = "" } = {}) =>
+    request(`/api/behavior?banc=${encodeURIComponent(banc)}&id=${encodeURIComponent(id)}&gyaml=${encodeURIComponent(gyaml)}`),
   model: (gyaml) => request(`/api/models/${encodeURIComponent(gyaml)}`),
   models: (names) =>
     request("/api/models/batch", { method: "POST", body: JSON.stringify({ names }) }).then((data) => data.models || {}),

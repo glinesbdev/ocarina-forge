@@ -5,6 +5,7 @@ bake or the actors near a point. ``ground-debug <banc>`` prints the ground
 layer. ``material-debug`` prints the shader assign and the uniforms.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
+``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 With no subcommand, the server starts, which is what dev.sh runs.
 """
 
@@ -27,10 +28,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, and tex-debug print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "behavior", "serve"],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, and behavior print reports. The default is the editor server.",
     )
-    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, or bfres path.")
+    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
+    parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
     parser.add_argument("--json", action="store_true", help="Print the report as JSON.")
     parser.add_argument(
         "--banc",
@@ -80,6 +82,18 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(print_material_debug(args.banc, as_json=args.json, dump=args.dump, strings=args.strings))
     if args.command == "material-audit":
         raise SystemExit(print_material_audit(as_json=args.json, dump=args.dump, out=args.out))
+    if args.command == "behavior":
+        if not args.banc and not args.id:
+            parser.error("behavior needs an actor class, or --banc and --id")
+        raise SystemExit(
+            print_behavior(
+                args.banc or "",
+                actor_id=args.id or "",
+                banc=args.scene_banc or "",
+                as_json=args.json,
+                dump=args.dump,
+            )
+        )
     if args.command == "tex-debug":
         if not args.banc:
             parser.error("tex-debug needs a texture name or a Tex path")
@@ -121,6 +135,45 @@ def print_problems(banc: str, *, as_json: bool = False, dump: str | None = None,
     else:
         print(render_markdown(report), end="")
     return 1 if any(row.get("severity") == "error" for row in report["diagnostics"]) else 0
+
+
+def print_behavior(target: str, *, actor_id: str = "", banc: str = "", as_json: bool = False, dump: str | None = None) -> int:
+    """Print the read-only behavior graph. 2 when the dump is missing."""
+    from ocarina_forge.behavior import load_actor_graph
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    scene = banc
+    gyaml = ""
+    if target.endswith(".bcett.byml.zs") or target.startswith("Banc/"):
+        scene = target
+    else:
+        gyaml = target
+    try:
+        graph = load_actor_graph(Dump(dump_path), gyaml=gyaml, banc=scene, actor_id=actor_id)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    if as_json:
+        print(json.dumps(graph, indent=2))
+        return 0
+    print(f"behavior {graph.get('gyaml') or gyaml}")
+    if graph.get("note"):
+        print(graph["note"])
+    for source in graph.get("sources") or []:
+        print(f"{source['kind']} {source['status']} {source['path']}")
+    print(f"nodes {len(graph.get('nodes') or [])}")
+    print(f"edges {len(graph.get('edges') or [])}")
+    for node in graph.get("nodes") or []:
+        mark = "raw" if not node.get("decoded") else "friendly" if node.get("known") else "named"
+        print(f"  {mark} {node.get('raw')} -> {node.get('name')}  {node.get('id')}")
+    return 0
 
 
 def print_model_debug(

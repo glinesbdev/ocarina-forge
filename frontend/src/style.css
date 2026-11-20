@@ -331,7 +331,39 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .model-note.is-box p:first-of-type { color: #f0d7b0; }
 
 #outliner-panel { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-#props-panel { padding: 12px; flex: 1; }
+#props-panel, #behavior-panel { padding: 12px; flex: 1; }
+.behavior-bar { display: flex; gap: 8px; margin-bottom: 8px; }
+.behavior-bar button {
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  min-height: 32px;
+}
+.behavior-bar button.is-on { border-color: var(--gold); color: var(--text); }
+.graph-canvas { position: relative; margin-top: 8px; }
+.graph-svg { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.graph-edge { fill: none; stroke: var(--gold); stroke-width: 1.5; opacity: 0.8; }
+.graph-title { position: absolute; color: var(--faint); font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; }
+.graph-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  text-align: left;
+  gap: 0;
+  padding: 6px 8px;
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.graph-node strong { font-size: 13px; line-height: 16px; }
+.graph-node.is-on { border-color: var(--gold); }
+.graph-node.is-undecoded { border-style: dashed; }
+.pin { font-size: 11px; line-height: 16px; color: var(--muted); }
+.pin-out { text-align: right; }
+.pin-in { text-align: left; }
 .identity { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .identity h3 { margin: 0; font-size: 22px; }
 .identity .id-row { font-size: 13px; line-height: 1.35; word-break: break-all; }
