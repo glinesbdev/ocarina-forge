@@ -1,9 +1,10 @@
 """Structured diagnostics for one scene.
 
-Each item names a file, a JSON pointer and/or an actor hash, a stable code,
-a message, and a severity. The editor shows them in Properties and in the
-Problems list, and asks again after every edit. Nothing here writes the
-project or converts a model.
+Each item names a file, a field (the JSON pointer), a message, a stable code,
+a severity, and an actor hash when it has one. ``pointer`` is the same string
+as ``field``. The editor shows them in Properties and in the Problems list,
+and asks again after every edit. ``python -m bancwright problems --json``
+prints the same object. Nothing here writes the project or converts a model.
 """
 
 from __future__ import annotations
@@ -796,6 +797,7 @@ def _pointer(parts: list) -> str:
 def _issue(*, file, code, message, severity, actor=None, pointer="") -> dict:
     return {
         "file": file,
+        "field": pointer,
         "pointer": pointer,
         "actor": actor,
         "code": code,

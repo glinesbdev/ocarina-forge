@@ -112,6 +112,7 @@ def test_edits_report_class_type_link_and_flag(tmp_path):
     assert any(row["actor"] == added and row["severity"] == "error" for row in by_code["unknown_class"])
     bad = by_code["bad_param"]
     assert any("IsEnable" in row["message"] and row["pointer"].endswith("/Dynamic/IsEnable") for row in bad)
+    assert all(row["file"] and row["message"] and row["field"] == row["pointer"] for row in report["diagnostics"])
     sign_links = [row for row in by_code["missing_link"] if row["actor"] == format_hash(SIGN)]
     assert sign_links and all(row["severity"] == "error" for row in sign_links)
     assert any("MissingFlag.Nope" in row["message"] for row in by_code["unknown_flag"])

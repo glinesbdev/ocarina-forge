@@ -154,4 +154,6 @@ Accepted inputs:
 
 An actor entry with `op: add`, or a `gyaml` and no hash, becomes `added` and gets a new hash. `hide: true` or `op: hide` hides. `op: remove` (or `delete`) removes. `translate`, `rotate`, and `scale` copy across. `params` is flattened into `set` paths. A `Name` parameter becomes the instance name.
 
+How these files line up with the Longshot mod package, and what an exporter still has to translate, is [longshot-mapping.md](longshot-mapping.md). The YAML stays the source.
+
 `examples/ato-scenes/hyrule_field.yaml` is a fixture in that shape. Point the importer at a real `src/scenes` folder when you have the After the Ocarina tree.

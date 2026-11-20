@@ -24,4 +24,4 @@ Still later: snap to a grid.
 
 ## 4. Behavior editor
 
-A Blueprint-style editor over AINB and event flows. A raw layer that exposes every node, and a curated friendly layer. Stages: a read-only panel, then editing nodes, then custom graphs, with a flags and quests picker. Live previews of AI schedules, event flows, and dialog.
+A Blueprint-style editor over AINB and event flows. A raw layer that exposes every node, and a curated friendly layer. Stages: a read-only panel, then editing nodes, then custom graphs, with a flags and quests picker. Live previews of AI schedules, event flows, and dialog. Graph edits are typed ops with stable ids, not a replaced file. The mapping to the Longshot package is [longshot-mapping.md](longshot-mapping.md).
