@@ -1,14 +1,12 @@
-/** Layout and drawing for the read-only behavior graph.
+/** Layout and drawing for the behavior graph.
 
 Node ids come from the dump. Laying the graph out again does not change them.
 The raw layer shows every node, including ones that did not decode. The
-curated layer uses the friendly name.
+curated layer uses the friendly name. The picture is a blueprint: it fills
+the panel, and the camera pans and zooms.
 */
 
-const NODE_W = 196;
-const COL = 220;
-const HEAD = 34;
-const PIN = 16;
+import { COL, NODE_W, ROW_GAP, mountGraph, nodeHeight } from "./graph-view.js";
 
 export function displayName(node, layer) {
   if (!node) return "";
@@ -46,7 +44,7 @@ export function layoutGraph(graph) {
       for (const node of column) {
         const height = nodeHeight(node);
         positions[node.id] = { x: 8 + index * COL, y: rowY, w: NODE_W, h: height };
-        rowY += height + 12;
+        rowY += height + ROW_GAP;
       }
       tallest = Math.max(tallest, rowY - y);
       width = Math.max(width, 8 + index * COL + NODE_W + 16);
@@ -59,9 +57,9 @@ export function layoutGraph(graph) {
     y += 22;
     rest.forEach((node, index) => {
       const height = nodeHeight(node);
-      positions[node.id] = { x: 8, y: y + index * (height + 12), w: NODE_W, h: height };
+      positions[node.id] = { x: 8, y: y + index * (height + ROW_GAP), w: NODE_W, h: height };
     });
-    y += rest.reduce((sum, node) => sum + nodeHeight(node) + 12, 0);
+    y += rest.reduce((sum, node) => sum + nodeHeight(node) + ROW_GAP, 0);
   }
   return { positions, titles, width, height: Math.max(y, 80) };
 }
@@ -155,17 +153,9 @@ function neighborhood(start, members, edges) {
   return order;
 }
 
-export function pinAnchor(node, pin, pos) {
-  const pins = (node && node.pins) || [];
-  const index = Math.max(0, pins.findIndex((item) => item.id === pin.id));
-  return {
-    x: pin.dir === "out" ? pos.x + pos.w : pos.x,
-    y: pos.y + HEAD + index * PIN + PIN / 2,
-  };
-}
-
 export function renderBehavior(host, model) {
   host.replaceChildren();
+  host.__fitGraph = null;
   if (!model || !model.actor) {
     host.append(note("Select an actor. The Behavior tab draws its AI graph, schedule, and event-flow hooks."));
     return;
@@ -183,6 +173,10 @@ export function renderBehavior(host, model) {
     host.append(note("Reading the AI graph…"));
     return;
   }
+  const shell = document.createElement("div");
+  shell.className = "behavior-shell";
+  const chrome = document.createElement("div");
+  chrome.className = "behavior-chrome";
   const bar = document.createElement("div");
   bar.className = "behavior-bar";
   bar.append(
@@ -196,7 +190,9 @@ export function renderBehavior(host, model) {
     exp.addEventListener("click", () => model.onExport());
     bar.append(exp);
   }
-  host.append(bar);
+  chrome.append(bar);
+  shell.append(chrome);
+  host.append(shell);
   if (!graph.nodes || !graph.nodes.length) {
     const hint = document.createElement("p");
     hint.className = "muted";
@@ -207,96 +203,69 @@ export function renderBehavior(host, model) {
   }
 
   const view = visibleNodes(graph, { file: model.file, entry: model.entry, query: model.query });
-  host.append(fileList(graph, view, model));
+  chrome.append(fileList(graph, view, model));
   const search = document.createElement("input");
   search.className = "behavior-search";
   search.type = "search";
   search.placeholder = "Search this actor";
   search.value = model.query || "";
   search.addEventListener("input", (event) => model.onQuery && model.onQuery(event.target.value));
-  host.append(search);
-  if (!model.query) host.append(entryList(view, model));
+  chrome.append(search);
+  if (!model.query) chrome.append(entryList(view, model));
   const hint = document.createElement("p");
   hint.className = "muted";
   hint.textContent = viewHint(graph, view);
-  host.append(hint);
+  chrome.append(hint);
   if (view.elsewhere && model.onFile) {
     const jump = document.createElement("button");
     jump.type = "button";
     jump.className = "behavior-jump";
     jump.textContent = `${view.elsewhere.count} in ${view.elsewhere.file}`;
     jump.addEventListener("click", () => model.onFile(view.elsewhere.id, true));
-    host.append(jump);
+    chrome.append(jump);
   }
   if (!view.nodes.length) return;
 
+  const fit = document.createElement("button");
+  fit.type = "button";
+  fit.textContent = "Fit";
+  fit.addEventListener("click", () => host.__fitGraph && host.__fitGraph());
+  bar.append(fit);
+
   const laid = layoutGraph({ nodes: view.nodes, edges: graph.edges, sources: view.source ? [view.source] : [] });
-  const canvas = document.createElement("div");
-  canvas.className = "graph-canvas";
-  canvas.style.width = `${laid.width}px`;
-  canvas.style.height = `${laid.height}px`;
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", "graph-svg");
-  svg.setAttribute("width", String(laid.width));
-  svg.setAttribute("height", String(laid.height));
-  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
-  for (const edge of graph.edges || []) {
-    const fromNode = byId.get(pinOwner(edge.from, byId));
-    const toNode = byId.get(pinOwner(edge.to, byId));
-    const fromPos = fromNode && laid.positions[fromNode.id];
-    const toPos = toNode && laid.positions[toNode.id];
-    if (!fromPos || !toPos) continue;
-    const fromPin = (fromNode.pins || []).find((pin) => pin.id === edge.from) || { id: edge.from, dir: "out" };
-    const toPin = (toNode.pins || []).find((pin) => pin.id === edge.to) || { id: edge.to, dir: "in" };
-    const start = pinAnchor(fromNode, fromPin, fromPos);
-    const end = pinAnchor(toNode, toPin, toPos);
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    const bend = Math.max(24, (end.x - start.x) / 2);
-    path.setAttribute("d", `M ${start.x} ${start.y} C ${start.x + bend} ${start.y}, ${end.x - bend} ${end.y}, ${end.x} ${end.y}`);
-    path.setAttribute("class", "graph-edge");
-    svg.append(path);
-  }
-  const scroller = document.createElement("div");
-  scroller.className = "graph-scroll";
-  scroller.append(canvas);
-  canvas.append(svg);
-  for (const title of laid.titles) {
-    const label = document.createElement("div");
-    label.className = "graph-title";
-    label.style.left = `${title.x}px`;
-    label.style.top = `${title.y}px`;
-    label.textContent = title.text;
-    canvas.append(label);
-  }
-  for (const node of view.nodes) {
-    const pos = laid.positions[node.id];
-    if (!pos) continue;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "graph-node";
-    if (!node.decoded) button.classList.add("is-undecoded");
-    if (node.edited) button.classList.add("is-edited");
-    if (node.id === model.selectedId) button.classList.add("is-on");
-    button.style.left = `${pos.x}px`;
-    button.style.top = `${pos.y}px`;
-    button.style.width = `${pos.w}px`;
-    button.style.height = `${pos.h}px`;
-    const title = document.createElement("strong");
-    title.textContent = displayName(node, model.layer);
-    button.append(title);
-    for (const pin of node.pins || []) {
-      const row = document.createElement("span");
-      row.className = pin.dir === "out" ? "pin pin-out" : "pin pin-in";
-      row.textContent = pin.name;
-      button.append(row);
-    }
-    button.addEventListener("click", () => model.onSelect(node.id));
-    canvas.append(button);
-  }
-  host.append(scroller);
+  const body = document.createElement("div");
+  body.className = "behavior-body";
+  const stage = document.createElement("div");
+  stage.className = "graph-stage";
+  stage.setAttribute("aria-label", "Behavior graph");
+  body.append(stage);
   const selected = (graph.nodes || []).find((node) => node.id === model.selectedId);
-  if (selected) host.append(detail(selected, graph, model));
-  if ((graph.diff || []).length) host.append(diffList(graph, model));
+  if (selected) {
+    const inspector = detail(selected, graph, model);
+    inspector.classList.add("behavior-inspector");
+    body.append(inspector);
+  }
+  shell.append(body);
+  mountGraph(stage, {
+    key: graphKey(graph, view, model),
+    nodes: view.nodes.map((node) => ({
+      node,
+      pos: laid.positions[node.id],
+      title: displayName(node, model.layer),
+    })),
+    edges: graph.edges || [],
+    positions: laid.positions,
+    selectedId: model.selectedId,
+    onSelect: (id) => model.onSelect && model.onSelect(id),
+    onContext: (point) => model.onContext && model.onContext(point, view),
+  });
+  host.__fitGraph = () => stage.__fit && stage.__fit();
+  if ((graph.diff || []).length) chrome.append(diffList(graph, model));
+}
+
+function graphKey(graph, view, model) {
+  const source = (view.source && view.source.id) || "";
+  return [graph.gyaml || "", source, view.entry || "", model.query || "", model.layer || ""].join("|");
 }
 
 export function sharedFileLabel(source, count) {
@@ -489,10 +458,6 @@ function note(text) {
   paragraph.className = "muted";
   paragraph.textContent = text;
   return paragraph;
-}
-
-function nodeHeight(node) {
-  return HEAD + Math.max((node.pins || []).length, 1) * PIN;
 }
 
 function columnsOf(members, incoming) {

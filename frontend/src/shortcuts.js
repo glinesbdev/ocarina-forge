@@ -13,7 +13,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "Alt+left-drag", action: "Orbit the point under the cursor, or the selection" },
       { keys: "Middle-drag", action: "Pan" },
       { keys: "Scroll", action: "Zoom" },
-      { keys: "F", action: "Frame the selection, or the whole scene" },
+      { keys: "F", action: "Frame the selection, or the whole scene. Over the behavior graph, F fits that graph" },
     ],
   },
   {
@@ -63,6 +63,17 @@ export const SHORTCUT_GROUPS = [
     items: [
       { keys: "Esc", action: "Close a dialog, release mouse look, or clear the selection" },
       { keys: "Stats", action: "The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line" },
+    ],
+  },
+  {
+    id: "behavior",
+    label: "Behavior graph",
+    items: [
+      { keys: "Middle-drag, right-drag, or Space-drag", action: "Pan the graph" },
+      { keys: "Scroll", action: "Zoom toward the cursor" },
+      { keys: "F, or Fit", action: "Fit the graph in the panel" },
+      { keys: "Minimap", action: "Drag the map in the corner to pan. The rectangle is the current view" },
+      { keys: "Click a node", action: "Select it and edit its fields. The change is a set field op" },
     ],
   },
   {

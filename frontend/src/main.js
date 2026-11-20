@@ -310,8 +310,12 @@ onShortcut = (event) => {
   } else if (meta && (event.key.toLowerCase() === "y" || (event.shiftKey && event.key.toLowerCase() === "z"))) {
     event.preventDefault();
     redo();
-  } else if (event.key === "f") {
-    viewport.frame(state.selected);
+  } else if (event.key === "f" || event.key === "F") {
+    const behavior = document.getElementById("behavior-panel");
+    if (behavior && behavior.__fitGraph && behavior.matches(":hover")) {
+      event.preventDefault();
+      behavior.__fitGraph();
+    } else viewport.frame(state.selected);
   } else if (event.key === "g") {
     setGizmo("translate");
   } else if (event.key === "r") {
