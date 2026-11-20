@@ -349,9 +349,16 @@ def _exchange_glb(op: str, glb: bytes) -> bytes | None:
 
 
 def finish_glb(glb: bytes) -> bytes:
-    """EXT_meshopt_compression. Textures stay PNG or JPEG. The bytes are unchanged if Node cannot pack."""
+    """EXT_meshopt_compression. Textures stay PNG or JPEG. The bytes are unchanged if Node cannot pack.
+
+    The packer keeps every image and drops textures that no standard material
+    slot uses. Overlay maps (orm1, normal1, moss) are cited from extras, so
+    this puts a real texture index back before the file is cached.
+    """
+    from ocarina_forge.formats.gltf import rebind_extra_textures
+
     packed = _exchange_glb("pack", glb)
-    return packed if packed else glb
+    return rebind_extra_textures(packed if packed else glb)
 
 
 def plain_glb(glb: bytes) -> bytes:

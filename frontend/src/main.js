@@ -6,6 +6,7 @@ import { renderBehavior } from "./behavior.js";
 import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { paletteRows } from "./palette.js";
+import { groupModelErrors } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
 
@@ -51,6 +52,8 @@ const state = {
   changeToken: 0,
   problems: null,
   problemToken: 0,
+  modelErrors: [],
+  terrainNotes: [],
   behavior: null,
   behaviorKey: "",
   behaviorLayer: "curated",
@@ -102,25 +105,10 @@ viewport = await createViewport($("viewport"), {
   },
   onModels: () => renderProps(),
   onModelError: (gyaml, message) => {
-    const warnings = $("warnings");
-    if (!warnings) return;
-    warnings.hidden = false;
-    const line = `${gyaml}: ${message}`;
-    if ([...warnings.querySelectorAll("p")].some((item) => item.textContent === line)) return;
-    const p = document.createElement("p");
-    p.textContent = line;
-    warnings.append(p);
-    console.error(line);
+    noteModelError(gyaml, message);
   },
   onTerrainWarn: (message) => {
-    const warnings = $("warnings");
-    if (!warnings) return;
-    warnings.hidden = false;
-    const line = `terrain: ${message}`;
-    if ([...warnings.querySelectorAll("p")].some((item) => item.textContent === line)) return;
-    const p = document.createElement("p");
-    p.textContent = line;
-    warnings.append(p);
+    noteTerrain(message);
   },
   onTerrain: (meta) => {
     state.terrain = meta;
@@ -829,8 +817,6 @@ async function openScene(banc, options = {}) {
     renderChanges();
   } catch (error) {
     toast(error.message);
-    $("warnings").hidden = false;
-    $("warnings").textContent = error.message;
   }
 }
 
@@ -912,18 +898,12 @@ function applyView(view, { frame = false, select } = {}) {
   // A new or deleted actor joins the batches that are already on screen.
   // Opening a scene still goes through setActors, which is the one full load.
   if (!patched && (frame || !viewport.reconcileActors(composed.actors))) {
+    state.modelErrors = [];
+    state.terrainNotes = [];
     viewport.setActors(composed.actors, { frame, banc: view.banc });
   }
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
-  const warnings = $("warnings");
-  warnings.replaceChildren();
-  warnings.hidden = !view.warnings || view.warnings.length === 0;
-  for (const message of view.warnings || []) {
-    const p = document.createElement("p");
-    p.textContent = message;
-    warnings.append(p);
-  }
   renderOutliner();
   renderProps();
   loadChanges(view.banc || state.banc);
@@ -1917,12 +1897,44 @@ function problemNotes(rows) {
   return list;
 }
 
+function noteModelError(gyaml, message) {
+  if (!gyaml) return;
+  const text = message || "The glTF did not load.";
+  if (state.modelErrors.some((item) => item.gyaml === gyaml)) return;
+  state.modelErrors = [...state.modelErrors, { gyaml, message: text }];
+  console.error(`${gyaml}: ${text}`);
+  renderProblems();
+}
+
+function noteTerrain(message) {
+  const text = message || "The terrain did not load.";
+  if (state.terrainNotes.includes(text)) return;
+  state.terrainNotes = [...state.terrainNotes, text];
+  renderProblems();
+}
+
+function modelGroups() {
+  const actors = (state.view && state.view.actors) || [];
+  return groupModelErrors(state.modelErrors, actors);
+}
+
+function sceneWarnings() {
+  return ((state.view && state.view.warnings) || []).filter((message) => message);
+}
+
 function problemsMarkdown(report) {
   const rows = (report && report.diagnostics) || [];
-  const counts = { error: 0, warning: 0, info: 0 };
+  const groups = modelGroups();
+  const notes = [...state.terrainNotes, ...sceneWarnings()];
+  const counts = { error: groups.reduce((sum, group) => sum + group.count, 0), warning: notes.length, info: 0 };
   for (const row of rows) counts[row.severity] = (counts[row.severity] || 0) + 1;
   const summary = ["error", "warning", "info"].filter((key) => counts[key]).map((key) => `${counts[key]} ${key}`).join(", ");
-  const lines = [`# Problems for ${(report && report.banc) || "scene"}`, "", summary || "No problems.", ""];
+  const lines = [`# Problems for ${(report && report.banc) || state.banc || "scene"}`, "", summary || "No problems.", ""];
+  for (const group of groups) {
+    lines.push(`- **error** ${group.message} (${group.count})`);
+    for (const actor of group.actors) lines.push(`  - ${actor.name || actor.gyaml}${actor.id ? ` \`${actor.id}\`` : ""}`);
+  }
+  for (const message of notes) lines.push(`- **warning** ${message}`);
   for (const row of rows) {
     lines.push(`- **${row.severity}** \`${row.code}\` ${row.message}`);
     const where = [row.file, row.pointer || row.actor].filter(Boolean).join(" · ");
@@ -1976,8 +1988,11 @@ function renderProblems() {
   panel.replaceChildren();
   const report = state.problems;
   const rows = (report && report.diagnostics) || [];
-  const errors = rows.filter((row) => row.severity === "error").length;
-  const warnings = rows.filter((row) => row.severity === "warning").length;
+  const groups = modelGroups();
+  const loadErrors = groups.reduce((sum, group) => sum + group.count, 0);
+  const sceneNotes = [...state.terrainNotes, ...sceneWarnings()];
+  const errors = rows.filter((row) => row.severity === "error").length + loadErrors;
+  const warnings = rows.filter((row) => row.severity === "warning").length + sceneNotes.length;
   const notes = rows.filter((row) => row.severity === "info").length;
   badge.hidden = !(errors || warnings);
   badge.textContent = errors ? String(errors) : String(warnings);
@@ -1988,11 +2003,13 @@ function renderProblems() {
     return;
   }
   if (!report) {
-    panel.append(empty("Checking this scene…"));
+    if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
+    else panel.append(empty("Checking this scene…"));
     return;
   }
   if (report.error) {
     panel.append(empty(report.error));
+    if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
     return;
   }
   const tools = document.createElement("div");
@@ -2038,10 +2055,12 @@ function renderProblems() {
   }
   panel.append(tools);
   const visible = rows.filter((row) => row.severity !== "info" || state.showProblemNotes);
-  if (!visible.length) {
+  if (!visible.length && !groups.length && !sceneNotes.length) {
     panel.append(empty(notes ? "No errors. Vanilla notes are hidden." : "No problems in this scene."));
     return;
   }
+  if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
+  if (!visible.length) return;
   const list = document.createElement("div");
   list.className = "change-list";
   for (const row of visible) {
@@ -2064,6 +2083,66 @@ function renderProblems() {
     list.append(button);
   }
   panel.append(list);
+}
+
+function modelProblemList(groups, notes) {
+  const root = document.createElement("div");
+  for (const group of groups) {
+    const block = document.createElement("section");
+    block.className = "problem-group";
+    const head = document.createElement("p");
+    head.className = "problem-error";
+    head.textContent = `${group.message} (${group.count})`;
+    block.append(head);
+    const list = document.createElement("div");
+    list.className = "change-list";
+    for (const actor of group.actors) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "change-row";
+      const mark = document.createElement("span");
+      mark.className = "badge removed";
+      mark.textContent = "model";
+      const text = document.createElement("span");
+      text.className = "grow";
+      const strong = document.createElement("strong");
+      strong.textContent = actor.name || actor.gyaml;
+      const small = document.createElement("small");
+      small.textContent = [actor.name && actor.name !== actor.gyaml ? actor.gyaml : "", actor.id].filter(Boolean).join(" · ");
+      text.append(strong, small);
+      button.append(mark, text);
+      button.addEventListener("click", () => focusActor(actor.id));
+      list.append(button);
+    }
+    block.append(list);
+    root.append(block);
+  }
+  for (const message of notes) {
+    const line = document.createElement("p");
+    line.className = "problem-warning";
+    line.textContent = message;
+    root.append(line);
+  }
+  return root;
+}
+
+function focusActor(id) {
+  if (!id || !state.view) {
+    toast("That actor is not in the open scene.");
+    return;
+  }
+  const actor = state.view.actors.find((item) => item.id === id);
+  if (!actor) {
+    toast("That actor is not in the open scene.");
+    return;
+  }
+  state.selected = actor.id;
+  viewport.select(actor.id);
+  viewport.frame(actor.id);
+  renderOutliner();
+  renderProps();
+  noteCompanion();
+  showTab("props");
 }
 
 function focusProblem(row) {

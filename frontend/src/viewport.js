@@ -17,6 +17,7 @@ import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick,
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { chooseHit } from "./pick.js";
 import { chooseSnap } from "./snap.js";
+import { resolveTextureIndex } from "./problems.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -879,6 +880,12 @@ export async function createViewport(host, hooks) {
     map.needsUpdate = true;
   }
 
+  function bindNamedTexture(parser, index, imageName) {
+    const slot = resolveTextureIndex(parser.json, index, imageName);
+    if (slot < 0) return Promise.resolve(null);
+    return parser.getDependency("texture", slot).catch(() => null);
+  }
+
   async function bindSurfaceMaps(gltf) {
     const parser = gltf.parser;
     const surface = [];
@@ -887,27 +894,28 @@ export async function createViewport(host, hooks) {
       if (!child.material) return;
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const material of materials) {
-        const extra = material.userData && material.userData.surface;
-        if (!extra) continue;
-        if (Number.isInteger(extra.orm1)) {
-          surface.push(parser.getDependency("texture", extra.orm1).then((texture) => {
+        const extra = (material.userData && material.userData.surface) || {};
+        const blend = (material.userData && material.userData.blend) || {};
+        const want = [
+          [extra.orm1, extra.orm1Image, (texture) => {
             asDataMap(texture);
             material.userData.orm1Map = texture;
-          }));
-        }
-        if (Number.isInteger(extra.normal1)) {
-          surface.push(parser.getDependency("texture", extra.normal1).then((texture) => {
+          }],
+          [extra.normal1, extra.normal1Image, (texture) => {
             asDataMap(texture);
             material.userData.normal1Map = texture;
-          }));
-        }
-        const blend = material.userData && material.userData.blend;
-        if (blend && Number.isInteger(blend.moss)) {
-          surface.push(parser.getDependency("texture", blend.moss).then((texture) => {
+          }],
+          [blend.moss, blend.mossImage, (texture) => {
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.wrapS = THREE.RepeatWrapping;
             texture.wrapT = THREE.RepeatWrapping;
             material.userData.mossMap = texture;
+          }],
+        ];
+        for (const [index, imageName, apply] of want) {
+          if (!Number.isInteger(index) && !imageName) continue;
+          surface.push(bindNamedTexture(parser, index, imageName).then((texture) => {
+            if (texture) apply(texture);
           }));
         }
       }

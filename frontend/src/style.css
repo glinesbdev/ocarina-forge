@@ -276,14 +276,8 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   z-index: 1;
 }
 #viewport-empty[hidden], #viewport.is-live #viewport-empty { display: none; }
-.warnings {
-  padding: 8px 12px;
-  background: #2a2218;
-  color: #f0d7b0;
-  font-size: 13px;
-  border-bottom: 1px solid #4a3d22;
-}
-.warnings p { margin: 2px 0; }
+.problem-group { margin: 0 0 12px; }
+.problem-group .problem-error { margin: 0 0 6px; }
 .hot-status { color: var(--muted); font-size: 13px; line-height: 1.35; }
 .hot-status.is-error { color: var(--danger); }
 .stage-bar {

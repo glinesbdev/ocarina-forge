@@ -377,7 +377,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-37", "55de67b2a5722caed8338f979161cc85dcc9a54d95bc2e11210cb9c9ae185033")
+    pinned = ("models-38", "47c2a8636e2b0d3a784c2e7de11dce66919229b0a636fb4763a60c6f029cca73")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -2943,6 +2943,92 @@ def test_leaf_tiles_stay_under_a_triangle_budget():
     coarse_tris = next(row.triangles for row in reports if row.name == "Coarse")
     assert coarse_tris < alone_tris
     assert total > coarse_tris
+
+
+def test_meshopt_overlay_maps_stay_real_texture_indices():
+    """A land cliff's orm1, normal1, and moss survive packing.
+
+    meshopt writes a texture only for a standard slot. The overlay maps used
+    to stay as image indices in extras, and three's GLTFLoader then read
+    ``textures[index].extensions`` on a missing slot.
+    """
+    from ocarina_forge.formats.gltf import Primitive, glb_issues, join_glb, png_rgba, split_glb, to_glb
+    from ocarina_forge.formats.meshopt import finish_glb
+
+    def png(red, green, blue):
+        return png_rgba(2, 2, bytes([red, green, blue, 255]) * 4)
+
+    positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+    uvs = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    glb = finish_glb(
+        to_glb(
+            [
+                Primitive(
+                    positions,
+                    [0, 1, 2],
+                    uvs,
+                    png=png(180, 90, 40),
+                    normal_png=png(128, 128, 255),
+                    orm_png=png(200, 80, 10),
+                    orm1_png=png(40, 180, 20),
+                    normal1_png=png(100, 140, 255),
+                    emissive_png=png(255, 200, 40),
+                    moss_png=png(30, 160, 40),
+                    extras={
+                        "blend": {
+                            "channel": "r",
+                            "uv": "_u0",
+                            "scale": [1, 1],
+                            "translate": [0, 0],
+                            "sampler": "_a1",
+                            "texture": "Moss",
+                        }
+                    },
+                    name="Cliff:0",
+                )
+            ]
+        )
+    )
+    assert glb_issues(glb) == []
+    document, _binary = split_glb(glb)
+    material = document["materials"][0]
+    textures = document["textures"]
+    images = document["images"]
+    surface = material["extras"]["surface"]
+    blend = material["extras"]["blend"]
+
+    def source_name(slot):
+        return images[textures[slot]["source"]]["name"]
+
+    assert source_name(surface["orm1"]) == surface["orm1Image"]
+    assert source_name(surface["normal1"]) == surface["normal1Image"]
+    assert source_name(blend["moss"]) == blend["mossImage"]
+    assert surface["orm1Image"] != images[textures[material["pbrMetallicRoughness"]["metallicRoughnessTexture"]["index"]]["source"]]["name"]
+    assert blend["mossImage"] != images[textures[material["emissiveTexture"]["index"]]["source"]]["name"]
+    assert glb_issues(finish_glb(glb)) == []
+
+    broken, binary = split_glb(glb)
+    broken["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"] = 99
+    assert any("baseColorTexture" in issue for issue in glb_issues(join_glb(broken, binary)))
+
+
+def test_every_fixture_glb_passes_the_loader_checks(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.gltf import glb_issues
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    paths = []
+    for gyaml in ("Npc_Kokiri_F_01", "Obj_Tree"):
+        info = describe_actor(dump, gyaml)
+        assert info["status"] == "mesh", info
+        paths.append(cache_dir() / info["digest"][:2] / f"{info['digest']}.glb")
+    terrain = describe_terrain(dump, KOKIRI_STATIC)
+    assert terrain["status"] == "mesh", terrain
+    paths.append(cache_dir() / terrain["digest"][:2] / f"{terrain['digest']}.glb")
+    assert len(paths) == 3
+    for path in paths:
+        assert path.is_file()
+        assert glb_issues(path.read_bytes()) == [], path.name
 
 
 def test_workers_ignore_sigint_and_the_pool_closes_quietly():
