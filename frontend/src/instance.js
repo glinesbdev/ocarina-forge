@@ -3,8 +3,10 @@
  * actor's pivot, so hide, lock, picking, and the gizmo have to agree on these
  * flags or a copy stays clickable after its category is locked.
  *
- * Selection tint and the gizmo matrix write stay in the viewport: they call
- * setColorAt and setMatrixAt on the instance this actor owns.
+ * `applyActorMatrix` is the gizmo write. It touches setMatrixAt only for slots
+ * whose actor is the one being dragged. Other copies of the same geometry stay
+ * on the matrices they already have. BatchedMesh has no instanceMatrix; flagging
+ * that buffer is what made the drag throw after the first slot.
  */
 
 export function actorShown({ status, category, volume, showHidden, categories, hideVolumes }) {
@@ -29,4 +31,26 @@ export function canGizmo({ id, shown, locked }) {
 /** Copies that share a key are one BatchedMesh. The key is the material, not the actor. */
 export function batchKey({ image, alpha, side, tint, indexed, attributes }) {
   return `${image}|${alpha}|s${side}|c${tint}|${indexed}|${attributes}`;
+}
+
+/**
+ * Write `matrix` onto the slots owned by `actorKey`. A shared slots list, or a
+ * second copy of the same model, does not get the write. Hidden slots keep the
+ * matrix for when they show again, and skip the GPU update.
+ * Returns how many instance matrices were sent to the mesh.
+ */
+export function applyActorMatrix(slots, actorKey, matrix) {
+  const dirty = [];
+  if (!actorKey || !Array.isArray(slots)) return 0;
+  for (const slot of slots) {
+    if (!slot || slot.actor !== actorKey || !slot.mesh || typeof slot.mesh.setMatrixAt !== "function") continue;
+    if (slot.matrix && typeof slot.matrix.copy === "function") slot.matrix.copy(matrix);
+    if (slot.shown === false) continue;
+    slot.mesh.setMatrixAt(slot.index, matrix);
+    dirty.push(slot.mesh);
+  }
+  for (const mesh of dirty) {
+    if (mesh.instanceMatrix) mesh.instanceMatrix.needsUpdate = true;
+  }
+  return dirty.length;
 }

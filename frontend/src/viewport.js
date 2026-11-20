@@ -8,9 +8,9 @@ import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
-import { instanceLod, isTerrainProxy } from "./cull.js";
+import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
 import { formatStats, keepRendering } from "./frame.js";
-import { actorLocked, actorShown, batchKey, canGizmo, canPick } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick } from "./instance.js";
 import { chooseHit } from "./pick.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -649,24 +649,43 @@ export function createViewport(host, hooks) {
     return material;
   }
 
+  function isIdentityMatrix(matrix) {
+    const got = matrix.elements;
+    for (let i = 0; i < 16; i += 1) {
+      const expected = i % 5 === 0 ? 1 : 0;
+      if (Math.abs(got[i] - expected) > 1e-5) return false;
+    }
+    return true;
+  }
+
   function partsFromTemplate(template, url) {
     const parts = [];
     let index = 0;
+    template.updateWorldMatrix(true, true);
+    const rootInverse = new THREE.Matrix4().copy(template.matrixWorld).invert();
+    const local = new THREE.Matrix4();
     template.traverse((child) => {
       if (!child.isMesh || !child.geometry) return;
       const identity = lodOf(child);
-      const geometry = child.geometry;
-      if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+      // The glTF node transform belongs to the mesh, not to one placed actor.
+      // Bake it into a clone so a later change to the template cannot slide
+      // every copy, and so the instance matrix stays the actor matrix alone.
+      local.multiplyMatrices(rootInverse, child.matrixWorld);
+      const geometry = child.geometry.clone();
+      if (!isIdentityMatrix(local)) geometry.applyMatrix4(local);
+      geometry.computeBoundingSphere();
       if (!geometry.boundsTree) geometry.computeBoundsTree();
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
       const material = prepareMaterial(source);
+      const sphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : new THREE.Sphere(new THREE.Vector3(), 1);
       parts.push({
         lod: identity.lod,
         family: identity.family,
         geometry,
         material,
-        radius: geometry.boundingSphere ? geometry.boundingSphere.radius : 1,
+        sphere,
+        radius: sphere.radius,
         key: `${url}|${identity.lod}|${identity.family}|${index}`,
         batchKey: batchKeyFor(material, geometry),
       });
@@ -721,10 +740,10 @@ export function createViewport(host, hooks) {
   function syncInstanceMatrix(entry) {
     if (!entry.slots || !entry.slots.length) return;
     entry.pivot.updateWorldMatrix(true, false);
-    for (const slot of entry.slots) {
-      slot.mesh.setMatrixAt(slot.index, entry.pivot.matrixWorld);
-      slot.mesh.instanceMatrix.needsUpdate = true;
-    }
+    // Copy first. The live matrixWorld is reused by the next object update, and
+    // the write below must be this actor's 16 floats only.
+    actorMatrix.copy(entry.pivot.matrixWorld);
+    applyActorMatrix(entry.slots, entry.key, actorMatrix);
   }
 
   function projectedPixels(radius, distance) {
@@ -792,22 +811,37 @@ export function createViewport(host, hooks) {
   const cullMatrix = new THREE.Matrix4();
   const cullSphere = new THREE.Sphere();
 
-  function lodFor(entry, part, distance, inFrustum) {
+  const worldSphere = { center: [0, 0, 0], radius: 0 };
+
+  function slotProbe(entry, slot, elements) {
     const scale = actorScale(entry);
-    const radius = part.radius * scale;
-    return instanceLod({
-      distance,
-      radius,
-      pixels: screenPixels(radius, distance),
-      hasFar: Boolean(entry.farNames && entry.farNames.has(part.family)),
-      selected: entry.key === selected,
-      inFrustum,
-      maxDistance: drawDistance,
-    });
+    if (!slot.sphere) {
+      const pivotDistance = camera.position.distanceTo(entry.pivot.position);
+      return { inFrustum: true, distance: pivotDistance, radius: (slot.radius || 1) * scale };
+    }
+    transformSphere(
+      [slot.sphere.center.x, slot.sphere.center.y, slot.sphere.center.z],
+      slot.sphere.radius,
+      elements,
+      worldSphere,
+    );
+    cullSphere.center.set(worldSphere.center[0], worldSphere.center[1], worldSphere.center[2]);
+    cullSphere.radius = worldSphere.radius;
+    return {
+      inFrustum: cullFrustum.intersectsSphere(cullSphere),
+      distance: boundsGap(camera.position.distanceTo(cullSphere.center), cullSphere.radius),
+      radius: cullSphere.radius,
+    };
   }
 
   function syncBatchVisibility() {
     camera.updateMatrixWorld();
+    // Flying out must not clip the field on a far plane framed for the village.
+    const farNeed = Math.max(8000, camera.position.distanceTo(orbit.target) * 6);
+    if (camera.far < farNeed) {
+      camera.far = farNeed;
+      camera.updateProjectionMatrix();
+    }
     cullMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     cullFrustum.setFromProjectionMatrix(cullMatrix);
     let instances = 0;
@@ -815,16 +849,45 @@ export function createViewport(host, hooks) {
     for (const entry of entries.values()) {
       if (!entry.slots || !entry.slots.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
-      const distance = camera.position.distanceTo(entry.pivot.position);
+      const elements = entry.pivot.matrixWorld.elements;
+      const probes = [];
+      const closest = new Map();
       for (const slot of entry.slots) {
         instances += 1;
-        let inFrustum = true;
-        if (slot.sphere) {
-          cullSphere.copy(slot.sphere).applyMatrix4(entry.pivot.matrixWorld);
-          inFrustum = cullFrustum.intersectsSphere(cullSphere);
-        }
-        const lod = entry.pivot.visible ? lodFor(entry, slot, distance, inFrustum) : null;
-        const show = lod === slot.lod;
+        const probe = slotProbe(entry, slot, elements);
+        probes.push(probe);
+        const previous = closest.get(slot.family);
+        if (!previous || probe.distance < previous.distance) closest.set(slot.family, probe);
+      }
+      const wanted = new Map();
+      for (const [family, probe] of closest) {
+        const lod = entry.pivot.visible
+          ? instanceLod({
+              distance: probe.distance,
+              radius: probe.radius,
+              pixels: screenPixels(probe.radius, probe.distance),
+              hasFar: Boolean(entry.farNames && entry.farNames.has(family)),
+              selected: entry.key === selected,
+              inFrustum: true,
+              maxDistance: drawDistance,
+            })
+          : null;
+        wanted.set(family, lod);
+      }
+      const levels = new Map();
+      for (const slot of entry.slots) {
+        const list = levels.get(slot.family);
+        if (list) list.push(slot.lod);
+        else levels.set(slot.family, [slot.lod]);
+      }
+      for (let i = 0; i < entry.slots.length; i += 1) {
+        const slot = entry.slots[i];
+        const probe = probes[i];
+        const lod = resolveLod(wanted.get(slot.family), levels.get(slot.family));
+        const show = probe.inFrustum && lod === slot.lod;
+        const wasHidden = slot.shown === false;
+        slot.shown = show;
+        if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
         if (show) visible += 1;
         slot.mesh.setVisibleAt(slot.index, show);
       }
@@ -871,8 +934,18 @@ export function createViewport(host, hooks) {
       mesh.castShadow = false;
       mesh.receiveShadow = false;
       mesh.frustumCulled = false;
-      mesh.perObjectFrustumCulled = true;
+      // Instance matrices are world matrices. The batch object has to stay at
+      // the origin, or dragging one pivot would slide every copy parented to it.
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.identity();
+      mesh.matrixWorld.identity();
+      mesh.matrixWorldAutoUpdate = false;
+      // The view culls each instance from its own world sphere. The mesh-level
+      // sphere is the untransformed geometry and would hide the whole forest
+      // once the camera looks away from the origin.
+      mesh.perObjectFrustumCulled = false;
       mesh.sortObjects = Boolean(group.material.transparent);
+      mesh.renderOrder = 1;
       const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
       const water = tag === "water";
       if (water) {
@@ -902,19 +975,23 @@ export function createViewport(host, hooks) {
         const geometryId = geomIds.get(record.part.geometry.uuid);
         if (geometryId === undefined) continue;
         const instanceId = mesh.addInstance(geometryId);
-        mesh.setMatrixAt(instanceId, record.entry.pivot.matrixWorld);
+        const placed = new THREE.Matrix4().copy(record.entry.pivot.matrixWorld);
+        mesh.setMatrixAt(instanceId, placed);
         mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
         ids[instanceId] = record.entry.key;
         geometries[instanceId] = record.part.geometry;
-        spheres[instanceId] = record.part.geometry.boundingSphere;
+        spheres[instanceId] = record.part.sphere;
         count = Math.max(count, instanceId + 1);
         record.entry.slots.push({
+          actor: record.entry.key,
           mesh,
           index: instanceId,
           lod: record.part.lod,
           family: record.part.family,
           radius: record.part.radius,
-          sphere: record.part.geometry.boundingSphere,
+          sphere: record.part.sphere,
+          matrix: placed,
+          shown: true,
         });
       }
       mesh.userData.pick = { ids, geometries, spheres, count };
@@ -951,6 +1028,7 @@ export function createViewport(host, hooks) {
   }
 
   const scratchMatrix = new THREE.Matrix4();
+  const actorMatrix = new THREE.Matrix4();
   const scratchSphere = new THREE.Sphere();
   const scratchMesh = new THREE.Mesh();
   const scratchHits = [];
@@ -1068,6 +1146,8 @@ export function createViewport(host, hooks) {
     const columns = Number(material.userData.atlas) || 1;
     const repeat = Number(material.userData.repeat) || 8;
     material.userData.terrainShader = true;
+    material.userData.terrainColsUniform = { value: columns };
+    material.userData.terrainRepeatUniform = { value: repeat };
     if (!material.userData.terrainDebugUniform) {
       material.userData.terrainDebugUniform = { value: showTerrainDebug ? 1 : 0 };
     }
@@ -1081,15 +1161,21 @@ export function createViewport(host, hooks) {
       material.map.wrapS = THREE.ClampToEdgeWrapping;
       material.map.wrapT = THREE.ClampToEdgeWrapping;
       material.map.needsUpdate = true;
+      material.userData.terrainMap = material.map;
     }
     const previous = material.onBeforeCompile;
     material.onBeforeCompile = (shader) => {
-      if (previous) previous(shader);
-      shader.uniforms.terrainCols = { value: columns };
-      shader.uniforms.terrainRepeat = { value: repeat };
+      if (previous && previous !== material.onBeforeCompile) previous(shader);
+      material.userData.terrainShaderRef = shader;
+      shader.uniforms.terrainCols = material.userData.terrainColsUniform;
+      shader.uniforms.terrainRepeat = material.userData.terrainRepeatUniform;
       shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
       shader.uniforms.terrainSub = material.userData.terrainSubUniform;
       shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
+      // A second compile (gizmo interaction can rebuild programs) must not
+      // inject the helpers twice, and must not leave the stock map chunk in
+      // place. The stock chunk samples uv, which is not the atlas.
+      if (shader.fragmentShader.includes("terrainCell(")) return;
       shader.vertexShader = shader.vertexShader
         .replace(
           "#include <uv_pars_vertex>",
@@ -1130,10 +1216,29 @@ uniform float terrainLayerMissing;`
         .replace("void main() {", `${TERRAIN_FUNCS}\nvoid main() {`)
         .replace("#include <map_fragment>", TERRAIN_MAP);
     };
-    const previousKey = material.customProgramCacheKey ? material.customProgramCacheKey.bind(material) : null;
-    material.customProgramCacheKey = () => `${previousKey ? previousKey() : ""}|terrain|${columns}|${repeat}`;
+    // Stable key. The default key is the onBeforeCompile source, which changes
+    // identity if the callback is wrapped again and would swap in a program
+    // that never received the atlas uniforms.
+    material.customProgramCacheKey = () => `terrain|${columns}|${repeat}`;
     material.needsUpdate = true;
     return material;
+  }
+
+  function bindTerrainMesh(mesh) {
+    mesh.frustumCulled = false;
+    mesh.onBeforeRender = () => {
+      const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (!material || !material.userData) return;
+      const atlas = material.userData.terrainMap;
+      if (atlas && material.map !== atlas) material.map = atlas;
+      const shader = material.userData.terrainShaderRef;
+      if (!shader || !shader.uniforms) return;
+      shader.uniforms.terrainCols = material.userData.terrainColsUniform;
+      shader.uniforms.terrainRepeat = material.userData.terrainRepeatUniform;
+      shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
+      shader.uniforms.terrainSub = material.userData.terrainSubUniform;
+      shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
+    };
   }
 
   function mergeStatic(template) {
@@ -1170,6 +1275,8 @@ uniform float terrainLayerMissing;`
           for (const item of group.geometries) {
             const mesh = new THREE.Mesh(item, group.material);
             mesh.raycast = () => {};
+            mesh.frustumCulled = false;
+            if (group.material.userData && group.material.userData.terrainShader) bindTerrainMesh(mesh);
             root.add(mesh);
           }
           continue;
@@ -1179,6 +1286,8 @@ uniform float terrainLayerMissing;`
       if (!geometry.boundsTree) geometry.computeBoundsTree();
       const mesh = new THREE.Mesh(geometry, group.material);
       mesh.raycast = () => {};
+      mesh.frustumCulled = false;
+      if (group.material.userData && group.material.userData.terrainShader) bindTerrainMesh(mesh);
       root.add(mesh);
     }
     return root;
@@ -1224,14 +1333,20 @@ uniform float terrainLayerMissing;`
       terrainRoot = mergeStatic(template);
       terrainRoot.name = "terrain";
       terrainRoot.visible = showGround;
-      terrainRoot.renderOrder = 0;
+      // Draw the field before batched actors. A gizmo drag re-uploads the
+      // float matrix texture; drawing the field first keeps that upload from
+      // being the texture the atlas sampler sees.
+      terrainRoot.renderOrder = -1;
+      terrainRoot.frustumCulled = false;
       terrainRoot.raycast = () => {};
       let missingLayer = false;
       terrainRoot.traverse((child) => {
         child.raycast = () => {};
         child.castShadow = false;
         child.receiveShadow = false;
-        child.renderOrder = 0;
+        child.frustumCulled = false;
+        child.renderOrder = -1;
+        if (child.isMesh) bindTerrainMesh(child);
         const layered = Boolean(child.geometry && child.geometry.getAttribute("uv3"));
         if (child.isMesh && child.geometry && !layered) missingLayer = true;
         const materials = Array.isArray(child.material) ? child.material : [child.material];

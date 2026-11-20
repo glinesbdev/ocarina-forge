@@ -46,6 +46,18 @@ test("the map replacement has no function definitions", () => {
   assert.ok(decls !== -1 && decls < inject && inject < maps, "helpers are injected after the uniforms and before the map chunk");
 });
 
+test("a gizmo drag cannot throw away the atlas or move every copy", () => {
+  assert.match(source, /applyActorMatrix\(entry\.slots, entry\.key, actorMatrix\)/);
+  assert.doesNotMatch(source, /slot\.mesh\.instanceMatrix\.needsUpdate = true/);
+  assert.match(source, /matrixWorldAutoUpdate = false/);
+  assert.match(source, /shader\.fragmentShader\.includes\("terrainCell\("\)/);
+  assert.match(source, /customProgramCacheKey = \(\) => `terrain\|\$\{columns\}\|\$\{repeat\}`/);
+  assert.match(source, /terrainRoot\.renderOrder = -1/);
+  assert.match(source, /terrainRoot\.frustumCulled = false/);
+  assert.match(source, /boundsGap\(/);
+  assert.match(source, /transformSphere\(/);
+});
+
 test("sub terrain starts off and the field is front-side", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");

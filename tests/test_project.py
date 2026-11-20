@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 
-from bancwright.actors import actor_id, format_hash
+from bancwright.actors import actor_id, format_hash, read_vec
 from bancwright.dump import Dump
 from bancwright.export import build
 from bancwright.fixtures import (
@@ -15,6 +15,8 @@ from bancwright.fixtures import (
     GUARD,
     KOKIRI_STATIC,
     STAL,
+    TREE,
+    TREE2,
     build_fixture,
     kokiri_static,
 )
@@ -76,6 +78,39 @@ def test_move_hide_add_and_undo_roundtrip(tmp_path):
 
     reverted, _focus = apply_command(document, diff, {"command": "revert", "id": format_hash(FADO)})
     assert format_hash(FADO) not in reverted["actors"]
+
+
+def test_transform_one_copy_leaves_the_other_and_undo_restores_it(tmp_path):
+    dump = _dump(tmp_path)
+    document, _dict_id, _raw = dump.read_byml(KOKIRI_STATIC)
+    empty = {"format": 1, "banc": KOKIRI_STATIC, "actors": {}}
+    before = {actor["id"]: actor for actor in scene_view(document, empty)["actors"]}
+    tree = format_hash(TREE)
+    twin = format_hash(TREE2)
+    assert before[tree]["gyaml"] == before[twin]["gyaml"] == "Obj_Tree"
+    original_tree = list(before[tree]["translate"])
+    original_twin = list(before[twin]["translate"])
+    diff, focus = apply_command(
+        document,
+        empty,
+        {"command": "transform", "id": tree, "translate": [9, 2, 1], "rotate": [0, 0.4, 0]},
+    )
+    assert focus == tree
+    assert set(diff["actors"]) == {tree}
+    moved = {actor["id"]: actor for actor in scene_view(document, diff)["actors"]}
+    assert moved[tree]["status"] == "edited"
+    assert moved[tree]["translate"] == [9.0, 2.0, 1.0]
+    assert moved[tree]["rotate"][1] == 0.4
+    assert moved[twin]["status"] == "vanilla"
+    assert moved[twin]["translate"] == original_twin
+    assert moved[twin]["rotate"] == before[twin]["rotate"]
+    exported, _warnings = export_document(document, diff)
+    saved = {actor_id(actor): actor for actor in exported["Actors"]}
+    assert saved[tree]["Translate"] == [9.0, 2.0, 1.0]
+    assert read_vec(saved[twin], "Translate", [0, 0, 0]) == original_twin
+    restored = {actor["id"]: actor for actor in scene_view(document, empty)["actors"]}
+    assert restored[tree]["translate"] == original_tree
+    assert restored[twin]["translate"] == original_twin
 
 
 def test_set_param_keeps_the_byml_type(tmp_path):
