@@ -6,6 +6,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
 ``tex-audit`` flags a mip-0 size that implies a different block height than usual, and scores the Tegra and Switch 2 GOB orders.
+``warm <scene>`` converts that scene's models, then neighboring scenes. ``warm --all`` converts every scene.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
 ``behavior-export`` writes saved set-field ops into the project build folder.
@@ -31,8 +32,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "tex-audit", "behavior", "behavior-audit", "behavior-export", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, tex-audit, behavior, behavior-audit, and behavior-export print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "tex-audit", "behavior", "behavior-audit", "behavior-export", "warm", "serve"],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, tex-audit, behavior, behavior-audit, behavior-export, and warm print or convert. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--png", help="tex-debug writes the current decode to this PNG.")
     parser.add_argument("--out", help="material-audit also writes the report to this file.")
     parser.add_argument("--project", help="Project folder. Defaults to the saved config, or an empty project.")
+    parser.add_argument("--all", action="store_true", help="warm converts every scene instead of one banc and its neighbors.")
     parser.add_argument("--host", default=setting("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(setting("PORT", "47232") or "47232"))
     parser.add_argument("--static", help="Serve a built frontend from this directory.")
@@ -111,6 +113,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(print_tex_debug(args.banc, png=args.png, as_json=args.json, dump=args.dump))
     if args.command == "tex-audit":
         raise SystemExit(print_tex_audit(as_json=args.json, dump=args.dump, out=args.out))
+    if args.command == "warm":
+        if not args.all and not args.banc:
+            parser.error("warm needs a banc path or --all")
+        raise SystemExit(print_warm("all" if args.all else args.banc, dump=args.dump))
     if args.static:
         from ocarina_forge.server import mount_frontend
 
@@ -439,6 +445,31 @@ def print_material_audit(*, as_json: bool = False, dump: str | None = None, out:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text, encoding="utf-8")
     print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
+def print_warm(target: str, *, dump: str | None = None) -> int:
+    """Convert one scene and its neighbors, or every scene. Prints each model's timing."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.warm import run_warm
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    try:
+        run_warm(opened, target)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return 2
     return 0
 
 

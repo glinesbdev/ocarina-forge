@@ -37,6 +37,7 @@ from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
+from ocarina_forge.warm import neighbor_bancs, scene_model_names, warm_queue
 
 def _ignore_sigint() -> None:
     """Worker processes must not print KeyboardInterrupt when the terminal gets Ctrl+C."""
@@ -56,6 +57,8 @@ def _close_pool() -> None:
 @asynccontextmanager
 async def _lifespan(_app):
     yield
+    if _WARM_TASK is not None:
+        _WARM_TASK.cancel()
     _close_pool()
 
 
@@ -102,6 +105,85 @@ def _pool():
 
 _CONVERTING: dict[str, asyncio.Future] = {}
 _CONVERT_LOCK = asyncio.Lock()
+_INTERACTIVE = 0
+_WARM_QUEUE: list[tuple[str, str]] = []
+_WARM_DONE = 0
+_WARM_TOTAL = 0
+_WARM_SCENE = ""
+_WARM_SEEN: set[str] = set()
+_WARM_TASK: asyncio.Task | None = None
+_WARM_EVENT: asyncio.Event | None = None
+
+
+def _warm_status() -> dict:
+    return {
+        "scene": _WARM_SCENE,
+        "done": _WARM_DONE,
+        "total": _WARM_TOTAL,
+        "paused": _INTERACTIVE > 0,
+        "left": sum(1 for kind, _name in _WARM_QUEUE if kind == "model"),
+    }
+
+
+def _kick_warm() -> None:
+    if _WARM_EVENT is not None:
+        _WARM_EVENT.set()
+
+
+def _enter_interactive() -> None:
+    global _INTERACTIVE
+    _INTERACTIVE += 1
+    _kick_warm()
+
+
+def _leave_interactive() -> None:
+    global _INTERACTIVE
+    _INTERACTIVE = max(0, _INTERACTIVE - 1)
+    _kick_warm()
+
+
+async def _warm_loop() -> None:
+    """One model at a time, and only while nothing interactive is waiting."""
+    global _WARM_DONE, _WARM_TOTAL, _WARM_QUEUE
+    while True:
+        if _INTERACTIVE > 0 or not _WARM_QUEUE:
+            assert _WARM_EVENT is not None
+            _WARM_EVENT.clear()
+            if _INTERACTIVE > 0 or not _WARM_QUEUE:
+                await _WARM_EVENT.wait()
+                continue
+        kind, name = _WARM_QUEUE.pop(0)
+        if _INTERACTIVE > 0:
+            _WARM_QUEUE.insert(0, (kind, name))
+            continue
+        if kind == "scene":
+            try:
+                extra = await asyncio.to_thread(scene_model_names, _open_dump(), name)
+            except Exception:
+                extra = []
+            fresh = []
+            for item in extra:
+                if item in _WARM_SEEN:
+                    continue
+                _WARM_SEEN.add(item)
+                fresh.append(("model", item))
+            _WARM_QUEUE[0:0] = fresh
+            _WARM_TOTAL += len(fresh)
+            _kick_warm()
+            continue
+        try:
+            await _describe_model(name, interactive=False)
+        except Exception:
+            pass
+        _WARM_DONE += 1
+
+
+def _ensure_warm() -> None:
+    global _WARM_TASK, _WARM_EVENT
+    if _WARM_EVENT is None:
+        _WARM_EVENT = asyncio.Event()
+    if _WARM_TASK is None or _WARM_TASK.done():
+        _WARM_TASK = asyncio.get_running_loop().create_task(_warm_loop())
 
 
 def _publish(info: dict) -> dict:
@@ -159,40 +241,50 @@ def _note_stream(kind: str, name: str, info: dict) -> dict:
     return info
 
 
-async def _describe_model(gyaml: str) -> dict:
-    dump = _open_dump()
+async def _describe_model(gyaml: str, *, interactive: bool = True) -> dict:
+    if interactive:
+        _enter_interactive()
     try:
-        return _note_stream("model", gyaml, _publish(describe_actor(dump, gyaml, convert=False)))
-    except CacheMiss:
-        pass
+        dump = _open_dump()
+        try:
+            return _note_stream("model", gyaml, _publish(describe_actor(dump, gyaml, convert=False)))
+        except CacheMiss:
+            pass
 
-    async def run():
-        pool = _pool()
-        if pool is None:
-            info = await asyncio.to_thread(describe_actor, dump, gyaml)
-        else:
-            info = await asyncio.wrap_future(pool.submit(describe_actor_at, str(dump.root), gyaml))
-        return _publish(info)
+        async def run():
+            pool = _pool()
+            if pool is None:
+                info = await asyncio.to_thread(describe_actor, dump, gyaml)
+            else:
+                info = await asyncio.wrap_future(pool.submit(describe_actor_at, str(dump.root), gyaml))
+            return _publish(info)
 
-    return _note_stream("model", gyaml, await _convert(f"model:{gyaml}", run))
+        return _note_stream("model", gyaml, await _convert(f"model:{gyaml}", run))
+    finally:
+        if interactive:
+            _leave_interactive()
 
 
 async def _describe_terrain_model(banc: str) -> dict:
-    dump = _open_dump()
+    _enter_interactive()
     try:
-        return _note_stream("terrain", banc, _publish(describe_terrain(dump, banc, convert=False)))
-    except CacheMiss:
-        pass
+        dump = _open_dump()
+        try:
+            return _note_stream("terrain", banc, _publish(describe_terrain(dump, banc, convert=False)))
+        except CacheMiss:
+            pass
 
-    async def run():
-        pool = _pool()
-        if pool is None:
-            info = await asyncio.to_thread(describe_terrain, dump, banc)
-        else:
-            info = await asyncio.wrap_future(pool.submit(describe_terrain_at, str(dump.root), banc))
-        return _publish(info)
+        async def run():
+            pool = _pool()
+            if pool is None:
+                info = await asyncio.to_thread(describe_terrain, dump, banc)
+            else:
+                info = await asyncio.wrap_future(pool.submit(describe_terrain_at, str(dump.root), banc))
+            return _publish(info)
 
-    return _note_stream("terrain", banc, await _convert(f"terrain:{banc}", run))
+        return _note_stream("terrain", banc, await _convert(f"terrain:{banc}", run))
+    finally:
+        _leave_interactive()
 
 
 def _queued_model(gyaml: str) -> dict:
@@ -300,7 +392,35 @@ def health():
 @app.get("/api/stream")
 def stream_summary():
     """Convert, texture-decode, and cache-hit totals since the server started."""
-    return STREAM.summary()
+    summary = STREAM.summary()
+    summary["warm"] = _warm_status()
+    return summary
+
+
+@app.post("/api/warm")
+async def start_warm(body: dict):
+    """Queue this scene, nearest first, then neighboring scenes. Pauses while the view is converting."""
+    global _WARM_QUEUE, _WARM_DONE, _WARM_TOTAL, _WARM_SCENE
+    banc = str(body.get("banc") or "")
+    nearest = [name for name in (body.get("names") or []) if isinstance(name, str) and name]
+    dump = _open_dump()
+
+    def plan() -> list[tuple[str, str]]:
+        scenes = [item["path"] for item in dump.list_scenes()]
+        if banc and banc not in scenes and banc not in {"all", "--all"}:
+            raise BancError(f"No scene {banc}.", "not_found")
+        if banc in {"all", "--all"}:
+            return warm_queue([], [], scenes)
+        return warm_queue(nearest, scene_model_names(dump, banc) if banc else [], neighbor_bancs(banc, scenes) if banc else [])
+
+    _WARM_QUEUE = await asyncio.to_thread(plan)
+    _WARM_DONE = 0
+    _WARM_TOTAL = sum(1 for kind, _name in _WARM_QUEUE if kind == "model")
+    _WARM_SEEN = {name for kind, name in _WARM_QUEUE if kind == "model"}
+    _WARM_SCENE = banc
+    _ensure_warm()
+    _kick_warm()
+    return _warm_status()
 
 
 @app.get("/api/status")

@@ -154,6 +154,10 @@ viewport = await createViewport($("viewport"), {
     fillNumber("rz", deg(rotate[2]));
   },
   onDeviceLost: (message) => toast(message),
+  onWarm(names) {
+    if (!state.banc || !names || !names.length) return;
+    api.warm({ banc: state.banc, names }).then((status) => viewport.setWarm(status)).catch(() => {});
+  },
   onStats(text) {
     const readout = $("stats-readout");
     if (readout && readout.textContent !== text) readout.textContent = text;
@@ -181,7 +185,9 @@ function refreshStreamLog() {
   streamAt = now;
   api.stream()
     .then((data) => {
-      const head = `server ${data.misses || 0} converted · ${data.hits || 0} cache hits · conv ${data.convertMs || 0} ms · tex ${data.textureMs || 0} ms`;
+      if (data.warm) viewport.setWarm(data.warm);
+      const warm = data.warm && data.warm.total ? ` · warm ${data.warm.done || 0}/${data.warm.total}${data.warm.paused ? " paused" : ""}` : "";
+      const head = `server ${data.misses || 0} converted · ${data.hits || 0} cache hits · conv ${data.convertMs || 0} ms · tex ${data.textureMs || 0} ms${warm}`;
       const lines = (data.lines || []).slice(-8);
       box.textContent = lines.length ? `${head}\n${lines.join("\n")}` : head;
     })

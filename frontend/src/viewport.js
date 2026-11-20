@@ -698,6 +698,7 @@ export async function createViewport(host, hooks) {
 
   function loadModels(token, actors) {
     const names = [...new Set(actors.map((actor) => actor.gyaml).filter(Boolean))];
+    if (hooks.onWarm) hooks.onWarm(names.slice().sort((a, b) => gyamlScore(a) - gyamlScore(b)));
     statQueued = 0;
     statLoading = 0;
     statLoaded = 0;
@@ -2674,6 +2675,12 @@ uniform float terrainLayerMissing;`
     frame,
     spawnPoint,
     resize,
+    setWarm(status) {
+      const total = status && Number(status.total);
+      statWarmDone = total ? Number(status.done) || 0 : null;
+      statWarmTotal = total || null;
+      requestRender();
+    },
     setShowStats(on) {
       showStats = Boolean(on);
       statsEl.hidden = !showStats;
