@@ -80,16 +80,17 @@ def overlay_plan(material, span: list[tuple[float, float]] | None = None) -> dic
     slot, texture = albedo[1]
     if not texture:
         return None
-    for block in getattr(material, "shader_blocks", None) or []:
-        if block.get("slot") not in (None, "+0x10"):
-            continue
-        indices = sampler_indices(block)
-        if slot in indices and indices[slot] == 0xFF:
-            return None
+    if not _has_c0(material):
+        return None
+    indices = _primary_indices(material)
+    if indices is not None and slot in indices and indices[slot] == 0xFF:
+        return None
     channel, reason = choose_channel(getattr(material, "options", None), span)
     uv = _uv_channel(material, slot)
     scale, translate = _srt(material, slot)
-    return {
+    normal_slot, normal = _bound(material, indices, ("_n1",))
+    surface_slot, surface = _bound(material, indices, ("_rah1", "_rmh1"))
+    plan = {
         "sampler": slot,
         "texture": texture,
         "channel": channel,
@@ -98,6 +99,51 @@ def overlay_plan(material, span: list[tuple[float, float]] | None = None) -> dic
         "scale": [round(float(scale[0]), 6), round(float(scale[1]), 6)],
         "translate": [round(float(translate[0]), 6), round(float(translate[1]), 6)],
     }
+    if normal:
+        plan["normalSampler"] = normal_slot
+        plan["normal"] = normal
+    if surface:
+        plan["surfaceSampler"] = surface_slot
+        plan["surface"] = surface
+    return plan
+
+
+def _has_c0(material) -> bool:
+    """True when the material has a ``_c0`` attribute, or names no attributes.
+
+    A named attribute list without ``_c0`` is a single layer. Materials that
+    do not list attributes (the older samples) still blend when ``_a1`` is used.
+    """
+    saw = False
+    for block in getattr(material, "shader_blocks", None) or []:
+        names = [str(name) for name in (block.get("attributeNames") or [])]
+        if not names:
+            continue
+        saw = True
+        if any(name in {"_c0", "c0", "_c"} for name in names):
+            return True
+    return not saw
+
+
+def _primary_indices(material) -> dict[str, int] | None:
+    for block in getattr(material, "shader_blocks", None) or []:
+        if block.get("slot") not in (None, "+0x10"):
+            continue
+        indices = sampler_indices(block)
+        if indices:
+            return indices
+    return None
+
+
+def _bound(material, indices: dict[str, int] | None, slots: tuple[str, ...]) -> tuple[str, str]:
+    """The first of ``slots`` whose variation index is not ``0xFF``."""
+    for slot, texture in getattr(material, "binds", None) or []:
+        if slot not in slots or not texture:
+            continue
+        if indices is not None and indices.get(slot, 0xFF) == 0xFF:
+            continue
+        return slot, texture
+    return "", ""
 
 
 def _channel_from_options(options: dict) -> str | None:

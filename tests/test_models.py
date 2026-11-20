@@ -215,6 +215,10 @@ def test_bc1_mixed_index_3_is_the_endpoint_average_not_a_black_dot():
 def test_astc_ids_and_partial_gob_row():
     from ocarina_forge.formats.bntx import _FORMATS, _repair_astc_partial_gob
 
+    assert _FORMATS[0x3101][1:3] == (6, 6)
+    assert _FORMATS[0x3201][1:3] == (8, 5)
+    assert _FORMATS[0x3501][1:3] == (10, 5)
+    assert _FORMATS[0x3001][1:3] == (6, 5)
     assert _FORMATS[0x3701][1:3] == (10, 8)
     assert _FORMATS[0x3801][1:3] == (10, 10)
     assert _FORMATS[0x3901][1:3] == (12, 10)
@@ -244,12 +248,93 @@ def test_block_height_uses_layout_low_bits_and_mip_size():
     assert image.block_height == 1
     assert image.rgba[0] > 180 and image.rgba[2] < 40
     assert image.rgba[(width - 1) * 4 + 2] > 180
-    # A stored log2 that disagrees with the mip size is replaced by the size.
+    # textureLayout log2 4 stays 4 even when the mip was swizzled at log2 0.
     overridden = write_rgba("Edge", width, height, bytes(rgba), swizzled=True, log2=0, layout0=4, layout4=0xC9)
     fixed = textures(overridden)[0]
-    assert fixed.block_height == 1
-    assert fixed.rgba[0] > 180
-    assert fixed.rgba[(width - 1) * 4 + 2] > 180
+    assert fixed.block_height == 16
+
+
+def test_nonsquare_astc_keeps_the_layout_height_and_the_wide_axis():
+    """8×5 is 8 pixels wide and 5 tall. The layout log2 is not replaced by the mip size.
+
+    1024² ASTC 8×5 at log2 0 is 425984 bytes, the same count as log2 0 of a
+    swapped 5×8 footprint, and the usual height is log2 4 (524288). 6×6 at
+    log2 0 is 484352. Block rows pad to the GOB height (8), so the last
+    partial row of an 8×5 image roundtrips instead of sliding into the pad.
+    """
+    from ocarina_forge.formats.bntx import _decode, _quieter
+    from ocarina_forge.formats.swizzle import (
+        block_log2,
+        default_block_log2,
+        deswizzle,
+        inferred_block_log2,
+        surface_bytes,
+        swizzle,
+    )
+    from ocarina_forge.texaudit import disagreement
+
+    assert surface_bytes(1024, 1024, 8, 5, 16, 0) == 425984
+    assert surface_bytes(1024, 1024, 5, 8, 16, 0) == 425984
+    assert surface_bytes(1024, 1024, 8, 5, 16, 4) == 524288
+    assert default_block_log2(1024, 5) == 4
+    assert surface_bytes(1024, 1024, 6, 6, 16, 0) == 484352
+    assert surface_bytes(1024, 1024, 6, 6, 16, 4) == 704512
+    assert default_block_log2(1024, 6) == 4
+    layout4 = bytes([4, 0, 0, 0, 0xC9, 0, 0, 0])
+    assert block_log2(1024, 5, layout4, width=1024, block_width=8, bytes_per=16, mip_bytes=425984) == 4
+    layout0 = bytes([0, 0, 0, 0, 0xC9, 0, 0, 0])
+    assert block_log2(1024, 5, layout0, width=1024, block_width=8, bytes_per=16, mip_bytes=425984) == 0
+    assert inferred_block_log2(1024, 1024, 8, 5, 16, 425984) == 0
+    flagged = disagreement(
+        {
+            "name": "Land_HrlCastle_Wall_Brick_A_Lighter_Alb",
+            "formatName": "astc8x5",
+            "width": 1024,
+            "height": 1024,
+            "blockWidth": 8,
+            "blockHeightPixels": 5,
+            "blockHeightLog2": 0,
+            "inferredBlockHeightLog2": 0,
+            "defaultBlockHeightLog2": 4,
+            "mip0Size": 425984,
+            "surfaces": {0: 425984, 4: 524288},
+            "textureLayout": 0,
+            "sizeRange": 0xC9,
+        }
+    )
+    assert flagged["inferredLog2"] == 0 and flagged["usualLog2"] == 4
+    assert disagreement({"inferredBlockHeightLog2": 4, "defaultBlockHeightLog2": 4}) is None
+
+    width, height, block_w, block_h = 40, 50, 8, 5
+    blocks_x, blocks_y = 5, 10
+    assert surface_bytes(width, height, block_w, block_h, 16, 0) == 128 * 16
+    linear = bytearray(blocks_x * blocks_y * 16)
+    for y in range(blocks_y):
+        for x in range(blocks_x):
+            at = (y * blocks_x + x) * 16
+            linear[at : at + 16] = bytes((x * 3 + y * 5 + index) & 0xFF for index in range(16))
+    marker = bytes(range(16))
+    linear[(9 * blocks_x) * 16 : (9 * blocks_x) * 16 + 16] = marker
+    packed = swizzle(width, height, block_w, block_h, 16, 0, 0, bytes(linear))
+    assert deswizzle(width, height, block_w, block_h, 16, 0, 0, packed) == bytes(linear)
+    assert deswizzle(width, height, block_h, block_w, 16, 0, 0, packed) != bytes(linear)
+    assert _bytewise_deswizzle(packed, blocks_x, blocks_y, 16, 1) == bytes(linear)
+    assert not _quieter(40, 30)
+    assert _quieter(40, 12)
+
+    try:
+        import texture2ddecoder  # noqa: F401
+    except ImportError:
+        return
+    green = bytes([0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 255, 0, 0, 255, 0, 0, 255, 255])
+    red = bytes([0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 255, 255, 0, 0, 0, 255, 255])
+    tiles = green + red + green + red
+    swizzled = swizzle(16, 10, 8, 5, 16, 0, 0, tiles)
+    restored = deswizzle(16, 10, 8, 5, 16, 0, 0, swizzled)
+    rgba, _note = _decode("astc8x5", 16, 10, restored, 0x3201)
+    assert list(rgba[0:3]) == [0, 255, 0]
+    assert list(rgba[8 * 4 : 8 * 4 + 3]) == [255, 0, 0]
+    assert list(rgba[(5 * 16) * 4 : (5 * 16) * 4 + 3]) == [0, 255, 0]
 
 
 def test_sparse_heightmap_is_a_few_files_inside_a_large_index():
@@ -377,7 +462,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-38", "47c2a8636e2b0d3a784c2e7de11dce66919229b0a636fb4763a60c6f029cca73")
+    pinned = ("models-39", "3758ca81bdbce16d961cd0a9d7a87e582aadd2e36daf797fcb39c2771c8699e9")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."

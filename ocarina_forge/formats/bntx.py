@@ -17,6 +17,8 @@ from ocarina_forge.formats.swizzle import (
     deswizzle,
     div_up,
     fill_partial_gob,
+    inferred_block_log2,
+    layout_words,
     surface_bytes,
 )
 
@@ -207,6 +209,7 @@ def texture_headers(data: bytes) -> list[dict]:
         fmt = _u32(data, brti + 0x1C)
         info, family_note = _format_info(fmt)
         layout = data[brti + 0x34 : brti + 0x3C]
+        texture_layout, size_range = layout_words(layout)
         stored = _stored_log2(layout)
         image = 0
         mip_table = _u64(data, brti + 0x70)
@@ -216,6 +219,7 @@ def texture_headers(data: bytes) -> list[dict]:
         height = _i32(data, brti + 0x28)
         mip0 = _mip0_bytes(data, brti, image)
         surface = {}
+        block_w = block_h = bytes_per = 0
         if info is not None:
             _codec, block_w, block_h, bytes_per = info
             for log2 in range(6):
@@ -226,13 +230,22 @@ def texture_headers(data: bytes) -> list[dict]:
                 "format": fmt,
                 "formatName": info[0] if info else "",
                 "formatNote": family_note,
+                "blockWidth": block_w or None,
+                "blockHeightPixels": block_h or None,
                 "width": width,
                 "height": height,
                 "depth": _i32(data, brti + 0x2C) if brti + 0x30 <= len(data) else 0,
                 "mips": _mip_count(data, brti),
                 "tileMode": _u16(data, brti + 0x12),
                 "layout": layout.hex(),
+                "textureLayout": texture_layout,
+                "sizeRange": size_range,
                 "blockHeightLog2": stored,
+                "inferredBlockHeightLog2": (
+                    inferred_block_log2(width, height, block_w, block_h, bytes_per, mip0)
+                    if info is not None
+                    else None
+                ),
                 "blockHeight": (1 << stored) if stored is not None else None,
                 "arrayCount": _u32(data, brti + 0x30) if brti + 0x34 <= len(data) else 0,
                 "imageSize": _u32(data, brti + 0x50) if brti + 0x54 <= len(data) else 0,
@@ -475,15 +488,69 @@ def _decode_swizzle(
             continue
         alt_rgba = _channels(alt_rgba, width, height, channels)
         alt_score = _noise(alt_rgba, width, height)
-        if alt_score + 10 <= best_score and alt_score <= best_score * 0.45:
+        if _quieter(best_score, alt_score):
             best_rgba, best_log, best_score = alt_rgba, alt, alt_score
+    chosen_note = note
     if best_log != log2:
-        extra = f"swizzle log2 {best_log}, stored {log2} looked like noise"
-        return best_rgba, f"{note}. {extra}".strip(". "), best_log
+        chosen_note = f"{note}. swizzle log2 {best_log}, stored {log2} looked like noise".strip(". ")
+    swapped = _quieter_footprint(
+        codec, width, height, block_w, block_h, bytes_per, tile, best_log, raw, channels, fmt, expected, best_score
+    )
+    if swapped is not None:
+        alt_rgba, alt_note, alt_w, alt_h = swapped
+        extra = f"footprint {alt_w}x{alt_h}, {block_w}x{block_h} looked like noise"
+        return alt_rgba, f"{alt_note}. {extra}".strip(". "), best_log
+    if best_log != log2:
+        return best_rgba, chosen_note, best_log
     if score >= 70:
         extra = f"swizzle log2 {log2} still looks noisy"
         return rgba, f"{note}. {extra}".strip(". "), log2
     return rgba, note, log2
+
+
+def _quieter(score: float, alt_score: float) -> bool:
+    """True when the alternate is a real improvement, not a busy image's grain."""
+    return alt_score + 10 <= score and alt_score <= score * 0.45
+
+
+def _quieter_footprint(
+    codec: str,
+    width: int,
+    height: int,
+    block_w: int,
+    block_h: int,
+    bytes_per: int,
+    tile: int,
+    log2: int,
+    raw: bytes,
+    channels: bytes,
+    fmt: int,
+    expected: int,
+    score: float,
+):
+    """Try the other axis of a non-square ASTC block when it uses the same bytes.
+
+    8×5 is 8 pixels wide and 5 tall. At 1024² and log2 0 that surface is the
+    same size as 5×8, so a size check cannot tell the axes apart. A much
+    smoother decode wins. 6×6 has one axis, so it is left alone. The GOB
+    block height stays the textureLayout value.
+    """
+    if not codec.startswith("astc") or block_w == block_h or block_w <= 0 or block_h <= 0 or score < 18:
+        return None
+    alt_w, alt_h = block_h, block_w
+    if surface_bytes(width, height, alt_w, alt_h, bytes_per, log2) != expected:
+        return None
+    alt_linear = deswizzle(width, height, alt_w, alt_h, bytes_per, tile, log2, raw)
+    alt_linear = fill_partial_gob(alt_linear, width, height, alt_w, alt_h, bytes_per)
+    try:
+        alt_rgba, alt_note = _decode(codec, width, height, alt_linear, fmt, footprint=(alt_w, alt_h))
+    except BntxError:
+        return None
+    alt_rgba = _channels(alt_rgba, width, height, channels)
+    alt_score = _noise(alt_rgba, width, height)
+    if not _quieter(score, alt_score):
+        return None
+    return alt_rgba, alt_note, alt_w, alt_h
 
 
 def _noise(rgba: bytes, width: int, height: int) -> float:
@@ -505,7 +572,14 @@ def _noise(rgba: bytes, width: int, height: int) -> float:
     return total / max(count, 1)
 
 
-def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tuple[bytes, str]:
+def _decode(
+    codec: str,
+    width: int,
+    height: int,
+    linear: bytes,
+    fmt: int,
+    footprint: tuple[int, int] | None = None,
+) -> tuple[bytes, str]:
     if codec == "rgba8":
         need = width * height * 4
         return bytes(linear[:need]).ljust(need, b"\0"), ""
@@ -541,7 +615,7 @@ def _decode(codec: str, width: int, height: int, linear: bytes, fmt: int) -> tup
     if codec == "bc2":
         decoder = getattr(texture2ddecoder, "decode_bc2", None) or getattr(texture2ddecoder, "decode_bc3", None)
     if codec in astc:
-        bw, bh = astc[codec]
+        bw, bh = footprint or astc[codec]
         linear = _repair_astc_partial_gob(linear, width, height, bw, bh)
         bgra = texture2ddecoder.decode_astc(linear, width, height, bw, bh)
     elif decoder is None:

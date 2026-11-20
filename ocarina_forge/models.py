@@ -57,7 +57,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-38\0"
+_CACHE_VERSION = b"models-39\0"
 _BNTX_VERSION = b"bntx-4\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1061,9 +1061,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     overlay_uvs = (part.uv_extra or {}).get(wanted_uv)
                     if overlay_uvs is not None and len(overlay_uvs) != len(part.positions):
                         overlay_uvs = None
-                if "moss blend" not in notes:
+                if not any(note.startswith("blend ") for note in notes):
                     notes.append(
-                        f"moss blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
+                        f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
                     )
             primitives.append(
                 Primitive(

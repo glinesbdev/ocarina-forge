@@ -2174,6 +2174,8 @@ _SKIP = {
     "msk",
     "mask",
     "blend",
+    "bake",
+    "gn",
     "splat",
     "height",
     "fx",
@@ -2448,8 +2450,10 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     ``MaterialAlb``) is not a fallback, and neither is the string pool.
     ``Mt_TerraMaterial_NNN`` is the exception, and the model loader reads
     layer NNN of ``MaterialAlb`` itself rather than treating that name as albedo.
-    A texture whose name is a normal, mask, or blend map is skipped even
-    when the slot is ``_a0``.
+    A texture whose name is a normal, mask, or blend map is skipped on
+    ``_a0``. ``_a1`` and ``_a2`` stay the overlay even when the file name
+    says Blend: the slot is the authority, and a normal or mask in that
+    slot is still skipped. ``bake`` and ``gn`` maps are not albedo.
     A material with no sampler names still ranks texture names, which is
     how the version-9 samples are written.
     """
@@ -2476,14 +2480,28 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return [(sampler, texture) for _key, sampler, texture in ranked]
 
 
+def _overlay_albedo(texture: str) -> bool:
+    """``_a1`` may be named Blend and still be the second albedo.
+
+    A normal, mask, bake, or gn map in that slot is not an overlay color.
+    """
+    stem = (texture or "").lower()
+    if any(part in stem for part in ("nrm", "normal", "mask", "msk", "bake", "dummy")):
+        return False
+    tokens = set(re.findall(r"[a-z0-9]+", stem))
+    if "gn" in tokens or "bake" in tokens:
+        return False
+    return True
+
+
 def _rank_locked_samplers(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     ranked = []
     for index, (sampler, texture) in enumerate(binds):
         if not texture:
             continue
-        if texture_rank(texture) >= 2:
-            continue
         token = "".join(char for char in sampler.lower() if char.isalnum())
+        if texture_rank(texture) >= 2 and not (token in _LOCKED_EXTRA and _overlay_albedo(texture)):
+            continue
         if token in _PRIMARY_SAMPLER:
             key = 0
         elif token in _LOCKED_EXTRA:

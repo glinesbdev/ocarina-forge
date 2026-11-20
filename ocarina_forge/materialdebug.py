@@ -68,6 +68,25 @@ def projection_options(options: dict) -> dict:
     return found
 
 
+def neutral_sampler_lines(binds: list[dict]) -> list[str]:
+    """bake and gn maps are not multiplied into the albedo.
+
+    ``CmnTex_BakeLightDefault`` and ``Dummy*`` are neutral placeholders.
+    ``_gn0`` is a separate map and is not a colour or an occlusion multiply.
+    """
+    lines = []
+    for item in binds:
+        slot = str(item.get("sampler") or "")
+        texture = str(item.get("texture") or "")
+        token = _alnum(slot)
+        folded = _alnum(texture)
+        if token.startswith("bake") or "bakelight" in folded or "dummy" in folded:
+            lines.append(f"{slot} {texture} is not sampled (neutral placeholder)")
+        elif token.startswith("gn"):
+            lines.append(f"{slot} {texture} is not multiplied into albedo")
+    return lines
+
+
 def sampler_lines(material) -> list[dict]:
     """One row per sampler: role, UV channel from the assign, and a matching SRT."""
     assign = getattr(material, "assign", {}) or {}
@@ -270,7 +289,13 @@ def render_text(report: dict) -> str:
                 f"  blend {blend.get('sampler') or '_a1'} {blend.get('texture') or ''}  "
                 f"mask _c0.{blend.get('channel') or 'r'}  uv {blend.get('uv') or '_u0'}  scale {scale}"
             )
+            if blend.get("normal"):
+                lines.append(f"  blend normal {blend.get('normalSampler') or '_n1'} {blend.get('normal')}")
+            if blend.get("surface"):
+                lines.append(f"  blend surface {blend.get('surfaceSampler') or '_rah1'} {blend.get('surface')}")
             lines.append(f"    {blend.get('reason') or ''}")
+        for note in neutral_sampler_lines(row.get("binds") or []):
+            lines.append(f"  {note}")
         slots = row.get("slots") or []
         if slots:
             lines.append("  header")

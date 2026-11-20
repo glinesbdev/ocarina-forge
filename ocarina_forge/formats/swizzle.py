@@ -7,6 +7,8 @@ formula. It is not taken from the GPL BNTX extractors.
 
 from __future__ import annotations
 
+import struct
+
 
 def div_up(value: int, block: int) -> int:
     return (value + block - 1) // block if block else 0
@@ -40,7 +42,14 @@ def default_block_log2(height: int, block_height: int) -> int:
 
 
 def surface_bytes(width: int, height: int, block_w: int, block_h: int, bytes_per: int, log2: int) -> int:
-    """Byte size of one mip after the block-linear pitch and GOB padding."""
+    """Byte size of one mip after the block-linear pitch and GOB padding.
+
+    ``block_w`` is the footprint width in pixels and ``block_h`` the height
+    (ASTC 8×5 is 8 wide and 5 tall, 6×6 is square, 10×5 is 10 wide). The
+    pitch is the block row in bytes, rounded up to 64. The row count is the
+    block rows rounded up to the GOB height, ``block_height * 8``, not to
+    the ASTC block's own pixel height.
+    """
     blocks_x = max(1, div_up(width, max(block_w, 1)))
     blocks_y = max(1, div_up(height, max(block_h, 1)))
     pitch = round_up(blocks_x * bytes_per, 64)
@@ -48,8 +57,20 @@ def surface_bytes(width: int, height: int, block_w: int, block_h: int, bytes_per
     return pitch * rows
 
 
+def layout_words(layout: bytes) -> tuple[int, int]:
+    """``textureLayout`` then ``sizeRange``, the two u32s at BRTI+0x34.
+
+    ``textureLayout`` low 3 bits are the block-height log2. ``sizeRange`` is
+    the next word. On these files that word's first byte is ``0xC9`` and is
+    not a log2.     Older notes use the name sizeRange for the log2 word itself.
+    """
+    texture_layout = struct.unpack_from("<I", layout)[0] if len(layout) >= 4 else 0
+    size_range = struct.unpack_from("<I", layout, 4)[0] if len(layout) >= 8 else 0
+    return texture_layout, size_range
+
+
 def _stored_log2(layout: bytes) -> int | None:
-    """Block-height log2 from the BRTI layout bytes.
+    """Block-height log2 from textureLayout, not from the mip size.
 
     On these Switch 2 textures the value is the low 3 bits of layout byte 0
     (BRTI+0x34). Byte 4 is 0xC9 and is not a log2. Files this reader writes
@@ -77,6 +98,25 @@ def _log2_matching_mip(width: int, height: int, block_w: int, block_h: int, byte
     return matches[0] if matches else None
 
 
+def inferred_block_log2(
+    width: int,
+    height: int,
+    block_w: int,
+    block_h: int,
+    bytes_per: int,
+    mip_bytes: int,
+) -> int | None:
+    """The lowest log2 whose padded surface equals the mip-0 size.
+
+    This is the height a size check would guess. It is not the height to
+    decode with when textureLayout has a value. ``tex-audit`` flags a texture
+    when this guess is not the usual height for the image size.
+    """
+    if mip_bytes <= 0:
+        return None
+    return _log2_matching_mip(width, height, block_w, block_h, bytes_per, mip_bytes)
+
+
 def block_log2(
     height: int,
     pixel_block_height: int,
@@ -89,24 +129,20 @@ def block_log2(
 ) -> int:
     """Block height for the base mip.
 
-    Prefer layout byte 0. When that value's padded surface does not match the
-    mip-table size, use the log2 that does. Files written here keep the old
-    byte-4 field, and a texture with no usable stored value falls back to the
-    Switch 1 height rule.
+    textureLayout's low 3 bits win, even when a different log2's padded
+    surface equals the mip-0 size. A 1024² ASTC 8×5 mip of 425984 bytes
+    matches log2 0, and the usual height for that image is log2 4; the field
+    is what was swizzled. Files written here keep the old byte-4 field. A
+    texture with no usable stored value uses the mip size, then the usual
+    Switch 1 height.
     """
     stored = _stored_log2(layout)
-    if mip_bytes > 0 and width > 0 and bytes_per > 0:
-        stored_size = (
-            surface_bytes(width, height, block_width, pixel_block_height, bytes_per, stored)
-            if stored is not None
-            else None
-        )
-        if stored is None or stored_size != mip_bytes:
-            derived = _log2_matching_mip(width, height, block_width, pixel_block_height, bytes_per, mip_bytes)
-            if derived is not None:
-                return derived
     if stored is not None:
         return stored
+    if mip_bytes > 0 and width > 0 and bytes_per > 0:
+        derived = inferred_block_log2(width, height, block_width, pixel_block_height, bytes_per, mip_bytes)
+        if derived is not None:
+            return derived
     return default_block_log2(height, pixel_block_height)
 
 

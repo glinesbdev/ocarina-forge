@@ -57,6 +57,73 @@ def test_the_byte_map_is_sampler_indices_and_ff_is_unused():
     assert overlay_plan(unused) is None
 
 
+def test_a_blend_named_a1_with_c0_mixes_the_normal_and_the_rah():
+    from ocarina_forge.formats.bfres import rank_albedo
+    from ocarina_forge.materialdebug import neutral_sampler_lines
+    from ocarina_forge.surface import collect
+
+    names = ["_a0", "_n0", "_rah0", "_a1", "_n1", "_rah1", "bake0", "bake1", "_gn0"]
+    attributes = ["_p0", "_n0", "_t0", "_u0", "_c0", "bake"]
+    raw = [0, 1, 2, 3, 6, 5, 0, 1, 2, 3, 0xFF, 5, 4, 7, 8, 9]
+    binds = [
+        ("_a0", "Land_HrlCastle_Wall_Brick_A_Lighter_Alb"),
+        ("_n0", "Land_HrlCastle_Wall_Brick_A_Nrm"),
+        ("_rah0", "Land_HrlCastle_Wall_Brick_A_Rah"),
+        ("_a1", "Land_HrlCastle_Wall_Brick_Blend_A_Alb"),
+        ("_n1", "Land_HrlCastle_Wall_Brick_Blend_A_Nrm"),
+        ("_rah1", "Land_HrlCastle_Wall_Brick_Blend_A_Rah"),
+        ("bake0", "CmnTex_BakeLightDefault"),
+        ("bake1", "CmnTex_BakeLightDefault"),
+        ("_gn0", "Land_HrlCastle_Wall_Brick_A_Gn"),
+    ]
+    assert rank_albedo(binds) == [
+        ("_a0", "Land_HrlCastle_Wall_Brick_A_Lighter_Alb"),
+        ("_a1", "Land_HrlCastle_Wall_Brick_Blend_A_Alb"),
+    ]
+    material = Material(
+        "Mt_Land_HrlCastle_Wall_Brick_Dirt_A_ManualUV",
+        binds=binds,
+        albedo=rank_albedo(binds),
+        shader_blocks=[
+            {
+                "slot": "+0x10",
+                "attributeNames": attributes,
+                "samplerNames": names,
+                "byteMap": [{"value": value} for value in raw],
+            }
+        ],
+    )
+    plan = overlay_plan(material)
+    assert plan["sampler"] == "_a1"
+    assert plan["texture"] == "Land_HrlCastle_Wall_Brick_Blend_A_Alb"
+    assert plan["channel"] == "r"
+    assert "normal" not in plan
+    assert plan["surfaceSampler"] == "_rah1"
+    assert plan["surface"] == "Land_HrlCastle_Wall_Brick_Blend_A_Rah"
+    roles = {(slot, role) for slot, _texture, role, _layer in collect(material)}
+    assert ("_rah1", "rah") in roles
+    assert ("_n1", "normal1") not in roles
+    assert all(slot not in {"bake0", "bake1", "_gn0"} for slot, _role in roles)
+    used_normal = [0, 1, 2, 3, 6, 5, 0, 1, 2, 3, 6, 5, 4, 7, 8]
+    material.shader_blocks[0]["byteMap"] = [{"value": value} for value in used_normal]
+    with_normal = overlay_plan(material)
+    assert with_normal["normalSampler"] == "_n1"
+    assert with_normal["normal"] == "Land_HrlCastle_Wall_Brick_Blend_A_Nrm"
+    used_roles = {(slot, role) for slot, _texture, role, _layer in collect(material)}
+    assert ("_n1", "normal1") in used_roles
+    notes = neutral_sampler_lines(
+        [{"sampler": slot, "texture": texture} for slot, texture in binds]
+    )
+    assert any("bake1 CmnTex_BakeLightDefault is not sampled" in line for line in notes)
+    assert any("_gn0" in line and "not multiplied into albedo" in line for line in notes)
+    no_color = Material(
+        "flat",
+        albedo=[("_a0", "slate"), ("_a1", "Land_HrlCastle_Wall_Brick_Blend_A_Alb")],
+        shader_blocks=[{"slot": "+0x10", "attributeNames": ["_p0", "_u0"], "samplerNames": ["_a0", "_a1"]}],
+    )
+    assert overlay_plan(no_color) is None
+
+
 def test_the_overlay_keeps_its_own_scale_and_the_assigned_uv():
     material = Material(
         "Mt_Land_HrlCastle_Roof_Slate_A",
@@ -130,7 +197,7 @@ def test_the_glb_carries_the_mask_and_a_dark_emissive_overlay():
     )
     model = Model("castle", parts=[part], images={"slate": slate, "moss": moss})
     blob, info = _assemble([model], {})
-    assert any("moss blend" in note for note in info["notes"])
+    assert any(note.startswith("blend ") and "moss" in note for note in info["notes"])
     document = _json(blob)
     primitive = document["meshes"][0]["primitives"][0]
     color = document["accessors"][primitive["attributes"]["COLOR_0"]]

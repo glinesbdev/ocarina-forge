@@ -5,6 +5,7 @@ bake or the actors near a point. ``ground-debug <banc>`` prints the ground
 layer. ``material-debug`` prints the shader assign and the uniforms.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
+``tex-audit`` flags textures whose mip-0 size implies a different block height than usual.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
 ``behavior-export`` writes saved set-field ops into the project build folder.
@@ -30,8 +31,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "behavior", "behavior-audit", "behavior-export", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, behavior, behavior-audit, and behavior-export print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "tex-audit", "behavior", "behavior-audit", "behavior-export", "serve"],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, tex-audit, behavior, behavior-audit, and behavior-export print reports. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
@@ -108,6 +109,8 @@ def main(argv: list[str] | None = None) -> None:
         if not args.banc:
             parser.error("tex-debug needs a texture name or a Tex path")
         raise SystemExit(print_tex_debug(args.banc, png=args.png, as_json=args.json, dump=args.dump))
+    if args.command == "tex-audit":
+        raise SystemExit(print_tex_audit(as_json=args.json, dump=args.dump, out=args.out))
     if args.static:
         from ocarina_forge.server import mount_frontend
 
@@ -439,6 +442,36 @@ def print_material_audit(*, as_json: bool = False, dump: str | None = None, out:
     return 0
 
 
+def print_tex_audit(*, as_json: bool = False, dump: str | None = None, out: str | None = None) -> int:
+    """Flag textures whose size-inferred block height is not the usual one. 2 when Tex/ is missing."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.texaudit import audit, render_text
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    report = audit(opened)
+    if report.get("errors") and not report.get("checked"):
+        print("\n".join(report["errors"]), file=sys.stderr)
+        return 2
+    text = json.dumps(report, indent=2) if as_json else render_text(report)
+    if out:
+        destination = Path(out).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
 def print_tex_debug(name: str, *, png: str | None = None, as_json: bool = False, dump: str | None = None) -> int:
     """Print the BNTX header and, with --png, write the current decode. 2 on a miss."""
     from ocarina_forge.config import load_config
@@ -537,6 +570,8 @@ def _render_tex(report: dict) -> str:
             f"  size {header.get('width')}x{header.get('height')}  depth {header.get('depth')}  "
             f"array {header.get('arrayCount')}"
         )
+        if header.get("blockWidth") and header.get("blockHeightPixels"):
+            lines.append(f"  footprint {header['blockWidth']}x{header['blockHeightPixels']}")
         lines.append(f"  mips {header.get('mips')}  tile mode {header.get('tileMode')}")
         log2 = header.get("blockHeightLog2")
         height = header.get("blockHeight")
@@ -544,6 +579,13 @@ def _render_tex(report: dict) -> str:
             f"  block height log2 {log2 if log2 is not None else '?'}  "
             f"block height {height if height is not None else '?'}  layout {header.get('layout') or ''}"
         )
+        lines.append(
+            f"  textureLayout {int(header.get('textureLayout') or 0):#x}  "
+            f"sizeRange {int(header.get('sizeRange') or 0):#x}"
+        )
+        inferred = header.get("inferredBlockHeightLog2")
+        if inferred is not None and inferred != log2:
+            lines.append(f"  mip0 size infers log2 {inferred}; the layout field is log2 {log2}")
         lines.append(
             f"  image size {int(header.get('imageSize') or 0):#x}  "
             f"mip0 {int(header.get('mip0Size') or 0):#x}  "
