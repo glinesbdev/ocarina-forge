@@ -61,7 +61,7 @@ def test_groups_sort_by_count_and_flag_what_the_viewer_skips(tmp_path, monkeypat
     assert any("glass" in row["value"] and "translucent" in row["value"] for row in glass["splits"]["tags"])
     assert glass["splits"]["attributes"][0]["value"] == "_p0 _u0"
     kinds = {(item["kind"], item["name"]): item["count"] for item in report["unhandled"]}
-    assert kinds[("unknown sampler", "_rah0")] == 2
+    assert ("unknown sampler", "_rah0") not in kinds
     assert kinds[("missing texture", "rah")] == 2
     assert kinds[("missing texture", "Glass_Alb")] == 1
     assert kinds[("unparsed assign", "")] == 3
@@ -126,7 +126,7 @@ def test_the_same_sampler_list_is_one_group_and_the_attribute_split_is_named():
     assert ("missing texture", "CmnTex_BakeLightDefault") not in kinds
     assert ("missing texture", "DummyBake") not in kinds
     assert ("unknown sampler", "bake0") in kinds
-    assert ("unknown sampler", "_rgh0") in kinds
+    assert ("unknown sampler", "_rgh0") not in kinds
 
 
 def test_an_unused_sampler_is_not_also_an_unknown_role():

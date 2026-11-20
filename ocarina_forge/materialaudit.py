@@ -17,6 +17,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from ocarina_forge.blend import sampler_indices
+from ocarina_forge.surface import surface_role
 from ocarina_forge.formats.bfres import FresError, _File, bind_role
 from ocarina_forge.formats.zsio import decompress, is_zstd
 from ocarina_forge.models import _WATER_TOKENS, _stem, _tex_index, cache_dir
@@ -590,6 +591,8 @@ def _indices(material: dict) -> dict[str, int]:
 
 
 def _unhandled(sampler: str) -> bool:
+    if surface_role(sampler):
+        return False
     role = bind_role(sampler)
     token = _token(sampler)
     if role == "albedo":

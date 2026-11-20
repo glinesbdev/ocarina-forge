@@ -855,11 +855,53 @@ export async function createViewport(host, hooks) {
     let pending = templateCache.get(url);
     if (!pending) {
       pending = new Promise((resolve, reject) => {
-        loader.load(url, (gltf) => resolve(gltf.scene), undefined, reject);
+        loader.load(
+          url,
+          (gltf) => {
+            bindSurfaceMaps(gltf).then(() => resolve(gltf.scene), reject);
+          },
+          undefined,
+          reject,
+        );
       });
       templateCache.set(url, pending);
     }
     return pending;
+  }
+
+  function asDataMap(map) {
+    if (!map) return;
+    map.colorSpace = THREE.LinearSRGBColorSpace;
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    map.needsUpdate = true;
+  }
+
+  async function bindSurfaceMaps(gltf) {
+    const parser = gltf.parser;
+    const surface = [];
+    if (!parser) return;
+    gltf.scene.traverse((child) => {
+      if (!child.material) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        const extra = material.userData && material.userData.surface;
+        if (!extra) continue;
+        if (Number.isInteger(extra.orm1)) {
+          surface.push(parser.getDependency("texture", extra.orm1).then((texture) => {
+            asDataMap(texture);
+            material.userData.orm1Map = texture;
+          }));
+        }
+        if (Number.isInteger(extra.normal1)) {
+          surface.push(parser.getDependency("texture", extra.normal1).then((texture) => {
+            asDataMap(texture);
+            material.userData.normal1Map = texture;
+          }));
+        }
+      }
+    });
+    await Promise.all(surface);
   }
 
   function lodOf(object) {
@@ -874,8 +916,14 @@ export async function createViewport(host, hooks) {
 
   function prepareMaterial(material, role) {
     if (!material || material.userData.bancPrepared) return material;
-    material.metalness = 0;
-    material.roughness = 0.85;
+    const hasSurface = Boolean(material.roughnessMap || material.metalnessMap || material.aoMap);
+    material.metalness = hasSurface ? 1 : 0;
+    material.roughness = hasSurface ? 1 : 0.85;
+    material.aoMapIntensity = 1;
+    asDataMap(material.roughnessMap);
+    asDataMap(material.metalnessMap);
+    asDataMap(material.aoMap);
+    asDataMap(material.normalMap);
     if (material.map) {
       material.map.wrapS = THREE.RepeatWrapping;
       material.map.wrapT = THREE.RepeatWrapping;
@@ -1061,8 +1109,15 @@ export async function createViewport(host, hooks) {
     const blend = material.userData && material.userData.blend;
     const blendImage = material.userData && material.userData.blendMap && material.userData.blendMap.image;
     const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage) : "flat"}` : "";
+    const roughImage = material.roughnessMap && material.roughnessMap.image;
+    const normalImage = material.normalMap && material.normalMap.image;
+    const orm1Image = material.userData && material.userData.orm1Map && material.userData.orm1Map.image;
+    const normal1Image = material.userData && material.userData.normal1Map && material.userData.normal1Map.image;
+    const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
+      ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
+      : "";
     return batchKey({
-      image: image + blendKey,
+      image: image + blendKey + surfaceKey,
       alpha,
       side: material.side,
       tint: material.color ? material.color.getHexString() : "fff",
@@ -1466,14 +1521,72 @@ export async function createViewport(host, hooks) {
     diffuseColor *= sampledDiffuseColor;
   `;
 
+  let sharedOrm = null;
+  let sharedFlatNormal = null;
+
+  function sharedOrmMap() {
+    if (sharedOrm) return sharedOrm;
+    const data = new Uint8Array([255, 217, 0, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1);
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    sharedOrm = tex;
+    return tex;
+  }
+
+  function sharedNormalMap() {
+    if (sharedFlatNormal) return sharedFlatNormal;
+    const data = new Uint8Array([128, 128, 255, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1);
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    sharedFlatNormal = tex;
+    return tex;
+  }
+
   const BLEND_MIX = `
 {
   float mask = blendChannel < 0.5 ? vBlendMask.r : blendChannel < 1.5 ? vBlendMask.g : blendChannel < 2.5 ? vBlendMask.b : vBlendMask.a;
-  float weight = smoothstep(0.35, 0.65, mask);
-  vec2 mossUv = vMossUv * blendScale + blendTranslate;
-  vec4 moss = texture2D(blendMap, mossUv);
-  diffuseColor.rgb = mix(diffuseColor.rgb, moss.rgb, weight);
-  if (blendDebug > 0.5) diffuseColor.rgb = vec3(weight);
+  blendWeight = smoothstep(0.35, 0.65, mask);
+  blendMossUv = vMossUv * blendScale + blendTranslate;
+  vec4 moss = texture2D(blendMap, blendMossUv);
+  diffuseColor.rgb = mix(diffuseColor.rgb, moss.rgb, blendWeight);
+  if (blendDebug > 0.5) diffuseColor.rgb = vec3(blendWeight);
+}`;
+
+  const BLEND_SURFACE = `
+{
+  vec4 surface1 = texture2D(orm1Map, blendMossUv);
+  roughnessFactor = mix(roughnessFactor, surface1.g, blendWeight);
+  metalnessFactor = mix(metalnessFactor, surface1.b, blendWeight);
+}`;
+
+  const BLEND_NORMAL = `
+{
+  vec3 overlayN = texture2D(normal1Map, blendMossUv).xyz * 2.0 - 1.0;
+  overlayN.xy *= normalScale;
+  normal = normalize(mix(normal, normalize(tbn * overlayN), blendWeight));
+}`;
+
+  const BLEND_AO = `
+{
+  float overlayAo = texture2D(orm1Map, blendMossUv).r;
+  float mixedAo = mix(ambientOcclusion, overlayAo, blendWeight);
+  float aoScale = mixedAo / max(ambientOcclusion, 0.001);
+  reflectedLight.indirectDiffuse *= aoScale;
+#if defined( USE_ENVMAP ) && defined( STANDARD )
+  reflectedLight.indirectSpecular *= aoScale;
+#endif
 }`;
 
   function installBlendShader(material) {
@@ -1494,6 +1607,25 @@ export async function createViewport(host, hooks) {
       material.emissive.setRGB(0, 0, 0);
       material.emissiveMap = null;
     }
+    if (!material.roughnessMap) {
+      const orm = sharedOrmMap();
+      material.roughnessMap = orm;
+      material.metalnessMap = orm;
+      material.aoMap = orm;
+    } else {
+      if (!material.metalnessMap) material.metalnessMap = material.roughnessMap;
+      if (!material.aoMap) material.aoMap = material.roughnessMap;
+    }
+    material.metalness = 1;
+    material.roughness = 1;
+    material.aoMapIntensity = 1;
+    asDataMap(material.roughnessMap);
+    if (!material.normalMap) material.normalMap = sharedNormalMap();
+    asDataMap(material.normalMap);
+    if (!material.userData.orm1Map) material.userData.orm1Map = material.roughnessMap;
+    if (!material.userData.normal1Map) material.userData.normal1Map = material.normalMap;
+    material.userData.orm1Uniform = { value: material.userData.orm1Map };
+    material.userData.normal1Uniform = { value: material.userData.normal1Map };
     const useUv1 = material.userData.blendUv1Uniform.value > 0.5;
     const vertexPars = useUv1
       ? `attribute vec4 blendMask;\nattribute vec2 blendUv;\nvarying vec4 vBlendMask;\nvarying vec2 vMossUv;`
@@ -1505,6 +1637,8 @@ export async function createViewport(host, hooks) {
       shader.uniforms.blendTranslate = material.userData.blendTranslateUniform;
       shader.uniforms.blendChannel = material.userData.blendChannelUniform;
       shader.uniforms.blendMap = { value: material.userData.blendMap };
+      shader.uniforms.orm1Map = material.userData.orm1Uniform;
+      shader.uniforms.normal1Map = material.userData.normal1Uniform;
       shader.vertexShader = shader.vertexShader
         .replace("#include <uv_pars_vertex>", `#include <uv_pars_vertex>\n${vertexPars}`)
         .replace("#include <uv_vertex>", `#include <uv_vertex>\n${vertexBody}`);
@@ -1512,15 +1646,22 @@ export async function createViewport(host, hooks) {
 varying vec4 vBlendMask;
 varying vec2 vMossUv;
 uniform sampler2D blendMap;
+uniform sampler2D orm1Map;
+uniform sampler2D normal1Map;
 uniform float blendDebug;
 uniform float blendChannel;
 uniform vec2 blendScale;
-uniform vec2 blendTranslate;`;
+uniform vec2 blendTranslate;
+float blendWeight;
+vec2 blendMossUv;`;
       shader.fragmentShader = shader.fragmentShader
         .replace("#include <uv_pars_fragment>", fragPars)
-        .replace("#include <map_fragment>", `#include <map_fragment>\n${BLEND_MIX}`);
+        .replace("#include <map_fragment>", `#include <map_fragment>\n${BLEND_MIX}`)
+        .replace("#include <metalnessmap_fragment>", `#include <metalnessmap_fragment>\n${BLEND_SURFACE}`)
+        .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>\n${BLEND_NORMAL}`)
+        .replace("#include <aomap_fragment>", `#include <aomap_fragment>\n${BLEND_AO}`);
     };
-    material.customProgramCacheKey = () => `blend|${blend.channel}|${blend.uv}|${scale}|${translate}`;
+    material.customProgramCacheKey = () => (useUv1 ? "blend|uv1" : "blend");
     material.needsUpdate = true;
     return material;
   }

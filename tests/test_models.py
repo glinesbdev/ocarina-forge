@@ -327,6 +327,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
 
     assert [path.name for path in _converter_files()] == [
         "models.py",
+        "surface.py",
         "bfres.py",
         "bntx.py",
         "terrain.py",
@@ -337,7 +338,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-34", "70e1d69d1f760a5ee92052136e6119e9fabd5c89715239d582c784b834274db6")
+    pinned = ("models-35", "3a0848afb078d85d4425fc0828e0aea4e2a5f9f10bcead8fa357bf4b2c711c29")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."

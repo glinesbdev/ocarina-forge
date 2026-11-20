@@ -92,6 +92,11 @@ class Part:
     # Second albedo (`_a1`) and how it blends over `_a0`. Empty when this part is one layer.
     overlay_texture: str = ""
     blend: dict | None = None
+    # Layer 0 and layer 1 occlusion-roughness-metal images. Height is in alpha.
+    orm_image: object | None = None
+    orm1_image: object | None = None
+    normal1_texture: str = ""
+    surface_note: str = ""
 
 
 @dataclass

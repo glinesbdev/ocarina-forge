@@ -32,6 +32,7 @@ from ocarina_forge.errors import BancError
 from ocarina_forge.locate import setting, user_cache_root
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
 from ocarina_forge.blend import color_span, overlay_plan
+from ocarina_forge.surface import collect, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
 
@@ -56,7 +57,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-34\0"
+_CACHE_VERSION = b"models-35\0"
 _BNTX_VERSION = b"bntx-3\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -94,6 +95,7 @@ def _converter_files() -> tuple[Path, ...]:
     root = Path(__file__).resolve().parent
     return (
         root / "models.py",
+        root / "surface.py",
         root / "formats" / "bfres.py",
         root / "formats" / "bntx.py",
         root / "formats" / "terrain.py",
@@ -1015,8 +1017,27 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                         seen_images.add(id(extra))
                 return encoded
 
+            def image_png(image):
+                nonlocal texture_count
+                if image is None or not getattr(image, "rgba", None):
+                    return None
+                encoded = png_for.get(id(image))
+                if encoded is None:
+                    # ORM is four data channels. JPEG would crush roughness and metal.
+                    encoded = _encode_cached(image, "png")
+                    png_for[id(image)] = encoded
+                    if id(image) not in seen_images:
+                        texture_count += 1
+                        seen_images.add(id(image))
+                return encoded
+
             normal_png = extra_png(part.normal_texture)
+            normal1_png = extra_png(part.normal1_texture)
+            orm_png = image_png(part.orm_image)
+            orm1_png = image_png(part.orm1_image)
             emissive_png = extra_png(part.emission_texture)
+            if part.surface_note and part.surface_note not in notes:
+                notes.append(part.surface_note)
             overlay_png = None
             blend_extra = None
             overlay_uvs = None
@@ -1061,6 +1082,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     normal_png=normal_png,
                     emissive_png=overlay_png or emissive_png,
                     extras=blend_extra,
+                    orm_png=orm_png,
+                    orm1_png=orm1_png,
+                    normal1_png=normal1_png,
                 )
             )
             if part.lod == 0 and not any(other.name == part.name and other.lod for other in model.parts):
@@ -1087,6 +1111,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             normal_png=normal_png,
                             emissive_png=overlay_png or emissive_png,
                             extras=blend_extra,
+                            orm_png=orm_png,
+                            orm1_png=orm1_png,
+                            normal1_png=normal1_png,
                         )
                     )
             triangles += len(part.indices) // 3
@@ -1165,6 +1192,11 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                     overlay = choice.get("overlay") or {}
                     part.overlay_texture = overlay.get("texture") or ""
                     part.blend = overlay.get("plan")
+                    surface = choice.get("surface") or {}
+                    part.orm_image = surface.get("orm")
+                    part.orm1_image = surface.get("orm1")
+                    part.normal1_texture = surface.get("normal1") or ""
+                    part.surface_note = surface.get("note") or ""
                     part.alpha = choice["alpha"]
                     part.cutoff = choice["cutoff"]
                     if choice.get("wrap"):
@@ -1377,6 +1409,9 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         role = bind_role(slot, tex)
         if role not in {"normal", "emission"} or not tex or role in maps:
             continue
+        # _n1 is the overlay normal. It must not replace the base normal.
+        if surface_role(slot) == "normal1":
+            continue
         extra = _load_named(dump, model, tex, hints, "opaque", material.cutoff, external, raws)
         found = extra.get("found") or ""
         # A missing normal must not borrow an albedo through the hint search.
@@ -1385,7 +1420,51 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             external[tex] = extra["image"]
     result["maps"] = maps
     result["overlay"] = _overlay_choice(dump, model, material, hints, external, raws)
+    result["surface"] = _surface_choice(dump, model, material, hints, external, raws)
     return result
+
+
+def _exact_data(dump, model, name, hints, material, external, raws):
+    """A surface map only when the file is this texture, including a BC4 channel."""
+    extra = _load_named(
+        dump, model, name, hints, "opaque", material.cutoff, external, raws, keep_data=True
+    )
+    found = extra.get("found") or ""
+    image = extra.get("image")
+    if image is not None and (found == "embedded" or _stem(found).lower() == _stem(name).lower()):
+        external[name] = image
+        return image
+    return None
+
+
+def _surface_choice(dump, model, material, hints, external, raws) -> dict:
+    """Pack roughness, metal, and AO for layer 0 and layer 1, and name the overlay normal."""
+    entries = collect(material)
+    if not entries:
+        return {}
+    layers: dict[int, list] = {}
+    normal1 = ""
+    for sampler, texture, role, layer in entries:
+        if role == "normal1":
+            if _exact_data(dump, model, texture, hints, material, external, raws) is not None:
+                normal1 = texture
+            continue
+        image = _exact_data(dump, model, texture, hints, material, external, raws)
+        if image is None:
+            continue
+        layers.setdefault(layer, []).append((sampler, role, image))
+    orm, note0 = pack_layer(layers.get(0) or [])
+    orm1, note1 = pack_layer(layers.get(1) or [])
+    notes = []
+    if note0:
+        notes.append(f"surface {note0}")
+    if note1:
+        notes.append(f"surface layer 1 {note1}")
+    if normal1:
+        notes.append(f"surface overlay normal {normal1}")
+    if orm is None and orm1 is None and not normal1:
+        return {}
+    return {"orm": orm, "orm1": orm1, "normal1": normal1, "note": "; ".join(notes)}
 
 
 def _choose_loose(dump, model, part, hints, terrain, external, raws) -> dict:
@@ -1516,6 +1595,7 @@ def _load_named(
     forced: str = "",
     layer: int | None = None,
     flatten_alpha: bool = False,
+    keep_data: bool = False,
 ) -> dict:
     result = {"image": None, "error": "", "tried": [], "found": "", "alpha": alpha, "cutoff": cutoff, "images": 0}
     if not name and not forced:
@@ -1528,7 +1608,7 @@ def _load_named(
         result["tried"] = ["embedded in the bfres"]
         result["found"] = "embedded"
         result["images"] = 1
-        image, mode, used_cut, note = _accept(embedded, alpha, cutoff)
+        image, mode, used_cut, note = _accept(embedded, alpha, cutoff, keep_data=keep_data)
         result["alpha"] = mode
         result["cutoff"] = used_cut
         result["error"] = note
@@ -1571,7 +1651,7 @@ def _load_named(
             result["error"] = str(exc)
             return result
         result["images"] = 1
-        image, mode, used_cut, note = _accept(picked, "opaque" if flatten_alpha else alpha, cutoff)
+        image, mode, used_cut, note = _accept(picked, "opaque" if flatten_alpha else alpha, cutoff, keep_data=keep_data)
         if flatten_alpha:
             mode = "opaque"
         result["alpha"] = mode
@@ -1592,7 +1672,7 @@ def _load_named(
         if failed is not None and failed.fmt and "format" not in result["error"]:
             result["error"] = f"{result['error']} (0x{failed.fmt:04X})"
         return result
-    image, mode, used_cut, note = _accept(picked, alpha, cutoff)
+    image, mode, used_cut, note = _accept(picked, alpha, cutoff, keep_data=keep_data)
     result["alpha"] = mode
     result["cutoff"] = used_cut
     result["image"] = image
@@ -1635,10 +1715,10 @@ def pick_image(decoded, wanted: str):
     return None, f"no image named {wanted} in this bntx ({names})"
 
 
-def _accept(image, alpha: str, cutoff: float):
+def _accept(image, alpha: str, cutoff: float, keep_data: bool = False):
     if image is None or not image.rgba:
         return None, alpha, cutoff, (image.note if image is not None else "") or "texture did not decode"
-    if (getattr(image, "codec", "") or "").lower().startswith("bc4"):
+    if not keep_data and (getattr(image, "codec", "") or "").lower().startswith("bc4"):
         return None, alpha, cutoff, "BC4 is a single channel and is not a colour"
     fraction = _magenta_fraction(image.rgba)
     if fraction >= 0.85:

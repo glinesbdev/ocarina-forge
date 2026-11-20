@@ -30,6 +30,10 @@ class Primitive:
     extras: dict | None = None
     normal_png: bytes | None = None
     emissive_png: bytes | None = None
+    # One ORM image: R occlusion, G roughness, B metal, A height (not sampled).
+    orm_png: bytes | None = None
+    orm1_png: bytes | None = None
+    normal1_png: bytes | None = None
 
 
 def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
@@ -309,6 +313,9 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         image_index = image_index_for(prim.png)
         normal_index = image_index_for(prim.normal_png)
         emissive_index = image_index_for(prim.emissive_png)
+        orm_index = image_index_for(prim.orm_png)
+        orm1_index = image_index_for(prim.orm1_png)
+        normal1_index = image_index_for(prim.normal1_png)
         color = [float(channel) for channel in prim.base_color[:4]]
         if len(color) < 4:
             color = (color + [1.0, 1.0, 1.0, 1.0])[:4]
@@ -316,6 +323,14 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         cutoff = round(min(max(float(prim.cutoff), 0.0), 1.0), 4)
         kind = prim.kind or ""
         extras = {key: value for key, value in (prim.extras or {}).items() if isinstance(key, str)}
+        surface = {}
+        if orm1_index is not None:
+            surface["orm1"] = orm1_index
+        if normal1_index is not None:
+            surface["normal1"] = normal1_index
+        if surface:
+            extras = dict(extras)
+            extras["surface"] = surface
         extra_key = tuple(sorted((key, repr(value)) for key, value in extras.items()))
         key = (
             image_index,
@@ -328,16 +343,23 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             extra_key,
             normal_index,
             emissive_index,
+            orm_index,
+            orm1_index,
+            normal1_index,
         )
         if key not in material_of:
             pbr = {
                 "baseColorFactor": color,
-                "metallicFactor": 0,
-                "roughnessFactor": 0.85 if image_index is not None else 0.9,
+                "metallicFactor": 1 if orm_index is not None else 0,
+                "roughnessFactor": 1 if orm_index is not None else (0.85 if image_index is not None else 0.9),
             }
             if image_index is not None:
                 pbr["baseColorTexture"] = {"index": image_index}
+            if orm_index is not None:
+                pbr["metallicRoughnessTexture"] = {"index": orm_index}
             material = {"doubleSided": bool(prim.double_sided), "pbrMetallicRoughness": pbr}
+            if orm_index is not None:
+                material["occlusionTexture"] = {"index": orm_index}
             if normal_index is not None:
                 material["normalTexture"] = {"index": normal_index}
             if emissive_index is not None:
