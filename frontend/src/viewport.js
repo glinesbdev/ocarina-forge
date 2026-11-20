@@ -4,7 +4,12 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
-import { formatFor, readKtx2, splitPacked, textureSupport } from "./gpu-texture.js";
+import {
+  createGpuTextureLoader,
+  gpuTexturesEnabled,
+  repairCompressedTexture,
+  textureSupport,
+} from "./gpu-texture.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
@@ -144,46 +149,21 @@ export async function createViewport(host, hooks) {
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
   ktx2Loader.detectSupport(renderer);
   const gpuCaps = textureSupport(renderer.getContext());
-  loader.setKTX2Loader({
-    parse(buffer, onLoad, onError) {
-      try {
-        const packed = splitPacked(buffer);
-        const info = readKtx2(packed.ktx);
-        const format = info && formatFor(info.vkFormat, gpuCaps);
-        if (format) {
-          const texture = new THREE.CompressedTexture(
-            [{ data: info.data, width: info.width, height: info.height }],
-            info.width,
-            info.height,
-            format,
-          );
-          texture.needsUpdate = true;
-          texture.minFilter = THREE.LinearFilter;
-          texture.magFilter = THREE.LinearFilter;
-          texture.generateMipmaps = false;
-          texture.colorSpace = THREE.SRGBColorSpace;
-          texture.flipY = false;
-          onLoad(texture);
-          return;
-        }
-        if (packed.fallback && packed.fallback.length && (!info || info.vkFormat !== 0) && typeof createImageBitmap === "function") {
-          createImageBitmap(new Blob([packed.fallback]), { imageOrientation: "none", premultiplyAlpha: "none" }).then((image) => {
-            const texture = new THREE.Texture(image);
-            texture.needsUpdate = true;
-            texture.colorSpace = THREE.SRGBColorSpace;
-            texture.flipY = false;
-            onLoad(texture);
-          }, onError);
-          return;
-        }
-      } catch (error) {
-        if (onError) onError(error);
-        return;
-      }
-      // vkFormat 0 is Basis. three's transcoder is the retry for that file.
-      ktx2Loader.parse(buffer, onLoad, onError);
-    },
-  });
+  const gl = renderer.getContext();
+  let loadingGyaml = "";
+  function reportGpuFallback(reason) {
+    const name = loadingGyaml || "texture";
+    if (hooks.onModelError) hooks.onModelError(name, `GPU texture fell back to the bitmap (${reason}).`);
+  }
+  loader.setKTX2Loader(createGpuTextureLoader({
+    THREE,
+    gl,
+    caps: gpuCaps,
+    enabled: () => gpuTexturesEnabled(window.location.search, window.localStorage.getItem("ocarinaforge.gpuTextures")),
+    onFallback: reportGpuFallback,
+    // vkFormat 0 is Basis. three's transcoder is the retry for that file.
+    basisParse: (buffer, onLoad, onError) => ktx2Loader.parse(buffer, onLoad, onError),
+  }));
   const templateCache = new Map();
   const modelRequests = new Map();
   const GLB_SLOTS = 8;
@@ -922,8 +902,17 @@ export async function createViewport(host, hooks) {
         if (!response.ok) throw new Error(`The model download failed (${response.status}).`);
         const buffer = await response.arrayBuffer();
         const downloaded = performance.now();
+        loadingGyaml = (meta && (meta.gyaml || meta.source)) || "";
         const gltf = await new Promise((resolve, reject) => {
           loader.parse(buffer, "", resolve, reject);
+        });
+        loadingGyaml = "";
+        gltf.scene.traverse((child) => {
+          const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+          for (const material of materials) {
+            repairCompressedTexture(material.map);
+            repairCompressedTexture(material.emissiveMap);
+          }
         });
         await bindSurfaceMaps(gltf);
         const uploaded = performance.now();
@@ -1011,9 +1000,13 @@ export async function createViewport(host, hooks) {
     if (material.map) {
       material.map.wrapS = THREE.RepeatWrapping;
       material.map.wrapT = THREE.RepeatWrapping;
-      material.map.generateMipmaps = true;
       const maxAniso = renderer.capabilities && renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 4;
       material.map.anisotropy = Math.min(4, maxAniso);
+      // A compressed albedo already has its chain. generateMipmaps asks WebGL
+      // to build mips, which compressed formats reject, and GLTFLoader has
+      // already overwritten minFilter from the sampler.
+      if (material.map.isCompressedTexture) repairCompressedTexture(material.map);
+      else material.map.generateMipmaps = true;
       material.map.needsUpdate = true;
     }
     const tag = (material.userData && material.userData.banc) || material.name || "";
@@ -1989,7 +1982,7 @@ uniform float terrainLayerMissing;`
       return;
     }
     try {
-      const template = await ensureTemplate(meta.url);
+      const template = await ensureTemplate(meta.url, meta);
       if (!terrainCurrent(token)) return;
       await new Promise((resolve) => {
         if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: 800 });

@@ -445,7 +445,10 @@ def to_glb(primitives: list[Primitive]) -> bytes:
     }
     if images:
         document["images"] = images
-        document["samplers"] = [{"wrapS": 10497, "wrapT": 10497}]
+        # 9987 is LinearMipmapLinear. The compressed images carry that chain.
+        # A sampler that omits minFilter makes three assign the same filter
+        # after the upload, which samples black when the chain is missing.
+        document["samplers"] = [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]
         document["textures"] = textures
     extensions = []
     if used_unlit:
@@ -519,7 +522,7 @@ def _texture_for_image(document: dict, image_index: int) -> int:
             return slot
     samplers = document.setdefault("samplers", [])
     if not samplers:
-        samplers.append({"wrapS": 10497, "wrapT": 10497})
+        samplers.append({"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497})
     textures.append({"sampler": 0, "source": image_index})
     return len(textures) - 1
 

@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-43\0"
+_CACHE_VERSION = b"models-44\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -692,7 +692,7 @@ def _encode_cached(image, alpha: str, gpu: bool = False) -> bytes:
 
     token = hashlib.sha256(
         _BNTX_VERSION
-        + struct.pack("<IIB", image.width, image.height, 1 if gpu else 0)
+        + struct.pack("<IIB", image.width, image.height, 2 if gpu else 0)
         + (alpha or "opaque").encode()
         + image.rgba
     ).hexdigest()

@@ -192,10 +192,17 @@ async function openSettings() {
     const locked = workers.source === "env";
     range.disabled = locked;
     number.disabled = locked;
-    $("worker-save").disabled = locked;
     $("worker-note").textContent = locked
       ? `OCARINA_FORGE_WORKERS is ${workers.count}, so this slider is saved but not used until that variable is unset. This machine has ${workers.max} cores.`
       : `Using ${workers.count} of ${workers.max}. The default leaves one core free. The pool is rebuilt between converts.`;
+    const textures = $("gpu-textures");
+    const forced = new URLSearchParams(window.location.search).has("textures") || new URLSearchParams(window.location.search).has("gpuTextures");
+    textures.checked = gpuTexturesOn();
+    textures.disabled = forced;
+    $("worker-save").disabled = locked && forced;
+    $("gpu-texture-note").textContent = forced
+      ? "This page's URL chooses the texture path. Take ?textures= off the address to use the checkbox."
+      : "Albedo uploads as BC blocks. Turn this off, or open ?textures=bitmap, to use the JPEG and PNG instead. Saving reloads the view.";
     $("settings-dialog").showModal();
   } catch (error) {
     toast(error.message);
@@ -213,11 +220,26 @@ function syncWorkerCount(value) {
 
 $("worker-range").addEventListener("input", () => syncWorkerCount($("worker-range").value));
 $("worker-count").addEventListener("input", () => syncWorkerCount($("worker-count").value));
+function gpuTexturesOn() {
+  const params = new URLSearchParams(window.location.search);
+  const flag = params.get("textures") || params.get("gpuTextures");
+  if (flag === "bitmap" || flag === "0") return false;
+  if (flag === "gpu" || flag === "1") return true;
+  return localStorage.getItem("ocarinaforge.gpuTextures") !== "0";
+}
+
 $("settings-form").addEventListener("submit", async (event) => {
   if (event.submitter && event.submitter.value !== "save") return;
   event.preventDefault();
   try {
+    const previous = localStorage.getItem("ocarinaforge.gpuTextures") === "0" ? "0" : "1";
+    const next = $("gpu-textures").checked ? "1" : "0";
+    localStorage.setItem("ocarinaforge.gpuTextures", next);
     await api.saveConfig({ workers: Number($("worker-count").value) });
+    if (previous !== next && !$("gpu-textures").disabled) {
+      window.location.reload();
+      return;
+    }
     $("settings-dialog").close();
   } catch (error) {
     toast(error.message);

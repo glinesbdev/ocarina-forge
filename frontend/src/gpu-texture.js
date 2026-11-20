@@ -28,6 +28,11 @@ export function splitPacked(buffer) {
   return { ktx: bytes, fallback: new Uint8Array() };
 }
 
+export function mipCount(width, height) {
+  const edge = Math.max(width || 1, height || 1);
+  return Math.floor(Math.log2(edge)) + 1;
+}
+
 export function readKtx2(bytes) {
   if (!bytes || bytes.length < 104) return null;
   for (let i = 0; i < KTX_MAGIC.length; i += 1) {
@@ -37,11 +42,175 @@ export function readKtx2(bytes) {
   const vkFormat = view.getUint32(12, true);
   const width = view.getUint32(20, true);
   const height = view.getUint32(24, true);
-  // Header is 80 bytes. Mip 0's byteOffset and byteLength follow it.
-  const offset = Number(view.getBigUint64(80, true));
-  const length = Number(view.getBigUint64(88, true));
-  if (offset < 0 || length <= 0 || offset + length > bytes.length) return null;
-  return { vkFormat, width, height, data: bytes.subarray(offset, offset + length) };
+  const levelCount = view.getUint32(40, true);
+  if (!width || !height || levelCount < 1 || levelCount > 16) return null;
+  if (bytes.length < 80 + levelCount * 24) return null;
+  const levels = [];
+  let levelWidth = width;
+  let levelHeight = height;
+  for (let level = 0; level < levelCount; level += 1) {
+    const at = 80 + level * 24;
+    const offset = Number(view.getBigUint64(at, true));
+    const length = Number(view.getBigUint64(at + 8, true));
+    if (length <= 0 || offset < 0 || offset + length > bytes.length) return null;
+    levels.push({
+      width: levelWidth,
+      height: levelHeight,
+      data: bytes.subarray(offset, offset + length),
+    });
+    levelWidth = Math.max(1, levelWidth >> 1);
+    levelHeight = Math.max(1, levelHeight >> 1);
+  }
+  return { vkFormat, width, height, levels };
+}
+
+/** 1008 is LinearMipmapLinear. 1006 is Linear. A short chain must not ask for mips. */
+export function minFilterFor(uploaded, width, height) {
+  return uploaded >= mipCount(width, height) ? 1008 : 1006;
+}
+
+export function repairCompressedTexture(texture) {
+  if (!texture || !texture.isCompressedTexture) return;
+  const uploaded = (texture.mipmaps && texture.mipmaps.length) || 1;
+  const width = (texture.image && texture.image.width) || 0;
+  const height = (texture.image && texture.image.height) || 0;
+  texture.generateMipmaps = false;
+  texture.minFilter = minFilterFor(uploaded, width, height);
+  texture.magFilter = 1006;
+  texture.needsUpdate = true;
+}
+
+export function gpuTexturesEnabled(search, stored) {
+  const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+  const flag = params.get("textures") || params.get("gpuTextures");
+  if (flag === "bitmap" || flag === "0") return false;
+  if (flag === "gpu" || flag === "1") return true;
+  if (stored === "0" || stored === false) return false;
+  return true;
+}
+
+export function chooseTexture(buffer, options) {
+  const enabled = !options || options.enabled !== false;
+  const caps = (options && options.caps) || {};
+  const gl = options && options.gl;
+  const packed = splitPacked(buffer);
+  const info = readKtx2(packed.ktx);
+  const format = enabled && info ? formatFor(info.vkFormat, caps) : 0;
+  if (format && gl) {
+    if (canUploadCompressed(gl, format, info.levels)) {
+      return { kind: "compressed", format, width: info.width, height: info.height, levels: info.levels, reason: "" };
+    }
+    if (info.levels.length > 1 && canUploadCompressed(gl, format, [info.levels[0]])) {
+      return {
+        kind: "compressed",
+        format,
+        width: info.width,
+        height: info.height,
+        levels: [info.levels[0]],
+        reason: "only the base mip uploaded",
+      };
+    }
+    const misaligned = info.width % 4 !== 0 || info.height % 4 !== 0;
+    return {
+      kind: "bitmap",
+      bytes: packed.fallback,
+      reason: misaligned ? "size is not a multiple of 4" : "the GPU rejected the blocks",
+    };
+  }
+  if (!info || info.vkFormat !== 0) {
+    return { kind: "bitmap", bytes: packed.fallback, reason: "" };
+  }
+  return { kind: "basis", bytes: packed.ktx, reason: "" };
+}
+
+/**
+ * GLTFLoader calls loader.load(blobUrl), then the KTX2 loader fetches and parse().
+ * A stand-in that only implements parse() throws, the loader swallows it, and
+ * the material is left with no map. Problems stays empty.
+ */
+export function createGpuTextureLoader(options) {
+  const THREE = options.THREE;
+  const gl = options.gl;
+  const caps = options.caps;
+  const basisParse = options.basisParse;
+  const onFallback = options.onFallback;
+  const enabled = options.enabled || (() => true);
+
+  function parse(buffer, onLoad, onError) {
+    try {
+      const choice = chooseTexture(buffer, { enabled: enabled(), caps, gl });
+      if (choice.kind === "compressed") {
+        if (choice.reason && onFallback) onFallback(choice.reason);
+        const texture = new THREE.CompressedTexture(
+          choice.levels.map((level) => ({ data: level.data, width: level.width, height: level.height })),
+          choice.width,
+          choice.height,
+          choice.format,
+        );
+        texture.needsUpdate = true;
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.flipY = false;
+        texture.generateMipmaps = false;
+        onLoad(texture);
+        return;
+      }
+      if (choice.kind === "bitmap") {
+        if (choice.reason && onFallback) onFallback(choice.reason);
+        if (choice.bytes && choice.bytes.length && typeof createImageBitmap === "function") {
+          createImageBitmap(new Blob([choice.bytes]), { imageOrientation: "none", premultiplyAlpha: "none" }).then((image) => {
+            const texture = new THREE.Texture(image);
+            texture.needsUpdate = true;
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.flipY = false;
+            onLoad(texture);
+          }, onError);
+          return;
+        }
+      }
+    } catch (error) {
+      if (onError) onError(error);
+      return;
+    }
+    if (basisParse) {
+      basisParse(buffer, onLoad, onError);
+      return;
+    }
+    if (onError) onError(new Error("no texture"));
+  }
+
+  function load(url, onLoad, _onProgress, onError) {
+    fetch(url).then((response) => {
+      if (!response.ok) throw new Error(`texture download failed (${response.status})`);
+      return response.arrayBuffer();
+    }).then((buffer) => {
+      parse(buffer, onLoad, onError);
+    }).catch((error) => {
+      if (onError) onError(error);
+    });
+  }
+
+  return { load, parse };
+}
+
+export function canUploadCompressed(gl, format, levels) {
+  if (!gl || !format || !levels || !levels.length) return false;
+  if (levels[0].width % 4 !== 0 || levels[0].height % 4 !== 0) return false;
+  const tex = gl.createTexture();
+  if (!tex) return false;
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.getError();
+  let ok = true;
+  for (let level = 0; level < levels.length; level += 1) {
+    const item = levels[level];
+    gl.compressedTexImage2D(gl.TEXTURE_2D, level, format, item.width, item.height, 0, item.data);
+    if (gl.getError()) {
+      ok = false;
+      break;
+    }
+  }
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  gl.deleteTexture(tex);
+  return ok;
 }
 
 const ASTC = {

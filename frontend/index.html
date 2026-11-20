@@ -153,6 +153,8 @@
           <input id="worker-count" type="number" min="1" max="1" value="1" />
         </label>
         <p id="worker-note" class="muted"></p>
+        <label class="worker-setting"><input id="gpu-textures" type="checkbox" checked /> GPU textures</label>
+        <p id="gpu-texture-note" class="muted">Albedo uploads as BC blocks. Turn this off, or open <code>?textures=bitmap</code>, to use the JPEG and PNG instead.</p>
         <div class="dialog-actions">
           <button value="cancel">Cancel</button>
           <button id="worker-save" class="primary" value="save">Save</button>

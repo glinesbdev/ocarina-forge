@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatFor, readKtx2, splitPacked, VK_FORMAT } from "./gpu-texture.js";
+import { formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, VK_FORMAT } from "./gpu-texture.js";
 
 test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   const ktx = new Uint8Array(104);
@@ -10,6 +10,7 @@ test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   view.setUint32(12, VK_FORMAT.bc7, true);
   view.setUint32(20, 4, true);
   view.setUint32(24, 4, true);
+  view.setUint32(40, 1, true);
   view.setBigUint64(80, 104n, true);
   view.setBigUint64(88, 16n, true);
   const blocks = new Uint8Array(16).fill(7);
@@ -28,9 +29,16 @@ test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   const info = readKtx2(split.ktx);
   assert.equal(info.vkFormat, VK_FORMAT.bc7);
   assert.equal(info.width, 4);
-  assert.equal(info.data.length, 16);
+  assert.equal(info.levels.length, 1);
+  assert.equal(info.levels[0].data.length, 16);
   assert.equal(formatFor(info.vkFormat, { bptc: true }), 36492);
   assert.equal(formatFor(info.vkFormat, {}), 0);
   assert.equal(formatFor(0, { bptc: true }), 0);
   assert.equal(formatFor(167, { astc: true }), 37813);
+  assert.equal(minFilterFor(1, 256, 256), 1006);
+  assert.equal(minFilterFor(9, 256, 256), 1008);
+  assert.equal(gpuTexturesEnabled("", null), true);
+  assert.equal(gpuTexturesEnabled("?textures=bitmap", "1"), false);
+  assert.equal(gpuTexturesEnabled("", "0"), false);
+  assert.equal(gpuTexturesEnabled("?gpuTextures=1", "0"), true);
 });

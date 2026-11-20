@@ -31,7 +31,36 @@ def test_mode_6_keeps_a_flat_colour_and_is_not_basis():
     ktx, fallback = split_texture(packed)
     assert ktx[:4] == b"\xabKTX"
     assert fallback[:2] == b"\xff\xd8"
-    assert int.from_bytes(ktx[80:88], "little") == 104
+    assert int.from_bytes(ktx[40:44], "little") >= 2
+    assert int.from_bytes(ktx[80:88], "little") == 80 + 24 * int.from_bytes(ktx[40:44], "little")
+
+
+def test_a_size_the_gpu_would_reject_stays_a_bitmap():
+    image = _Image(bytes([20, 30, 40, 255]) * (6 * 10))
+    image.width = 6
+    image.height = 10
+    assert gpu_image(image, "opaque") is None
+
+
+def test_the_chain_has_a_mip_for_every_level():
+    import texture2ddecoder
+
+    rgba = bytes([90, 40, 20, 255]) * (8 * 8)
+    image = _Image(rgba, codec="")
+    image.width = 8
+    image.height = 8
+    packed = gpu_image(image, "opaque")
+    ktx, _fallback = split_texture(packed)
+    count = int.from_bytes(ktx[40:44], "little")
+    assert count == 4
+    width = 8
+    for level in range(count):
+        at = 80 + level * 24
+        offset = int.from_bytes(ktx[at : at + 8], "little")
+        length = int.from_bytes(ktx[at + 8 : at + 16], "little")
+        decoded = _bgra_to_rgba(bytes(texture2ddecoder.decode_bc7(ktx[offset : offset + length], width, width)), width, width)
+        assert abs(decoded[0] - 90) <= 2
+        width = max(1, width // 2)
 
 
 def test_a_model_albedo_is_ktx2_and_survives_meshopt(tmp_path, monkeypatch):

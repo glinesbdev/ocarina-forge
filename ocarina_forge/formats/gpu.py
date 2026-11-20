@@ -53,8 +53,27 @@ def split_texture(blob: bytes) -> tuple[bytes, bytes] | None:
     return blob[8 : 8 + size], blob[8 + size :]
 
 
-def ktx2(vk_format: int, width: int, height: int, blocks: bytes) -> bytes:
-    """One mip, no supercompression. The DFD says sRGB BT.709 so three can label it."""
+def ktx2(vk_format: int, width: int, height: int, levels: bytes | list[bytes]) -> bytes:
+    """Every mip, no supercompression. Level 0 is the full image.
+
+    three's glTF loader assigns LinearMipmapLinear when the sampler omits
+    minFilter. A compressed texture cannot build those mips on the GPU, so a
+    one-level file samples black. The chain is stored here instead.
+    """
+    if isinstance(levels, (bytes, bytearray)):
+        levels = [bytes(levels)]
+    if not levels:
+        raise ValueError("KTX2 needs at least one mip")
+    dfd = _dfd()
+    # Header ends at 80. Each level index is 24 bytes, then the level bytes, then the DFD.
+    data_at = 80 + 24 * len(levels)
+    packed = bytearray()
+    index = bytearray()
+    cursor = data_at
+    for level in levels:
+        index += struct.pack("<QQQ", cursor, len(level), len(level))
+        packed += level
+        cursor += len(level)
     header = struct.pack(
         "<12sIIIIIIIII",
         KTX2_MAGIC,
@@ -65,20 +84,15 @@ def ktx2(vk_format: int, width: int, height: int, blocks: bytes) -> bytes:
         0,
         0,
         1,
-        1,
+        len(levels),
         0,
     )
-    dfd = _dfd()
-    # 12 byte magic + 9 uint32 = 48. Then dfd/kvd as uint32 and sgd as uint64 = 32.
-    # The header ends at 80. One level index is 24 bytes, so mip 0 starts at 104.
-    data_at = 104
-    dfd_at = data_at + len(blocks)
     blob = bytearray(header)
-    blob += struct.pack("<IIII", dfd_at, len(dfd), 0, 0)
+    blob += struct.pack("<IIII", cursor, len(dfd), 0, 0)
     blob += struct.pack("<QQ", 0, 0)
-    blob += struct.pack("<QQQ", data_at, len(blocks), len(blocks))
-    blob += blocks
-    if len(blob) != dfd_at:
+    blob += index
+    blob += packed
+    if len(blob) != cursor:
         raise RuntimeError("KTX2 layout does not match the header")
     blob += dfd
     return bytes(blob)
@@ -110,50 +124,91 @@ def _dfd() -> bytes:
 
 
 def gpu_image(image, alpha: str) -> bytes | None:
-    """OCFG bytes, or None when there is nothing better than a plain JPEG or PNG."""
-    native = _native_ktx(image)
-    if native is None and getattr(image, "rgba", None):
-        native = _bc7_ktx(image)
-    if native is None:
+    """OCFG bytes, or None when a compressed upload would be the wrong size.
+
+    WebGL rejects a BC level 0 whose width or height is not a multiple of 4.
+    Those images stay JPEG or PNG. Everything else gets a full mip chain.
+    """
+    chain = _mip_chain(image)
+    if chain is None:
         return None
+    vk, width, height, levels = chain
     fallback, _mime = encode_albedo(image.width, image.height, image.rgba, alpha if alpha != "png" else "mask")
-    return pack_texture(native, fallback)
+    return pack_texture(ktx2(vk, width, height, levels), fallback)
 
 
-def _native_ktx(image) -> bytes | None:
+def _mip_chain(image) -> tuple[int, int, int, list[bytes]] | None:
+    rgba = getattr(image, "rgba", None) or b""
+    if not rgba:
+        return None
+    width, height, pixels = _limit(image.width, image.height, rgba)
+    if width <= 0 or height <= 0 or width % 4 or height % 4:
+        return None
+    native_vk, native_blocks = _native_base(image, width, height)
+    vk = native_vk or VK_BC7
+    encoder = encode_bc1 if vk == VK_BC1 else encode_bc7
+    levels: list[bytes] = []
+    w, h, mip = width, height, pixels
+    first = True
+    while True:
+        if first and native_blocks is not None:
+            levels.append(native_blocks)
+        else:
+            block = encoder(w, h, mip)
+            if not block:
+                return None
+            levels.append(block)
+        if w == 1 and h == 1:
+            break
+        w, h, mip = _downsample(w, h, mip)
+        first = False
+    return vk, width, height, levels
+
+
+def _native_base(image, width: int, height: int) -> tuple[int | None, bytes | None]:
+    """Mip 0 from the dump when it is already BC1 or BC7 at this size.
+
+    Lower mips are re-encoded in that same format. BC3 and ASTC become BC7 for
+    the whole chain, because a desktop GPU usually has BPTC and the chain has
+    to be one vkFormat.
+    """
+    if getattr(image, "width", 0) != width or getattr(image, "height", 0) != height:
+        return None, None
     blocks = getattr(image, "blocks", b"") or b""
     codec = (getattr(image, "codec", "") or "").lower()
-    width = getattr(image, "width", 0) or 0
-    height = getattr(image, "height", 0) or 0
-    if not blocks or width <= 0 or height <= 0:
-        return None
     if codec == "bc1":
-        vk = VK_BC1
-        size = 8
-    elif codec == "bc3":
-        vk = VK_BC3
-        size = 16
+        vk, size = VK_BC1, 8
     elif codec == "bc7":
-        vk = VK_BC7
-        size = 16
-    elif codec.startswith("astc"):
-        # Kept for a GPU that has ASTC. The browser falls back to the BC7
-        # re-encode below when this file is not what we ship. See gpu_image.
-        return None
+        vk, size = VK_BC7, 16
     else:
-        return None
+        return None, None
     expect = _block_count(width, height) * size
     if len(blocks) < expect:
-        return None
-    return ktx2(vk, width, height, blocks[:expect])
+        return None, None
+    return vk, blocks[:expect]
 
 
-def _bc7_ktx(image) -> bytes | None:
-    width, height, rgba = _limit(image.width, image.height, image.rgba)
-    blocks = encode_bc7(width, height, rgba)
-    if not blocks:
-        return None
-    return ktx2(VK_BC7, width, height, blocks)
+def _downsample(width: int, height: int, rgba: bytes) -> tuple[int, int, bytes]:
+    """Box-filter one step. A 1-pixel side stays 1."""
+    nw = max(1, width // 2)
+    nh = max(1, height // 2)
+    out = bytearray(nw * nh * 4)
+    for y in range(nh):
+        for x in range(nw):
+            acc = [0, 0, 0, 0]
+            count = 0
+            for oy in (0, 1):
+                sy = min(height - 1, y * 2 + oy)
+                for ox in (0, 1):
+                    sx = min(width - 1, x * 2 + ox)
+                    pixel = (sy * width + sx) * 4
+                    for channel in range(4):
+                        acc[channel] += rgba[pixel + channel]
+                    count += 1
+            dest = (y * nw + x) * 4
+            for channel in range(4):
+                out[dest + channel] = acc[channel] // max(1, count)
+    return nw, nh, bytes(out)
 
 
 def _limit(width: int, height: int, rgba: bytes):
@@ -166,6 +221,74 @@ def _block_count(width: int, height: int) -> int:
     return max(1, (width + 3) // 4) * max(1, (height + 3) // 4)
 
 
+def encode_bc1(width: int, height: int, rgba: bytes) -> bytes:
+    """BC1, four opaque colours. Used for mip 0 passthrough's lower levels."""
+    if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return b""
+    out = bytearray()
+    for y in range(0, height, 4):
+        for x in range(0, width, 4):
+            pixels = _gather(rgba, width, height, x, y)
+            out += _bc1_block(pixels)
+    return bytes(out)
+
+
+def _gather(rgba: bytes, width: int, height: int, x: int, y: int) -> list[bytes]:
+    pixels = []
+    for row in range(4):
+        sy = min(height - 1, y + row)
+        for col in range(4):
+            sx = min(width - 1, x + col)
+            at = (sy * width + sx) * 4
+            pixels.append(rgba[at : at + 4])
+    return pixels
+
+
+def _to565(pixel: bytes) -> int:
+    return ((pixel[0] >> 3) << 11) | ((pixel[1] >> 2) << 5) | (pixel[2] >> 3)
+
+
+def _from565(value: int) -> tuple[int, int, int]:
+    red = (value >> 11) & 31
+    green = (value >> 5) & 63
+    blue = value & 31
+    return (red << 3) | (red >> 2), (green << 2) | (green >> 4), (blue << 3) | (blue >> 2)
+
+
+def _bc1_block(pixels: list[bytes]) -> bytes:
+    def luma(pixel: bytes) -> int:
+        return pixel[0] * 2 + pixel[1] * 4 + pixel[2]
+
+    dark = min(pixels, key=luma)
+    bright = max(pixels, key=luma)
+    color0 = _to565(bright)
+    color1 = _to565(dark)
+    if color0 <= color1:
+        # Equal endpoints select the 3-colour mode, which punches a transparent pixel.
+        if color0 < 0xFFFF:
+            color0 += 1
+        else:
+            color1 -= 1
+    ends = (_from565(color0), _from565(color1))
+    palette = (
+        ends[0],
+        ends[1],
+        tuple((2 * ends[0][channel] + ends[1][channel]) // 3 for channel in range(3)),
+        tuple((ends[0][channel] + 2 * ends[1][channel]) // 3 for channel in range(3)),
+    )
+    indices = 0
+    for pixel_index, pixel in enumerate(pixels):
+        best = 0
+        best_error = 1 << 30
+        for choice, colour in enumerate(palette):
+            error = sum((pixel[channel] - colour[channel]) ** 2 for channel in range(3))
+            if error < best_error:
+                best_error = error
+                best = choice
+        indices |= best << (pixel_index * 2)
+    return struct.pack("<HHI", color0, color1, indices)
+
+
 def encode_bc7(width: int, height: int, rgba: bytes) -> bytes:
     """Mode 6, one subset, 4-bit indices. Good enough that a brick stays a brick."""
     if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
@@ -173,14 +296,7 @@ def encode_bc7(width: int, height: int, rgba: bytes) -> bytes:
     out = bytearray()
     for y in range(0, height, 4):
         for x in range(0, width, 4):
-            pixels = []
-            for row in range(4):
-                sy = min(height - 1, y + row)
-                for col in range(4):
-                    sx = min(width - 1, x + col)
-                    at = (sy * width + sx) * 4
-                    pixels.append(rgba[at : at + 4])
-            out += _mode6(pixels)
+            out += _mode6(_gather(rgba, width, height, x, y))
     return bytes(out)
 
 
