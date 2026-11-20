@@ -97,6 +97,8 @@ class Part:
     orm1_image: object | None = None
     normal1_texture: str = ""
     surface_note: str = ""
+    emission_image: object | None = None
+    emission_note: str = ""
 
 
 @dataclass
@@ -2185,7 +2187,7 @@ def bind_role(sampler: str, texture: str = "") -> str:
         return "albedo"
     if token in {"n", "n0", "n1", "n2", "n3", "nrm", "nrm0", "normal", "normal0"} or token.startswith(("normal", "nrm")):
         return "normal"
-    if "emiss" in token or token.startswith(("emm", "emit")) or token in {"e", "e0", "e1", "e2", "e3"}:
+    if "emiss" in token or token.startswith(("emm", "emit", "em", "ec")) or token in {"e", "e0", "e1", "e2", "e3"}:
         return "emission"
     if "mask" in token or token.startswith("msk"):
         return "mask"

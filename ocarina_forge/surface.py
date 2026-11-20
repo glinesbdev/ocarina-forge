@@ -124,6 +124,65 @@ def pack_layer(entries: list[tuple[str, str, Texture]]) -> tuple[Texture | None,
     return image, "; ".join(notes)
 
 
+def emissive_image(entries: list[tuple[str, Texture]]) -> tuple[Texture | None, str]:
+    """One glow image from ``_em`` and ``_ec``.
+
+    A single map is used as it is. When one map is gray and the other is
+    colored, the gray one is a mask and the image is their product. When both
+    carry color, the ``_em`` map is the glow and the note says the other was
+    not multiplied in.
+    """
+    usable = [(name, image) for name, image in entries if image is not None and getattr(image, "rgba", None)]
+    if not usable:
+        return None, ""
+    if len(usable) == 1:
+        name, image = usable[0]
+        return image, f"emissive {name}"
+    colored = [(name, image) for name, image in usable if not _is_gray(image)]
+    gray = [(name, image) for name, image in usable if _is_gray(image)]
+    if colored and gray:
+        image = _multiply([item[1] for item in colored[:1] + gray])
+        names = " * ".join(name for name, _image in colored[:1] + gray)
+        return image, f"emissive {names}"
+    preferred = next((item for item in usable if _token(item[0]).startswith("em")), usable[0])
+    skipped = [name for name, _image in usable if name != preferred[0]]
+    note = f"emissive {preferred[0]}"
+    if skipped:
+        note += "; " + ", ".join(skipped) + " also carries color and was not multiplied"
+    return preferred[1], note
+
+
+def _is_gray(image: Texture) -> bool:
+    stats = _stats(image.rgba, image.width, image.height)
+    if not stats:
+        return True
+    means = [stats[name]["mean"] for name in "rgb"]
+    return max(means) - min(means) < 0.04
+
+
+def _multiply(images: list[Texture]) -> Texture:
+    width = max(1, min(1024, max(image.width for image in images)))
+    height = max(1, min(1024, max(image.height for image in images)))
+    rgba = bytearray(width * height * 4)
+    for y in range(height):
+        for x in range(width):
+            red = green = blue = 255
+            for image in images:
+                sy = min(image.height - 1, y * image.height // height) if image.height else 0
+                sx = min(image.width - 1, x * image.width // width) if image.width else 0
+                at = (sy * image.width + sx) * 4
+                if at + 2 < len(image.rgba):
+                    red = red * image.rgba[at] // 255
+                    green = green * image.rgba[at + 1] // 255
+                    blue = blue * image.rgba[at + 2] // 255
+            out = (y * width + x) * 4
+            rgba[out] = red
+            rgba[out + 1] = green
+            rgba[out + 2] = blue
+            rgba[out + 3] = 255
+    return Texture(name="emissive", width=width, height=height, rgba=bytes(rgba), fmt=0, codec="emissive")
+
+
 def _prior(kind: str) -> dict[str, str]:
     if kind == "rmh":
         return {"roughness": "r", "metal": "g", "height": "b"}

@@ -30,6 +30,8 @@ class Primitive:
     extras: dict | None = None
     normal_png: bytes | None = None
     emissive_png: bytes | None = None
+    # Moss image when a real emission map already owns the emissive slot.
+    moss_png: bytes | None = None
     # One ORM image: R occlusion, G roughness, B metal, A height (not sampled).
     orm_png: bytes | None = None
     orm1_png: bytes | None = None
@@ -313,6 +315,11 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         image_index = image_index_for(prim.png)
         normal_index = image_index_for(prim.normal_png)
         emissive_index = image_index_for(prim.emissive_png)
+        moss_index = image_index_for(prim.moss_png)
+        real_emissive = emissive_index
+        if emissive_index is None and moss_index is not None:
+            emissive_index = moss_index
+            moss_index = None
         orm_index = image_index_for(prim.orm_png)
         orm1_index = image_index_for(prim.orm1_png)
         normal1_index = image_index_for(prim.normal1_png)
@@ -331,6 +338,11 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if surface:
             extras = dict(extras)
             extras["surface"] = surface
+        if moss_index is not None and extras.get("blend"):
+            extras = dict(extras)
+            blend = dict(extras["blend"])
+            blend["moss"] = moss_index
+            extras["blend"] = blend
         extra_key = tuple(sorted((key, repr(value)) for key, value in extras.items()))
         key = (
             image_index,
@@ -346,6 +358,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             orm_index,
             orm1_index,
             normal1_index,
+            moss_index,
         )
         if key not in material_of:
             pbr = {
@@ -364,10 +377,10 @@ def to_glb(primitives: list[Primitive]) -> bytes:
                 material["normalTexture"] = {"index": normal_index}
             if emissive_index is not None:
                 material["emissiveTexture"] = {"index": emissive_index}
-                # A moss overlay rides in this slot so the glb stays one mesh.
-                # Factor 0 keeps the stock shader from adding it as light.
-                # A real emission map still glows.
-                material["emissiveFactor"] = [0.0, 0.0, 0.0] if extras.get("blend") else [1.0, 1.0, 1.0]
+                # Moss rides in this slot only when nothing else glows, and then
+                # the factor stays 0. A real emission map uses factor 1, and the
+                # moss image is extras.blend.moss instead.
+                material["emissiveFactor"] = [1.0, 1.0, 1.0] if real_emissive is not None else [0.0, 0.0, 0.0]
             if alpha == "mask":
                 material["alphaMode"] = "MASK"
                 material["alphaCutoff"] = cutoff

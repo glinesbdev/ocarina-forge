@@ -5,8 +5,8 @@ import struct
 
 from ocarina_forge.formats.bfres import Material, Model, Part
 from ocarina_forge.formats.bntx import Texture
-from ocarina_forge.models import _accept, _assemble, _surface_choice
-from ocarina_forge.surface import classify_packed, collect, pack_layer, surface_role
+from ocarina_forge.models import _accept, _assemble, _emission_choice, _surface_choice
+from ocarina_forge.surface import classify_packed, collect, emissive_image, pack_layer, surface_role
 
 
 def _image(width, height, paint) -> Texture:
@@ -132,6 +132,51 @@ def test_layer_one_maps_are_named_in_the_extras():
     base = body["pbrMetallicRoughness"]["metallicRoughnessTexture"]["index"]
     assert surface["orm1"] != base
     assert surface["normal1"] != surface["orm1"]
+
+
+def test_a_gray_mask_multiplies_the_colored_glow():
+    color = _image(2, 2, lambda x, y: (200, 40, 10))
+    mask = _image(2, 2, lambda x, y: (128, 128, 128))
+    image, note = emissive_image([("_em0", color), ("_ec0", mask)])
+    assert image.rgba[0] == 200 * 128 // 255
+    assert "*" in note
+
+
+def test_two_colored_glow_maps_keep_the_em_map():
+    em = _image(2, 2, lambda x, y: (200, 40, 10))
+    ec = _image(2, 2, lambda x, y: (10, 180, 40))
+    image, note = emissive_image([("_em0", em), ("_ec0", ec)])
+    assert image is em
+    assert "not multiplied" in note
+
+
+def test_an_embedded_emission_map_glows_and_moss_keeps_its_own_image():
+    glow = Texture("lamp", 1, 1, bytes([255, 200, 80, 255]), 0)
+    slate = Texture("slate", 1, 1, bytes([180, 160, 140, 255]), 0)
+    moss = Texture("moss", 1, 1, bytes([40, 120, 40, 255]), 0)
+    material = Material("lamp", binds=[("_a0", "slate"), ("_em0", "lamp")], albedo=[("_a0", "slate")])
+    model = Model("castle", materials=[material], images={"slate": slate, "lamp": glow, "moss": moss})
+    choice = _emission_choice(None, model, material, [], {}, [])
+    assert choice["image"] is glow
+    part = Part(
+        "lamp",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        "slate",
+        material_index=0,
+        colors=[(0.2, 0, 0, 1), (0.8, 0, 0, 1), (0.4, 0, 0, 1)],
+        overlay_texture="moss",
+        blend={"channel": "r", "uv": "_u0", "scale": [1, 1], "translate": [0, 0], "sampler": "_a1"},
+        emission_image=choice["image"],
+        emission_note=choice["note"],
+    )
+    model.parts = [part]
+    blob, info = _assemble([model], {})
+    assert any(note.startswith("emissive ") for note in info["notes"])
+    body = _json(blob)["materials"][0]
+    assert body["emissiveFactor"] == [1, 1, 1]
+    assert body["extras"]["blend"]["moss"] != body["emissiveTexture"]["index"]
 
 
 def test_an_unused_overlay_normal_is_not_collected():

@@ -129,6 +129,34 @@ def test_the_same_sampler_list_is_one_group_and_the_attribute_split_is_named():
     assert ("unknown sampler", "_rgh0") not in kinds
 
 
+def test_emission_is_handled_and_thickness_is_not():
+    flags = _flags(
+        {
+            "binds": [
+                {"sampler": "_a0", "texture": "slate"},
+                {"sampler": "_em0", "texture": "lamp"},
+                {"sampler": "_ec0", "texture": "lamp_c"},
+                {"sampler": "_fx0", "texture": "spark"},
+                {"sampler": "_th0", "texture": "thick"},
+            ],
+            "assign": {"_a0": "_u0"},
+            "shaderBlocks": [
+                {
+                    "slot": "+0x10",
+                    "samplerNames": ["_a0", "_em0", "_ec0", "_fx0", "_th0"],
+                    "samplerIndices": [0, 1, 2, 3, 4],
+                }
+            ],
+        },
+        {"slate", "lamp", "lamp_c", "spark", "thick"},
+    )
+    unknown = [name for kind, name in flags if kind == "unknown sampler"]
+    assert "_em0" not in unknown
+    assert "_ec0" not in unknown
+    assert "_fx0" in unknown
+    assert "_th0" in unknown
+
+
 def test_an_unused_sampler_is_not_also_an_unknown_role():
     flags = _flags(
         {

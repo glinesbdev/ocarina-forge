@@ -32,7 +32,7 @@ from ocarina_forge.errors import BancError
 from ocarina_forge.locate import setting, user_cache_root
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
 from ocarina_forge.blend import color_span, overlay_plan
-from ocarina_forge.surface import collect, pack_layer, surface_role
+from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
 
@@ -57,7 +57,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-35\0"
+_CACHE_VERSION = b"models-36\0"
 _BNTX_VERSION = b"bntx-3\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1035,34 +1035,36 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             normal1_png = extra_png(part.normal1_texture)
             orm_png = image_png(part.orm_image)
             orm1_png = image_png(part.orm1_image)
-            emissive_png = extra_png(part.emission_texture)
+            emissive_png = image_png(part.emission_image) or extra_png(part.emission_texture)
             if part.surface_note and part.surface_note not in notes:
                 notes.append(part.surface_note)
-            overlay_png = None
+            if part.emission_note and part.emission_note not in notes:
+                notes.append(part.emission_note)
+            moss_png = None
             blend_extra = None
             overlay_uvs = None
-            if part.blend and part.overlay_texture and not emissive_png:
-                overlay_png = extra_png(part.overlay_texture)
-                if overlay_png:
-                    blend_extra = {
-                        "blend": {
-                            "channel": part.blend.get("channel") or "r",
-                            "uv": part.blend.get("uv") or "_u0",
-                            "scale": list(part.blend.get("scale") or [1, 1]),
-                            "translate": list(part.blend.get("translate") or [0, 0]),
-                            "sampler": part.blend.get("sampler") or "",
-                            "texture": part.overlay_texture,
-                        }
+            if part.blend and part.overlay_texture:
+                moss_png = extra_png(part.overlay_texture)
+            if moss_png:
+                blend_extra = {
+                    "blend": {
+                        "channel": part.blend.get("channel") or "r",
+                        "uv": part.blend.get("uv") or "_u0",
+                        "scale": list(part.blend.get("scale") or [1, 1]),
+                        "translate": list(part.blend.get("translate") or [0, 0]),
+                        "sampler": part.blend.get("sampler") or "",
+                        "texture": part.overlay_texture,
                     }
-                    wanted_uv = part.blend.get("uv") or "_u0"
-                    if wanted_uv != "_u0":
-                        overlay_uvs = (part.uv_extra or {}).get(wanted_uv)
-                        if overlay_uvs is not None and len(overlay_uvs) != len(part.positions):
-                            overlay_uvs = None
-                    if "moss blend" not in notes:
-                        notes.append(
-                            f"moss blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
-                        )
+                }
+                wanted_uv = part.blend.get("uv") or "_u0"
+                if wanted_uv != "_u0":
+                    overlay_uvs = (part.uv_extra or {}).get(wanted_uv)
+                    if overlay_uvs is not None and len(overlay_uvs) != len(part.positions):
+                        overlay_uvs = None
+                if "moss blend" not in notes:
+                    notes.append(
+                        f"moss blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
+                    )
             primitives.append(
                 Primitive(
                     part.positions,
@@ -1080,7 +1082,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     colors=part.colors if blend_extra else None,
                     uvs2=overlay_uvs,
                     normal_png=normal_png,
-                    emissive_png=overlay_png or emissive_png,
+                    emissive_png=emissive_png,
+                    moss_png=moss_png,
                     extras=blend_extra,
                     orm_png=orm_png,
                     orm1_png=orm1_png,
@@ -1109,7 +1112,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             kind=kind,
                             colors=coarser[3] if blend_extra and len(coarser) > 3 else None,
                             normal_png=normal_png,
-                            emissive_png=overlay_png or emissive_png,
+                            emissive_png=emissive_png,
+                            moss_png=moss_png,
                             extras=blend_extra,
                             orm_png=orm_png,
                             orm1_png=orm1_png,
@@ -1197,6 +1201,8 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                     part.orm1_image = surface.get("orm1")
                     part.normal1_texture = surface.get("normal1") or ""
                     part.surface_note = surface.get("note") or ""
+                    part.emission_image = (choice.get("emission") or {}).get("image")
+                    part.emission_note = (choice.get("emission") or {}).get("note") or ""
                     part.alpha = choice["alpha"]
                     part.cutoff = choice["cutoff"]
                     if choice.get("wrap"):
@@ -1421,7 +1427,23 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
     result["maps"] = maps
     result["overlay"] = _overlay_choice(dump, model, material, hints, external, raws)
     result["surface"] = _surface_choice(dump, model, material, hints, external, raws)
+    result["emission"] = _emission_choice(dump, model, material, hints, external, raws)
     return result
+
+
+def _emission_choice(dump, model, material, hints, external, raws) -> dict:
+    """``_em`` and ``_ec`` only. ``_fx`` and ``_th`` are not light."""
+    found = []
+    for slot, texture in material.binds:
+        if bind_role(slot, texture) != "emission" or not texture:
+            continue
+        image = _exact_data(dump, model, texture, hints, material, external, raws)
+        if image is not None:
+            found.append((slot, image))
+    image, note = emissive_image(found)
+    if image is None:
+        return {}
+    return {"image": image, "note": note}
 
 
 def _exact_data(dump, model, name, hints, material, external, raws):

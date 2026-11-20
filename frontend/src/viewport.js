@@ -899,6 +899,15 @@ export async function createViewport(host, hooks) {
             material.userData.normal1Map = texture;
           }));
         }
+        const blend = material.userData && material.userData.blend;
+        if (blend && Number.isInteger(blend.moss)) {
+          surface.push(parser.getDependency("texture", blend.moss).then((texture) => {
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            material.userData.mossMap = texture;
+          }));
+        }
       }
     });
     await Promise.all(surface);
@@ -1600,7 +1609,11 @@ export async function createViewport(host, hooks) {
     material.userData.blendTranslateUniform = { value: new THREE.Vector2(Number(translate[0]) || 0, Number(translate[1]) || 0) };
     material.userData.blendChannelUniform = { value: { r: 0, g: 1, b: 2, a: 3 }[blend.channel] ?? 0 };
     material.userData.blendUv1Uniform = { value: blend.uv === "_u1" || blend.uv === "u1" ? 1 : 0 };
-    if (material.emissiveMap && !material.userData.blendMap) {
+    if (material.userData.mossMap && !material.userData.blendMap) {
+      material.userData.blendMap = material.userData.mossMap;
+      material.userData.blendMap.wrapS = THREE.RepeatWrapping;
+      material.userData.blendMap.wrapT = THREE.RepeatWrapping;
+    } else if (material.emissiveMap && !material.userData.blendMap) {
       material.userData.blendMap = material.emissiveMap;
       material.userData.blendMap.wrapS = THREE.RepeatWrapping;
       material.userData.blendMap.wrapT = THREE.RepeatWrapping;
