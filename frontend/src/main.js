@@ -85,16 +85,19 @@ const viewport = await createViewport($("viewport"), {
     state.terrain = meta;
     const proxy = Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));
     const heightmap = Boolean(meta && typeof meta.reason === "string" && /terrain heightmap/i.test(meta.reason));
-    const show = Boolean(meta && meta.status === "mesh" && !proxy);
+    const sparse = Boolean(meta && meta.sparse);
+    const show = Boolean(meta && meta.status === "mesh" && !proxy && !sparse);
     state.showGround = show;
     const box = $("show-ground");
     if (box) {
       box.checked = show;
       const title = proxy
         ? "The static map has no albedo. On draws a neutral grid on y = 0 instead of the green stand-in."
-        : heightmap
-          ? "Show the terrain heightmap. The untextured stand-in stays off."
-          : "Show the static ground mesh";
+        : sparse
+          ? "Sparse heightmap: most in-clip tiles have no file, so Ground starts off. Turn it on to see the sheet."
+          : heightmap
+            ? "Show the terrain heightmap. The untextured stand-in stays off."
+            : "Show the static ground mesh";
       box.title = title;
       if (box.parentElement) box.parentElement.title = title;
     }

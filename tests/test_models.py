@@ -236,6 +236,16 @@ def test_block_height_uses_layout_low_bits_and_mip_size():
     assert fixed.rgba[(width - 1) * 4 + 2] > 180
 
 
+def test_sparse_heightmap_is_a_few_files_inside_a_large_index():
+    from bancwright.models import _sparse_heightmap
+
+    castle = [{"status": "drawn", "reason": ""}] * 14 + [{"status": "skipped", "reason": "no heightmap file"}] * 583
+    assert _sparse_heightmap(castle) is True
+    kokiri = [{"status": "drawn", "reason": ""}] * 12 + [{"status": "skipped", "reason": "outside the placed actors"}] * 40
+    assert _sparse_heightmap(kokiri) is False
+    assert _sparse_heightmap([{"status": "drawn", "reason": ""}]) is False
+
+
 def test_converter_output_is_pinned_to_the_cache_version():
     """The converter sources are hashed into the cache key.
 
@@ -256,7 +266,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-27", "48337a05b4af93c24c2744dbba123430855f61ee7aeb528037735bd670a5e7d4")
+    pinned = ("models-28", "9fcd6f64168e286fecdc006c6bb367db93f54cdf13abbb9b14352afaa5e004fa")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1906,6 +1916,7 @@ def test_a_busy_albedo_keeps_the_stored_block_height():
 
 def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, capsys):
     import json
+    import struct
 
     from bancwright.__main__ import print_material_debug
     from bancwright.formats.bfres import parse, sample_bfres, sample_v10_bfres
@@ -1948,6 +1959,10 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
     assert row["binds"][0]["uvSource"] == "sampler assign"
     assert row["binds"][0]["srt"]["name"] == "albedo_texsrt"
     assert row["binds"][0]["srt"]["scale"] == [2.0, 3.0]
+    shape = report["shapes"][0]
+    assert shape["uvs"][0]["name"] == "_u0"
+    assert shape["uvs"][0]["min"] == [0.0, 0.0]
+    assert shape["uvs"][0]["max"] == [1.0, 1.0]
     by_name = {item["name"]: item for item in row["params"]}
     assert by_name["albedo_color"]["value"] == [0.2, 0.4, 0.6, 1.0]
     assert by_name["albedo_texsrt"]["mode"] == "maya"
@@ -1968,6 +1983,19 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
     assert material.assign["_a0"] == "_u1"
     assert material.params[1]["kind"] == "texsrt"
     assert material.albedo[0] == ("_a0", "Gate_Alb")
+    # Retail v10 keeps the dictionaries and leaves the count bytes at +0x44 clear.
+    zeroed = bytearray(v10)
+    at = zeroed.find(b"FMAT")
+    assign = struct.unpack_from("<Q", zeroed, at + 0x10)[0]
+    zeroed[assign + 0x44 : assign + 0x48] = b"\0\0\0\0"
+    loose = parse(bytes(zeroed))[0].materials[0]
+    assert loose.archive == "Land.sharc"
+    assert loose.shader == "Land_Solid"
+    assert loose.attributes["in_uv0"] == "_u1"
+    assert loose.assign["_a0"] == "_u1"
+    assert loose.options["projection_type"] == "triplanar"
+    assert any(item["kind"] == "texsrt" for item in loose.params)
+    assert loose.slots == []
 
 
 def test_a_normal_named_texture_is_not_albedo_on_a0():

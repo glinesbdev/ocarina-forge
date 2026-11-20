@@ -81,6 +81,8 @@ class Part:
     wrap: str = ""
     normal_texture: str = ""
     emission_texture: str = ""
+    # Every `_uN` channel in the vertex buffer, with min/max. Not the channel the mesh is drawn with.
+    uv_sets: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -107,6 +109,8 @@ class Material:
     params: list[dict] = field(default_factory=list)
     # v10 render-state strings in slot order, including the empty ones.
     states: list[str] = field(default_factory=list)
+    # One line per unread v10 header qword, set only when no shader assign matched.
+    slots: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -606,9 +610,9 @@ class _File:
             mode = ""
         note = self._render_info_note(at)
         try:
-            archive, model, attributes, assign, options, params = self._probe_v10_shader(at)
+            archive, model, attributes, assign, options, params, slots = self._probe_v10_shader(at)
         except (FresError, struct.error, IndexError, OSError, ValueError):
-            archive, model, attributes, assign, options, params = "", "", {}, {}, {}, []
+            archive, model, attributes, assign, options, params, slots = "", "", {}, {}, {}, [], []
         return Material(
             name,
             binds,
@@ -627,6 +631,7 @@ class _File:
             [],
             params,
             states,
+            slots,
         )
 
     def _render_info_note(self, at: int) -> str:
@@ -772,34 +777,75 @@ class _File:
         return found
 
     def _probe_v10_shader(self, header: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str], list[dict]]:
-        """Find a version-9 shader-assign block and shader-param array in a v10 header.
+        """Find a shader-assign block and shader-param array in a v10 header.
 
-        Version 10's known fields are the texture list, the sampler dictionary,
-        and the render-state strings. The other qwords are only accepted when
-        they match that older record: a shader assign needs a dictionary whose
-        length is the count at +0x45 or +0x46, and a param array needs every
-        dictionary key to decode as a known uniform. A miss stays empty.
+        Texture names, the sampler dictionary, and the render-state strings
+        stay at +0x20, +0x38, and +0x40. The other qwords, and a relative
+        offset from each of them, are tried as a version-9 assign. A block
+        whose count bytes disagree with its dictionaries is still kept when
+        the dictionaries name UV channels or shader options. The dictionary
+        length is the count in that case. A complete miss returns one line
+        per header qword so the next dump shows the real slot.
         """
-        slots = (0x10, 0x18, 0x28, 0x30, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98)
-        pointers = []
+        slots = (0x10, 0x18, 0x28, 0x30, 0x48, 0x50, 0x58, 0x60, 0x68, 0x70, 0x78, 0x80, 0x88, 0x90, 0x98, 0xA8)
+        pointers: list[int] = []
         for slot in slots:
-            ptr = self.u64(header + slot)
-            if ptr and ptr not in pointers:
-                pointers.append(ptr)
-        archive = model = ""
-        attributes: dict[str, str] = {}
-        assign: dict[str, str] = {}
-        options: dict[str, str] = {}
+            ptr = self.u64(header + slot) if header + slot + 8 <= len(self.data) else 0
+            for candidate in self._pointer_candidates(header, slot, ptr):
+                if candidate not in pointers:
+                    pointers.append(candidate)
+        best = self._best_assign(pointers)
+        nested: list[int] = []
+        if best is None:
+            for ptr in pointers:
+                if not ptr or ptr + 0x40 > len(self.data) or self._dict_ok(ptr) or self._is_string(ptr):
+                    continue
+                for inner in range(0, 0x40, 8):
+                    child = self.u64(ptr + inner)
+                    if child and child not in pointers and child not in nested:
+                        nested.append(child)
+            best = self._best_assign(nested)
+        if best is None:
+            archive, model, attributes, assign, options = "", "", {}, {}, {}
+        else:
+            archive, model, attributes, assign, options = best
+        hint = self._param_count_hint(header)
+        params = self._probe_params(pointers, hint)
+        if not params and nested:
+            params = self._probe_params(nested, hint)
+        slots_text = [] if archive or model else self._header_lines(header)
+        return archive, model, attributes, assign, options, params, slots_text
+
+    def _pointer_candidates(self, header: int, slot: int, ptr: int) -> list[int]:
+        found = []
+        if ptr and ptr + 0x48 <= len(self.data):
+            found.append(ptr)
+        low = ptr & 0xFFFFFFFF
+        relative = header + slot + low
+        if low and relative != ptr and relative + 0x48 <= len(self.data) and relative not in found:
+            found.append(relative)
+        return found
+
+    def _best_assign(self, pointers: list[int]):
+        best = None
+        best_score = 0
         for ptr in pointers:
             found = self._assign_block(ptr)
             if found is None:
                 continue
-            archive, model, attributes, assign, options = found
-            break
-        params = self._probe_params(pointers)
-        return archive, model, attributes, assign, options, params
+            score = _assign_score(*found)
+            if score > best_score:
+                best = found
+                best_score = score
+        return best
 
     def _assign_block(self, at: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str]] | None:
+        strict = self._assign_strict(at)
+        if strict is not None:
+            return strict
+        return self._assign_loose(at)
+
+    def _assign_strict(self, at: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str]] | None:
         if not at or at + 0x48 > len(self.data):
             return None
         attr_dict = self.u64(at + 0x18)
@@ -840,8 +886,94 @@ class _File:
             return None
         return archive, model, attributes, assign, options
 
-    def _probe_params(self, pointers: list[int]) -> list[dict]:
+    def _assign_loose(self, at: int) -> tuple[str, str, dict[str, str], dict[str, str], dict[str, str]] | None:
+        """Same record as the strict reader, but the dictionary length is the count.
+
+        Retail v10 files keep the archive, the shading model, and the three
+        dictionaries, and the bytes at +0x44 do not match those lengths. The
+        maps still have to name a UV channel, a sampler slot, or a shader option.
+        """
+        if not at or at + 0x48 > len(self.data):
+            return None
+        attr_dict = self.u64(at + 0x18)
+        samp_dict = self.u64(at + 0x28)
+        opt_dict = self.u64(at + 0x38)
+        if not any(self._dict_ok(ptr) for ptr in (attr_dict, samp_dict, opt_dict)):
+            return None
+        archive = self._shader_label(self.u64(at))
+        model = self._shader_label(self.u64(at + 8))
+        if archive is None or model is None or (not archive and not model):
+            return None
+        attributes = self._string_pairs(self.u64(at + 0x10), attr_dict, 0)
+        assign = self._string_pairs(self.u64(at + 0x20), samp_dict, 0)
+        options = self._string_pairs(self.u64(at + 0x30), opt_dict, 0)
+        if not _shader_symbols(attributes, assign, options):
+            return None
+        return archive, model, attributes, assign, options
+
+    def _shader_label(self, at: int) -> str | None:
+        """A printable shader name, or '' when the pointer is null. None if it is not a string."""
+        if not at:
+            return ""
+        if not self._is_string(at):
+            return None
+        text = self.string(at)
+        if text and not _SHADER_TEXT.fullmatch(text):
+            return None
+        return text
+
+    def _param_count_hint(self, header: int) -> int:
+        if header + 0xA6 > len(self.data):
+            return 0
+        count = self.u16(header + 0xA4)
+        if 0 < count <= 80:
+            return count
+        return 0
+
+    def _header_lines(self, header: int) -> list[str]:
+        """What each unread qword in the 0xB0 material header points at."""
+        if header + 0xB0 > len(self.data):
+            return []
+        lines = []
+        known = {0x20: "texture names", 0x38: "sampler dictionary", 0x40: "render states"}
+        for slot in range(0x10, 0xB0, 8):
+            if slot in known:
+                lines.append(f"+0x{slot:02X} {known[slot]}")
+                continue
+            ptr = self.u64(header + slot)
+            lines.append(f"+0x{slot:02X} {self._describe_pointer(ptr)}")
+        lines.append("tail " + self.data[header + 0xA0 : header + 0xB0].hex())
+        return lines
+
+    def _describe_pointer(self, ptr: int) -> str:
+        if not ptr:
+            return "null"
+        if ptr + 16 > len(self.data):
+            return f"{ptr:#x} outside the file"
+        if self._is_string(ptr):
+            return f"string {self.string(ptr)!r}"
+        if self._dict_ok(ptr):
+            try:
+                keys = [key for key in self.dict_keys(ptr) if key][:8]
+            except FresError:
+                keys = []
+            shown = ", ".join(keys) if keys else "(empty)"
+            extra = ""
+            try:
+                count = self.i32(ptr + 4)
+            except (struct.error, IndexError):
+                count = 0
+            if count > len(keys):
+                extra = f" +{count - len(keys)}"
+            return f"dict {shown}{extra}"
+        names = self._name_list(ptr, 6)
+        if len(names) >= 2:
+            return "strings " + ", ".join(names)
+        return f"{ptr:#x} " + self.data[ptr : ptr + 24].hex()
+
+    def _probe_params(self, pointers: list[int], hint: int = 0) -> list[dict]:
         best: list[dict] = []
+        useful: list[dict] = []
         for dictionary in pointers:
             if not self._dict_ok(dictionary):
                 continue
@@ -851,19 +983,25 @@ class _File:
                 continue
             if not keys or len(keys) > 80 or all(_sampler_key(key) for key in keys):
                 continue
+            counts = {len(keys)}
+            if hint:
+                counts.add(hint)
             for array in pointers:
                 if array == dictionary:
                     continue
                 for data in pointers:
                     if data in (array, dictionary):
                         continue
-                    try:
-                        rows = self._read_params(array, dictionary, data, len(keys))
-                    except (FresError, struct.error, IndexError, OSError, ValueError):
-                        continue
-                    if len(rows) == len(keys) and len(rows) > len(best):
-                        best = rows
-        return best
+                    for count in counts:
+                        try:
+                            rows = self._read_params(array, dictionary, data, count)
+                        except (FresError, struct.error, IndexError, OSError, ValueError):
+                            continue
+                        if len(rows) == count and len(rows) > len(best):
+                            best = rows
+                        elif rows and _params_useful(rows) and len(rows) > len(useful):
+                            useful = rows
+        return best or useful
 
     def _dict_ok(self, at: int) -> bool:
         if not at or at + 24 > len(self.data):
@@ -1036,7 +1174,9 @@ class _File:
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
             return [], end, info
+        uv_sets = _uv_ranges(fvtx)
         made = [_part_from(name, positions, lod["indices"], uvs, material, material_index, 0)]
+        made[0].uv_sets = uv_sets
         # LOD meshes are a contiguous array of 0x38-byte headers. Drawing every
         # level at once stacks the coarse mesh on the fine one. Keep LOD 0 for
         # near, and the coarsest smaller level for far.
@@ -1084,7 +1224,9 @@ class _File:
                 best = (far_positions, far_uvs, coarser["indices"])
                 best_level = level
             if best is not None:
-                made.append(_part_from(name, best[0], best[2], best[1], material, material_index, best_level))
+                far = _part_from(name, best[0], best[2], best[1], material, material_index, best_level)
+                far.uv_sets = uv_sets
+                made.append(far)
         return made, end, info
 
     def _shape_bounds(self, at: int) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
@@ -1245,6 +1387,72 @@ class _File:
             except FresError:
                 return None
         return slots
+
+
+def _uv_ranges(fvtx: dict) -> list[dict]:
+    """Min and max of every `_uN` channel. The drawn mesh still uses `_u0`."""
+    found = []
+    for attribute in fvtx.get("attributes") or []:
+        name = attribute.get("name") or ""
+        if not _UV_ATTR.fullmatch(name):
+            continue
+        umin = vmin = math.inf
+        umax = vmax = -math.inf
+        count = 0
+        for index in range(int(fvtx.get("count") or 0)):
+            try:
+                raw = _read_attr(fvtx, attribute, index)
+            except (FresError, struct.error, IndexError):
+                break
+            if len(raw) < 2 or not math.isfinite(raw[0]) or not math.isfinite(raw[1]):
+                continue
+            umin = min(umin, raw[0])
+            umax = max(umax, raw[0])
+            vmin = min(vmin, raw[1])
+            vmax = max(vmax, raw[1])
+            count += 1
+        if not count:
+            continue
+        found.append(
+            {
+                "name": name,
+                "min": [round(umin, 5), round(vmin, 5)],
+                "max": [round(umax, 5), round(vmax, 5)],
+                "count": count,
+            }
+        )
+    return found
+
+
+def _assign_score(archive: str, model: str, attributes: dict, assign: dict, options: dict) -> int:
+    score = (2 if archive else 0) + (2 if model else 0)
+    for mapping in (attributes, assign):
+        for key, value in mapping.items():
+            if _UV_ATTR.fullmatch(str(key)) or _UV_ATTR.fullmatch(str(value)):
+                score += 3
+            elif _SAMPLER_SLOT.fullmatch(str(key)):
+                score += 1
+    if options:
+        score += 2
+    return score
+
+
+def _shader_symbols(attributes: dict, assign: dict, options: dict) -> bool:
+    for key, value in {**attributes, **assign}.items():
+        if _UV_ATTR.fullmatch(str(key)) or _UV_ATTR.fullmatch(str(value)):
+            return True
+        if _SAMPLER_SLOT.fullmatch(str(key)) and str(key).startswith("_"):
+            return True
+    return any(_SHADER_OPTION.search(str(key)) for key in options)
+
+
+def _params_useful(rows: list[dict]) -> bool:
+    for row in rows:
+        if row.get("kind") == "texsrt":
+            return True
+        if _PARAM_USEFUL.search(str(row.get("name") or "")):
+            return True
+    return False
 
 
 def _attr(attributes: list[dict], names: tuple[str, ...]) -> dict | None:
@@ -1825,6 +2033,11 @@ _EXTRA_SAMPLER = {"alb1", "alb2", "alb3", "albedo1", "albedo2", "albedo3"}
 _POOL = re.compile(rb"([A-Za-z][A-Za-z0-9_]{3,80})\x00")
 _POOL_SKIP = {"FRES", "FMDL", "FMAT", "FSHP", "FVTX", "FSKL", "BNTX", "BRTI", "Body"}
 _RENDER_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{1,48}$")
+_SHADER_TEXT = re.compile(r"(?=.*[A-Za-z])[ -~]{1,160}")
+_UV_ATTR = re.compile(r"^_?u\d+$", re.I)
+_SHADER_OPTION = re.compile(r"enable|alpha|proj|uv|coord|gsys|tile|macro|world|planar", re.I)
+_SAMPLER_SLOT = re.compile(r"^_?[A-Za-z]{1,12}\d{0,2}$")
+_PARAM_USEFUL = re.compile(r"srt|tile|uv|color|albedo|scale|tex", re.I)
 
 
 _TEXTURE_IN_FILE = re.compile(

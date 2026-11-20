@@ -7,8 +7,10 @@ and shading model, the attribute assign (``_u0`` / ``_u1`` / ``_u2`` are UV
 channels), the sampler assign, the option strings, and the shader parameters.
 Each sampler line names the UV channel when the assign says one, the texture
 SRT whose name matches that sampler, and the options that look like a
-projection mode. None of that is applied to the mesh. Stretched roof tiles
-and the long garden beds stay as they are until this report comes back.
+projection mode. Each shape lists the UV sets in its vertex buffer and their
+min/max. A set that runs past 0..1 is the tiling set. None of that is applied
+to the mesh. Stretched roof tiles and the long garden beds stay as they are
+until this report comes back.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ def inspect_materials(dump, target: str) -> dict:
         "version": header.get("version"),
         "error": header.get("error") or "",
         "materials": rows,
+        "shapes": _shapes(models),
     }
 
 
@@ -141,7 +144,31 @@ def _row(model: str, material) -> dict:
         "params": material.params,
         "baseColor": list(material.base_color) if material.base_color else None,
         "note": material.note,
+        "slots": list(getattr(material, "slots", []) or []),
     }
+
+
+def _shapes(models) -> list[dict]:
+    """Near LOD only. The ranges are the vertex buffer, before seam splitting."""
+    rows = []
+    seen = set()
+    for model in models:
+        for part in model.parts:
+            if part.lod:
+                continue
+            key = (model.name, part.name, part.material)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "model": model.name,
+                    "name": part.name,
+                    "material": part.material,
+                    "uvs": list(getattr(part, "uv_sets", []) or []),
+                }
+            )
+    return rows
 
 
 def render_text(report: dict) -> str:
@@ -168,6 +195,11 @@ def render_text(report: dict) -> str:
                 lines.append(f"  archive {archive}")
         else:
             lines.append("  shader (no shader assign in this file)")
+        slots = row.get("slots") or []
+        if slots and not (shader or archive):
+            lines.append("  header")
+            for slot in slots:
+                lines.append(f"    {slot}")
         if row.get("hints"):
             lines.append("  name hint " + ", ".join(row["hints"]))
         attributes = row.get("attributes") or {}
@@ -234,6 +266,24 @@ def render_text(report: dict) -> str:
             lines.append("  base color " + " ".join(f"{channel:.3f}" for channel in row["baseColor"]))
         if row.get("note"):
             lines.append(f"  note {row['note']}")
+    shapes = report.get("shapes") or []
+    if shapes:
+        lines.append("")
+        lines.append("shapes")
+        for shape in shapes:
+            title = shape.get("name") or "(shape)"
+            material = shape.get("material") or ""
+            lines.append(f"  {title}" + (f"  material {material}" if material else ""))
+            uvs = shape.get("uvs") or []
+            if not uvs:
+                lines.append("    uv (none)")
+                continue
+            for item in uvs:
+                low = item.get("min") or [0, 0]
+                high = item.get("max") or [0, 0]
+                lines.append(
+                    f"    {item.get('name') or '?'}  u {low[0]}..{high[0]}  v {low[1]}..{high[1]}  n={item.get('count') or 0}"
+                )
     lines.append("")
     return "\n".join(lines)
 

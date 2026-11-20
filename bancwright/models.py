@@ -54,7 +54,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-27\0"
+_CACHE_VERSION = b"models-28\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -2418,6 +2418,22 @@ def _choose_tiles(tiles, scale, origin, clip):
     return chosen, skipped, notes
 
 
+def _sparse_heightmap(rows: list[dict]) -> bool:
+    """A quadtree that names hundreds of tiles and only ships a few height files.
+
+    Hyrule Castle's index has 597 tiles and 14 `.hght` files. Those files are
+    nested LODs of the same origin, and they disagree by metres, so the sheet
+    is not the castle's walkable ground. A field that actually has height
+    files (Kokiri) stays on: this needs at least 40 missing tiles and the
+    readable share under a fifth.
+    """
+    missing = sum(1 for row in rows if row.get("reason") == "no heightmap file")
+    drawn = sum(1 for row in rows if row.get("status") == "drawn")
+    if missing < 40 or drawn <= 0:
+        return False
+    return drawn / (drawn + missing) < 0.2
+
+
 def _height_source(banc: str, tscb: str, extras: str = "") -> str:
     blob = _cache_prefix() + b"height\0" + banc.encode("utf-8", "replace") + b"\0" + tscb.encode("utf-8", "replace")
     blob += b"\0" + extras.encode("utf-8", "replace")
@@ -2438,6 +2454,7 @@ def _height_response(banc: str, digest: str, info: dict) -> dict:
         "banc": banc,
         "tiles": info.get("tiles") or [],
         "terrain": info.get("terrain") or {},
+        "sparse": bool(info.get("sparse")),
     }
 
 
@@ -2696,6 +2713,18 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         "Sub terrain starts off and shows the overlay"
     )
     notes.append("custom.extm is not decoded")
+    notes.append(
+        "TSCB bytes +0x0C..+0x5F and GameBancParam have no hole or hide-ground flag; "
+        ".mate is a material index"
+    )
+    sparse = _sparse_heightmap(rows)
+    if sparse:
+        missing = sum(1 for row in rows if row.get("reason") == "no heightmap file")
+        present = sum(1 for row in rows if row.get("status") == "drawn")
+        notes.insert(
+            0,
+            f"sparse heightmap ({present} of {present + missing} in-clip tiles have a height file); Ground starts off",
+        )
     reason = "terrain heightmap. " + " ".join(notes)
     bounds = None
     if positions:
@@ -2713,8 +2742,10 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         "tiles": rows,
         "terrain": _terrain_meta(located, scale, height_scale, clip, notes, sub_paths),
         "notes": notes,
+        "sparse": sparse,
     }
     info["terrain"]["drawn"] = len(drawn)
+    info["terrain"]["sparse"] = sparse
     info["terrain"]["tiles"] = tile_count
     digest = hashlib.sha256(
         _cache_prefix() + b"height-mesh\0" + _height_blob(loaded) + _texture_key(raws)
