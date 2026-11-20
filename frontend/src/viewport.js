@@ -9,6 +9,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
 import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
+import { shouldReloadTerrain } from "./terrain.js";
 import { formatStats, keepRendering } from "./frame.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick } from "./instance.js";
 import { chooseHit } from "./pick.js";
@@ -124,6 +125,8 @@ export function createViewport(host, hooks) {
   const loadDelta = new THREE.Vector3();
   const loadForward = new THREE.Vector3();
   let terrainRoot = null;
+  let terrainBanc = null;
+  let terrainToken = 0;
   let groundGrid = null;
   let lastClick = null;
   let grid = null;
@@ -154,13 +157,19 @@ export function createViewport(host, hooks) {
     if (entry.label) entry.label.element.remove();
   }
 
-  function clearTerrain() {
-    if (!terrainRoot) return;
-    terrainRoot.traverse((child) => {
+  function disposeTerrainObject(root) {
+    if (!root) return;
+    root.traverse((child) => {
       if (child.geometry) child.geometry.dispose();
     });
-    terrainRoot.removeFromParent();
+    root.removeFromParent();
+  }
+
+  function clearTerrain() {
+    terrainToken += 1;
+    disposeTerrainObject(terrainRoot);
     terrainRoot = null;
+    terrainBanc = null;
   }
 
   function clearGround() {
@@ -297,8 +306,8 @@ export function createViewport(host, hooks) {
 
   function setActors(actors, options = {}) {
     clearActors();
-    clearTerrain();
-    clearGround();
+    // The field is not part of the actor diff. Clearing it here is what turned
+    // the ground black for a couple of seconds after POST /api/scene/edit.
     const token = ++generation;
     actors.forEach((actor, index) => {
       const key = actor.id || `locked-${index}`;
@@ -384,13 +393,16 @@ export function createViewport(host, hooks) {
     syncLabels();
     requestRender();
     loadModels(token, actors);
-    if (options.banc !== undefined) {
+    if (shouldReloadTerrain(terrainBanc, options.banc)) {
       const banc = options.banc;
+      const next = ++terrainToken;
+      terrainBanc = banc;
       // The static map can be hundreds of thousands of triangles. Let the
       // actor requests start first, and never raycast the map, so picking
-      // stays on the actors while the terrain converts.
+      // stays on the actors while the terrain converts. A later actor edit
+      // does not reach this branch: the banc has not changed.
       setTimeout(() => {
-        if (token === generation) loadTerrain(token, banc);
+        if (next === terrainToken) loadTerrain(next, banc);
       }, 300);
     }
   }
@@ -1293,9 +1305,49 @@ uniform float terrainLayerMissing;`
     return root;
   }
 
-  async function loadTerrain(token, banc) {
-    clearTerrain();
+  function terrainCurrent(token) {
+    return token === terrainToken;
+  }
+
+  async function warmTerrain(root) {
+    // Compile against the lit scene before the mesh is visible, then upload the
+    // atlas. Swapping earlier draws the field with an empty program (solid black)
+    // until the shader and the texture finish.
+    if (typeof renderer.compileAsync === "function") {
+      await renderer.compileAsync(root, camera, scene);
+    } else if (typeof renderer.compile === "function") {
+      renderer.compile(root, camera, scene);
+    }
+    const maps = new Set();
+    root.traverse((child) => {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        if (material && material.map) maps.add(material.map);
+      }
+    });
+    for (const map of maps) {
+      const image = map.image;
+      if (image && image.complete === false && typeof image.decode === "function") {
+        try {
+          await image.decode();
+        } catch {
+          /* the loader already decoded it, or the browser will upload on draw */
+        }
+      }
+      if (typeof renderer.initTexture === "function") renderer.initTexture(map);
+    }
+  }
+
+  function showTerrain(nextRoot) {
+    const previous = terrainRoot;
+    terrainRoot = nextRoot;
+    if (nextRoot) scene.add(nextRoot);
     clearGround();
+    disposeTerrainObject(previous);
+    requestRender();
+  }
+
+  async function loadTerrain(token, banc) {
     if (!banc || !hooks.fetchTerrain) return;
     retainLoad();
     try {
@@ -1312,35 +1364,42 @@ uniform float terrainLayerMissing;`
     } catch (error) {
       meta = { status: "none", reason: error.message || "The map model request failed." };
     }
-    if (token !== generation) return;
+    if (!terrainCurrent(token)) return;
     if (hooks.onTerrain) hooks.onTerrain(meta);
-    if (meta.status !== "mesh" || !meta.url) return;
+    if (meta.status !== "mesh" || !meta.url) {
+      showTerrain(null);
+      return;
+    }
     try {
       const template = await ensureTemplate(meta.url);
-      if (token !== generation) return;
+      if (!terrainCurrent(token)) return;
       await new Promise((resolve) => {
         if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: 800 });
         else setTimeout(resolve, 0);
       });
-      if (token !== generation) return;
+      if (!terrainCurrent(token)) return;
       if (isTerrainProxy(meta)) {
         const box = measureTemplate(template);
+        if (!terrainCurrent(token)) return;
         if (!box.isEmpty()) placeGround(box);
+        const previous = terrainRoot;
+        terrainRoot = null;
+        disposeTerrainObject(previous);
         requestRender();
         return;
       }
       // A heightmap mesh is the ground. Leave the proxy grid off so it cannot sit above the field.
-      terrainRoot = mergeStatic(template);
-      terrainRoot.name = "terrain";
-      terrainRoot.visible = showGround;
+      const nextRoot = mergeStatic(template);
+      nextRoot.name = "terrain";
+      nextRoot.visible = showGround;
       // Draw the field before batched actors. A gizmo drag re-uploads the
       // float matrix texture; drawing the field first keeps that upload from
       // being the texture the atlas sampler sees.
-      terrainRoot.renderOrder = -1;
-      terrainRoot.frustumCulled = false;
-      terrainRoot.raycast = () => {};
+      nextRoot.renderOrder = -1;
+      nextRoot.frustumCulled = false;
+      nextRoot.raycast = () => {};
       let missingLayer = false;
-      terrainRoot.traverse((child) => {
+      nextRoot.traverse((child) => {
         child.raycast = () => {};
         child.castShadow = false;
         child.receiveShadow = false;
@@ -1366,10 +1425,18 @@ uniform float terrainLayerMissing;`
         console.warn(message);
         if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
       }
-      scene.add(terrainRoot);
-      requestRender();
+      try {
+        await warmTerrain(nextRoot);
+      } catch (error) {
+        console.warn(error);
+      }
+      if (!terrainCurrent(token)) {
+        disposeTerrainObject(nextRoot);
+        return;
+      }
+      showTerrain(nextRoot);
     } catch (error) {
-      if (token === generation && hooks.onTerrain) {
+      if (terrainCurrent(token) && hooks.onTerrain) {
         hooks.onTerrain({ status: "box", reason: error.message || "The map glTF did not load.", source: meta.source || "" });
       }
     }

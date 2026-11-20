@@ -52,10 +52,21 @@ test("a gizmo drag cannot throw away the atlas or move every copy", () => {
   assert.match(source, /matrixWorldAutoUpdate = false/);
   assert.match(source, /shader\.fragmentShader\.includes\("terrainCell\("\)/);
   assert.match(source, /customProgramCacheKey = \(\) => `terrain\|\$\{columns\}\|\$\{repeat\}`/);
-  assert.match(source, /terrainRoot\.renderOrder = -1/);
-  assert.match(source, /terrainRoot\.frustumCulled = false/);
+  assert.match(source, /nextRoot\.renderOrder = -1/);
+  assert.match(source, /nextRoot\.frustumCulled = false/);
   assert.match(source, /boundsGap\(/);
   assert.match(source, /transformSphere\(/);
+});
+
+test("committing an edit does not rebuild the field", () => {
+  const setActors = source.slice(source.indexOf("function setActors"), source.indexOf("function fitBounds"));
+  const load = source.slice(source.indexOf("async function loadTerrain"), source.indexOf("async function loadTerrainBody"));
+  assert.match(setActors, /shouldReloadTerrain\(terrainBanc, options\.banc\)/);
+  assert.doesNotMatch(setActors, /clearTerrain\(/);
+  assert.doesNotMatch(load, /clearTerrain\(/);
+  assert.match(source, /renderer\.compileAsync\(root, camera, scene\)/);
+  assert.match(source, /renderer\.initTexture\(map\)/);
+  assert.match(source, /function showTerrain\(nextRoot\)/);
 });
 
 test("sub terrain starts off and the field is front-side", () => {
