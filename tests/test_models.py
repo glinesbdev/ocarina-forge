@@ -615,13 +615,14 @@ def test_converter_output_is_pinned_to_the_cache_version():
         "swizzle.py",
         "terrain.py",
         "gltf.py",
+        "gpu.py",
         "meshopt.py",
         "meshopt-worker.mjs",
     ]
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-42", "4d55c003077f725727d4493d6920eefe46f406ad0b15270f7aa2aa35d360a4e6")
+    pinned = ("models-43", "c62d48ff8e2be4d5a9a0e6bef3da255beca537e00e47d19bc8148326cd8d5132")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -2710,7 +2711,7 @@ def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
         assert factor[1] > factor[0]
         assert factor[2] > factor[0]
         assert factor[3] < 0.8
-        assert doc["extensionsUsed"] == ["KHR_materials_unlit"]
+        assert doc["extensionsUsed"] == ["KHR_materials_unlit", "KHR_texture_basisu"]
 
     npc = describe_actor(dump, "Npc_River_A")
     assert "water" not in (npc["reason"] or "")
@@ -2831,6 +2832,12 @@ def _png_pixel(glb: bytes) -> tuple[int, int, int, int]:
     view = doc["bufferViews"][doc["images"][0]["bufferView"]]
     start = view.get("byteOffset", 0)
     raw = data[start : start + view["byteLength"]]
+    if raw[:4] == b"OCFG":
+        from ocarina_forge.formats.gpu import split_texture
+
+        split = split_texture(raw)
+        assert split is not None
+        raw = split[1]
     assert raw[:8] == b"\x89PNG\r\n\x1a\n" or raw[:2] == b"\xff\xd8"
     image = Image.open(BytesIO(raw))
     return image.getpixel((0, 0))

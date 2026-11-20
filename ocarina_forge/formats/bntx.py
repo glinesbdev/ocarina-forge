@@ -111,6 +111,10 @@ class Texture:
     tile: int = 0
     swizzle: str = ""
     block_height: int = 0
+    blocks: bytes = b""
+    block_w: int = 0
+    block_h: int = 0
+    bytes_per: int = 0
 
 
 def _u16(data: bytes, at: int) -> int:
@@ -410,6 +414,10 @@ def _texture(data: bytes, at: int, *, layer: int | None = None, flatten_alpha: b
         swizzle = "linear"
     else:
         swizzle = f"deswizzled tile {tile} gob {gob_order(bytes_per)}"
+    blocks = b""
+    if codec != "rgba8" and "footprint" not in (note or ""):
+        blocks = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw)
+        blocks = fill_partial_gob(blocks, width, height, block_w, block_h, bytes_per)
     return Texture(
         name=name,
         width=width,
@@ -421,6 +429,10 @@ def _texture(data: bytes, at: int, *, layer: int | None = None, flatten_alpha: b
         tile=tile,
         swizzle=swizzle,
         block_height=block_height,
+        blocks=blocks,
+        block_w=block_w,
+        block_h=block_h,
+        bytes_per=bytes_per,
     )
 
 

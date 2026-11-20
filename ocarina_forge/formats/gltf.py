@@ -178,6 +178,22 @@ def cluster_lod(
     return new_pos, new_idx, coarse_uv
 
 
+def _image_mime(blob: bytes) -> str:
+    if blob[:4] == b"OCFG":
+        return "image/ktx2"
+    if blob[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    return "image/png"
+
+
+def _texture_entry(source: int, mime: str) -> dict:
+    entry = {"sampler": 0, "source": source}
+    if mime == "image/ktx2":
+        # three r170 loads KTX2 only through this extension, not from the mime alone.
+        entry["extensions"] = {"KHR_texture_basisu": {"source": source}}
+    return entry
+
+
 def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
     rows = bytearray()
     stride = width * 4
@@ -306,12 +322,12 @@ def to_glb(primitives: list[Primitive]) -> bytes:
                 return None
             if blob not in image_of:
                 image_view = view(blob)
-                mime = "image/jpeg" if blob[:2] == b"\xff\xd8" else "image/png"
+                mime = _image_mime(blob)
                 # The name is how a later meshopt rewrite finds this image. The
                 # writer drops textures that no standard slot uses, and the
                 # overlay maps live in extras.
                 images.append({"name": f"img{len(images)}", "bufferView": image_view, "mimeType": mime})
-                textures.append({"sampler": 0, "source": len(images) - 1})
+                textures.append(_texture_entry(len(images) - 1, mime))
                 image_of[blob] = len(images) - 1
             return image_of[blob]
 
@@ -431,8 +447,13 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         document["images"] = images
         document["samplers"] = [{"wrapS": 10497, "wrapT": 10497}]
         document["textures"] = textures
+    extensions = []
     if used_unlit:
-        document["extensionsUsed"] = ["KHR_materials_unlit"]
+        extensions.append("KHR_materials_unlit")
+    if any(image.get("mimeType") == "image/ktx2" for image in images):
+        extensions.append("KHR_texture_basisu")
+    if extensions:
+        document["extensionsUsed"] = extensions
     text = json.dumps(document, separators=(",", ":")).encode()
     while len(text) % 4:
         text += b" "
@@ -634,7 +655,11 @@ def glb_issues(glb: bytes) -> list[str]:
         if not isinstance(texture, dict):
             issues.append(f"texture {texture_index} is not an object")
             continue
-        _expect_index(issues, f"texture {texture_index} source", texture.get("source"), len(images))
+        source = texture.get("source")
+        basis = (texture.get("extensions") or {}).get("KHR_texture_basisu")
+        if isinstance(basis, dict) and basis.get("source") is not None:
+            source = basis.get("source")
+        _expect_index(issues, f"texture {texture_index} source", source, len(images))
         if "sampler" in texture:
             _expect_index(issues, f"texture {texture_index} sampler", texture.get("sampler"), len(document.get("samplers") or []))
 

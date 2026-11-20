@@ -58,8 +58,8 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-42\0"
-_BNTX_VERSION = b"bntx-5\0"
+_CACHE_VERSION = b"models-43\0"
+_BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
 _TERRAIN = (0.36, 0.45, 0.28, 1.0)
@@ -102,6 +102,7 @@ def _converter_files() -> tuple[Path, ...]:
         root / "formats" / "swizzle.py",
         root / "formats" / "terrain.py",
         root / "formats" / "gltf.py",
+        root / "formats" / "gpu.py",
         root / "formats" / "meshopt.py",
         root.parent / "frontend" / "tools" / "meshopt-worker.mjs",
     )
@@ -601,9 +602,12 @@ def _write_bwtx(path: Path, decoded: list) -> None:
         rgba = image.rgba or b""
         payload += struct.pack("<IIIIII", image.width, image.height, image.fmt, image.tile, image.block_height, len(rgba))
         payload += rgba
+        blocks = getattr(image, "blocks", b"") or b""
+        payload += struct.pack("<HHHI", getattr(image, "block_w", 0), getattr(image, "block_h", 0), getattr(image, "bytes_per", 0), len(blocks))
+        payload += blocks
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(b"BWTX" + struct.pack("<H", 1) + zlib.compress(bytes(payload), 1))
+    tmp.write_bytes(b"BWTX" + struct.pack("<H", 2) + zlib.compress(bytes(payload), 1))
     os.replace(tmp, path)
 
 
@@ -617,7 +621,10 @@ def _read_bwtx(path: Path) -> list | None:
         return None
     try:
         blob = path.read_bytes()
-        if blob[:4] != b"BWTX" or struct.unpack_from("<H", blob, 4)[0] != 1:
+        if blob[:4] != b"BWTX":
+            return None
+        version = struct.unpack_from("<H", blob, 4)[0]
+        if version not in (1, 2):
             return None
         payload = zlib.decompress(blob[6:])
         count = struct.unpack_from("<I", payload, 0)[0]
@@ -634,6 +641,13 @@ def _read_bwtx(path: Path) -> list | None:
             at += 24
             rgba = payload[at : at + size]
             at += size
+            blocks = b""
+            block_w = block_h = bytes_per = 0
+            if version == 2 and at + 10 <= len(payload):
+                block_w, block_h, bytes_per, block_size = struct.unpack_from("<HHHI", payload, at)
+                at += 10
+                blocks = payload[at : at + block_size]
+                at += block_size
             found.append(
                 Texture(
                     name=name,
@@ -646,6 +660,10 @@ def _read_bwtx(path: Path) -> list | None:
                     tile=tile,
                     swizzle=swizzle,
                     block_height=block_height,
+                    blocks=bytes(blocks),
+                    block_w=block_w,
+                    block_h=block_h,
+                    bytes_per=bytes_per,
                 )
             )
         return found
@@ -668,10 +686,15 @@ _IMG_MEM: dict[str, bytes] = {}
 _IMG_ORDER: list[str] = []
 
 
-def _encode_cached(image, alpha: str) -> bytes:
-    """JPEG or PNG for this image, reused when another model shares the pixels."""
+def _encode_cached(image, alpha: str, gpu: bool = False) -> bytes:
+    """JPEG, PNG, or a GPU container. The same pixels are not encoded twice."""
+    from ocarina_forge.formats.gpu import gpu_image
+
     token = hashlib.sha256(
-        _BNTX_VERSION + struct.pack("<II", image.width, image.height) + (alpha or "opaque").encode() + image.rgba
+        _BNTX_VERSION
+        + struct.pack("<IIB", image.width, image.height, 1 if gpu else 0)
+        + (alpha or "opaque").encode()
+        + image.rgba
     ).hexdigest()
     hit = _IMG_MEM.get(token)
     if hit is not None:
@@ -682,10 +705,12 @@ def _encode_cached(image, alpha: str) -> bytes:
             stored = path.read_bytes()
         except OSError:
             stored = b""
-        if stored[:2] in (b"\xff\xd8", b"\x89P"):
+        if stored[:4] == b"OCFG" or stored[:2] in (b"\xff\xd8", b"\x89P"):
             _remember_img(token, stored)
             return stored
-    encoded, _mime = encode_albedo(image.width, image.height, image.rgba, alpha)
+    encoded = gpu_image(image, alpha) if gpu else None
+    if not encoded:
+        encoded, _mime = encode_albedo(image.width, image.height, image.rgba, alpha)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(encoded)
@@ -1016,7 +1041,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 png = png_for.get(id(image))
                 if png is None:
                     # A terra array layer is stored as PNG. Opaque JPEG is for ordinary albedos.
-                    png = _encode_cached(image, "png" if part.wrap == "repeat" else part.alpha)
+                    png = _encode_cached(image, "png" if part.wrap == "repeat" else part.alpha, gpu=True)
                     png_for[id(image)] = png
                     if id(image) not in seen_images:
                         texture_count += 1

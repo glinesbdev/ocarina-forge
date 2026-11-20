@@ -3,23 +3,25 @@
  * The Python converter keeps this process alive so a scene does not start Node once per mesh.
  */
 import { NodeIO } from "@gltf-transform/core";
-import { EXTMeshoptCompression, KHRMaterialsUnlit } from "@gltf-transform/extensions";
+import { EXTMeshoptCompression, KHRMaterialsUnlit, KHRTextureBasisu } from "@gltf-transform/extensions";
 import { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } from "meshoptimizer";
 
 await MeshoptSimplifier.ready;
 await MeshoptEncoder.ready;
 await MeshoptDecoder.ready;
 
+const textureExtensions = [EXTMeshoptCompression, KHRMaterialsUnlit, KHRTextureBasisu];
 const readIO = new NodeIO()
-  .registerExtensions([EXTMeshoptCompression, KHRMaterialsUnlit])
+  .registerExtensions(textureExtensions)
   .registerDependencies({ "meshopt.decoder": MeshoptDecoder });
 const writeIO = new NodeIO()
-  .registerExtensions([EXTMeshoptCompression, KHRMaterialsUnlit])
+  .registerExtensions(textureExtensions)
   .registerDependencies({ "meshopt.encoder": MeshoptEncoder, "meshopt.decoder": MeshoptDecoder });
-const plainIO = new NodeIO().registerExtensions([KHRMaterialsUnlit]);
+const plainIO = new NodeIO().registerExtensions([KHRMaterialsUnlit, KHRTextureBasisu]);
 
-// KTX2 is not applied. The current Basis encoder writes files that three's
-// transcoder turns into an empty image, so a cached texture would draw black.
+// Albedo images may be image/ktx2. The bytes are a KTX2 of BC1, BC3, or BC7
+// with a JPEG or PNG after it (OCFG). They are copied through. Do not transcode
+// them: a Basis file (vkFormat 0) decoded empty in three r170.
 // Geometry is compressed without quantizing. Positions and TEXCOORD stay
 // float32, including UVs outside 0..1. Do not run quantize(): a normalized
 // uint16 texcoord squashes a tiled chart (a roof at -3..5) into the unit square.

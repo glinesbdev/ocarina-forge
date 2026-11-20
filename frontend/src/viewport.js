@@ -4,6 +4,7 @@ import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { formatFor, readKtx2, splitPacked, textureSupport } from "./gpu-texture.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
@@ -142,7 +143,47 @@ export async function createViewport(host, hooks) {
   loader.setMeshoptDecoder(MeshoptDecoder);
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
   ktx2Loader.detectSupport(renderer);
-  loader.setKTX2Loader(ktx2Loader);
+  const gpuCaps = textureSupport(renderer.getContext());
+  loader.setKTX2Loader({
+    parse(buffer, onLoad, onError) {
+      try {
+        const packed = splitPacked(buffer);
+        const info = readKtx2(packed.ktx);
+        const format = info && formatFor(info.vkFormat, gpuCaps);
+        if (format) {
+          const texture = new THREE.CompressedTexture(
+            [{ data: info.data, width: info.width, height: info.height }],
+            info.width,
+            info.height,
+            format,
+          );
+          texture.needsUpdate = true;
+          texture.minFilter = THREE.LinearFilter;
+          texture.magFilter = THREE.LinearFilter;
+          texture.generateMipmaps = false;
+          texture.colorSpace = THREE.SRGBColorSpace;
+          texture.flipY = false;
+          onLoad(texture);
+          return;
+        }
+        if (packed.fallback && packed.fallback.length && (!info || info.vkFormat !== 0) && typeof createImageBitmap === "function") {
+          createImageBitmap(new Blob([packed.fallback]), { imageOrientation: "none", premultiplyAlpha: "none" }).then((image) => {
+            const texture = new THREE.Texture(image);
+            texture.needsUpdate = true;
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.flipY = false;
+            onLoad(texture);
+          }, onError);
+          return;
+        }
+      } catch (error) {
+        if (onError) onError(error);
+        return;
+      }
+      // vkFormat 0 is Basis. three's transcoder is the retry for that file.
+      ktx2Loader.parse(buffer, onLoad, onError);
+    },
+  });
   const templateCache = new Map();
   const modelRequests = new Map();
   const GLB_SLOTS = 8;

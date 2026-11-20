@@ -52,7 +52,17 @@ Check: open a scene with a heightmap, quit, pull this build, and open it again. 
 
 ## Shared texture cache
 
-A decoded BNTX is stored under its Tex path and the decoder version, not only under a hash of that one model's copy of the bytes. Castle bricks that many actors name are decoded once. The next model reads `bntx/*.bwtx`. The in-memory cache is still per process, so another worker hits the file. An embedded texture with no path keeps the blob hash.
+A decoded BNTX is stored under its Tex path and the decoder version, not only under a hash of that one model's copy of the bytes. Castle bricks that many actors name are decoded once. The next model reads `bntx/*.bwtx`. The in-memory cache is still per process, so another worker hits the file. An embedded texture with no path keeps the blob hash. The file also keeps the linear blocks (cache `bntx-6`) so a later encode can upload BC1, BC3, or BC7 without decoding them again.
+
+## GPU textures
+
+An albedo in the glb is `image/ktx2` with `KHR_texture_basisu`. The bytes are a small container: a KTX2 of the blocks, then the JPEG or PNG. three r170's KTX2 loader raw-uploads only uncompressed formats, ASTC 6x6, and one float ASTC. BC1 and BC7 throw `Unsupported vkFormat`. A Basis file is vkFormat 0, and that is the transcoder path that came back as an empty image. This machine has no basisu or toktx binary, so UASTC and ETC1S were not encoded and decoded again. The files we write use a real vkFormat and are not Basis.
+
+The view uploads the blocks with `CompressedTexture` when the GPU has the matching extension: `WEBGL_compressed_texture_s3tc` for BC1 and BC3, `EXT_texture_compression_bptc` for BC7, `WEBGL_compressed_texture_astc` for ASTC. Native BC1, BC3, and BC7 from the dump are copied through. ASTC is re-encoded to BC7 mode 6, because a desktop GPU usually has BPTC and not ASTC. A swizzle pass that had to change the footprint encodes from the decoded pixels. Normals and ORM stay PNG, so a colour block format is not applied to data textures.
+
+Without the extension, the trailing JPEG or PNG is decoded with `createImageBitmap`, off the main thread. A vkFormat of 0 still goes to three's Basis transcoder under `/basis/`. Meshopt still compresses the geometry and copies the image bytes through.
+
+The glb prefix is `models-43` and decoded images are `bntx-6`, so the first open after this build misses both caches. The sample Kokiri walk on this machine, one core, is 16 models, 2 converted, 76.4 ms convert, and 0.4 ms texture the first time. The second run is 2 cache hits and 0 ms. That is server time. There is no display GPU here, so the browser upload is not in that number. Retail Kokiri and Hyrule Castle are not in this checkout. Time them with the warm command in Stream timings: the first run is cold, the second is warm, and Stats shows `conv`, `tex`, `dl`, and `up`.
 
 ## Converter cores
 
@@ -75,7 +85,7 @@ Behavior layout is a depth walk. 160 nodes (the cap the panel draws) took 0.2 ms
 
 Search over 8,000 actors took 0.16 ms to list and 0.02 ms for a query. That stays on the keystroke.
 
-BC and ASTC decode, zstd, and pack reads run in the server process when a model or a scene is built. The browser receives PNG, JPEG, and meshopt glbs. A KTX2 client transcoder was already rejected (three r170 returns an empty image). Terrain atlases and LOD meshes are built at import and cached. There is no client-side copy of that work to move.
+BC and ASTC decode, zstd, and pack reads run in the server process when a model or a scene is built. Albedo arrives as a GPU block image (see GPU textures) with a JPEG or PNG behind it. Normals, ORM, and the terrain atlas stay PNG or JPEG. Meshopt glbs are unchanged. Terrain atlases and LOD meshes are built at import and cached.
 
 ## Stream timings
 
