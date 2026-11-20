@@ -219,34 +219,21 @@ def audit(dump, *, workers: int | None = None) -> dict:
 
 
 def render_text(report: dict) -> str:
+    """One line per sampler-role signature. ``--json`` is the full split."""
     lines = [
         "material-audit",
-        f"models {report.get('models') or 0}",
-        f"materials {report.get('materials') or 0}",
-        f"failed {len(report.get('failed') or [])}",
+        f"models {report.get('models') or 0}  materials {report.get('materials') or 0}  "
+        f"groups {len(report.get('groups') or [])}  failed {len(report.get('failed') or [])}",
     ]
     groups = report.get("groups") or []
     if not groups:
         lines.append("no materials")
     for group in groups:
-        tags = " · ".join(group.get("tags") or [])
-        label = group.get("label") or "(no samplers)"
-        lines.append("")
+        signature = group.get("signature") or "(no samplers)"
+        splits = _split_phrase(group.get("splits") or {})
         lines.append(
-            f"{group.get('count') or 0} materials  {group.get('modelCount') or 0} models  "
-            f"{group.get('render') or 'opaque'}  {label}"
+            f"{group.get('count') or 0}  {group.get('modelCount') or 0} models  {signature}{splits}"
         )
-        if tags:
-            lines.append(f"  tags {tags}")
-        attributes = " ".join(group.get("attributes") or []) or "(none)"
-        lines.append(f"  attributes {attributes}")
-        if group.get("renderState"):
-            lines.append(f"  render state {group['renderState']}")
-        examples = group.get("examples") or []
-        if examples:
-            shown = ", ".join(_example(item) for item in examples)
-            lines.append(f"  examples {shown}")
-    lines.append("")
     lines.append("unhandled")
     flags = report.get("unhandled") or []
     if not flags:
@@ -254,25 +241,26 @@ def render_text(report: dict) -> str:
     for flag in flags:
         name = f" {flag['name']}" if flag.get("name") else ""
         lines.append(f"  {flag.get('count') or 0}  {flag.get('kind') or ''}{name}")
-        examples = flag.get("examples") or []
-        if examples:
-            lines.append("    " + ", ".join(_example(item) for item in examples[:_EXAMPLE_LIMIT]))
     failed = report.get("failed") or []
     if failed:
-        lines.append("")
         lines.append("failed")
-        for item in failed[:20]:
+        for item in failed[:8]:
             lines.append(f"  {item.get('file') or '?'}  {item.get('error') or ''}")
-        if len(failed) > 20:
-            lines.append(f"  ... {len(failed) - 20} more")
+        if len(failed) > 8:
+            lines.append(f"  ... {len(failed) - 8} more")
     lines.append("")
     return "\n".join(lines)
 
 
-def _example(item: dict) -> str:
-    material = item.get("material") or "(unnamed)"
-    model = item.get("model") or ""
-    return f"{material} ({model})" if model else material
+def _split_phrase(splits: dict) -> str:
+    parts = []
+    for reason in ("samplers", "attributes", "render", "tags"):
+        rows = splits.get(reason) or []
+        if len(rows) > 1:
+            parts.append(f"{reason} {len(rows)}")
+    if not parts:
+        return ""
+    return "  splits on " + ", ".join(parts)
 
 
 def _model_files(folder: Path) -> list[Path]:
@@ -377,7 +365,7 @@ def _read_one(job: dict, dicts) -> dict:
 
 
 def _report(parsed: list[dict], stems: set[str]) -> dict:
-    groups: dict[tuple, dict] = {}
+    groups: dict[str, dict] = {}
     flags: dict[tuple, dict] = {}
     failed = []
     model_count = 0
@@ -392,26 +380,26 @@ def _report(parsed: list[dict], stems: set[str]) -> dict:
             for material in model.get("materials") or []:
                 material_count += 1
                 record = _classify(material, stems)
-                key = record["key"]
-                group = groups.get(key)
+                signature = record["signature"]
+                group = groups.get(signature)
                 if group is None:
                     group = {
+                        "signature": signature,
                         "count": 0,
                         "models": set(),
-                        "label": record["label"],
-                        "tags": record["tags"],
-                        "attributes": record["attributes"],
-                        "render": record["render"],
-                        "renderState": record["renderState"],
                         "examples": [],
+                        "_splits": {"samplers": {}, "attributes": {}, "render": {}, "tags": {}},
                     }
-                    groups[key] = group
+                    groups[signature] = group
                 group["count"] += 1
                 group["models"].add(item.get("file") or model_name)
                 if len(group["examples"]) < _EXAMPLE_LIMIT:
                     group["examples"].append(
                         {"material": material.get("name") or "", "model": model_name, "file": item.get("file") or ""}
                     )
+                for reason, value in record["split"].items():
+                    bucket = group["_splits"][reason]
+                    bucket[value] = bucket.get(value, 0) + 1
                 for flag in record["flags"]:
                     slot = flags.get(flag)
                     if slot is None:
@@ -422,9 +410,16 @@ def _report(parsed: list[dict], stems: set[str]) -> dict:
                         slot["examples"].append(
                             {"material": material.get("name") or "", "model": model_name, "file": item.get("file") or ""}
                         )
-    ordered = sorted(groups.values(), key=lambda row: (-row["count"], row["label"]))
+    ordered = sorted(groups.values(), key=lambda row: (-row["count"], row["signature"]))
     for group in ordered:
         group["modelCount"] = len(group.pop("models"))
+        group["splits"] = {
+            reason: [
+                {"value": value, "count": count}
+                for value, count in sorted(bucket.items(), key=lambda item: (-item[1], item[0]))
+            ]
+            for reason, bucket in group.pop("_splits").items()
+        }
     unhandled = sorted(flags.values(), key=lambda row: (-row["count"], row["kind"], row["name"]))
     return {
         "models": model_count,
@@ -437,44 +432,88 @@ def _report(parsed: list[dict], stems: set[str]) -> dict:
 
 def _classify(material: dict, stems: set[str]) -> dict:
     binds = material.get("binds") or []
-    samplers = [str(item.get("sampler") or "") for item in binds]
-    shown = [name for name in samplers if name]
-    attributes = tuple(material.get("vertexAttributes") or [])
+    shown = [str(item.get("sampler") or "") for item in binds if item.get("sampler")]
+    attributes = " ".join(material.get("vertexAttributes") or []) or "(none)"
     alpha = material.get("alpha") or "opaque"
     state = material.get("renderState") or ""
     sided = "double" if material.get("doubleSided") else "single"
     render = alpha if not state or state == alpha else f"{alpha} {state}"
+    render = f"{render} {sided}"
     tags = _tags(material, shown)
-    label = _label(shown, tags)
-    flags = _flags(material, stems)
-    key = (tuple(shown), attributes, render, sided, tuple(tags), label)
     return {
-        "key": key,
-        "label": label,
-        "tags": tags,
-        "attributes": list(attributes),
-        "render": f"{render} {sided}",
-        "renderState": state,
-        "flags": flags,
+        "signature": _signature(shown),
+        "split": {
+            "samplers": "+".join(shown) if shown else "(none)",
+            "attributes": attributes,
+            "render": render,
+            "tags": " · ".join(tags) if tags else "(none)",
+        },
+        "flags": _flags(material, stems),
     }
 
 
-def _label(samplers: list[str], tags: list[str]) -> str:
-    if samplers == ["_a0"] or samplers == ["a0"]:
-        head = "_a0 only"
-    elif "blend" in tags:
-        head = "_a0+_a1 blend"
-        extra = [name for name in samplers if _token(name) not in {"a0", "a1"}]
-        if extra:
-            head += " " + "+".join(extra)
-    else:
-        head = "+".join(samplers) if samplers else "(no samplers)"
-    rest = [tag for tag in tags if tag not in {"blend"}]
-    if head == "_a0 only":
-        rest = [tag for tag in rest if tag != "a0"]
-    if rest:
-        head += " · " + " · ".join(rest)
-    return head
+_ROLE_ORDER = (
+    "albedo",
+    "normal",
+    "roughness",
+    "metalness",
+    "ao",
+    "rah",
+    "rmh",
+    "emissive",
+    "bake",
+    "fx",
+    "thickness",
+    "gradient",
+    "slt",
+    "terrain",
+)
+
+
+def _signature(samplers: list[str]) -> str:
+    """The role set, so ``_a0+_n0+_rgh0+bake0+bake1`` is one group whatever the attributes are."""
+    roles = []
+    for name in samplers:
+        role = _sampler_role(name)
+        if role not in roles:
+            roles.append(role)
+    roles.sort(key=lambda role: (_ROLE_ORDER.index(role) if role in _ROLE_ORDER else len(_ROLE_ORDER), role))
+    return "+".join(roles) if roles else "(no samplers)"
+
+
+def _sampler_role(name: str) -> str:
+    token = _token(name)
+    if token.startswith("bake"):
+        return "bake"
+    if token.startswith("rgh") or token.startswith("rough"):
+        return "roughness"
+    if token.startswith("rah"):
+        return "rah"
+    if token.startswith("rmh"):
+        return "rmh"
+    if token.startswith("mt") or token.startswith("metal"):
+        return "metalness"
+    if token.startswith("ao"):
+        return "ao"
+    if token.startswith(("nrm", "normal")) or (token.startswith("n") and token[1:].isdigit()) or token == "n":
+        return "normal"
+    if token.startswith(("emiss", "emit", "em", "ec")):
+        return "emissive"
+    if token.startswith("fx"):
+        return "fx"
+    if token.startswith("th"):
+        return "thickness"
+    if token.startswith("gn"):
+        return "gradient"
+    if token.startswith("slt"):
+        return "slt"
+    if token in {"ta", "tc"}:
+        return "terrain"
+    if token.startswith("a") and (token[1:].isdigit() or token.startswith(("alb", "albedo"))):
+        return "albedo"
+    if token in {"alb", "albedo", "basecolor", "diffuse", "color", "base"}:
+        return "albedo"
+    return token or "other"
 
 
 def _tags(material: dict, samplers: list[str]) -> list[str]:
@@ -530,7 +569,7 @@ def _flags(material: dict, stems: set[str]) -> list[tuple[str, str]]:
             add("unused sampler", sampler)
         elif sampler and _unhandled(sampler):
             add("unknown sampler", sampler)
-        if texture and _stem(texture).lower() not in stems:
+        if texture and not _neutral_texture(texture) and _stem(texture).lower() not in stems:
             add("missing texture", texture)
     if _unparsed(material):
         add("unparsed assign", "")
@@ -572,6 +611,12 @@ def _unparsed(material: dict) -> bool:
     if blocks or material.get("binds"):
         return True
     return False
+
+
+def _neutral_texture(texture: str) -> bool:
+    """CmnTex_BakeLightDefault and Dummy* are placeholders, not missing files."""
+    stem = _stem(texture).lower()
+    return "default" in stem or "dummy" in stem
 
 
 def _token(name: str) -> str:
