@@ -140,6 +140,51 @@ def entry_label(raw: str) -> str:
     return friendly_name(text)[0]
 
 
+def _field(name: str, value, type_name: str, *, editable: bool = True, options: list | None = None) -> dict:
+    plain = _plain(value)
+    kind = _field_type(name, type_name)
+    return {
+        "name": name,
+        "value": plain,
+        "base": plain,
+        "type": kind,
+        "editable": editable and kind in ("bool", "int", "float", "string", "flag", "enum"),
+        "options": list(options or []),
+    }
+
+
+def _field_type(name: str, type_name: str) -> str:
+    key = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    if key.endswith("flag") or "gamedata" in key or key in ("databool", "conditionflag"):
+        return "flag"
+    mapped = {"bool": "bool", "int": "int", "float": "float", "string": "string", "enum": "enum", "flag": "flag"}
+    return mapped.get(type_name, "string")
+
+
+def schedule_builtin_label(name: str) -> str | None:
+    """Dummy and game__bsa__ / game__aischedule__ names are references, not missing files."""
+    text = (name or "").replace("\\", "/").strip()
+    base = text.split("/")[-1]
+    folded = re.sub(r"[^a-z0-9]", "", base.lower())
+    if not folded:
+        return None
+    if folded == "dummy" or folded.startswith("dummygamecomponentaischeduleparam"):
+        return "Dummy schedule"
+    if "gamebsa" not in folded and "gameaischedule" not in folded:
+        return None
+    for token, label in (
+        ("threatreaction", "Threat reaction"),
+        ("moveto", "Move to"),
+        ("checktimer", "Check timer"),
+        ("checkstate", "Check state"),
+        ("specialparam", "Special param"),
+    ):
+        if token in folded:
+            return label
+    tail = re.sub(r"(?i)^aischedule", "", base.split("__")[-1])
+    return friendly_name(tail or base)[0]
+
+
 def audit_npc_behavior(dump) -> dict:
     """Count undecoded node types across every Npc_ pack."""
     packs = [name for name in dump.actor_names() if name.startswith("Npc_")]
@@ -535,21 +580,28 @@ def _ainb(path: str, data: bytes) -> dict:
 def _ainb_fields(node) -> list[dict]:
     fields = []
     for type_name, inputs, _outputs in _PARAM_LISTS:
+        if type_name in ("vec3", "ptr"):
+            continue
         for param in getattr(node.params, inputs, []) or []:
-            if _param_sources(param) and any(int(getattr(src, "src_node_index", -1)) >= 0 for src in _param_sources(param)):
-                continue
+            wired = _param_sources(param) and any(int(getattr(src, "src_node_index", -1)) >= 0 for src in _param_sources(param))
             value = getattr(param, "default_value", None)
-            if value in (None, ""):
+            if value is None and not wired:
                 continue
-            fields.append({"name": str(getattr(param, "name", "") or type_name), "value": _plain(value)})
+            fields.append(
+                _field(str(getattr(param, "name", "") or type_name), "" if value is None else value, type_name, editable=not wired)
+            )
     props = getattr(node, "properties", None)
     if props is not None:
         for list_name in _PROP_LISTS:
+            type_name = list_name.split("_", 1)[0]
+            if type_name in ("vec3f", "ptr"):
+                continue
+            mapped = {"int": "int", "bool": "bool", "float": "float", "string": "string"}.get(type_name, "string")
             for prop in getattr(props, list_name, []) or []:
                 value = getattr(prop, "default_value", None)
-                if value in (None, ""):
+                if value is None:
                     continue
-                fields.append({"name": str(getattr(prop, "name", "") or "property"), "value": _plain(value)})
+                fields.append(_field(str(getattr(prop, "name", "") or "property"), value, mapped))
     return fields
 
 
@@ -611,12 +663,13 @@ def _schedule(path: str, data: bytes) -> dict:
             name=f"When {flag}",
             known=True,
             decoded=True,
-            fields=[{"name": "ConditionFlag", "value": flag}],
+            fields=[_field("ConditionFlag", flag, "flag")],
         )
         nodes.append(row_node)
         actions = row.get("ActionSchedule") if isinstance(row.get("ActionSchedule"), list) else []
         for slot, action in enumerate(actions):
             for name in _action_names(action):
+                builtin = schedule_builtin_label(name)
                 label, known = friendly_name(name)
                 child = _node(
                     kind="schedule",
@@ -624,9 +677,11 @@ def _schedule(path: str, data: bytes) -> dict:
                     index=index,
                     key=f"as:{slot}:{name}",
                     raw=name,
-                    name=label if known else f"Play {name}",
+                    name=builtin or (label if known else f"Play {name}"),
                     known=True,
                     decoded=True,
+                    type_name="builtin" if builtin else "Action",
+                    fields=[_field("Setting", name, "string")],
                 )
                 child["id"] = f"schedule:{path}#{index}:as:{slot}:{name}"
                 out_pin = _pin(row_node["id"], "out", slot, "then", "flow")
@@ -649,7 +704,7 @@ def _schedule(path: str, data: bytes) -> dict:
                 name=f"Talk {event_name}",
                 known=True,
                 decoded=True,
-                fields=[{"name": "EventName", "value": event_name}],
+                fields=[_field("EventName", event_name, "string")],
             )
             hook["id"] = f"schedule:{path}#{index}:hook:{slot}:{event_name}"
             out_pin = _pin(row_node["id"], "out", 20 + slot, "hook", "flow")
@@ -735,7 +790,7 @@ def _event(path: str, data: bytes) -> dict:
             decoded=True,
             type_name="Entry",
             entry=True,
-            fields=[{"name": "entry", "value": label}],
+            fields=[_field("entry", label, "string", editable=False)],
         )
         built["id"] = f"event:{path}#entry:{label}"
         nodes.append(built)
@@ -774,15 +829,32 @@ def _event_label(event) -> tuple[str, str, list[dict], bool]:
             friendly = f"Choose {friendly}"
     else:
         friendly, known = structural.get(kind, kind), True
-    fields = [{"name": "event", "value": str(getattr(event, "name", "") or "")}]
+    fields = [_field("event", str(getattr(event, "name", "") or ""), "string", editable=False)]
     if action:
-        fields.append({"name": "action", "value": action})
+        fields.append(_field("action", action, "string"))
+    params = getattr(getattr(data, "params", None), "data", None)
+    if isinstance(params, dict):
+        for key, value in params.items():
+            if isinstance(value, (list, dict)):
+                continue
+            fields.append(_field(str(key), value, _py_field_type(value)))
     flow_name = str(getattr(data, "res_flowchart_name", "") or "")
     entry_name = str(getattr(data, "entry_point_name", "") or "")
     if flow_name or entry_name:
-        fields.append({"name": "subflow", "value": f"{flow_name}:{entry_name}".strip(":")})
+        fields.append(_field("flowchart", flow_name, "string"))
+        fields.append(_field("entry", entry_name, "string"))
         friendly = f"Sub flow {entry_name or flow_name}"
     return raw, friendly, fields, True
+
+
+def _py_field_type(value) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    return "string"
 
 
 def _event_next(data) -> list[tuple[int, str]]:
@@ -962,6 +1034,10 @@ def _drain(dump, found: list[dict], seen: set[str], logged: set[str], trace: lis
 def _try_reference(dump, found, seen, logged, trace, queue, role: str, text: str, why: str) -> None:
     if _reference_only(text):
         trace.append(f"reference {text} reference only ({why})")
+        return
+    builtin = schedule_builtin_label(text)
+    if builtin:
+        trace.append(f"reference {text} known reference {builtin} ({why})")
         return
     candidates = _candidates(text, role)
     if candidates and candidates[0] in seen:
@@ -1260,6 +1336,35 @@ def _is_schedule(document) -> bool:
     )
 
 
+def _schedule_paths(text: str) -> list[str]:
+    """Filenames such as Npc_Hylia_Talon_Child.game__component__AIScheduleParam.bgyml live in one folder."""
+    raw = text.replace("\\", "/").strip().lstrip("/")
+    if raw.startswith("Work/"):
+        raw = raw[len("Work/") :]
+    base = raw.split("/")[-1]
+    low = base.lower()
+    if "aischeduleparam" not in low and "aischedule" not in low:
+        return []
+    names = [f"Component/AIScheduleParam/{base}"]
+    if low.endswith(".gyml"):
+        names.append(f"Component/AIScheduleParam/{base[:-5]}.bgyml")
+        names.append(f"Component/AIScheduleParam/{base[:-5]}.bgyml.zs")
+    if not low.endswith(".zs"):
+        names.append(f"Component/AIScheduleParam/{base}.zs")
+    stem = base
+    for suffix in (".bgyml.zs", ".bgyml", ".gyml", ".zs"):
+        if stem.lower().endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    marker = ".game__component__aischeduleparam"
+    if stem.lower().endswith(marker):
+        stem = stem[: -len(marker)]
+    if stem and stem != base:
+        names.append(f"Component/AIScheduleParam/{stem}.game__component__AIScheduleParam.bgyml")
+        names.append(f"Component/AIScheduleParam/{stem}.game__component__AIScheduleParam.bgyml.zs")
+    return names
+
+
 def _candidates(text: str, role: str) -> list[str]:
     raw = text.replace("\\", "/").strip().lstrip("/")
     if raw.startswith("Work/"):
@@ -1285,6 +1390,8 @@ def _candidates(text: str, role: str) -> list[str]:
         if raw.endswith(".evfc"):
             add(raw[:-5] + ".bfevfl")
             add(raw[:-5] + ".bfevfl.zs")
+        for extra in _schedule_paths(raw):
+            add(extra)
         return names
     base = raw.split("/")[-1]
     if base.endswith(".zs"):
@@ -1308,6 +1415,8 @@ def _candidates(text: str, role: str) -> list[str]:
     if role in ("schedule", ""):
         add(f"Component/AIScheduleParam/{base}.game__component__AIScheduleParam.bgyml")
         add(f"Component/AIScheduleParam/{base}.game__component__AIScheduleParam.bgyml.zs")
+        for extra in _schedule_paths(raw):
+            add(extra)
     return names
 
 

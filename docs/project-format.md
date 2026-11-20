@@ -8,6 +8,7 @@ my-mod/
   scenes/<Area>/<Scene>.yaml
   text/          # reserved
   events/        # reserved
+  behaviors/     # set-field ops for one actor graph
   tables/        # reserved
   build/         # export output, not part of the source
 ```
@@ -37,7 +38,7 @@ domains:
 
 `target.version` is the game the diffs were written against. Export warns when it is not `1.1.1`, because the size-table rule was checked against that version.
 
-`domains` lists the kinds of patch the project may contain. A format 1 project exports `scenes` and stores `text`, `events`, and `tables` for a later editor. See `ocarina_forge/domains.py`.
+`domains` lists the kinds of patch the project may contain. A format 1 project exports `scenes` and stores `text`, `events`, and `tables` for a later editor. See `ocarina_forge/domains.py`. `behaviors/` is the behavior editor's op list. It is not one of those reserved domains.
 
 `engine` defaults to `scenes`. `after-ocarina` builds the project with the vendored pipeline instead of the scene rewriter. That project root is the pipeline's `src` directory:
 
@@ -56,6 +57,29 @@ after-the-ocarina/
 `tables/` is still the name a visual RSDB editor would write. The pipeline reads `rsdb/` when that folder exists. Scene files in an engine project are recipes, not actor-hash diffs, unless they actually contain an `actors` map. The viewport highlights a recipe's banc with an open dot. Actor diffs, when a project has them, stay the filled dot and are not merged into the After the Ocarina build.
 
 Some of those recipes have no visual editor yet. They are advanced patches: the YAML is the source, and the build produces the romfs. That includes event flows, the rumor builder, the boot hook, GameDataList, RSDB rows, AINB logic, AIScheduleParam, the stone clones, and the tapestry. The scene editor still owns ordinary actor diffs for a format 1 project.
+
+## Behavior edits
+
+One file per actor class:
+
+```text
+behaviors/Npc_Kokiri_Saria_Child.yaml
+```
+
+The dump's AINB, event flow, and schedule stay the base. The file stores `set field` ops. Each op names the node's stable id, the field, its type, and the new value. Setting the field back to the dump value removes the op. Undo replaces the whole list. Export writes the rebuilt file under `build/romfs` only after that format round-trips with no ops applied. A format that cannot round-trip keeps the ops and does not write the file.
+
+```yaml
+format: 1
+gyaml: Npc_Kokiri_Saria_Child
+ops:
+  - op: set field
+    id: "event:Event/EventFlow/Npc_Kokiri_Saria_Child.bfevfl.zs#0:Talk"
+    field: action
+    type: string
+    value: Demo_Talk
+```
+
+Connecting nodes and adding nodes are not written yet.
 
 ## Scene diffs
 

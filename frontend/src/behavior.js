@@ -189,6 +189,13 @@ export function renderBehavior(host, model) {
     layerButton("Friendly", "curated", model),
     layerButton("Raw", "raw", model),
   );
+  if (model.onExport && graph && graph.ops && graph.ops.length) {
+    const exp = document.createElement("button");
+    exp.type = "button";
+    exp.textContent = "Export";
+    exp.addEventListener("click", () => model.onExport());
+    bar.append(exp);
+  }
   host.append(bar);
   if (!graph.nodes || !graph.nodes.length) {
     const hint = document.createElement("p");
@@ -268,6 +275,7 @@ export function renderBehavior(host, model) {
     button.type = "button";
     button.className = "graph-node";
     if (!node.decoded) button.classList.add("is-undecoded");
+    if (node.edited) button.classList.add("is-edited");
     if (node.id === model.selectedId) button.classList.add("is-on");
     button.style.left = `${pos.x}px`;
     button.style.top = `${pos.y}px`;
@@ -286,8 +294,9 @@ export function renderBehavior(host, model) {
     canvas.append(button);
   }
   host.append(scroller);
-  const selected = view.nodes.find((node) => node.id === model.selectedId);
-  if (selected) host.append(detail(selected, graph));
+  const selected = (graph.nodes || []).find((node) => node.id === model.selectedId);
+  if (selected) host.append(detail(selected, graph, model));
+  if ((graph.diff || []).length) host.append(diffList(graph, model));
 }
 
 function fileList(graph, view, model) {
@@ -346,12 +355,12 @@ function layerButton(label, layer, model) {
   return button;
 }
 
-function detail(node, graph) {
+function detail(node, graph, model) {
   const wrap = document.createElement("div");
   wrap.className = "model-note";
   const title = document.createElement("div");
   title.className = "axis-label";
-  title.textContent = node.decoded ? node.name : "Undecoded";
+  title.textContent = node.edited ? `${node.decoded ? node.name : "Undecoded"} · edited` : node.decoded ? node.name : "Undecoded";
   wrap.append(title);
   const raw = document.createElement("p");
   raw.textContent = node.raw;
@@ -363,10 +372,15 @@ function detail(node, graph) {
     path.textContent = source.path;
     wrap.append(path);
   }
-  for (const field of node.fields || []) {
+  const editable = (node.fields || []).filter((field) => field.editable);
+  if (!editable.length) {
     const line = document.createElement("p");
-    line.textContent = `${field.name}: ${field.value}`;
+    line.className = "muted";
+    line.textContent = "This node has no editable params.";
     wrap.append(line);
+  }
+  for (const field of node.fields || []) {
+    wrap.append(fieldRow(node, field, model));
   }
   if (node.note) {
     const line = document.createElement("p");
@@ -378,6 +392,77 @@ function detail(node, graph) {
   ident.className = "muted hash";
   ident.textContent = node.id;
   wrap.append(ident);
+  return wrap;
+}
+
+function fieldRow(node, field, model) {
+  const row = document.createElement("label");
+  row.className = "field-row";
+  const name = document.createElement("span");
+  name.textContent = field.edited ? `${field.name} · edited` : field.name;
+  row.append(name);
+  if (!field.editable) {
+    const value = document.createElement("span");
+    value.className = "muted";
+    value.textContent = String(field.value ?? "");
+    row.append(value);
+    return row;
+  }
+  const commit = (value) => model.onField && model.onField(node, field, value);
+  if (field.type === "bool") {
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(field.value);
+    input.addEventListener("change", () => commit(input.checked));
+    row.append(input);
+    return row;
+  }
+  if (field.type === "enum" && (field.options || []).length) {
+    const select = document.createElement("select");
+    for (const option of field.options) {
+      const item = document.createElement("option");
+      item.value = String(option);
+      item.textContent = String(option);
+      if (String(option) === String(field.value)) item.selected = true;
+      select.append(item);
+    }
+    select.addEventListener("change", () => commit(select.value));
+    row.append(select);
+    return row;
+  }
+  const input = document.createElement("input");
+  input.type = field.type === "int" || field.type === "float" ? "number" : "text";
+  if (field.type === "float") input.step = "any";
+  input.value = field.value == null ? "" : String(field.value);
+  if (field.type === "flag") {
+    input.setAttribute("list", "flag-names");
+    input.placeholder = "Flag name";
+    input.addEventListener("focus", () => model.onFlags && model.onFlags(input));
+  }
+  input.addEventListener("change", () => commit(input.value));
+  row.append(input);
+  return row;
+}
+
+function diffList(graph, model) {
+  const wrap = document.createElement("div");
+  wrap.className = "behavior-diff";
+  const title = document.createElement("div");
+  title.className = "axis-label";
+  title.textContent = "Edits";
+  wrap.append(title);
+  for (const op of graph.diff || []) {
+    const row = document.createElement("p");
+    const node = (graph.nodes || []).find((item) => item.id === op.id);
+    row.textContent = `${node ? node.name : "Node"} · ${op.field} = ${op.value}`;
+    if (op.missing) row.textContent += " (node is gone)";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Revert";
+    button.addEventListener("click", () => model.onRevert && model.onRevert(op));
+    row.append(button);
+    wrap.append(row);
+  }
   return wrap;
 }
 

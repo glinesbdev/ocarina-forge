@@ -1106,6 +1106,10 @@ function undo() {
   if (!step) return;
   state.history = step.history;
   updateHistoryButtons();
+  if (step.entry.behavior) {
+    restoreBehavior(step.entry.gyaml, step.entry.before, previousHistory);
+    return;
+  }
   if (step.entry.local) {
     setCategory(step.entry.category, step.entry.before, { record: false });
     renderOutliner();
@@ -1124,6 +1128,10 @@ function redo() {
   if (!step) return;
   state.history = step.history;
   updateHistoryButtons();
+  if (step.entry.behavior) {
+    restoreBehavior(step.entry.gyaml, step.entry.after, previousHistory);
+    return;
+  }
   if (step.entry.local) {
     setCategory(step.entry.category, step.entry.after, { record: false });
     renderOutliner();
@@ -1132,6 +1140,21 @@ function redo() {
   }
   applyLocal(step.entry.shot);
   persistShot(step.entry.shot, { history: previousHistory, shot: step.scene });
+}
+
+async function restoreBehavior(gyaml, ops, previousHistory) {
+  try {
+    const graph = await api.putBehaviorOps({ gyaml, ops: ops || [] });
+    if (state.behavior && state.behavior.gyaml === gyaml) {
+      state.behavior = graph;
+      drawBehavior();
+    }
+    renderChanges();
+  } catch (error) {
+    state.history = previousHistory;
+    updateHistoryButtons();
+    toast(error.message);
+  }
 }
 
 function removeRecipe(actor) {
@@ -2530,7 +2553,86 @@ function drawBehavior() {
         input.setSelectionRange(end, end);
       }
     },
+    onField: (node, field, value) => saveBehaviorField(node, field, value),
+    onRevert: (op) => revertBehaviorField(op),
+    onExport: () => exportBehavior(),
+    onFlags: (input) => fillFlagList(input),
   });
+}
+
+async function saveBehaviorField(node, field, value) {
+  const gyaml = state.behavior && state.behavior.gyaml;
+  if (!gyaml) return;
+  if (!projectReady()) {
+    toast("Open a project first. Looking around does not write anything.");
+    openProjectDialog();
+    return;
+  }
+  const before = (state.behavior.ops || []).map((op) => ({ ...op }));
+  try {
+    const graph = await api.setBehaviorField({ gyaml, id: node.id, field: field.name, type: field.type, value });
+    state.behavior = graph;
+    state.history = pushEdit(state.history, {
+      label: `Set ${field.name} on ${node.name || node.raw}`,
+      behavior: true,
+      gyaml,
+      before,
+      after: graph.ops || [],
+    });
+    drawBehavior();
+    renderChanges();
+    updateHistoryButtons();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function revertBehaviorField(op) {
+  const gyaml = state.behavior && state.behavior.gyaml;
+  if (!gyaml) return;
+  const before = (state.behavior.ops || []).map((item) => ({ ...item }));
+  const node = (state.behavior.nodes || []).find((item) => item.id === op.id);
+  const field = node && (node.fields || []).find((item) => item.name === op.field);
+  if (!field) return;
+  await saveBehaviorField(node, { ...field, name: op.field, type: op.type || field.type }, field.base);
+  if (state.history.undo.length && state.history.undo[state.history.undo.length - 1].behavior) {
+    state.history.undo[state.history.undo.length - 1].label = `Revert ${op.field}`;
+    state.history.undo[state.history.undo.length - 1].before = before;
+  }
+}
+
+async function exportBehavior() {
+  const gyaml = state.behavior && state.behavior.gyaml;
+  if (!gyaml) return;
+  try {
+    const result = await api.exportBehavior(gyaml);
+    const lines = (result.files || []).map((file) => file.message);
+    toast(lines.join(" ") || "Nothing to export.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function fillFlagList(input) {
+  const query = input.value.trim();
+  if (query.length < 2) return;
+  let list = document.getElementById("flag-names");
+  if (!list) {
+    list = document.createElement("datalist");
+    list.id = "flag-names";
+    document.body.append(list);
+  }
+  try {
+    const result = await api.flags(query);
+    list.replaceChildren();
+    for (const name of result.names || []) {
+      const option = document.createElement("option");
+      option.value = name;
+      list.append(option);
+    }
+  } catch {
+    list.replaceChildren();
+  }
 }
 
 function openShortcuts() {

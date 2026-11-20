@@ -246,3 +246,155 @@ def test_behavior_audit_counts_unnamed_user_nodes(tmp_path):
 def test_friendly_names_leave_unknown_types_readable():
     assert friendly_name("HoldGameDataGetBool") == ("Read flag", True)
     assert friendly_name("") == ("Undecoded", False)
+
+
+def test_schedule_filenames_resolve_and_builtins_are_known_references(tmp_path):
+    from ocarina_forge.behavior import _schedule, sample_schedule_bytes, schedule_builtin_label
+
+    assert schedule_builtin_label("Dummy.game__component__AIScheduleParam.bgyml") == "Dummy schedule"
+    assert schedule_builtin_label("game__bsa__ActionSeq__AIScheduleMoveTo") == "Move to"
+    assert schedule_builtin_label("game__bsa__ActionSeq__AIScheduleThreatReaction") == "Threat reaction"
+    assert schedule_builtin_label("game__bsa__ConditionAIScheduleCheckTimer") == "Check timer"
+    assert schedule_builtin_label("game__bsa__ConditionAIScheduleCheckState") == "Check state"
+    assert schedule_builtin_label("game__aischedule__AIScheduleSpecialParam") == "Special param"
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    gyaml = "Npc_Hylia_Talon_Child"
+    filename = f"{gyaml}.game__component__AIScheduleParam.bgyml"
+    schedule = dump.romfs / "Component" / "AIScheduleParam" / filename
+    schedule.parent.mkdir(parents=True, exist_ok=True)
+    schedule.write_bytes(sample_schedule_bytes())
+    param = dumps(
+        {
+            "$type": "engine__actor__ActorParam",
+            "Name": gyaml,
+            "SharedSchedule": filename,
+            "Placeholder": "Dummy.game__component__AIScheduleParam.bgyml",
+            "Move": "game__bsa__ActionSeq__AIScheduleMoveTo",
+            "Threat": "game__bsa__ActionSeq__AIScheduleThreatReaction",
+            "Timer": "game__bsa__ConditionAIScheduleCheckTimer",
+            "State": "game__bsa__ConditionAIScheduleCheckState",
+            "Special": "game__aischedule__AIScheduleSpecialParam",
+        }
+    )
+    archive = pack({f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": param})
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(archive)
+
+    graph = load_actor_graph(dump, gyaml=gyaml)
+    paths = {source["path"] for source in graph["sources"]}
+    assert f"Component/AIScheduleParam/{filename}" in paths
+    assert any(node["name"] == "When ChildDay" and node["decoded"] for node in graph["nodes"])
+    raws = {node["raw"] for node in graph["nodes"] if not node["decoded"]}
+    assert filename not in raws
+    assert "Dummy.game__component__AIScheduleParam.bgyml" not in raws
+    text = "\n".join(graph["trace"])
+    for label in ("Dummy schedule", "Move to", "Threat reaction", "Check timer", "Check state", "Special param"):
+        assert f"known reference {label}" in text
+    assert "missing" not in text
+
+    played = _schedule(
+        "Component/AIScheduleParam/sample.bgyml",
+        dumps({"ConditionalSchedule": [{"ConditionFlag": "Always", "ActionSchedule": [{"Setting": "game__bsa__ActionSeq__AIScheduleMoveTo"}]}]}),
+    )
+    move = next(node for node in played["nodes"] if node["raw"] == "game__bsa__ActionSeq__AIScheduleMoveTo")
+    assert move["name"] == "Move to"
+    assert move["type"] == "builtin"
+    assert move["decoded"] is True
+
+
+def test_set_field_saves_an_op_and_export_round_trips(tmp_path):
+    from ainb import AINB
+
+    from ocarina_forge.behavior import FADO_AI, FADO_BROKEN, FADO_FLOW, FADO_SCHEDULE
+    from ocarina_forge.behavior_edit import export_behaviors, replace_ops, roundtrip_status, set_field
+    from ocarina_forge.export import build
+    from ocarina_forge.formats.byml import loads
+    from ocarina_forge.project import Project
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    for kind, data in (
+        ("ainb", sample_ai_bytes()),
+        ("event", sample_flow_bytes()),
+        ("schedule", sample_schedule_bytes()),
+    ):
+        ok, message = roundtrip_status(kind, data)
+        assert ok, message
+    blocked, reason = roundtrip_status("ainb", b"AIB \xff\xff undecoded")
+    assert blocked is False
+    assert "Editing is saved" in reason
+    assert "was not exported" in reason
+
+    project = Project.create(tmp_path / "mod", name="kokiri-notes", title="Kokiri notes", author="Bradyn", version="0")
+    graph = load_actor_graph(dump, gyaml="Npc_Kokiri_F_01")
+    flag = next(node for node in graph["nodes"] if node["raw"] == "HoldGameDataGetBool")
+    data_bool = next(field for field in flag["fields"] if field["name"] == "DataBool")
+    assert data_bool["type"] == "flag"
+    assert data_bool["editable"] is True
+    updated = set_field(
+        dump,
+        project,
+        gyaml="Npc_Kokiri_F_01",
+        node_id=flag["id"],
+        field="DataBool",
+        value="Kokiri_FadoLeft",
+        type_name="flag",
+    )
+    edited = next(node for node in updated["nodes"] if node["id"] == flag["id"])
+    assert edited["edited"] is True
+    assert any(field["value"] == "Kokiri_FadoLeft" and field["edited"] for field in edited["fields"])
+    saved = project.behavior_path("Npc_Kokiri_F_01").read_text(encoding="utf-8")
+    assert "set field" in saved
+    assert flag["id"] in saved
+    assert project.load_behavior_ops("Npc_Kokiri_F_01")[0]["op"] == "set field"
+
+    talk = next(node for node in graph["nodes"] if node["kind"] == "event" and node["raw"] == "Demo_Talk")
+    set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=talk["id"], field="action", value="Demo_TalkShop")
+    day = next(node for node in graph["nodes"] if node["name"] == "When ChildDay")
+    set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=day["id"], field="ConditionFlag", value="ChildNight")
+    wait = next(node for node in graph["nodes"] if node["raw"] == "Act_Wait")
+    set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=wait["id"], field="Setting", value="Act_Look")
+
+    results = export_behaviors(project, dump, gyaml="Npc_Kokiri_F_01", out_root=tmp_path / "out")
+    by_path = {row["path"]: row for row in results}
+    assert by_path[FADO_AI]["exported"] is True
+    assert by_path[FADO_FLOW]["exported"] is True
+    assert by_path[FADO_SCHEDULE]["exported"] is True
+    written = AINB.from_binary((tmp_path / "out" / FADO_AI).read_bytes(), reader_name="exported")
+    exported_flag = written.nodes[flag["index"]]
+    assert exported_flag.params.string_inputs[0].default_value == "Kokiri_FadoLeft"
+    from evfl.evfl import EventFlow
+
+    flow = EventFlow()
+    flow.read((tmp_path / "out" / FADO_FLOW).read_bytes())
+    assert str(flow.flowchart.actors[0].actions[0]) == "Demo_TalkShop"
+    schedule = loads((tmp_path / "out" / FADO_SCHEDULE).read_bytes())
+    assert schedule["ConditionalSchedule"][0]["ConditionFlag"] == "ChildNight"
+    assert schedule["ConditionalSchedule"][0]["ActionSchedule"][0]["Setting"] == "Act_Look"
+    assert (dump.romfs / FADO_AI).read_bytes() != (tmp_path / "out" / FADO_AI).read_bytes()
+
+    project.save_behavior_ops(
+        "Npc_Kokiri_F_01",
+        [{"op": "set field", "id": f"ainb:{FADO_BROKEN}#0:Mystery", "field": "DataBool", "type": "flag", "value": "Nope"}],
+    )
+    refused = export_behaviors(project, dump, gyaml="Npc_Kokiri_F_01", out_root=tmp_path / "blocked")
+    assert refused[0]["exported"] is False
+    assert "Editing is saved" in refused[0]["message"]
+    assert "was not exported" in refused[0]["message"]
+    assert not (tmp_path / "blocked" / FADO_BROKEN).exists()
+    assert project.load_behavior_ops("Npc_Kokiri_F_01")
+
+    restored = replace_ops(dump, project, gyaml="Npc_Kokiri_F_01", ops=[])
+    assert restored["ops"] == []
+    assert project.load_behavior_ops("Npc_Kokiri_F_01") == []
+    assert not project.behavior_path("Npc_Kokiri_F_01").exists()
+
+    set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=flag["id"], field="DataBool", value="Kokiri_FadoLeft")
+    built = build(project, dump, install=False, level=1)
+    text = "\n".join(line["message"] for line in built["log"])
+    assert "Wrote AI/Npc_Kokiri_F_01.root.ainb" in text
+    assert "no size-table entry" in text
+    shipped = AINB.from_binary((project.root / "build" / "romfs" / FADO_AI).read_bytes(), reader_name="built")
+    assert shipped.nodes[flag["index"]].params.string_inputs[0].default_value == "Kokiri_FadoLeft"
+
+    cleared = set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=flag["id"], field="DataBool", value="Kokiri_FadoMet")
+    assert cleared["ops"] == []

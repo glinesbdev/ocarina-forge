@@ -42,6 +42,10 @@ export const api = {
   actors: (q) => request(`/api/actors?q=${encodeURIComponent(q)}`),
   behavior: ({ banc = "", id = "", gyaml = "" } = {}) =>
     request(`/api/behavior?banc=${encodeURIComponent(banc)}&id=${encodeURIComponent(id)}&gyaml=${encodeURIComponent(gyaml)}`),
+  setBehaviorField: (body) => request("/api/behavior/field", { method: "POST", body: JSON.stringify(body) }),
+  putBehaviorOps: (body) => request("/api/behavior/ops", { method: "PUT", body: JSON.stringify(body) }),
+  exportBehavior: (gyaml) => request("/api/behavior/export", { method: "POST", body: JSON.stringify({ gyaml }) }),
+  flags: (q) => request(`/api/flags?q=${encodeURIComponent(q)}`),
   model: (gyaml) => request(`/api/models/${encodeURIComponent(gyaml)}`),
   models: (names) =>
     request("/api/models/batch", { method: "POST", body: JSON.stringify({ names }) }).then((data) => data.models || {}),

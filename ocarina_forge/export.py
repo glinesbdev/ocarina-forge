@@ -53,26 +53,31 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
 
     table = None
     rstb_rel = None
-    if bancs:
+    editing_behavior = bool(project.behavior_actors())
+    if bancs or editing_behavior:
         rstb_rel = dump.rstb_relative()
-        if not rstb_rel:
+        if bancs and not rstb_rel:
             raise BancError(
                 "This dump has no resource size table at System/Resource/*.rsizetable.zs. "
                 "A changed placement file needs a bigger entry or the game can sit on the load forever. "
                 "Nothing was installed.",
                 "rstb",
             )
-        try:
-            table = load_table((dump.romfs / rstb_rel).read_bytes())
-        except BancError:
-            raise
-        except Exception as exc:
-            raise BancError(f"Could not read the resource size table {rstb_rel}: {exc}", "rstb") from exc
-        log.info(f"Size table: {rstb_rel}.")
-    else:
+        if not rstb_rel:
+            log.warn("This dump has no resource size table. Behavior files will still be written. A missing entry is not invented.")
+        else:
+            try:
+                table = load_table((dump.romfs / rstb_rel).read_bytes())
+            except BancError:
+                raise
+            except Exception as exc:
+                raise BancError(f"Could not read the resource size table {rstb_rel}: {exc}", "rstb") from exc
+            log.info(f"Size table: {rstb_rel}.")
+    if not bancs:
         log.info("No scene diffs in this project.")
 
     written: list[str] = []
+    table_raised = False
     for banc in bancs:
         diff = project.load_scene_diff(banc)
         try:
@@ -109,13 +114,35 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
             )
         new_entry = entry_for_byml(old_entry, len(original), len(payload))
         before, after = table.raise_to(banc, new_entry)
+        table_raised = True
         log.info(
             f"{banc}: {len(original)} -> {len(payload)} bytes unpacked, dictionary {dict_id}, "
             f"size table {before} -> {after}."
         )
         written.append(banc)
 
-    if table is not None and written and rstb_rel:
+    note_pending(project, log)
+    from ocarina_forge.behavior_edit import export_behaviors
+
+    for result in export_behaviors(project, dump, out_root=out_root):
+        if not result.get("exported"):
+            log.error(f"{result.get('path') or 'behavior'}: {result['message']}")
+            continue
+        log.info(result["message"])
+        written.append(result["path"])
+        if table is None or not result.get("path"):
+            continue
+        old_entry = table.get(result["path"]) or 0
+        if not old_entry:
+            log.warn(f"{result['path']} has no size-table entry. The file was written. A missing entry is not invented.")
+            continue
+        new_entry = entry_for_byml(old_entry, result.get("original"), result.get("unpacked") or 0)
+        before, after = table.raise_to(result["path"], new_entry)
+        if after != before:
+            table_raised = True
+        log.info(f"{result['path']}: size table {before} -> {after}.")
+
+    if table is not None and table_raised and rstb_rel:
         packed_table = save_table(table, level=level)
         table_path = out_root / rstb_rel
         table_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,8 +150,6 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
         log.info(f"Wrote {rstb_rel} ({len(packed_table)} bytes compressed). Entries are only ever raised.")
     elif table is not None:
         log.info("No placement file changed, so the size table was not written.")
-
-    note_pending(project, log)
 
     installed = None
     if install:

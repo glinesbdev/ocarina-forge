@@ -172,6 +172,45 @@ class Project:
             raise BancError(f"{path} should list actors as a mapping of hash to edit.", "project")
         return {"format": FORMAT, "banc": banc, "actors": normalize_ids(actors)}
 
+    def behavior_path(self, gyaml: str) -> Path:
+        safe = (gyaml or "").replace("/", "_").replace("\\", "_")
+        return self.root / "behaviors" / f"{safe}.yaml"
+
+    def load_behavior_ops(self, gyaml: str) -> list[dict]:
+        path = self.behavior_path(gyaml)
+        if not path.is_file():
+            return []
+        data = load_yaml(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise BancError(f"{path} is not a behavior edit.", "project")
+        recorded = str(data.get("gyaml") or gyaml)
+        if recorded != gyaml:
+            raise BancError(f"{path} says it patches {recorded}, but it was opened as {gyaml}.", "project")
+        ops = data.get("ops") or []
+        if not isinstance(ops, list):
+            raise BancError(f"{path} should list ops.", "project")
+        return [op for op in ops if isinstance(op, dict)]
+
+    def save_behavior_ops(self, gyaml: str, ops: list[dict]) -> None:
+        path = self.behavior_path(gyaml)
+        if not ops:
+            if path.is_file():
+                path.unlink()
+            return
+        payload = {"format": FORMAT, "gyaml": gyaml, "ops": ops}
+        atomic_write(path, dump_yaml(payload))
+
+    def behavior_actors(self) -> list[str]:
+        folder = self.root / "behaviors"
+        if not folder.is_dir():
+            return []
+        found = []
+        for file in sorted(folder.glob("*.yaml")):
+            data = load_yaml(file.read_text(encoding="utf-8")) or {}
+            if isinstance(data, dict) and data.get("gyaml"):
+                found.append(str(data["gyaml"]))
+        return found
+
     def save_scene_diff(self, diff: dict) -> None:
         banc = diff["banc"]
         path = self.scene_path(banc)

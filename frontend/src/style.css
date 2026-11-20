@@ -366,6 +366,11 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .graph-node strong { font-size: 13px; line-height: 16px; }
 .graph-node.is-on { border-color: var(--gold); }
 .graph-node.is-undecoded { border-style: dashed; }
+.graph-node.is-edited { box-shadow: inset 3px 0 0 var(--gold); }
+.field-row { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; font-size: 13px; }
+.field-row input, .field-row select { width: 100%; }
+.behavior-diff { margin-top: 12px; }
+.behavior-diff p { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 .pin { font-size: 11px; line-height: 16px; color: var(--muted); }
 .pin-out { text-align: right; }
 pre.trace {

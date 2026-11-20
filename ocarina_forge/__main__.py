@@ -7,6 +7,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
+``behavior-export`` writes saved set-field ops into the project build folder.
 With no subcommand, the server starts, which is what dev.sh runs.
 """
 
@@ -29,8 +30,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "behavior", "behavior-audit", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, behavior, and behavior-audit print reports. The default is the editor server.",
+        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "behavior", "behavior-audit", "behavior-export", "serve"],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, behavior, behavior-audit, and behavior-export print reports. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
@@ -101,6 +102,8 @@ def main(argv: list[str] | None = None) -> None:
         )
     if args.command == "behavior-audit":
         raise SystemExit(print_behavior_audit(as_json=args.json, dump=args.dump, out=args.out))
+    if args.command == "behavior-export":
+        raise SystemExit(print_behavior_export(args.banc or "", dump=args.dump, project=args.project))
     if args.command == "tex-debug":
         if not args.banc:
             parser.error("tex-debug needs a texture name or a Tex path")
@@ -205,6 +208,36 @@ def print_behavior(
         mark = "raw" if not node.get("decoded") else "friendly" if node.get("known") else "named"
         print(f"  {mark} {node.get('raw')} -> {node.get('name')}  {node.get('id')}")
     return 0
+
+
+def print_behavior_export(gyaml: str = "", *, dump: str | None = None, project: str | None = None) -> int:
+    """Write saved set-field ops. 1 when a file cannot round-trip. 2 when dump or project is missing."""
+    from ocarina_forge.behavior_edit import export_behaviors
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.project import Project
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    project_path = project or config.get("project") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    if not project_path:
+        print("No project is configured. Pass --project, or open one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        results = export_behaviors(Project(project_path), Dump(dump_path), gyaml=gyaml)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    if not results:
+        print("No behavior edits to export.")
+        return 0
+    for row in results:
+        print(row["message"])
+    return 1 if any(not row.get("exported") for row in results) else 0
 
 
 def print_behavior_audit(*, as_json: bool = False, dump: str | None = None, out: str | None = None) -> int:

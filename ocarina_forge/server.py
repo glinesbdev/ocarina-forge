@@ -641,8 +641,67 @@ async def terrain_file(banc: str, request: Request):
 @app.get("/api/behavior")
 def behavior(gyaml: str = "", banc: str = "", id: str = ""):
     from ocarina_forge.behavior import load_actor_graph
+    from ocarina_forge.behavior_edit import apply_ops
 
-    return load_actor_graph(_open_dump(), gyaml=gyaml, banc=banc, actor_id=id)
+    dump = _open_dump()
+    graph = load_actor_graph(dump, gyaml=gyaml, banc=banc, actor_id=id)
+    ops = []
+    try:
+        ops = _open_project().load_behavior_ops(graph["gyaml"])
+    except BancError:
+        ops = []
+    return apply_ops(graph, ops)
+
+
+@app.post("/api/behavior/field")
+def behavior_field(body: dict):
+    from ocarina_forge.behavior_edit import set_field
+
+    gyaml = str(body.get("gyaml") or "")
+    if not gyaml:
+        raise BancError("Which actor?", "behavior")
+    return set_field(
+        _open_dump(),
+        _open_project(),
+        gyaml=gyaml,
+        node_id=str(body.get("id") or ""),
+        field=str(body.get("field") or ""),
+        value=body.get("value"),
+        type_name=str(body.get("type") or ""),
+    )
+
+
+@app.put("/api/behavior/ops")
+def behavior_ops(body: dict):
+    from ocarina_forge.behavior_edit import replace_ops
+
+    gyaml = str(body.get("gyaml") or "")
+    if not gyaml:
+        raise BancError("Which actor?", "behavior")
+    return replace_ops(_open_dump(), _open_project(), gyaml=gyaml, ops=body.get("ops") or [])
+
+
+@app.post("/api/behavior/export")
+def behavior_export(body: dict | None = None):
+    from ocarina_forge.behavior_edit import export_behaviors
+
+    body = body or {}
+    project = _open_project()
+    results = export_behaviors(project, _open_dump(), gyaml=str(body.get("gyaml") or ""))
+    blocked = [row for row in results if not row.get("exported")]
+    return {"ok": not blocked, "files": results}
+
+
+@app.get("/api/flags")
+def flags(q: str = ""):
+    from ocarina_forge.validate import gamedata_names
+
+    catalog = gamedata_names(_open_dump())
+    query = q.strip().lower()
+    if catalog is None or len(query) < 2:
+        return {"names": []}
+    names = sorted(name for name in catalog.strings if query in name.lower())
+    return {"names": names[:40]}
 
 
 @app.get("/api/actors")
