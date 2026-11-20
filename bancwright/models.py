@@ -41,7 +41,7 @@ class UndecodedGeometry(Exception):
 from bancwright.formats.bntx import BntxError, image_names, textures as read_bntx
 from bancwright.formats.byml import loads
 from bancwright.formats.gltf import Primitive, cluster_lod, encode_albedo, to_glb
-from bancwright.formats.meshopt import available as meshopt_available, simplify_mesh
+from bancwright.formats.meshopt import available as meshopt_available, finish_glb, simplify_mesh
 from bancwright.formats.sarc import Sarc
 from bancwright.formats import terrain as heightmap
 
@@ -53,7 +53,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-20\0"
+_CACHE_VERSION = b"models-21\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -959,7 +959,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 if part.omit_reason and part.omit_reason not in reasons:
                     reasons.append(part.omit_reason)
         raise FresError("; ".join(reasons) if reasons else "the model has no triangles")
-    glb = to_glb(primitives)
+    glb = finish_glb(to_glb(primitives))
     bounds = None
     if positions:
         bounds = {
@@ -2591,7 +2591,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"
     meta_path = folder / f"{digest}.json"
-    glb = to_glb(primitives)
+    glb = finish_glb(to_glb(primitives))
     with _LOCK:
         if not (glb_path.is_file() and meta_path.is_file()):
             folder.mkdir(parents=True, exist_ok=True)

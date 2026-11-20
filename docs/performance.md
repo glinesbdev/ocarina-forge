@@ -30,7 +30,15 @@ A shape that already has a coarser BFRES level keeps that mesh as `lod1`. Anythi
 
 Before this slice the far mesh was a grid quantize and it came on past 44 m even when the actor still filled the screen. After it, a wide view should draw fewer triangles than the 1.4–1.8M full-detail baseline once the coarse meshes are on screen, and a large actor that still covers the view stays on the full mesh past 44 m. The sample scene’s meshes are too small to grow a far level.
 
-Check: open Kokiri, fly back until trees are small, and **Stats** tris should fall compared with the previous build at the same camera. Fly toward one tree and it should sharpen before it fills the screen. Select an actor and fly away: that one stays on the full mesh. The first open rebuilds the cache (`models-20`).
+Check: open Kokiri, fly back until trees are small, and **Stats** tris should fall compared with the previous build at the same camera. Fly toward one tree and it should sharpen before it fills the screen. Select an actor and fly away: that one stays on the full mesh. The first open of this build rebuilds the cache (`models-21`).
+
+## Import cache
+
+Cached glbs use `EXT_meshopt_compression` on the geometry. The compression does not quantize positions, so a decoded vertex matches the one that was packed. Textures stay JPEG or PNG. A KTX2 encode was tried and rejected: three r170’s Basis transcoder returns an empty image for that encoder’s files, so the field and the actors would draw black. The view still loads a meshopt glb, and it has a KTX2 loader pointed at `/basis/` for when an encoder round-trips.
+
+Before: a 40×40 grid glb was 70,788 bytes of plain glTF. After: the same triangles are 14,040 bytes, about a fifth, and a decoded vertex still matches the one that was packed. Kokiri’s sample actors are already a few kilobytes, so the byte cut shows up on the dense meshes. Draw count is not what this slice moves. The cache prefix is `models-21`, so the first open rebuilds.
+
+Check: the first open after this build rebuilds the cache. Models should look the same as `models-20`, not black and not shifted. A wide view’s triangle count should still drop when actors are small on screen.
 
 ## Model loading
 

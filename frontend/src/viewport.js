@@ -3,6 +3,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
@@ -90,6 +92,10 @@ export function createViewport(host, hooks) {
   let running = true;
   let frameHandle = 0;
   const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(MeshoptDecoder);
+  const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
+  ktx2Loader.detectSupport(renderer);
+  loader.setKTX2Loader(ktx2Loader);
   const templateCache = new Map();
   const modelRequests = new Map();
   const GLB_SLOTS = 8;
@@ -1241,7 +1247,7 @@ uniform float terrainLayerMissing;`
         }
       });
       if (missingLayer) {
-        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-20 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
+        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-21 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
         console.warn(message);
         if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
       }

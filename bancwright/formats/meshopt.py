@@ -155,3 +155,29 @@ def simplify_mesh(
     if len(new_idx) < 3 or len(new_idx) >= count * 0.85 or len(new_pos) < 3:
         return None
     return new_pos, new_idx, new_uv if uvs is not None else None
+
+
+def _exchange_glb(op: str, glb: bytes) -> bytes | None:
+    if not available():
+        return None
+    body = _call({"op": op, "glb": base64.b64encode(glb).decode("ascii")})
+    if not body or not body.get("ok") or not body.get("glb"):
+        return None
+    try:
+        return base64.b64decode(body["glb"])
+    except (ValueError, TypeError):
+        return None
+
+
+def finish_glb(glb: bytes) -> bytes:
+    """EXT_meshopt_compression. Textures stay PNG or JPEG. The bytes are unchanged if Node cannot pack."""
+    packed = _exchange_glb("pack", glb)
+    return packed if packed else glb
+
+
+def plain_glb(glb: bytes) -> bytes:
+    """Decoded floats and PNG, for tests that read the cache file. A plain glb is returned as-is."""
+    if b"EXT_meshopt_compression" not in glb and b"image/ktx2" not in glb:
+        return glb
+    plain = _exchange_glb("plain", glb)
+    return plain if plain else glb

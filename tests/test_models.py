@@ -143,7 +143,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-20", "901a12cc196b8f7643b31c24e0c886980e02e02c6d48a09ebb7ced8b37adb27d")
+    pinned = ("models-21", "f9332a4ad61925d69d9c396df43eceaf7f676b11b2c46e17bd558b99dfb98780")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -433,9 +433,6 @@ def test_v10_render_state_drops_the_opaque_twin():
 
 
 def test_dummy_terrain_is_an_earth_green_proxy(tmp_path, monkeypatch):
-    import json
-    import struct
-
     monkeypatch.setenv("BANCWRIGHT_CACHE", str(tmp_path / "cache"))
     from bancwright.formats.bfres import sample_v10_bfres
     from bancwright.formats.bntx import write_rgba
@@ -470,16 +467,14 @@ def test_dummy_terrain_is_an_earth_green_proxy(tmp_path, monkeypatch):
     assert info["textureLog"][0]["error"] == "terrain proxy"
     assert info["textureLog"][0]["wanted"] == ""
     glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
-    document = json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
+    document, blob = _glb_parts(glb)
     factor = document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
     assert factor[1] > factor[0] and factor[1] > factor[2]
     assert abs(factor[1] - 0.45) < 1e-6
     assert "baseColorTexture" not in document["materials"][0]["pbrMetallicRoughness"]
     primitive = document["meshes"][0]["primitives"][0]
     assert "NORMAL" in primitive["attributes"]
-    normal_view = document["bufferViews"][document["accessors"][primitive["attributes"]["NORMAL"]]["bufferView"]]
-    start = normal_view["byteOffset"]
-    nx, ny, nz = struct.unpack_from("<3f", glb, 20 + struct.unpack_from("<I", glb, 12)[0] + 8 + start)
+    _nx, _ny, nz = _accessor_floats(document, blob, primitive["attributes"]["NORMAL"], 3)[0]
     assert abs(nz) > 0.9
 
 
@@ -559,11 +554,12 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
     assert again["digest"] == info["digest"]
     glb = (tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes()
     document, blob = _glb_parts(glb)
-    factor = document["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
+    pbr = document["materials"][0]["pbrMetallicRoughness"]
+    factor = pbr.get("baseColorFactor", [1.0, 1.0, 1.0, 1.0])
     assert factor[0] == 1.0 and factor[1] == 1.0
-    assert "baseColorTexture" in document["materials"][0]["pbrMetallicRoughness"]
+    assert "baseColorTexture" in pbr
     primitive = document["meshes"][0]["primitives"][0]
-    assert document["materials"][0]["doubleSided"] is False
+    assert document["materials"][0].get("doubleSided", False) is False
     assert "TEXCOORD_3" in primitive["attributes"]
     positions = _accessor_floats(document, blob, primitive["attributes"]["POSITION"], 3)
     assert min(point[0] for point in positions) < -7
@@ -573,7 +569,8 @@ def test_heightmap_beats_the_proxy_and_uses_a_material_layer(tmp_path, monkeypat
     assert normals[0][1] > 0.9
     image = document["images"][0]
     view = document["bufferViews"][image["bufferView"]]
-    png = blob[view["byteOffset"] : view["byteOffset"] + view["byteLength"]]
+    start = view.get("byteOffset", 0)
+    png = blob[start : start + view["byteLength"]]
     from io import BytesIO
 
     from PIL import Image
@@ -1058,10 +1055,18 @@ def _array_bntx(name: str, layers: list[bytes], width: int, height: int) -> byte
     return bytes(blob)
 
 
+def _stored(glb: bytes) -> bytes:
+    """The cache file is meshopt-compressed. Tests read the decoded floats and the original image."""
+    from bancwright.formats.meshopt import plain_glb
+
+    return plain_glb(glb)
+
+
 def _glb_parts(glb: bytes):
     import json
     import struct
 
+    glb = _stored(glb)
     json_len = struct.unpack_from("<I", glb, 12)[0]
     document = json.loads(glb[20 : 20 + json_len])
     return document, glb[20 + json_len + 8 :]
@@ -1072,9 +1077,10 @@ def _accessor_floats(document, blob: bytes, index: int, width: int):
 
     accessor = document["accessors"][index]
     view = document["bufferViews"][accessor["bufferView"]]
-    start = view["byteOffset"]
+    start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    stride = view.get("byteStride") or width * 4
     count = accessor["count"]
-    return [struct.unpack_from(f"<{width}f", blob, start + item * width * 4) for item in range(count)]
+    return [struct.unpack_from(f"<{width}f", blob, start + item * stride) for item in range(count)]
 
 
 def test_alb_suffix_and_bundle_resolve(tmp_path, monkeypatch):
@@ -1512,7 +1518,32 @@ def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
     assert min(ys) == 0 and max(ys) == 39
 
 
+def test_import_cache_stores_meshopt_geometry_and_keeps_the_texture():
+    from bancwright.formats.gltf import Primitive, png_rgba, to_glb
+    from bancwright.formats.meshopt import finish_glb
+
+    png = png_rgba(8, 8, bytes([220, 20, 20, 255]) * 64)
+    positions = [(0.0, 6.0, 0.0), (1.0, 6.0, 0.0), (0.0, 7.0, 0.0)]
+    glb = finish_glb(to_glb([Primitive(positions, [0, 1, 2], [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)], png=png, name="Body:0")]))
+    packed = _packed_document(glb)
+    assert "EXT_meshopt_compression" in packed.get("extensionsUsed", [])
+    assert packed["images"][0]["mimeType"] == "image/png"
+    doc, blob = _glb_parts(glb)
+    got = _accessor_floats(doc, blob, doc["meshes"][0]["primitives"][0]["attributes"]["POSITION"], 3)
+    assert abs(got[0][1] - 6.0) < 1e-4
+    pixel = _png_pixel(glb)
+    assert pixel[0] > 180 and pixel[1] < 80
+
+
 def _document(glb: bytes) -> dict:
+    import json
+    import struct
+
+    glb = _stored(glb)
+    return json.loads(glb[20 : 20 + struct.unpack_from("<I", glb, 12)[0]])
+
+
+def _packed_document(glb: bytes) -> dict:
     import json
     import struct
 
@@ -1757,18 +1788,15 @@ def _array_rgba(name: str, colors: list[bytes]) -> bytes:
 
 
 def _png_pixel(glb: bytes) -> tuple[int, int, int, int]:
-    import struct
     from io import BytesIO
 
     from PIL import Image
 
-    doc = _document(glb)
-    json_len = struct.unpack_from("<I", glb, 12)[0]
-    data = glb[20 + json_len + 8 :]
+    doc, data = _glb_parts(glb)
     view = doc["bufferViews"][doc["images"][0]["bufferView"]]
     start = view.get("byteOffset", 0)
     raw = data[start : start + view["byteLength"]]
-    assert raw[:8] == b"\x89PNG\r\n\x1a\n"
+    assert raw[:8] == b"\x89PNG\r\n\x1a\n" or raw[:2] == b"\xff\xd8"
     image = Image.open(BytesIO(raw))
     return image.getpixel((0, 0))
 
