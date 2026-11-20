@@ -96,7 +96,8 @@ def cluster_lod(
     indices: list[int],
     uvs: list[tuple[float, float]] | None,
     ratio: float = 0.35,
-) -> tuple[list, list, list | None] | None:
+    colors: list | None = None,
+) -> tuple | None:
     """A far mesh: quantize vertices onto a grid and drop degenerate triangles.
 
     The grid gets coarser as the source gets larger, so a view of the whole
@@ -122,19 +123,28 @@ def cluster_lod(
     remap: dict[int, int] = {}
     new_pos: list[tuple[float, float, float]] = []
     new_uv: list[tuple[float, float]] = []
+    new_color: list = []
+    keep_colors = colors is not None and len(colors) == len(positions)
     for index, point in enumerate(positions):
         # The UV bin keeps a seam (0 beside 1, or a tiled chart) from welding
-        # into the vertex that happened to share the position cell.
+        # into the vertex that happened to share the position cell. The color
+        # bin does the same for a moss edge and a bare edge in one cell.
         if uvs is not None and index < len(uvs):
             uv_bin = (int(round(uvs[index][0] * 4)), int(round(uvs[index][1] * 4)))
         else:
             uv_bin = (0, 0)
+        if keep_colors:
+            tone = colors[index]
+            color_bin = tuple(int(round(float(tone[channel]) * 4)) for channel in range(min(4, len(tone))))
+        else:
+            color_bin = ()
         cell = (
             int((point[0] - origin[0]) / step),
             int((point[1] - origin[1]) / step),
             int((point[2] - origin[2]) / step),
             uv_bin[0],
             uv_bin[1],
+            color_bin,
         )
         slot = vertex_of.get(cell)
         if slot is None:
@@ -143,6 +153,8 @@ def cluster_lod(
             new_pos.append(point)
             if uvs is not None and index < len(uvs):
                 new_uv.append(uvs[index])
+            if keep_colors:
+                new_color.append(colors[index])
         remap[index] = slot
     new_idx: list[int] = []
     for index in range(0, len(indices) - 2, 3):
@@ -154,7 +166,10 @@ def cluster_lod(
         new_idx.extend((a, b, c))
     if len(new_idx) < 3 or len(new_idx) >= len(indices) * 0.85:
         return None
-    return new_pos, new_idx, new_uv if uvs is not None else None
+    coarse_uv = new_uv if uvs is not None else None
+    if keep_colors:
+        return new_pos, new_idx, coarse_uv, new_color
+    return new_pos, new_idx, coarse_uv
 
 
 def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
@@ -270,8 +285,15 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             mark_bytes = b"".join(struct.pack("<2f", hue, folder) for hue, folder in prim.marks)
             attributes["TEXCOORD_3"] = accessor(view(mark_bytes, 34962), len(prim.marks), "VEC2", 5126)
         if prim.colors and len(prim.colors) == len(positions):
-            color_bytes = b"".join(struct.pack("<3f", red, green, blue) for red, green, blue in prim.colors)
-            attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)
+            wide = any(len(item) >= 4 for item in prim.colors)
+            if wide:
+                color_bytes = b"".join(
+                    struct.pack("<4f", item[0], item[1], item[2], item[3] if len(item) > 3 else 1.0) for item in prim.colors
+                )
+                attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC4", 5126)
+            else:
+                color_bytes = b"".join(struct.pack("<3f", item[0], item[1], item[2]) for item in prim.colors)
+                attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)
         index_accessor = accessor(view(idx_bytes, 34963), len(indices), "SCALAR", 5123 if use_short else 5125)
         def image_index_for(blob: bytes | None) -> int | None:
             if not blob:
@@ -320,7 +342,10 @@ def to_glb(primitives: list[Primitive]) -> bytes:
                 material["normalTexture"] = {"index": normal_index}
             if emissive_index is not None:
                 material["emissiveTexture"] = {"index": emissive_index}
-                material["emissiveFactor"] = [1.0, 1.0, 1.0]
+                # A moss overlay rides in this slot so the glb stays one mesh.
+                # Factor 0 keeps the stock shader from adding it as light.
+                # A real emission map still glows.
+                material["emissiveFactor"] = [0.0, 0.0, 0.0] if extras.get("blend") else [1.0, 1.0, 1.0]
             if alpha == "mask":
                 material["alphaMode"] = "MASK"
                 material["alphaCutoff"] = cutoff

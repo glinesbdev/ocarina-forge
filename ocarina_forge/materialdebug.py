@@ -11,15 +11,17 @@ projection mode. A retail v10 ``+0x10`` block is printed as attribute names,
 sampler names, and the byte index table (``0xFF`` unused). ``+0xA8`` is
 printed the same way. Each shape lists every vertex attribute and the UV
 sets, with format and min/max. The ranked albedo is the texture the viewer
-binds, with its pixel size when the Tex file is in the dump. ``--strings``
-prints the whole string pool. A dump-relative ``Model/...bfres.zs`` path is
-that file. None of that is applied to the mesh.
+binds, with its pixel size when the Tex file is in the dump. A two-albedo
+material also prints the blend: the overlay sampler, the ``_c0`` channel,
+the UV, and the overlay's own scale. ``--strings`` prints the whole string
+pool. A dump-relative ``Model/...bfres.zs`` path is that file.
 """
 
 from __future__ import annotations
 
 import re
 
+from ocarina_forge.blend import color_span, overlay_plan
 from ocarina_forge.formats.bfres import bind_role, bfres_strings, inspect, interesting_strings, parse
 from ocarina_forge.modeldebug import load_bytes
 
@@ -34,7 +36,7 @@ def inspect_materials(dump, target: str, *, strings: bool = False) -> dict:
     rows = []
     for model in models:
         for material in model.materials:
-            rows.append(_row(model.name, material, dump))
+            rows.append(_row(model, material, dump))
     report = {
         "target": target,
         "source": source,
@@ -129,11 +131,18 @@ def _alnum(text: str) -> str:
     return "".join(char for char in str(text or "").lower() if char.isalnum())
 
 
-def _row(model: str, material, dump=None) -> dict:
+def _row(model, material, dump=None) -> dict:
     lines = sampler_lines(material)
     albedo = _viewer_albedo(dump, material)
+    span = None
+    for part in model.parts:
+        if part.lod or part.material != material.name:
+            continue
+        span = color_span(part.vertex_attributes)
+        if span:
+            break
     return {
-        "model": model,
+        "model": model.name,
         "name": material.name,
         "hints": name_hints(material.name),
         "shader": material.shader,
@@ -155,6 +164,7 @@ def _row(model: str, material, dump=None) -> dict:
         "slots": list(getattr(material, "slots", []) or []),
         "shaderBlocks": list(getattr(material, "shader_blocks", []) or []),
         "viewerAlbedo": albedo,
+        "blend": overlay_plan(material, span),
     }
 
 
@@ -253,6 +263,14 @@ def render_text(report: dict) -> str:
             lines.append("  shader (no shader assign in this file)")
         for block in row.get("shaderBlocks") or []:
             lines.extend(_shader_block_lines(block))
+        blend = row.get("blend")
+        if blend:
+            scale = " ".join(str(item) for item in blend.get("scale") or [])
+            lines.append(
+                f"  blend {blend.get('sampler') or '_a1'} {blend.get('texture') or ''}  "
+                f"mask _c0.{blend.get('channel') or 'r'}  uv {blend.get('uv') or '_u0'}  scale {scale}"
+            )
+            lines.append(f"    {blend.get('reason') or ''}")
         slots = row.get("slots") or []
         if slots:
             lines.append("  header")
@@ -384,7 +402,7 @@ def render_text(report: dict) -> str:
 def _shader_block_lines(block: dict) -> list[str]:
     slot = block.get("slot") or "?"
     at = block.get("at") or 0
-    lines = [f"  shader block {slot} at {at:#x} (not applied to the mesh)"]
+    lines = [f"  shader block {slot} at {at:#x}"]
     labels = block.get("labels") or []
     if labels:
         lines.append("    names " + ", ".join(str(name) for name in labels))
@@ -400,6 +418,9 @@ def _shader_block_lines(block: dict) -> list[str]:
         lines.append(f"    byte map {shown}")
         if block.get("byteNote"):
             lines.append(f"    {block['byteNote']}")
+    indices = block.get("samplerIndices")
+    if indices:
+        lines.append("    sampler indices " + " ".join(f"{int(item):02x}" for item in indices))
     for child in block.get("children") or []:
         dwords = " ".join(f"{int(value):08x}" for value in child.get("dwords") or [])
         lines.append(f"    +{int(child.get('offset') or 0):#x} {child.get('text') or ''}  dwords {dwords}".rstrip())

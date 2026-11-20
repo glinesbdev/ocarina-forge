@@ -297,7 +297,8 @@ def simplify_mesh(
     positions: list[tuple[float, float, float]],
     indices: list[int],
     uvs: list[tuple[float, float]] | None,
-) -> tuple[list, list, list | None] | None:
+    colors: list | None = None,
+) -> tuple | None:
     """A coarser mesh. None when the simplifier is missing or the mesh did not shrink."""
     count = len(indices)
     if count < 900 or len(positions) < 40 or count % 3:
@@ -314,15 +315,25 @@ def simplify_mesh(
     }
     if uvs is not None and len(uvs) == len(positions):
         payload["uvs"] = _pack_f32([axis for point in uvs for axis in point])
+    keep_colors = colors is not None and len(colors) == len(positions)
+    if keep_colors:
+        flat_colors = []
+        for item in colors:
+            flat_colors.extend((float(item[0]), float(item[1]), float(item[2]), float(item[3]) if len(item) > 3 else 1.0))
+        payload["colors"] = _pack_f32(flat_colors)
     body = _call(payload)
     if not body or not body.get("ok"):
         return None
     new_pos = _unpack_f32(body["positions"], 3)
     new_idx = _unpack_u32(body["indices"])
     new_uv = _unpack_f32(body["uvs"], 2) if body.get("uvs") else None
+    new_colors = _unpack_f32(body["colors"], 4) if body.get("colors") else None
     if len(new_idx) < 3 or len(new_idx) >= count * 0.85 or len(new_pos) < 3:
         return None
-    return new_pos, new_idx, new_uv if uvs is not None else None
+    coarse_uv = new_uv if uvs is not None else None
+    if keep_colors:
+        return new_pos, new_idx, coarse_uv, new_colors
+    return new_pos, new_idx, coarse_uv
 
 
 def _exchange_glb(op: str, glb: bytes) -> bytes | None:

@@ -266,7 +266,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-32", "fa979aaaa1d60022f46fcddd4faee343082eac0e69e1bddcc3c0774575d424d5")
+    pinned = ("models-33", "4e213f658526f62c16eb1616af9f0e4cb350581320198e6113971360db8d1dd9")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -2222,7 +2222,7 @@ def test_retail_v10_shader_block_is_printed_and_not_applied(tmp_path, capsys):
     assert primary["samplerNames"] == ["_a0", "_n0", "_rah0", "_a1", "_n1", "_rah1"]
     unused = [item for item in primary["byteMap"] if item["unused"]]
     assert unused and unused[0]["value"] == 0xFF
-    assert "not applied" in primary["byteNote"]
+    assert "do not name a _c0 component" in primary["byteNote"]
     side = next(block for block in material.shader_blocks if block["slot"] == "+0xA8")
     assert side["labels"] == ["Model", "model"]
     assert 9 in side["children"][0]["dwords"]

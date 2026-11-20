@@ -101,6 +101,8 @@ function simplify(body) {
   const outPos = new Float32Array(unique * 3);
   const uvs = body.uvs ? floatsFrom(body.uvs) : null;
   const outUv = uvs ? new Float32Array(unique * 2) : null;
+  const colors = body.colors ? floatsFrom(body.colors) : null;
+  const outColor = colors ? new Float32Array(unique * 4) : null;
   for (let old = 0; old < remap.length; old += 1) {
     const slot = remap[old];
     if (slot >= unique) continue;
@@ -111,12 +113,19 @@ function simplify(body) {
       outUv[slot * 2] = uvs[old * 2];
       outUv[slot * 2 + 1] = uvs[old * 2 + 1];
     }
+    if (outColor && old * 4 + 3 < colors.length) {
+      outColor[slot * 4] = colors[old * 4];
+      outColor[slot * 4 + 1] = colors[old * 4 + 1];
+      outColor[slot * 4 + 2] = colors[old * 4 + 2];
+      outColor[slot * 4 + 3] = colors[old * 4 + 3];
+    }
   }
   return {
     ok: true,
     positions: bytesOf(outPos),
     indices: bytesOf(compacted),
     uvs: outUv ? bytesOf(outUv) : null,
+    colors: outColor ? bytesOf(outColor) : null,
     vertices: unique,
     triangles: compacted.length / 3,
     error: deviation,

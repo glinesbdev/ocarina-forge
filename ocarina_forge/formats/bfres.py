@@ -85,6 +85,13 @@ class Part:
     uv_sets: list[dict] = field(default_factory=list)
     # Every vertex attribute (name, format, min/max). The drawn UV stays `_u0`.
     vertex_attributes: list[dict] = field(default_factory=list)
+    # `_c0` as rgba 0..1, one tuple per vertex. None when the shape has no color.
+    colors: list[tuple[float, float, float, float]] | None = None
+    # `_u1` / `_u2` when the shape has them. The drawn albedo stays `_u0`.
+    uv_extra: dict = field(default_factory=dict)
+    # Second albedo (`_a1`) and how it blends over `_a0`. Empty when this part is one layer.
+    overlay_texture: str = ""
+    blend: dict | None = None
 
 
 @dataclass
@@ -113,7 +120,7 @@ class Material:
     states: list[str] = field(default_factory=list)
     # One line per unread v10 header qword, set only when no shader assign matched.
     slots: list[str] = field(default_factory=list)
-    # Retail v10 shader-info blocks (+0x10 and +0xA8). A reading, not applied to the mesh.
+    # Retail v10 shader-info blocks (+0x10 and +0xA8). The +0x10 indices decide which samplers are used.
     shader_blocks: list[dict] = field(default_factory=list)
 
 
@@ -650,6 +657,10 @@ class _File:
             slots,
         )
         material.shader_blocks = blocks
+        for block in blocks:
+            for index, choice in enumerate(block.get("optionChoices") or []):
+                if choice:
+                    material.options.setdefault(f"option{index}", choice)
         return material
 
     def _render_info_note(self, at: int) -> str:
@@ -827,6 +838,7 @@ class _File:
         byte_note = ""
         if byte_at and not self._is_string(byte_at) and not self._dict_ok(byte_at) and not self._string_pointer_list(byte_at, 1):
             byte_map, byte_note = self._index_bytes(byte_at)
+        sampler_indices, option_choices = self._variation_tail(ptr, len(attributes), len(samplers))
         children = []
         for off, child, used in ((8, second, bool(attributes)), (0x10, byte_at, bool(byte_map)), (0x18, samplers_at, bool(samplers))):
             if used or not child:
@@ -848,6 +860,8 @@ class _File:
             "samplerNames": samplers,
             "byteMap": byte_map,
             "byteNote": byte_note,
+            "samplerIndices": sampler_indices,
+            "optionChoices": option_choices,
             "children": children,
         }
 
@@ -876,11 +890,39 @@ class _File:
         raw = self.data[ptr : min(ptr + 32, len(self.data))]
         rows = [{"index": index, "value": byte, "unused": byte == 0xFF} for index, byte in enumerate(raw)]
         note = (
-            "Reading of these bytes, not applied to the mesh. 0xFF is unused. "
-            "One reading is an index per attribute name, then an index per sampler name "
-            "(a vertex buffer slot or a UV channel). That split is not confirmed."
+            "Attribute indices for this variation, then the sampler indices when that "
+            "list is packed next to them. 0xFF means the sampler is not used. These "
+            "bytes do not name a _c0 component."
         )
         return rows, note
+
+    def _variation_tail(self, ptr: int, attribute_count: int, sampler_count: int) -> tuple[list[int] | None, list[str]]:
+        """Sampler index bytes and option-choice strings, when the header counts match.
+
+        A 32-byte block (the synthetic assign) has no counts, and the bytes after
+        it belong to the next record. Those stay unread.
+        """
+        if ptr + 0x50 > len(self.data) or attribute_count <= 0 or sampler_count <= 0:
+            return None, []
+        if self.data[ptr + 0x44] != attribute_count or self.data[ptr + 0x45] != sampler_count:
+            return None, []
+        indices: list[int] | None = None
+        index_at = self.u64(ptr + 0x20)
+        if index_at and not self._is_string(index_at) and index_at + sampler_count <= len(self.data):
+            indices = list(self.data[index_at : index_at + sampler_count])
+        choices = []
+        total = self.u16(ptr + 0x48)
+        choice_at = self.u64(ptr + 0x30)
+        if choice_at and 0 < total <= 32:
+            for index in range(total):
+                slot = choice_at + index * 8
+                if slot + 8 > len(self.data):
+                    break
+                text_at = self.u64(slot)
+                if not text_at or not self._is_string(text_at):
+                    break
+                choices.append(self.string(text_at))
+        return indices, choices
 
     def _leading_dwords(self, ptr: int, count: int) -> list[int]:
         found = []
@@ -1321,6 +1363,8 @@ class _File:
                 info["bounds"] = self._shape_bounds(at)
             return [], end, info
         positions, uvs = self._vertices(fvtx, lod)
+        colors = _colors(fvtx, len(positions))
+        uv_extra = _extra_uvs(fvtx, len(positions))
         before = _point_bounds(positions) if self.capture is not None else None
         slots = None
         if bones and skin_count in (0, 1):
@@ -1351,7 +1395,7 @@ class _File:
             return [], end, info
         attributes = _attr_ranges(fvtx)
         uv_sets = [item for item in attributes if _UV_ATTR.fullmatch(item.get("name") or "")]
-        made = [_part_from(name, positions, lod["indices"], uvs, material, material_index, 0)]
+        made = [_part_from(name, positions, lod["indices"], uvs, material, material_index, 0, colors, uv_extra)]
         made[0].uv_sets = uv_sets
         made[0].vertex_attributes = attributes
         # LOD meshes are a contiguous array of 0x38-byte headers. Drawing every
@@ -1371,6 +1415,8 @@ class _File:
                     continue
                 try:
                     far_positions, far_uvs = self._vertices(fvtx, coarser)
+                    far_colors = _colors(fvtx, len(far_positions))
+                    far_uv_extra = _extra_uvs(fvtx, len(far_positions))
                 except (FresError, struct.error, IndexError, OSError):
                     continue
                 far_before = _point_bounds(far_positions) if self.capture is not None else None
@@ -1398,10 +1444,10 @@ class _File:
                     )
                 if not far_positions:
                     continue
-                best = (far_positions, far_uvs, coarser["indices"])
+                best = (far_positions, far_uvs, coarser["indices"], far_colors, far_uv_extra)
                 best_level = level
             if best is not None:
-                far = _part_from(name, best[0], best[2], best[1], material, material_index, best_level)
+                far = _part_from(name, best[0], best[2], best[1], material, material_index, best_level, best[3], best[4])
                 far.uv_sets = uv_sets
                 far.vertex_attributes = attributes
                 made.append(far)
@@ -2465,7 +2511,7 @@ def _chart_is_tiled(uv, axis: int) -> bool:
     return min(vals) < -0.25 or max(vals) > 1.25
 
 
-def _close_uv_seams(positions, uvs, indices):
+def _close_uv_seams(positions, uvs, indices, extras=None):
     """Split a triangle whose UVs jump across a unit-chart cut.
 
     A trunk unwrap puts u=0.98 and u=0.02 on one triangle. The GPU then sees
@@ -2481,6 +2527,7 @@ def _close_uv_seams(positions, uvs, indices):
     pos = list(positions)
     uv = [(float(u), float(v)) for u, v in uvs]
     idx = list(indices)
+    carried = [list(item) for item in extras] if extras else []
     tiled = [_chart_is_tiled(uv, axis) for axis in (0, 1)]
     if all(tiled):
         return pos, uv, idx
@@ -2511,21 +2558,94 @@ def _close_uv_seams(positions, uvs, indices):
                 if max(moved) - min(moved) < 0.02:
                     continue
                 pos.append(pos[vertex])
+                for extra in carried:
+                    if vertex < len(extra):
+                        extra.append(extra[vertex])
                 pair = [uv[vertex][0], uv[vertex][1]]
                 pair[axis] = shifted
                 uv.append((pair[0], pair[1]))
                 idx[tri + slot] = len(pos) - 1
                 ids[slot] = idx[tri + slot]
                 vals[slot] = shifted
+    if extras is not None:
+        extras[:] = carried
     return pos, uv, idx
 
 
-def _part_from(name, positions, indices, uvs, material: Material | None, material_index: int, lod: int = 0) -> Part:
+def _extra_uvs(fvtx: dict, count: int) -> dict[str, list[tuple[float, float]]]:
+    found = {}
+    for attribute in fvtx.get("attributes") or []:
+        name = attribute.get("name") or ""
+        if name not in {"_u1", "_u2", "u1", "u2"}:
+            continue
+        channel = []
+        try:
+            for index in range(count):
+                raw = _read_attr(fvtx, attribute, index)
+                channel.append((float(raw[0]), float(raw[1]) if len(raw) > 1 else 0.0))
+        except (FresError, struct.error, IndexError):
+            continue
+        if len(channel) == count:
+            found[name if name.startswith("_") else f"_{name}"] = channel
+    return found
+
+
+def _colors(fvtx: dict, count: int) -> list[tuple[float, float, float, float]] | None:
+    """``_c0`` as rgba in 0..1. None when the shape has no color attribute."""
+    attribute = _attr(fvtx["attributes"], ("_c0", "c0", "_c"))
+    if attribute is None or count <= 0:
+        return None
+    found = []
+    for index in range(count):
+        try:
+            raw = _read_attr(fvtx, attribute, index)
+        except (FresError, struct.error, IndexError):
+            return None
+        if len(raw) >= 4:
+            found.append((float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3])))
+        elif len(raw) == 3:
+            found.append((float(raw[0]), float(raw[1]), float(raw[2]), 1.0))
+        elif len(raw) == 1:
+            found.append((float(raw[0]), float(raw[0]), float(raw[0]), 1.0))
+        else:
+            return None
+    return found
+
+
+def _part_from(
+    name,
+    positions,
+    indices,
+    uvs,
+    material: Material | None,
+    material_index: int,
+    lod: int = 0,
+    colors: list[tuple[float, float, float, float]] | None = None,
+    uv_extra: dict | None = None,
+) -> Part:
     sampler, texture = ("", "")
     if material and material.albedo:
         sampler, texture = material.albedo[0]
+    if colors is not None and len(colors) != len(positions):
+        colors = None
+    carried = []
+    if colors:
+        carried.append(list(colors))
+    extra_names = []
+    for channel_name, channel in (uv_extra or {}).items():
+        if len(channel) == len(positions):
+            extra_names.append(channel_name)
+            carried.append(list(channel))
     if uvs and indices:
-        positions, uvs, indices = _close_uv_seams(positions, uvs, indices)
+        positions, uvs, indices = _close_uv_seams(positions, uvs, indices, carried or None)
+    cursor = 0
+    if colors:
+        colors = carried[cursor]
+        cursor += 1
+    kept_extra = {}
+    for channel_name in extra_names:
+        kept_extra[channel_name] = carried[cursor]
+        cursor += 1
     return Part(
         name,
         positions,
@@ -2542,6 +2662,8 @@ def _part_from(name, positions, indices, uvs, material: Material | None, materia
         material.double_sided if material else True,
         material.base_color if material else None,
         lod=lod,
+        colors=colors,
+        uv_extra=kept_extra,
     )
 
 

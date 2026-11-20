@@ -193,6 +193,9 @@ $("terrain-debug").addEventListener("change", (event) => {
   state.terrainDebug = event.target.checked;
   viewport.setFlags({ terrainDebug: state.terrainDebug });
 });
+$("blend-mask").addEventListener("change", (event) => {
+  viewport.setFlags({ blendMask: event.target.checked });
+});
 $("frame").addEventListener("click", () => viewport.frame(state.selected));
 const snapBox = $("snap-surface");
 if (snapBox) {

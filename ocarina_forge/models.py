@@ -31,6 +31,7 @@ from pathlib import Path
 from ocarina_forge.errors import BancError
 from ocarina_forge.locate import setting, user_cache_root
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
+from ocarina_forge.blend import color_span, overlay_plan
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
 
@@ -55,7 +56,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-32\0"
+_CACHE_VERSION = b"models-33\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1015,6 +1016,31 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
 
             normal_png = extra_png(part.normal_texture)
             emissive_png = extra_png(part.emission_texture)
+            overlay_png = None
+            blend_extra = None
+            overlay_uvs = None
+            if part.blend and part.overlay_texture and not emissive_png:
+                overlay_png = extra_png(part.overlay_texture)
+                if overlay_png:
+                    blend_extra = {
+                        "blend": {
+                            "channel": part.blend.get("channel") or "r",
+                            "uv": part.blend.get("uv") or "_u0",
+                            "scale": list(part.blend.get("scale") or [1, 1]),
+                            "translate": list(part.blend.get("translate") or [0, 0]),
+                            "sampler": part.blend.get("sampler") or "",
+                            "texture": part.overlay_texture,
+                        }
+                    }
+                    wanted_uv = part.blend.get("uv") or "_u0"
+                    if wanted_uv != "_u0":
+                        overlay_uvs = (part.uv_extra or {}).get(wanted_uv)
+                        if overlay_uvs is not None and len(overlay_uvs) != len(part.positions):
+                            overlay_uvs = None
+                    if "moss blend" not in notes:
+                        notes.append(
+                            f"moss blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
+                        )
             primitives.append(
                 Primitive(
                     part.positions,
@@ -1029,15 +1055,18 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     name=f"{part.name}:{part.material_index}",
                     unlit=unlit,
                     kind=kind,
+                    colors=part.colors if blend_extra else None,
+                    uvs2=overlay_uvs,
                     normal_png=normal_png,
-                    emissive_png=emissive_png,
+                    emissive_png=overlay_png or emissive_png,
+                    extras=blend_extra,
                 )
             )
             if part.lod == 0 and not any(other.name == part.name and other.lod for other in model.parts):
                 if meshopt_available():
-                    coarser = simplify_mesh(part.positions, part.indices, part.uvs)
+                    coarser = simplify_mesh(part.positions, part.indices, part.uvs, part.colors if blend_extra else None)
                 else:
-                    coarser = cluster_lod(part.positions, part.indices, part.uvs)
+                    coarser = cluster_lod(part.positions, part.indices, part.uvs, colors=part.colors if blend_extra else None)
                 if coarser:
                     primitives.append(
                         Primitive(
@@ -1053,8 +1082,10 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             name=f"{part.name}:{part.material_index}",
                             unlit=unlit,
                             kind=kind,
+                            colors=coarser[3] if blend_extra and len(coarser) > 3 else None,
                             normal_png=normal_png,
-                            emissive_png=emissive_png,
+                            emissive_png=overlay_png or emissive_png,
+                            extras=blend_extra,
                         )
                     )
             triangles += len(part.indices) // 3
@@ -1130,6 +1161,9 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                     part.albedo_sampler = choice["sampler"]
                     part.normal_texture = (choice.get("maps") or {}).get("normal") or ""
                     part.emission_texture = (choice.get("maps") or {}).get("emission") or ""
+                    overlay = choice.get("overlay") or {}
+                    part.overlay_texture = overlay.get("texture") or ""
+                    part.blend = overlay.get("plan")
                     part.alpha = choice["alpha"]
                     part.cutoff = choice["cutoff"]
                     if choice.get("wrap"):
@@ -1153,6 +1187,33 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 if choice.get("image") is not None and choice["wanted"]:
                     external[choice["wanted"]] = choice["image"]
     return external, log, raws
+
+
+def _c0_label(plan: dict) -> str:
+    return f"_c0.{plan.get('channel') or 'r'}"
+
+
+def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
+    """The decoded ``_a1`` layer, or nothing when this material is a single albedo."""
+    span = None
+    for part in model.parts:
+        if part.material_index < 0 or part.material_index >= len(model.materials):
+            continue
+        if model.materials[part.material_index] is not material:
+            continue
+        span = color_span(part.vertex_attributes)
+        if span:
+            break
+    plan = overlay_plan(material, span)
+    if not plan:
+        return {}
+    found = _load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws)
+    image = found.get("image")
+    located = found.get("found") or ""
+    if image is None or not (located == "embedded" or _stem(located).lower() == _stem(plan["texture"]).lower()):
+        return {}
+    external[plan["texture"]] = image
+    return {"texture": plan["texture"], "plan": plan}
 
 
 def _choose_material(dump, model, material, hints, terrain, external, raws) -> dict:
@@ -1322,6 +1383,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             maps[role] = tex
             external[tex] = extra["image"]
     result["maps"] = maps
+    result["overlay"] = _overlay_choice(dump, model, material, hints, external, raws)
     return result
 
 

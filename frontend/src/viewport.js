@@ -47,9 +47,11 @@ export async function createViewport(host, hooks) {
   const backendNote = created.note;
   let terrainNodes = null;
   let mapNodes = null;
+  let blendNodes = null;
   if (created.nodes) {
     terrainNodes = await import("./terrain-node.js");
     mapNodes = await import("./cutout-node.js");
+    blendNodes = await import("./blend-node.js");
   }
   if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
@@ -160,6 +162,7 @@ export async function createViewport(host, hooks) {
   let showSub = false;
   let drawDistance = 0;
   let showTerrainDebug = false;
+  let showBlendMask = false;
   let generation = 0;
   let rebuildTimer = 0;
   let loadQueue = null;
@@ -930,7 +933,19 @@ export async function createViewport(host, hooks) {
       if (!geometry.boundsTree) geometry.computeBoundsTree();
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
-      const material = prepareMaterial(source);
+      let material = prepareMaterial(source);
+      if (material.userData && material.userData.blend && geometry.getAttribute("color")) {
+        material = material.clone();
+        geometry.setAttribute("blendMask", geometry.getAttribute("color"));
+        geometry.deleteAttribute("color");
+        const blendUv = material.userData.blend.uv;
+        if ((blendUv === "_u1" || blendUv === "u1") && geometry.getAttribute("uv1")) {
+          geometry.setAttribute("blendUv", geometry.getAttribute("uv1"));
+        }
+        material.vertexColors = false;
+        installBlendShader(material);
+        if (blendNodes) blendNodes.attachBlend(material);
+      }
       const sphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : new THREE.Sphere(new THREE.Vector3(), 1);
       parts.push({
         lod: identity.lod,
@@ -1043,8 +1058,11 @@ export async function createViewport(host, hooks) {
       ? imageSignature(material.map.image)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
+    const blend = material.userData && material.userData.blend;
+    const blendImage = material.userData && material.userData.blendMap && material.userData.blendMap.image;
+    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage) : "flat"}` : "";
     return batchKey({
-      image,
+      image: image + blendKey,
       alpha,
       side: material.side,
       tint: material.color ? material.color.getHexString() : "fff",
@@ -1448,6 +1466,75 @@ export async function createViewport(host, hooks) {
     diffuseColor *= sampledDiffuseColor;
   `;
 
+  const BLEND_MIX = `
+{
+  float mask = blendChannel < 0.5 ? vBlendMask.r : blendChannel < 1.5 ? vBlendMask.g : blendChannel < 2.5 ? vBlendMask.b : vBlendMask.a;
+  float weight = smoothstep(0.35, 0.65, mask);
+  vec2 mossUv = vMossUv * blendScale + blendTranslate;
+  vec4 moss = texture2D(blendMap, mossUv);
+  diffuseColor.rgb = mix(diffuseColor.rgb, moss.rgb, weight);
+  if (blendDebug > 0.5) diffuseColor.rgb = vec3(weight);
+}`;
+
+  function installBlendShader(material) {
+    const blend = material.userData && material.userData.blend;
+    if (!blend || material.userData.blendShader) return material;
+    const scale = blend.scale || [1, 1];
+    const translate = blend.translate || [0, 0];
+    material.userData.blendShader = true;
+    material.userData.blendDebugUniform = { value: showBlendMask ? 1 : 0 };
+    material.userData.blendScaleUniform = { value: new THREE.Vector2(Number(scale[0]) || 1, Number(scale[1]) || 1) };
+    material.userData.blendTranslateUniform = { value: new THREE.Vector2(Number(translate[0]) || 0, Number(translate[1]) || 0) };
+    material.userData.blendChannelUniform = { value: { r: 0, g: 1, b: 2, a: 3 }[blend.channel] ?? 0 };
+    material.userData.blendUv1Uniform = { value: blend.uv === "_u1" || blend.uv === "u1" ? 1 : 0 };
+    if (material.emissiveMap && !material.userData.blendMap) {
+      material.userData.blendMap = material.emissiveMap;
+      material.userData.blendMap.wrapS = THREE.RepeatWrapping;
+      material.userData.blendMap.wrapT = THREE.RepeatWrapping;
+      material.emissive.setRGB(0, 0, 0);
+      material.emissiveMap = null;
+    }
+    const useUv1 = material.userData.blendUv1Uniform.value > 0.5;
+    const vertexPars = useUv1
+      ? `attribute vec4 blendMask;\nattribute vec2 blendUv;\nvarying vec4 vBlendMask;\nvarying vec2 vMossUv;`
+      : `attribute vec4 blendMask;\nvarying vec4 vBlendMask;\nvarying vec2 vMossUv;`;
+    const vertexBody = useUv1 ? "vBlendMask = blendMask;\nvMossUv = blendUv;" : "vBlendMask = blendMask;\nvMossUv = uv;";
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.blendDebug = material.userData.blendDebugUniform;
+      shader.uniforms.blendScale = material.userData.blendScaleUniform;
+      shader.uniforms.blendTranslate = material.userData.blendTranslateUniform;
+      shader.uniforms.blendChannel = material.userData.blendChannelUniform;
+      shader.uniforms.blendMap = { value: material.userData.blendMap };
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <uv_pars_vertex>", `#include <uv_pars_vertex>\n${vertexPars}`)
+        .replace("#include <uv_vertex>", `#include <uv_vertex>\n${vertexBody}`);
+      const fragPars = `#include <uv_pars_fragment>
+varying vec4 vBlendMask;
+varying vec2 vMossUv;
+uniform sampler2D blendMap;
+uniform float blendDebug;
+uniform float blendChannel;
+uniform vec2 blendScale;
+uniform vec2 blendTranslate;`;
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <uv_pars_fragment>", fragPars)
+        .replace("#include <map_fragment>", `#include <map_fragment>\n${BLEND_MIX}`);
+    };
+    material.customProgramCacheKey = () => `blend|${blend.channel}|${blend.uv}|${scale}|${translate}`;
+    material.needsUpdate = true;
+    return material;
+  }
+
+  function applyBlendUniforms() {
+    const value = showBlendMask ? 1 : 0;
+    for (const entry of entries.values()) {
+      for (const part of entry.parts || []) {
+        const uniform = part.material && part.material.userData && part.material.userData.blendDebugUniform;
+        if (uniform) uniform.value = value;
+      }
+    }
+  }
+
   function installTerrainShader(material) {
     if (!material || material.userData.terrainShader) return material;
     const columns = Number(material.userData.atlas) || 1;
@@ -1834,7 +1921,7 @@ uniform float terrainLayerMissing;`
     });
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, distance }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
@@ -1842,6 +1929,7 @@ uniform float terrainLayerMissing;`
     if (water !== undefined) showWater = Boolean(water);
     if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
     if (subTerrain !== undefined) showSub = Boolean(subTerrain);
+    if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
     if (distance !== undefined) drawDistance = Number(distance) || 0;
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
@@ -1864,6 +1952,7 @@ uniform float terrainLayerMissing;`
     applyGround();
     applyWater();
     applyTerrainUniforms();
+    applyBlendUniforms();
     attach();
     syncLabels();
     requestRender();
