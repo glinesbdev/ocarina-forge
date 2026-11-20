@@ -266,7 +266,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-28", "9fcd6f64168e286fecdc006c6bb367db93f54cdf13abbb9b14352afaa5e004fa")
+    pinned = ("models-29", "23ca1dcc2f438ed776b7152d241f29001237f873159283a4b32c566efdec3ebb")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1961,8 +1961,18 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
     assert row["binds"][0]["srt"]["scale"] == [2.0, 3.0]
     shape = report["shapes"][0]
     assert shape["uvs"][0]["name"] == "_u0"
+    assert "f32_2" in shape["uvs"][0]["format"]
     assert shape["uvs"][0]["min"] == [0.0, 0.0]
     assert shape["uvs"][0]["max"] == [1.0, 1.0]
+    assert shape["uvs"][0]["samples"][0]["decoded"][:2] == [0.0, 0.0]
+    assert shape["uvs"][0]["samples"][1]["decoded"][:2] == [1.0, 0.0]
+    assert shape["uvs"][0]["samples"][0]["raw"]
+    found_strings = [item["text"] for item in report["strings"]]
+    assert "enable_alphatest" in found_strings
+    enable = next(item for item in report["strings"] if item["text"] == "enable_alphatest")
+    assert enable["refs"]
+    assert row["viewerAlbedo"]["sampler"] == "_a0"
+    assert row["viewerAlbedo"]["texture"] == "Leaf_Alb"
     by_name = {item["name"]: item for item in row["params"]}
     assert by_name["albedo_color"]["value"] == [0.2, 0.4, 0.6, 1.0]
     assert by_name["albedo_texsrt"]["mode"] == "maya"
@@ -1996,6 +2006,12 @@ def test_material_debug_reads_the_shader_assign_and_leaves_uvs_alone(tmp_path, c
     assert loose.options["projection_type"] == "triplanar"
     assert any(item["kind"] == "texsrt" for item in loose.params)
     assert loose.slots == []
+    # A param row with no name of its own is not filled in from the dictionary.
+    blank = bytearray(v10)
+    param_array = struct.unpack_from("<Q", blank, at + 0x48)[0]
+    struct.pack_into("<Q", blank, param_array + 8, 0)
+    struct.pack_into("<Q", blank, param_array + 0x20 + 8, 0)
+    assert parse(bytes(blank))[0].materials[0].params == []
 
 
 def test_a_normal_named_texture_is_not_albedo_on_a0():

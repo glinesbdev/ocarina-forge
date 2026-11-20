@@ -37,6 +37,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--radius", type=float, default=10.0, help="Metres around --near. Default 10.")
     parser.add_argument("--at", action="append", default=[], help="x,z in metres. ground-debug prints the ground height there. Repeat for another point.")
     parser.add_argument("--dump", help="Dump folder. Defaults to the saved config.")
+    parser.add_argument(
+        "--strings",
+        action="store_true",
+        help="material-debug also prints the whole BFRES string pool.",
+    )
     parser.add_argument("--project", help="Project folder. Defaults to the saved config, or an empty project.")
     parser.add_argument("--host", default=os.environ.get("BANCWRIGHT_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BANCWRIGHT_PORT", "47232")))
@@ -66,7 +71,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "material-debug":
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
-        raise SystemExit(print_material_debug(args.banc, as_json=args.json, dump=args.dump))
+        raise SystemExit(print_material_debug(args.banc, as_json=args.json, dump=args.dump, strings=args.strings))
     if args.static:
         from bancwright.server import mount_frontend
 
@@ -216,7 +221,7 @@ def print_ground_debug(banc: str, *, points: list[str] | None = None, as_json: b
     return 0
 
 
-def print_material_debug(target: str, *, as_json: bool = False, dump: str | None = None) -> int:
+def print_material_debug(target: str, *, as_json: bool = False, dump: str | None = None, strings: bool = False) -> int:
     """Print shader assign and uniforms. 2 when the dump or the model is missing."""
     from bancwright.config import load_config
     from bancwright.dump import Dump
@@ -237,7 +242,7 @@ def print_material_debug(target: str, *, as_json: bool = False, dump: str | None
         print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
         return 2
     try:
-        report = inspect_materials(opened, target)
+        report = inspect_materials(opened, target, strings=strings)
     except (BancError, FresError, OSError, ValueError) as exc:
         print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
         return 2

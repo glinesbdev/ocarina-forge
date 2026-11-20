@@ -809,10 +809,10 @@ class _File:
             archive, model, attributes, assign, options = "", "", {}, {}, {}
         else:
             archive, model, attributes, assign, options = best
-        hint = self._param_count_hint(header)
-        params = self._probe_params(pointers, hint)
-        if not params and nested:
-            params = self._probe_params(nested, hint)
+        # Param records have to carry their own names. A dictionary of material
+        # names is not a uniform table, and neither is a pointer reached by
+        # walking +0x10. That walk is described in the header lines instead.
+        params = self._probe_params(pointers)
         slots_text = [] if archive or model else self._header_lines(header)
         return archive, model, attributes, assign, options, params, slots_text
 
@@ -922,14 +922,6 @@ class _File:
             return None
         return text
 
-    def _param_count_hint(self, header: int) -> int:
-        if header + 0xA6 > len(self.data):
-            return 0
-        count = self.u16(header + 0xA4)
-        if 0 < count <= 80:
-            return count
-        return 0
-
     def _header_lines(self, header: int) -> list[str]:
         """What each unread qword in the 0xB0 material header points at."""
         if header + 0xB0 > len(self.data):
@@ -943,6 +935,8 @@ class _File:
             ptr = self.u64(header + slot)
             lines.append(f"+0x{slot:02X} {self._describe_pointer(ptr)}")
         lines.append("tail " + self.data[header + 0xA0 : header + 0xB0].hex())
+        for slot in (0x10, 0x30, 0x50, 0xA8):
+            lines.extend(self._follow_lines(header, slot))
         return lines
 
     def _describe_pointer(self, ptr: int) -> str:
@@ -969,11 +963,77 @@ class _File:
         names = self._name_list(ptr, 6)
         if len(names) >= 2:
             return "strings " + ", ".join(names)
-        return f"{ptr:#x} " + self.data[ptr : ptr + 24].hex()
+        note = self._block_note(ptr)
+        return f"{ptr:#x} " + self.data[ptr : ptr + 24].hex() + note
+
+    def _follow_lines(self, header: int, slot: int) -> list[str]:
+        """One level under a header qword. +0x10 on retail v10 is three pointers."""
+        if header + slot + 8 > len(self.data):
+            return []
+        ptr = self.u64(header + slot)
+        if not ptr or ptr + 0x20 > len(self.data) or self._is_string(ptr) or self._dict_ok(ptr):
+            return []
+        lines = [f"follow +0x{slot:02X} {ptr:#x}"]
+        for off in range(0, 0x20, 8):
+            child = self.u64(ptr + off)
+            if not child:
+                lines.append(f"  +{off:#x} null")
+                continue
+            if child + 16 > len(self.data):
+                lines.append(f"  +{off:#x} {child:#x} outside the file")
+                continue
+            lines.append(f"  +{off:#x} {self._describe_pointer(child)}")
+        return lines
+
+    def _block_note(self, ptr: int) -> str:
+        if ptr < 0 or ptr + 16 > len(self.data):
+            return ""
+        notes = []
+        if self.data[ptr : ptr + 16] == b"\xff" * 16:
+            notes.append("ff-filled")
+        floats = []
+        for off in range(0, 24, 4):
+            if ptr + off + 4 > len(self.data):
+                break
+            bits = self.u32(ptr + off)
+            exp = (bits >> 23) & 0xFF
+            if exp in (0, 0xFF):
+                continue
+            value = self.f32(ptr + off)
+            if math.isfinite(value) and 0.05 <= abs(value) <= 100000:
+                floats.append(f"+{off:#x}={value:.4g}")
+        if floats:
+            notes.append("floats " + " ".join(floats))
+        table = self._u16_table(ptr)
+        if table:
+            notes.append(table)
+        if not notes:
+            return ""
+        return "  " + "; ".join(notes)
+
+    def _u16_table(self, ptr: int) -> str:
+        """A leading size and an ascending run of 4-byte u16 offsets."""
+        if ptr + 16 > len(self.data):
+            return ""
+        size = self.u32(ptr)
+        if not (8 <= size <= 0x2000):
+            return ""
+        values = []
+        at = ptr + 4
+        end = min(ptr + 4 + min(size, 48), len(self.data) - 1)
+        while at + 2 <= end and len(values) < 14:
+            values.append(self.u16(at))
+            at += 2
+        if len(values) < 4 or values != sorted(values) or values[-1] <= values[0]:
+            return ""
+        if any(value % 4 for value in values):
+            return ""
+        shown = ", ".join(f"{value:#x}" for value in values)
+        return f"u16 offsets size {size:#x}: {shown}"
 
     def _probe_params(self, pointers: list[int], hint: int = 0) -> list[dict]:
+        del hint
         best: list[dict] = []
-        useful: list[dict] = []
         for dictionary in pointers:
             if not self._dict_ok(dictionary):
                 continue
@@ -983,25 +1043,21 @@ class _File:
                 continue
             if not keys or len(keys) > 80 or all(_sampler_key(key) for key in keys):
                 continue
-            counts = {len(keys)}
-            if hint:
-                counts.add(hint)
+            if _material_name_keys(keys):
+                continue
             for array in pointers:
                 if array == dictionary:
                     continue
                 for data in pointers:
                     if data in (array, dictionary):
                         continue
-                    for count in counts:
-                        try:
-                            rows = self._read_params(array, dictionary, data, count)
-                        except (FresError, struct.error, IndexError, OSError, ValueError):
-                            continue
-                        if len(rows) == count and len(rows) > len(best):
-                            best = rows
-                        elif rows and _params_useful(rows) and len(rows) > len(useful):
-                            useful = rows
-        return best or useful
+                    try:
+                        rows = self._read_params(array, dictionary, data, len(keys))
+                    except (FresError, struct.error, IndexError, OSError, ValueError):
+                        continue
+                    if len(rows) == len(keys) and len(rows) > len(best):
+                        best = rows
+        return best
 
     def _dict_ok(self, at: int) -> bool:
         if not at or at + 24 > len(self.data):
@@ -1056,10 +1112,10 @@ class _File:
             if at + 0x14 > len(self.data):
                 break
             expected = labels[index] if index < len(labels) else ""
-            name = self.string(self.u64(at + 8)) or expected
-            if expected and name != expected:
-                continue
-            if not name:
+            # The record's own name. A dictionary key is not a substitute:
+            # that is how a material-name dictionary was read as bool uniforms.
+            name = self.string(self.u64(at + 8))
+            if not name or (expected and name != expected):
                 continue
             kind = self.data[at + 0x10]
             offset = self.u16(at + 0x12)
@@ -1413,12 +1469,15 @@ def _uv_ranges(fvtx: dict) -> list[dict]:
             count += 1
         if not count:
             continue
+        fmt = int(attribute.get("format") or 0)
         found.append(
             {
                 "name": name,
+                "format": f"0x{fmt:04X} {_format_name(fmt)}",
                 "min": [round(umin, 5), round(vmin, 5)],
                 "max": [round(umax, 5), round(vmax, 5)],
                 "count": count,
+                "samples": _uv_samples(fvtx, attribute),
             }
         )
     return found
@@ -1446,13 +1505,108 @@ def _shader_symbols(attributes: dict, assign: dict, options: dict) -> bool:
     return any(_SHADER_OPTION.search(str(key)) for key in options)
 
 
-def _params_useful(rows: list[dict]) -> bool:
-    for row in rows:
-        if row.get("kind") == "texsrt":
-            return True
-        if _PARAM_USEFUL.search(str(row.get("name") or "")):
-            return True
-    return False
+def _material_name_keys(keys: list[str]) -> bool:
+    """A model material dictionary (Mt_Land_..., Mt_Shade), not shader uniforms."""
+    if len(keys) < 2:
+        return False
+    named = sum(1 for key in keys if str(key).startswith("Mt_"))
+    return named >= max(2, (len(keys) + 1) // 2)
+
+
+def _format_name(fmt: int) -> str:
+    return {
+        _F32: "f32",
+        _F32_2: "f32_2",
+        _F32_3: "f32_3",
+        _F32_4: "f32_4",
+        _F16: "f16",
+        _F16_2: "f16_2",
+        _F16_4: "f16_4",
+        _U8: "u8",
+        _U8_2: "unorm8_2",
+        _U8_4: "unorm8_4",
+        _S8_4: "snorm8_4",
+        _U16_2: "unorm16_2",
+        _S16_2: "snorm16_2",
+        _SN10: "snorm10_10_10",
+        _UN10: "unorm10_10_10",
+    }.get(fmt, "unknown")
+
+
+def _uv_samples(fvtx: dict, attribute: dict, limit: int = 4) -> list[dict]:
+    """The first few vertices: raw attribute bytes and the decoded floats."""
+    fmt = int(attribute.get("format") or 0)
+    size = _format_size(fmt) or 8
+    samples = []
+    count = int(fvtx.get("count") or 0)
+    for index in list(range(min(limit, count))):
+        try:
+            raw = _attr_bytes(fvtx, attribute, index, size)
+        except (FresError, struct.error, IndexError):
+            break
+        decoded = None
+        try:
+            values = _read_attr(fvtx, attribute, index)
+            if values:
+                decoded = [round(float(value), 5) for value in values[:4]]
+        except (FresError, struct.error, IndexError, ValueError):
+            decoded = None
+        samples.append({"index": index, "raw": raw.hex(), "decoded": decoded})
+    return samples
+
+
+def _attr_bytes(fvtx: dict, attribute: dict, index: int, size: int) -> bytes:
+    buffer_index = attribute["buffer"]
+    if buffer_index >= len(fvtx["buffers"]):
+        raise FresError(f"attribute {attribute['name']} names a missing buffer")
+    stride = fvtx["strides"][buffer_index] or size
+    blob = fvtx["buffers"][buffer_index]
+    at = index * stride + attribute["offset"]
+    if at < 0 or at + size > len(blob):
+        raise FresError("a UV sample does not fit in its buffer")
+    return blob[at : at + size]
+
+
+_STRING_INTEREST = re.compile(r"gsys|texcoord|(?:^|_)uv_|(?:^|_)o_|enable_|sharc|bfsha|uking", re.I)
+
+
+def bfres_strings(data: bytes) -> list[dict]:
+    """Length-prefixed BFRES strings (u16 length, bytes, NUL) and their file offsets."""
+    found = []
+    index = 0
+    limit = len(data)
+    while index + 4 <= limit:
+        length = int.from_bytes(data[index : index + 2], "little")
+        end = index + 2 + length
+        if 1 <= length <= 180 and end < limit and data[end] == 0:
+            raw = data[index + 2 : end]
+            if all(32 <= byte < 127 for byte in raw):
+                found.append({"offset": index, "text": raw.decode("ascii")})
+                index = end + 1
+                if index & 1:
+                    index += 1
+                continue
+        index += 2
+    return found
+
+
+def interesting_strings(data: bytes) -> list[dict]:
+    """Shader-like names, and the file offsets of pointers that reference them.
+
+    A BFRES string pointer addresses the u16 length, which is ``offset`` here.
+    """
+    pool = [item for item in bfres_strings(data) if _STRING_INTEREST.search(item["text"])]
+    if not pool:
+        return []
+    targets = {item["offset"] for item in pool}
+    hits: dict[int, list[int]] = {item: [] for item in targets}
+    for at in range(0, len(data) - 7, 8):
+        value = int.from_bytes(data[at : at + 8], "little")
+        if value in hits and len(hits[value]) < 6:
+            hits[value].append(at)
+    for item in pool:
+        item["refs"] = hits.get(item["offset"]) or []
+    return pool
 
 
 def _attr(attributes: list[dict], names: tuple[str, ...]) -> dict | None:
@@ -2037,7 +2191,6 @@ _SHADER_TEXT = re.compile(r"(?=.*[A-Za-z])[ -~]{1,160}")
 _UV_ATTR = re.compile(r"^_?u\d+$", re.I)
 _SHADER_OPTION = re.compile(r"enable|alpha|proj|uv|coord|gsys|tile|macro|world|planar", re.I)
 _SAMPLER_SLOT = re.compile(r"^_?[A-Za-z]{1,12}\d{0,2}$")
-_PARAM_USEFUL = re.compile(r"srt|tile|uv|color|albedo|scale|tex", re.I)
 
 
 _TEXTURE_IN_FILE = re.compile(

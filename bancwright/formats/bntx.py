@@ -175,6 +175,29 @@ def texture_layer(data: bytes, index: int, *, flatten_alpha: bool = False) -> Te
     return _texture(data, brti, layer=index, flatten_alpha=flatten_alpha)
 
 
+def image_sizes(data: bytes) -> list[dict]:
+    """Name and pixel size of each image, without decoding the texels."""
+    if len(data) < 0x40 or data[:4] != b"BNTX":
+        return []
+    count = _i32(data, 0x24)
+    table = _u64(data, 0x28)
+    if count <= 0 or count > 4096 or table <= 0:
+        return []
+    found = []
+    for index in range(count):
+        at = table + index * 8
+        if at + 8 > len(data):
+            break
+        brti = _u64(data, at)
+        name, fmt = _identity(data, brti) if brti else ("", 0)
+        width = height = 0
+        if brti and brti + 0x2C <= len(data) and data[brti : brti + 4] == b"BRTI":
+            width = _i32(data, brti + 0x24)
+            height = _i32(data, brti + 0x28)
+        found.append({"name": name, "width": width, "height": height, "format": fmt})
+    return found
+
+
 def image_names(data: bytes) -> list[str]:
     """Texture names in a BNTX, without decoding the images."""
     if len(data) < 0x40 or data[:4] != b"BNTX":

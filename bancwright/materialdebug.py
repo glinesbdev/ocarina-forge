@@ -7,39 +7,43 @@ and shading model, the attribute assign (``_u0`` / ``_u1`` / ``_u2`` are UV
 channels), the sampler assign, the option strings, and the shader parameters.
 Each sampler line names the UV channel when the assign says one, the texture
 SRT whose name matches that sampler, and the options that look like a
-projection mode. Each shape lists the UV sets in its vertex buffer and their
-min/max. A set that runs past 0..1 is the tiling set. None of that is applied
-to the mesh. Stretched roof tiles and the long garden beds stay as they are
-until this report comes back.
+projection mode. Each shape lists the UV sets in its vertex buffer, their format, min/max, and
+a few raw samples. The ranked albedo is the texture the viewer binds, with
+its pixel size when the Tex file is in the dump. ``--strings`` prints the
+whole string pool. None of that is applied to the mesh.
 """
 
 from __future__ import annotations
 
 import re
 
-from bancwright.formats.bfres import bind_role, inspect, parse
+from bancwright.formats.bfres import bind_role, bfres_strings, inspect, interesting_strings, parse
 from bancwright.modeldebug import load_bytes
 
 _UV_NAME = re.compile(r"^(?:_?u\d|_?uv\d|texcoord\d|uvset\d)$", re.I)
 _PROJECTION = re.compile(r"uv|coord|project|triplanar|world|manual|planar|sphere|cube", re.I)
 
 
-def inspect_materials(dump, target: str) -> dict:
+def inspect_materials(dump, target: str, *, strings: bool = False) -> dict:
     source, blob = load_bytes(dump, target)
     header = inspect(blob)
     models = parse(blob) if not header.get("error") else []
     rows = []
     for model in models:
         for material in model.materials:
-            rows.append(_row(model.name, material))
-    return {
+            rows.append(_row(model.name, material, dump))
+    report = {
         "target": target,
         "source": source,
         "version": header.get("version"),
         "error": header.get("error") or "",
         "materials": rows,
         "shapes": _shapes(models),
+        "strings": interesting_strings(blob) if not header.get("error") else [],
     }
+    if strings and not header.get("error"):
+        report["stringPool"] = bfres_strings(blob)
+    return report
 
 
 def name_hints(name: str) -> list[str]:
@@ -122,8 +126,9 @@ def _alnum(text: str) -> str:
     return "".join(char for char in str(text or "").lower() if char.isalnum())
 
 
-def _row(model: str, material) -> dict:
+def _row(model: str, material, dump=None) -> dict:
     lines = sampler_lines(material)
+    albedo = _viewer_albedo(dump, material)
     return {
         "model": model,
         "name": material.name,
@@ -145,7 +150,53 @@ def _row(model: str, material) -> dict:
         "baseColor": list(material.base_color) if material.base_color else None,
         "note": material.note,
         "slots": list(getattr(material, "slots", []) or []),
+        "viewerAlbedo": albedo,
     }
+
+
+def _viewer_albedo(dump, material) -> dict:
+    """The texture rank_albedo hands the viewer, and its size when a file resolves.
+
+    Sibling borrow is not used. A missing Tex file stays missing.
+    """
+    chosen = list(getattr(material, "albedo", []) or [])[:1]
+    if not chosen:
+        return {"sampler": "", "texture": "", "size": "", "path": "", "note": "no albedo sampler"}
+    slot, name = chosen[0]
+    info = {"sampler": slot, "texture": name, "size": "", "path": "", "note": ""}
+    if dump is None:
+        info["note"] = "no dump, size not read"
+        return info
+    from bancwright.formats.bntx import image_sizes
+    from bancwright.models import _resolve_tex
+
+    path, tried = _resolve_tex(dump, name, [])
+    if not path:
+        info["note"] = "no Tex file matched"
+        info["tried"] = tried[:6]
+        return info
+    from bancwright.errors import BancError
+
+    try:
+        blob, _dict_id = dump.read_file(path)
+    except (BancError, OSError, ValueError) as exc:
+        info["path"] = path
+        info["note"] = getattr(exc, "message", None) or str(exc)
+        return info
+    sizes = image_sizes(blob)
+    info["path"] = path
+    wanted = (name or "").lower()
+    match = next((item for item in sizes if (item.get("name") or "").lower() == wanted), None)
+    if match is None and len(sizes) == 1:
+        match = sizes[0]
+    if match and match.get("width") and match.get("height"):
+        info["size"] = f"{match['width']}x{match['height']}"
+        image_name = match.get("name") or ""
+        if image_name and image_name.lower() != wanted:
+            info["note"] = f"image {image_name}"
+    else:
+        info["note"] = "BNTX has no size"
+    return info
 
 
 def _shapes(models) -> list[dict]:
@@ -250,6 +301,16 @@ def render_text(report: dict) -> str:
                 )
         else:
             lines.append("  samplers (none)")
+        albedo = row.get("viewerAlbedo") or {}
+        if albedo.get("texture") or albedo.get("note"):
+            bits = [f"viewer albedo  {albedo.get('sampler') or '?'} = {albedo.get('texture') or '?'}"]
+            if albedo.get("size"):
+                bits.append(albedo["size"])
+            if albedo.get("path"):
+                bits.append(albedo["path"])
+            if albedo.get("note"):
+                bits.append(f"({albedo['note']})")
+            lines.append("  " + "  ".join(bits))
         info = row.get("renderInfo") or []
         if info:
             lines.append("  render info")
@@ -282,8 +343,32 @@ def render_text(report: dict) -> str:
                 low = item.get("min") or [0, 0]
                 high = item.get("max") or [0, 0]
                 lines.append(
-                    f"    {item.get('name') or '?'}  u {low[0]}..{high[0]}  v {low[1]}..{high[1]}  n={item.get('count') or 0}"
+                    f"    {item.get('name') or '?'}  {item.get('format') or 'format ?'}  "
+                    f"u {low[0]}..{high[0]}  v {low[1]}..{high[1]}  n={item.get('count') or 0}"
                 )
+                for sample in item.get("samples") or []:
+                    decoded = sample.get("decoded")
+                    shown = " ".join(str(value) for value in decoded) if isinstance(decoded, list) else "not decoded"
+                    lines.append(f"      [{sample.get('index')}] raw {sample.get('raw') or ''}  decoded {shown}")
+    strings = report.get("strings") or []
+    lines.append("")
+    lines.append("strings")
+    if not strings:
+        lines.append("  (no gsys, texcoord, uv_, o_, enable_, or shader-archive name)")
+    for item in strings[:80]:
+        refs = " ".join(f"{ref:#x}" for ref in (item.get("refs") or [])[:6])
+        lines.append(f"  {item.get('offset', 0):#x} {item.get('text') or ''}  refs {refs or '(none)'}")
+    if len(strings) > 80:
+        lines.append(f"  ... {len(strings) - 80} more")
+    pool = report.get("stringPool")
+    if isinstance(pool, list):
+        lines.append("")
+        lines.append(f"string pool ({len(pool)})")
+        shown = pool[:2000]
+        for item in shown:
+            lines.append(f"  {item.get('offset', 0):#x} {item.get('text') or ''}")
+        if len(pool) > len(shown):
+            lines.append(f"  ... {len(pool) - len(shown)} more")
     lines.append("")
     return "\n".join(lines)
 
