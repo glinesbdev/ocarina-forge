@@ -2454,37 +2454,57 @@ def base_color_name(names: list[str]) -> str:
     return chosen[0][1] if chosen else ""
 
 
+def _chart_is_tiled(uv, axis: int) -> bool:
+    """True when this axis repeats past the unit square.
+
+    A trunk cut lives in 0..1 (u=0.98 beside u=0.02). A roof or a planter
+    tiles on purpose, often several units outside that square (~4 m per
+    shingle). Folding those by 1 squashes a real tile and the texture stretches.
+    """
+    vals = [pair[axis] for pair in uv]
+    return min(vals) < -0.25 or max(vals) > 1.25
+
+
 def _close_uv_seams(positions, uvs, indices):
-    """Split a triangle whose UVs jump across the texture.
+    """Split a triangle whose UVs jump across a unit-chart cut.
 
     A trunk unwrap puts u=0.98 and u=0.02 on one triangle. The GPU then sees
     a huge derivative, picks a coarse mip, and the mip averages the magenta
     gutter into a line down the seam. Moving the wrapped corner by 1 makes
     that triangle continuous. The other triangles keep the original vertex.
+
+    The jump has to land on an integer (a wrap), and the axis has to be a
+    unit chart. A tiled span such as 1.35..2.57 is left as it was stored.
     """
     if not uvs or len(uvs) != len(positions) or len(indices) < 3:
         return positions, uvs, indices
     pos = list(positions)
     uv = [(float(u), float(v)) for u, v in uvs]
     idx = list(indices)
-    limit = 0.5 - 1e-4
+    tiled = [_chart_is_tiled(uv, axis) for axis in (0, 1)]
+    if all(tiled):
+        return pos, uv, idx
     for tri in range(0, len(idx) - 2, 3):
         for axis in (0, 1):
+            if tiled[axis]:
+                continue
             ids = [idx[tri], idx[tri + 1], idx[tri + 2]]
             vals = [uv[j][axis] for j in ids]
             if max(vals) - min(vals) <= 0.5:
                 continue
-            med = sorted(vals)[1]
             for slot, (vertex, value) in enumerate(zip(ids, vals)):
-                shifted = value
-                while shifted - med > limit:
-                    shifted -= 1.0
-                while med - shifted > limit:
-                    shifted += 1.0
-                if abs(shifted - value) <= 1e-6:
-                    continue
                 others = [item for index, item in enumerate(vals) if index != slot]
                 if abs(others[0] - others[1]) > 0.25:
+                    continue
+                body = (others[0] + others[1]) * 0.5
+                delta = value - body
+                steps = round(delta)
+                # A real wrap is almost exactly ±1 (or a few tiles). A span of
+                # 0.6 across one chart is a gradient, not a cut.
+                if steps == 0 or abs(delta - steps) > 0.15:
+                    continue
+                shifted = value - steps
+                if abs(shifted - value) <= 1e-6:
                     continue
                 moved = list(vals)
                 moved[slot] = shifted

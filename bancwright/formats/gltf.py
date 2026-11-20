@@ -118,15 +118,23 @@ def cluster_lod(
     cells = max(2, int(round(max(16, len(positions) * ratio) ** (1 / 3))))
     step = span / cells
     origin = (min(xs), min(ys), min(zs))
-    vertex_of: dict[tuple[int, int, int], int] = {}
+    vertex_of: dict[tuple, int] = {}
     remap: dict[int, int] = {}
     new_pos: list[tuple[float, float, float]] = []
     new_uv: list[tuple[float, float]] = []
     for index, point in enumerate(positions):
+        # The UV bin keeps a seam (0 beside 1, or a tiled chart) from welding
+        # into the vertex that happened to share the position cell.
+        if uvs is not None and index < len(uvs):
+            uv_bin = (int(round(uvs[index][0] * 4)), int(round(uvs[index][1] * 4)))
+        else:
+            uv_bin = (0, 0)
         cell = (
             int((point[0] - origin[0]) / step),
             int((point[1] - origin[1]) / step),
             int((point[2] - origin[2]) / step),
+            uv_bin[0],
+            uv_bin[1],
         )
         slot = vertex_of.get(cell)
         if slot is None:

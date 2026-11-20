@@ -36,7 +36,7 @@ Check: open Kokiri, fly back until trees are small, and **Stats** tris should fa
 
 ## Import cache
 
-Cached glbs use `EXT_meshopt_compression` on the geometry. The compression does not quantize positions, so a decoded vertex matches the one that was packed. Textures stay JPEG or PNG. A KTX2 encode was tried and rejected: three r170’s Basis transcoder returns an empty image for that encoder’s files, so the field and the actors would draw black. The view still loads a meshopt glb, and it has a KTX2 loader pointed at `/basis/` for when an encoder round-trips.
+Cached glbs use `EXT_meshopt_compression` on the geometry. The compression does not quantize positions or texture coordinates, so a decoded vertex matches the one that was packed, including UVs outside 0..1. Textures stay JPEG or PNG. A KTX2 encode was tried and rejected: three r170’s Basis transcoder returns an empty image for that encoder’s files, so the field and the actors would draw black. The view still loads a meshopt glb, and it has a KTX2 loader pointed at `/basis/` for when an encoder round-trips.
 
 Before: a 40×40 grid glb was 70,788 bytes of plain glTF. After: the same triangles are 14,040 bytes, about a fifth, and a decoded vertex still matches the one that was packed. Kokiri’s sample actors are already a few kilobytes, so the byte cut shows up on the dense meshes. Draw count is not what this slice moves. That compression used prefix `models-21`. The atlas cache below moves the prefix to `models-22`, so the first open of this build rebuilds the glbs again.
 

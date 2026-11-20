@@ -20,7 +20,9 @@ const plainIO = new NodeIO().registerExtensions([KHRMaterialsUnlit]);
 
 // KTX2 is not applied. The current Basis encoder writes files that three's
 // transcoder turns into an empty image, so a cached texture would draw black.
-// Geometry is compressed without quantizing, which keeps actor positions put.
+// Geometry is compressed without quantizing. Positions and TEXCOORD stay
+// float32, including UVs outside 0..1. Do not run quantize(): a normalized
+// uint16 texcoord squashes a tiled chart (a roof at -3..5) into the unit square.
 
 async function pack(body) {
   const glb = Buffer.from(body.glb, "base64");

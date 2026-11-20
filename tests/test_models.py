@@ -266,7 +266,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-30", "3c3a80412bec2377781b793d923cd769999886ce589812fd84e4f87073be1625")
+    pinned = ("models-31", "1f018c034470d9175560e720fd116f348ba16b3a2e6f51e05002b721f09d9093")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -883,8 +883,111 @@ def test_a_uv_seam_is_closed_and_a_full_chart_is_left_alone():
     assert seam[2][1] != 1
     assert seam[1][seam[2][1]][0] < 0
     assert abs(seam[1][1][0] - 0.98) < 1e-6
+    # v=0.8 beside v=0.2 is a gradient, not a wrap. It stays.
+    assert min(pair[1] for pair in seam[1]) >= 0.2 - 1e-6
     chart = _close_uv_seams(positions, [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)], [0, 1, 2])
     assert chart[2] == [0, 1, 2]
+    # A slate span of ~1.2 tiles is tiling. Folding it by 1 is what stretched the roof.
+    roof = _close_uv_seams(
+        [(0.0, 0.0, 0.0), (4.83, 0.0, 0.0), (0.0, 0.0, 1.2)],
+        [(1.354, -1.45), (2.570, -1.40), (1.400, -1.20)],
+        [0, 1, 2],
+    )
+    assert roof[2] == [0, 1, 2]
+    assert roof[1][1][0] == 2.570
+
+
+def test_tiled_roof_uvs_match_the_served_glb_on_both_lods():
+    """Slate-style _u0 outside 0..1 survives the cached glb, lod0 and the far mesh.
+
+    The served file is the meshopt glb. TEXCOORD_0 is float, not a normalized
+    uint16, and the far mesh does not bridge a UV seam.
+    """
+    from bancwright.formats.bfres import parse, sample_bfres
+    from bancwright.formats.meshopt import simplify_mesh
+    from bancwright.models import _assemble
+
+    cols, rows = 20, 12
+    positions = []
+    uvs = []
+    for y in range(rows):
+        for x in range(cols):
+            positions.append((x * 4.83, 0.0, y * 4.0))
+            uvs.append((1.354 + x * 1.216, -1.45 + y * 0.516))
+    indices = []
+    for y in range(rows - 1):
+        for x in range(cols - 1):
+            corner = y * cols + x
+            indices.extend((corner, corner + 1, corner + cols, corner + 1, corner + cols + 1, corner + cols))
+    model = parse(
+        sample_bfres(
+            "Slate",
+            positions,
+            indices,
+            uvs,
+            bytes([40, 70, 120, 255]) * 4,
+            2,
+            2,
+            embed_texture=False,
+        )
+    )[0]
+    part = model.parts[0]
+    part.name = "pCube14947_1__Mt_Land_HrlCastle_Roof_Slate_A"
+    assert abs(part.uvs[0][0] - 1.354) < 1e-4 and abs(part.uvs[0][1] + 1.45) < 1e-4
+    assert abs(part.uvs[1][0] - (1.354 + 1.216)) < 1e-4
+    assert max(u for u, _v in part.uvs) - min(u for u, _v in part.uvs) > 2.0
+
+    glb, _info = _assemble([model], {})
+    document, blob = _glb_parts(glb)
+    by_lod = {}
+    for node in document["nodes"]:
+        mesh = document["meshes"][node["mesh"]]
+        primitive = mesh["primitives"][0]
+        by_lod[node["name"][:4]] = _accessor_floats(document, blob, primitive["attributes"]["TEXCOORD_0"], 2)
+    assert "lod0" in by_lod and "lod1" in by_lod
+    near = by_lod["lod0"]
+    assert len(near) == len(uvs)
+    for got, want in zip(near, uvs):
+        assert abs(got[0] - want[0]) < 1e-4
+        assert abs(got[1] - want[1]) < 1e-4
+    accessor = document["accessors"][document["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"]]
+    assert accessor["componentType"] == 5126
+    assert not accessor.get("normalized")
+    far = by_lod["lod1"]
+    assert min(u for u, _v in far) < 1.40
+    assert max(u for u, _v in far) > 1.354 + 11 * 1.216
+    # The corner texcoord is still the BFRES value, not a 0..1 squash.
+    assert any(abs(u - 1.354) < 1e-3 and abs(v + 1.45) < 1e-3 for u, v in far)
+
+    # A topological seam stays split on the simplified mesh: no far triangle
+    # reaches across u=0 and u=1.
+    seam_pos = []
+    seam_uv = []
+    seam_cols = 16 + 15
+    seam_rows = 16
+    for y in range(seam_rows):
+        for x in range(16):
+            seam_pos.append((float(x), 0.0, float(y)))
+            seam_uv.append((x / 15.0, y / 15.0))
+        for x in range(15):
+            seam_pos.append((15.0 + x, 0.0, float(y)))
+            seam_uv.append((x / 14.0, y / 15.0))
+    seam_idx = []
+    for y in range(seam_rows - 1):
+        for i in range(seam_cols - 1):
+            if i == 15:
+                continue
+            a = y * seam_cols + i
+            b = a + 1
+            c = a + seam_cols
+            d = c + 1
+            seam_idx.extend((a, b, c, b, d, c))
+    simplified = simplify_mesh(seam_pos, seam_idx, seam_uv)
+    assert simplified is not None
+    _pos, far_idx, far_uv = simplified
+    for start in range(0, len(far_idx), 3):
+        span = [far_uv[far_idx[start + offset]][0] for offset in range(3)]
+        assert max(span) - min(span) < 0.5
 
 
 def test_coverage_png_marks_the_emitted_quad(tmp_path):
@@ -1626,6 +1729,13 @@ def test_cluster_lod_shrinks_a_dense_mesh():
     far = cluster_lod(positions, indices, None)
     assert far is not None
     assert len(far[1]) < len(indices) * 0.5
+    # Neighbouring texcoords that share a position cell stay distinct.
+    # Welding them is what smears a seam on the fallback far mesh.
+    uvs = [(float(x % 2), 0.0) for y in range(40) for x in range(40)]
+    seamed = cluster_lod(positions, indices, uvs)
+    assert seamed is not None
+    assert any(abs(u - 1.0) < 1e-6 for u, _v in seamed[2])
+    assert any(abs(u) < 1e-6 for u, _v in seamed[2])
 
 
 def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
