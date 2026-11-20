@@ -8,6 +8,7 @@ import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-
 
 import { instanceLod, isTerrainProxy } from "./cull.js";
 import { formatStats, keepRendering } from "./frame.js";
+import { actorLocked, actorShown, batchKey, canGizmo, canPick } from "./instance.js";
 import { chooseHit } from "./pick.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -324,10 +325,17 @@ export function createViewport(host, hooks) {
       pivot.rotation.set(rx, ry, rz);
       pivot.scale.set(sx || 1, sy || 1, sz || 1);
       pivot.userData.actorId = actor.id;
-      const hiddenByStatus = actor.status === "hidden" && !showHidden;
-      const hiddenByCategory = categories[actor.category] === "hide";
-      const hiddenByVolume = volume && hideVolumes;
-      pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
+      const gate = {
+        status: actor.status,
+        category: actor.category,
+        volume,
+        showHidden,
+        categories,
+        hideVolumes,
+        companion: Boolean(actor.companion),
+        pickable: actor.pickable !== false,
+      };
+      pivot.visible = actorShown(gate);
       scene.add(pivot);
       entries.set(key, {
         key,
@@ -341,7 +349,7 @@ export function createViewport(host, hooks) {
         farNames: null,
         slots: [],
         pickable: actor.pickable !== false,
-        locked: categories[actor.category] === "lock" || (actor.companion && actor.pickable === false),
+        locked: actorLocked(gate),
         color,
         pivot,
         mesh,
@@ -750,14 +758,18 @@ export function createViewport(host, hooks) {
   }
 
   function batchKeyFor(material, geometry) {
-    const imageKey = material.map && material.map.image
+    const image = material.map && material.map.image
       ? imageSignature(material.map.image)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
-    const attrs = Object.keys(geometry.attributes).sort().join(",");
-    const indexed = geometry.getIndex() ? "idx" : "no";
-    const tintHex = material.color ? material.color.getHexString() : "fff";
-    return `${imageKey}|${alpha}|s${material.side}|c${tintHex}|${indexed}|${attrs}`;
+    return batchKey({
+      image,
+      alpha,
+      side: material.side,
+      tint: material.color ? material.color.getHexString() : "fff",
+      indexed: geometry.getIndex() ? "idx" : "no",
+      attributes: Object.keys(geometry.attributes).sort().join(","),
+    });
   }
 
   function actorScale(entry) {
@@ -1244,7 +1256,7 @@ uniform float terrainLayerMissing;`
 
   function attach() {
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id || !entry.pivot.visible || entry.locked) {
+    if (!entry || !canGizmo({ id: entry.id, shown: entry.pivot.visible, locked: entry.locked })) {
       transform.detach();
       return;
     }
@@ -1322,11 +1334,18 @@ uniform float terrainLayerMissing;`
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
-      const hiddenByStatus = entry.status === "hidden" && !showHidden;
-      const hiddenByCategory = categories[entry.category] === "hide";
-      const hiddenByVolume = entry.volume && hideVolumes;
-      entry.locked = categories[entry.category] === "lock" || (entry.companion && entry.pickable === false);
-      entry.pivot.visible = !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
+      const gate = {
+        status: entry.status,
+        category: entry.category,
+        volume: entry.volume,
+        showHidden,
+        categories,
+        hideVolumes,
+        companion: entry.companion,
+        pickable: entry.pickable,
+      };
+      entry.locked = actorLocked(gate);
+      entry.pivot.visible = actorShown(gate);
       syncGhost(entry);
     }
     syncBatchVisibility();
@@ -1377,7 +1396,7 @@ uniform float terrainLayerMissing;`
     const roots = [];
     for (const batch of batches) roots.push(batch.mesh);
     for (const entry of entries.values()) {
-      if (entry.pivot.visible && !entry.locked && (!entry.parts || !entry.parts.length)) roots.push(entry.pivot);
+      if (canPick({ shown: entry.pivot.visible, locked: entry.locked }) && (!entry.parts || !entry.parts.length)) roots.push(entry.pivot);
     }
     const groups = classify(roots.length ? raycaster.intersectObjects(roots, true) : []);
     for (const found of volumeRayHits(raycaster)) {
@@ -1395,7 +1414,7 @@ uniform float terrainLayerMissing;`
   function volumeRayHits(raycaster) {
     const found = [];
     for (const entry of entries.values()) {
-      if (!entry.volume || entry.locked || !entry.pivot.visible) continue;
+      if (!entry.volume || !canPick({ shown: entry.pivot.visible, locked: entry.locked })) continue;
       if (entry.parts && entry.parts.length) continue;
       entry.mesh.updateWorldMatrix(true, false);
       localInverse.copy(entry.mesh.matrixWorld).invert();
@@ -1426,7 +1445,7 @@ uniform float terrainLayerMissing;`
       if (!hit.object.visible) continue;
       const id = idOfHit(hit);
       const entry = id ? entries.get(id) : null;
-      if (!entry || entry.locked || !entry.pivot.visible) continue;
+      if (!entry || !canPick({ shown: entry.pivot.visible, locked: entry.locked })) continue;
       if (entry.volume && (!entry.parts || !entry.parts.length)) {
         if (!volumes.includes(id)) volumes.push(id);
         if (nearEdge(hit, entry) && !edges.includes(id)) edges.push(id);

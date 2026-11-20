@@ -10,7 +10,11 @@ Check: turn **Stats** on, orbit, then let go. The line should switch to `idle` w
 
 ## Instanced repeats
 
-Copies of a model that share an albedo are already one `BatchedMesh`: the geometry is uploaded once and each actor is an instance (matrix, colour, visibility). Picking, the selection tint, the gizmo, hide, lock, and the category toggles still go through that instance. **Stats** now includes `inst`, the number of those instances. On Kokiri that count should be in the thousands while draws stay in the low hundreds. This slice does not change the batching, so the draw count should stay near the 200–275 baseline.
+Copies of a model that share an albedo are one `BatchedMesh`: the geometry is uploaded once and each actor is an instance (matrix, colour, visibility). The batch key is the material, so two houses with the same roof share a draw even when they are different actors. Picking reads the batch id back to the actor. The selection tints that instance. The gizmo stays on the actor pivot and writes the instance matrix while it drags. Hide, lock, and the category toggles use one gate: a hidden category drops the instance and cannot be picked; a locked category stays drawn, clicks pass through, and the gizmo does not attach. `frontend/src/instance.test.js` covers those gates. **Stats** includes `inst`, the number of instances. On Kokiri that count should be in the thousands while draws stay in the low hundreds.
+
+Before and after this confirmation: draw count stays near the 200–275 baseline. The sample scene in this repo is too small to reproduce that (about 30 draws and a handful of instances).
+
+Check: two copies of one model count as two `inst` and do not add a second draw. Hide a category and those copies disappear and a click misses them. Lock the category and they stay visible, a click misses them, and the gizmo does not attach. Select one copy and it tints gold; dragging the gizmo moves that copy only.
 
 ## Frustum and draw distance
 
