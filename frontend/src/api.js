@@ -32,6 +32,7 @@ export const api = {
   scenes: () => request("/api/scenes"),
   scene: (banc) => request(`/api/scene?banc=${encodeURIComponent(banc)}`),
   sceneChanges: (banc) => request(`/api/scene/changes?banc=${encodeURIComponent(banc)}`),
+  problems: (banc) => request(`/api/scene/problems?banc=${encodeURIComponent(banc)}`),
   projectChanges: () => request("/api/changes"),
   edit: (banc, command) => request("/api/scene/edit", { method: "POST", body: JSON.stringify({ banc, command }) }),
   putDiff: (banc, actors) => request("/api/scene/diff", { method: "PUT", body: JSON.stringify({ banc, actors }) }),

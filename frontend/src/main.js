@@ -16,6 +16,8 @@ const state = {
   changeCounts: {},
   changes: null,
   changeToken: 0,
+  problems: null,
+  problemToken: 0,
   banc: null,
   view: null,
   selected: null,
@@ -205,6 +207,7 @@ document.querySelectorAll("[data-cat]").forEach((button) => {
 $("tab-outliner").addEventListener("click", () => showTab("outliner"));
 $("tab-props").addEventListener("click", () => showTab("props"));
 $("tab-changes").addEventListener("click", () => showTab("changes"));
+$("tab-problems").addEventListener("click", () => showTab("problems"));
 document.querySelectorAll("[data-nav]").forEach((button) => {
   button.addEventListener("click", () => setNav(button.dataset.nav));
 });
@@ -803,6 +806,7 @@ function applyView(view, { frame = false, select } = {}) {
   renderOutliner();
   renderProps();
   loadChanges(view.banc || state.banc);
+  loadProblems(view.banc || state.banc);
   if (state.banc) state.modified.add(state.banc);
   if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
   for (const extra of view.companions || []) {
@@ -896,7 +900,10 @@ async function writeShot(banc, shot, writeRecipes) {
     await api.putDiff(item.banc, item.actors || {});
     if (writeRecipes && Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
   }
-  if (state.banc === banc) loadChanges(banc);
+  if (state.banc === banc) {
+    loadChanges(banc);
+    loadProblems(banc);
+  }
 }
 
 function applyLocal(shot) {
@@ -1300,6 +1307,8 @@ function renderProps() {
   }
   head.append(title, gyaml, hash, meta);
   panel.append(head);
+  const notes = actorProblems(actor);
+  if (notes.length) panel.append(problemNotes(notes));
   if (actor.status === "recipe") panel.append(recipeNote(actor));
   panel.append(modelBlock(actor));
 
@@ -1656,6 +1665,120 @@ const CHANGE_LABELS = [
   ["schedule", "schedules"],
   ["text", "text"],
 ];
+
+function actorProblems(actor) {
+  const rows = (state.problems && state.problems.diagnostics) || [];
+  if (!actor) return [];
+  return rows.filter((row) => row.actor && row.actor === actor.id);
+}
+
+function problemNotes(rows) {
+  const list = document.createElement("div");
+  list.className = "problem-notes";
+  for (const row of rows) {
+    const line = document.createElement("p");
+    line.className = row.severity === "warning" ? "problem-warning" : "problem-error";
+    line.textContent = row.message;
+    list.append(line);
+  }
+  return list;
+}
+
+async function loadProblems(banc) {
+  const token = ++state.problemToken;
+  if (!banc || !projectReady()) {
+    state.problems = { banc, diagnostics: [] };
+    renderProblems();
+    return;
+  }
+  if (!state.problems || state.problems.banc !== banc) {
+    state.problems = null;
+    renderProblems();
+  }
+  try {
+    const report = await api.problems(banc);
+    if (token !== state.problemToken || state.banc !== banc) return;
+    state.problems = report;
+  } catch (error) {
+    if (token !== state.problemToken) return;
+    const missing = /404/.test(error.message || "");
+    state.problems = {
+      banc,
+      diagnostics: [],
+      error: missing ? "Restart the editor (./scripts/dev.sh) so validation can run." : error.message,
+    };
+  }
+  renderProblems();
+  if (state.selected) renderProps();
+}
+
+function renderProblems() {
+  const panel = $("problems-panel");
+  const badge = $("problem-count");
+  if (!panel || !badge) return;
+  panel.replaceChildren();
+  const report = state.problems;
+  const rows = (report && report.diagnostics) || [];
+  const errors = rows.filter((row) => row.severity === "error").length;
+  const warnings = rows.filter((row) => row.severity !== "error").length;
+  badge.hidden = !(errors || warnings);
+  badge.textContent = errors ? String(errors) : String(warnings);
+  badge.classList.toggle("removed", errors > 0);
+  if (!state.banc) {
+    panel.append(empty("Open a scene to check it."));
+    return;
+  }
+  if (!report) {
+    panel.append(empty("Checking this scene…"));
+    return;
+  }
+  if (report.error) {
+    panel.append(empty(report.error));
+    return;
+  }
+  if (!rows.length) {
+    panel.append(empty("No problems in this scene."));
+    return;
+  }
+  const list = document.createElement("div");
+  list.className = "change-list";
+  for (const row of rows) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "change-row";
+    const mark = document.createElement("span");
+    mark.className = row.severity === "warning" ? "badge" : "badge removed";
+    mark.textContent = row.severity === "warning" ? "warn" : "error";
+    const text = document.createElement("span");
+    text.className = "grow";
+    const strong = document.createElement("strong");
+    strong.textContent = row.message;
+    const small = document.createElement("small");
+    const where = [row.code, row.file, row.pointer || row.actor].filter(Boolean).join(" · ");
+    small.textContent = where;
+    text.append(strong, small);
+    button.append(mark, text);
+    button.addEventListener("click", () => focusProblem(row));
+    list.append(button);
+  }
+  panel.append(list);
+}
+
+function focusProblem(row) {
+  if (!row.actor || !state.view) return;
+  const actor = state.view.actors.find((item) => item.id === row.actor);
+  if (!actor) {
+    toast("That actor is not in the open scene.");
+    return;
+  }
+  state.selected = actor.id;
+  viewport.select(actor.id);
+  viewport.frame(actor.id);
+  renderOutliner();
+  renderProps();
+  noteCompanion();
+  showTab("props");
+}
 
 function changeSummary(counts) {
   if (!counts || !counts.total) return "";
@@ -2038,6 +2161,7 @@ function runCommand(id) {
     box.checked = !box.checked;
     box.dispatchEvent(new Event("change"));
   } else if (id === "changes") showTab("changes");
+  else if (id === "problems") showTab("problems");
   else if (id === "project") openProjectDialog();
   else if (id === "build") $("build-dialog").showModal();
   else if (id === "ground") {
@@ -2056,12 +2180,15 @@ function showTab(name) {
   $("outliner-panel").hidden = name !== "outliner";
   $("props-panel").hidden = name !== "props";
   $("changes-panel").hidden = name !== "changes";
+  $("problems-panel").hidden = name !== "problems";
   $("tab-outliner").classList.toggle("is-on", name === "outliner");
   $("tab-props").classList.toggle("is-on", name === "props");
   $("tab-changes").classList.toggle("is-on", name === "changes");
+  $("tab-problems").classList.toggle("is-on", name === "problems");
   $("tab-outliner").setAttribute("aria-selected", name === "outliner" ? "true" : "false");
   $("tab-props").setAttribute("aria-selected", name === "props" ? "true" : "false");
   $("tab-changes").setAttribute("aria-selected", name === "changes" ? "true" : "false");
+  $("tab-problems").setAttribute("aria-selected", name === "problems" ? "true" : "false");
   if (mobileQuery.matches) {
     $("side-pane").classList.remove("shut");
     $("scene-pane").classList.add("shut");

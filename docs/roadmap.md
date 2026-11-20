@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, and Ctrl+K search in this build. Live validation, hot reload, grid snap, and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, and live validation in this build. Hot reload, grid snap, and the behavior editor are not started. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
@@ -16,7 +16,9 @@ In this build: instant undo and redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) for a move, 
 
 In this build: Ctrl+K (or the Search button) opens a palette. It fuzzy-matches actors in the open scene by name, class, and hash, plus scene files and editor commands. Enter frames the actor, opens the scene, or runs the command.
 
-Still later: hot-reload of changed files into the Longshot mod folder, snap to a grid, and live validation for bad flag references, missing models, and unreachable events.
+In this build: **Problems** (and the same lines under the selected actor in Properties) lists diagnostics from the open scene. Each one names a file, a JSON pointer or an actor hash, a code, a message, and a severity. The list is fetched again after an edit and after undo. It reports an unknown actor class, a class with no model file, a duplicate hash, a parameter whose kind does not match the scene file, a link to a hash that is not in the scene, and a flag name that is not in GameDataList. A dump without `GameData/GameDataList.Product.110.byml.zs` or without `Pack/Actor` gets one warning instead of a row per actor. Volumes and areas are not flagged for a missing model.
+
+Still later: hot-reload of changed files into the Longshot mod folder, and snap to a grid.
 
 ## 4. Behavior editor
 

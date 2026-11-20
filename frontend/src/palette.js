@@ -12,6 +12,7 @@ export const EDITOR_COMMANDS = [
   { id: "delete", label: "Delete selection", detail: "Delete", fields: ["delete", "remove"] },
   { id: "hidden", label: "Toggle hidden actors", detail: "", fields: ["hidden", "show hidden"] },
   { id: "changes", label: "Show changes", detail: "", fields: ["changes", "diff", "history"] },
+  { id: "problems", label: "Show problems", detail: "", fields: ["problems", "validation", "diagnostics", "errors"] },
   { id: "project", label: "Project settings", detail: "", fields: ["project", "dump", "open"] },
   { id: "build", label: "Build the mod", detail: "", fields: ["build", "export", "install"] },
   { id: "ground", label: "Toggle ground", detail: "", fields: ["ground", "terrain", "heightmap"] },

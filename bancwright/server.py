@@ -435,6 +435,15 @@ def _attach_recipes(view: dict, banc: str) -> dict:
     return view
 
 
+@app.get("/api/scene/problems")
+def scene_problems(banc: str):
+    if not banc:
+        raise BancError("Which scene?", "edit")
+    from bancwright.validate import diagnose
+
+    return diagnose(_open_dump(), _open_project(), banc)
+
+
 @app.get("/api/scene")
 def get_scene(banc: str):
     dump = _open_dump()
