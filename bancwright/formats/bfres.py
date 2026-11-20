@@ -115,6 +115,18 @@ def parse(data: bytes) -> list[Model]:
     return _File(data).models()
 
 
+def inspect(data: bytes) -> dict:
+    """Bone and shape report for one BFRES. This does not write a glb."""
+    reader = _File(data)
+    reader.capture = []
+    error = ""
+    try:
+        reader.models()
+    except FresError as exc:
+        error = str(exc)
+    return {"version": reader.major, "error": error, "models": reader.model_reports}
+
+
 class _File:
     def __init__(self, data: bytes):
         if len(data) < 0x100 or data[:4] != b"FRES":
@@ -138,6 +150,12 @@ class _File:
         self.model_dict = self.u64(0x30)
         flag_at = 0xEE if self.major >= 9 else 0xCA
         self.flag = data[flag_at] if len(data) > flag_at else 0
+        # Set by inspect(). The converter leaves it empty, so a normal glb does not record bones.
+        self.capture: list | None = None
+        self.model_reports: list = []
+        self._debug_bones: list = []
+        self._debug_palette: list = []
+        self._debug_worlds: list = []
         if self.flag & 0x08:
             self.buffer_base = self.file_size + 288
         if self.buffer_base and self.buffer_base >= len(data):
@@ -282,43 +300,58 @@ class _File:
         end = cursor
         del vtx_count, shape_count
         bones, palette = self._bones(skel) if skel else ([], [])
-        materials = self._materials(mat_values, mat_dict, material_count)
-        if not any(material.binds or material.albedo for material in materials):
-            scanned = self._scan_fmats()
-            if scanned:
-                materials = scanned
-        shape_names = self.dict_keys(shape_dict)
-        parts: list[Part] = []
-        undecoded: list[dict] = []
-        shape_at = shape_values
-        for index, shape_name in enumerate(shape_names):
-            made, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, palette, materials)
-            if made:
-                parts.extend(made)
-            elif info.get("flags", 0) & 0x10:
-                undecoded.append(info)
-        near = [part for part in parts if part.lod == 0]
-        far = [part for part in parts if part.lod]
-        parts = _drop_opaque_twins(near) + far
-        bounds = _union_bounds([item["bounds"] for item in undecoded if item.get("bounds")])
-        model = Model(
-            name or fallback,
-            parts,
-            images,
-            list(getattr(self, "_image_notes", [])),
-            _texture_strings(self.data),
-            materials,
-            pool,
-            bounds,
-        )
-        model.flag10 = [str(item.get("name") or "") for item in undecoded]
-        if undecoded and not parts:
-            model.notes.append("geometry format not decoded (FSHP flag 0x10)")
-        elif undecoded:
-            model.notes.append(f"{len(undecoded)} shapes use FSHP flag 0x10 and were not decoded")
-        elif not parts:
-            model.notes.append(f"{model.name or fallback}: no drawable shape")
-        return model, end
+        shape_from = len(self.capture) if self.capture is not None else 0
+        self._debug_bones = bones
+        self._debug_palette = palette
+        self._debug_worlds = _worlds(bones) if self.capture is not None and bones else []
+        try:
+            materials = self._materials(mat_values, mat_dict, material_count)
+            if not any(material.binds or material.albedo for material in materials):
+                scanned = self._scan_fmats()
+                if scanned:
+                    materials = scanned
+            shape_names = self.dict_keys(shape_dict)
+            parts: list[Part] = []
+            undecoded: list[dict] = []
+            shape_at = shape_values
+            for index, shape_name in enumerate(shape_names):
+                made, shape_at, info = self._shape(shape_at, shape_name or f"shape{index}", bones, palette, materials)
+                if made:
+                    parts.extend(made)
+                elif info.get("flags", 0) & 0x10:
+                    undecoded.append(info)
+            near = [part for part in parts if part.lod == 0]
+            far = [part for part in parts if part.lod]
+            parts = _drop_opaque_twins(near) + far
+            bounds = _union_bounds([item["bounds"] for item in undecoded if item.get("bounds")])
+            model = Model(
+                name or fallback,
+                parts,
+                images,
+                list(getattr(self, "_image_notes", [])),
+                _texture_strings(self.data),
+                materials,
+                pool,
+                bounds,
+            )
+            model.flag10 = [str(item.get("name") or "") for item in undecoded]
+            if undecoded and not parts:
+                model.notes.append("geometry format not decoded (FSHP flag 0x10)")
+            elif undecoded:
+                model.notes.append(f"{len(undecoded)} shapes use FSHP flag 0x10 and were not decoded")
+            elif not parts:
+                model.notes.append(f"{model.name or fallback}: no drawable shape")
+            return model, end
+        finally:
+            if self.capture is not None:
+                self.model_reports.append(
+                    {
+                        "name": name or fallback,
+                        "bones": _bone_table(bones, self._debug_worlds),
+                        "palette": list(palette),
+                        "shapes": self.capture[shape_from:],
+                    }
+                )
 
     def _bones(self, at: int) -> tuple[list[tuple], list[int]]:
         if at + 4 > len(self.data) or self.data[at : at + 4] != b"FSKL":
@@ -334,7 +367,7 @@ class _File:
         names = self.dict_keys(dict_at)
         bones = []
         cursor = array_at
-        for _name in names:
+        for name in names:
             if not cursor:
                 break
             cursor += 8  # name
@@ -346,7 +379,8 @@ class _File:
             cursor += 2  # index
             parent = self.i16(cursor)
             cursor += 2
-            cursor += 2  # smooth palette index
+            smooth = self.i16(cursor)
+            cursor += 2
             rigid = self.i16(cursor)
             cursor += 2
             cursor += 4  # billboard, user count
@@ -360,7 +394,7 @@ class _File:
             cursor += 12
             # 0x1000: the first three floats are Euler XYZ radians. The fourth is unused.
             rot = _euler_quat(raw_rot[0], raw_rot[1], raw_rot[2]) if flags & 0x1000 else raw_rot
-            bones.append((parent, pos, rot, scale, flags, rigid))
+            bones.append((parent, pos, rot, scale, flags, rigid, name, raw_rot, smooth))
         return bones, self._matrix_palette(at, len(bones))
 
     def _matrix_palette(self, at: int, bone_count: int) -> list[int]:
@@ -749,6 +783,19 @@ class _File:
         if not standard:
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
+            if self.capture is not None:
+                self.capture.append(
+                    {
+                        "name": name,
+                        "lod": 0,
+                        "decoded": False,
+                        "flags": flags,
+                        "skinCount": skin_count,
+                        "boneIndex": bone_index,
+                        "reason": "shape is not a standard vertex buffer",
+                        "fileBounds": _bounds_json(info.get("bounds")),
+                    }
+                )
             return [], end, info
         fvtx = self._fvtx(vtx)
         lod = self._lod(mesh_at)
@@ -757,9 +804,29 @@ class _File:
                 info["bounds"] = self._shape_bounds(at)
             return [], end, info
         positions, uvs = self._vertices(fvtx, lod)
+        before = _point_bounds(positions) if self.capture is not None else None
+        slots = None
         if bones and skin_count in (0, 1):
             slots = self._skin_slots(fvtx, len(positions)) if skin_count == 1 else None
             positions = _bind_pose(positions, bones, palette, bone_index, slots)
+        if self.capture is not None:
+            self.capture.append(
+                _shape_report(
+                    name,
+                    0,
+                    skin_count,
+                    bone_index,
+                    slots,
+                    bones,
+                    palette,
+                    self._debug_worlds,
+                    before,
+                    _point_bounds(positions),
+                    material_index,
+                    materials,
+                    flags,
+                )
+            )
         material = materials[material_index] if 0 <= material_index < len(materials) else None
         if not positions or not lod["indices"]:
             if flags & 0x10:
@@ -785,9 +852,29 @@ class _File:
                     far_positions, far_uvs = self._vertices(fvtx, coarser)
                 except (FresError, struct.error, IndexError, OSError):
                     continue
+                far_before = _point_bounds(far_positions) if self.capture is not None else None
+                far_slots = None
                 if bones and skin_count in (0, 1):
                     far_slots = self._skin_slots(fvtx, len(far_positions)) if skin_count == 1 else None
                     far_positions = _bind_pose(far_positions, bones, palette, bone_index, far_slots)
+                if self.capture is not None:
+                    self.capture.append(
+                        _shape_report(
+                            name,
+                            level,
+                            skin_count,
+                            bone_index,
+                            far_slots,
+                            bones,
+                            palette,
+                            self._debug_worlds,
+                            far_before,
+                            _point_bounds(far_positions),
+                            material_index,
+                            materials,
+                            flags,
+                        )
+                    )
                 if not far_positions:
                     continue
                 best = (far_positions, far_uvs, coarser["indices"])
@@ -1071,6 +1158,117 @@ def _triangles(indices: list[int], primitive: int) -> list[int]:
     if primitive != 3:
         raise FresError(f"primitive type {primitive} is not triangles")
     return indices[: len(indices) - (len(indices) % 3)]
+
+
+def _point_bounds(positions) -> dict | None:
+    if not positions:
+        return None
+    mins = [min(point[axis] for point in positions) for axis in range(3)]
+    maxs = [max(point[axis] for point in positions) for axis in range(3)]
+    return {"min": mins, "max": maxs}
+
+
+def _bounds_json(bounds) -> dict | None:
+    if not bounds or len(bounds) != 2:
+        return None
+    return {"min": list(bounds[0]), "max": list(bounds[1])}
+
+
+def _finite(value: float) -> float | None:
+    if value != value or value in (float("inf"), float("-inf")):
+        return None
+    return value
+
+
+def _vec(values) -> list:
+    return [_finite(float(item)) for item in values]
+
+
+def _matrix_json(matrix) -> list | None:
+    if not matrix:
+        return None
+    return [[_finite(float(item)) for item in row] for row in matrix]
+
+
+def _bone_chain(bones, index: int) -> list[int]:
+    chain = []
+    seen = set()
+    while isinstance(index, int) and 0 <= index < len(bones) and index not in seen:
+        seen.add(index)
+        chain.append(index)
+        parent = bones[index][0]
+        index = parent
+    chain.reverse()
+    return chain
+
+
+def _bone_row(bones, worlds, index: int) -> dict:
+    bone = bones[index]
+    flags = bone[4] if len(bone) > 4 else 0
+    bits = []
+    if flags & 1:
+        bits.append("visible")
+    bits.append("euler-xyz" if flags & 0x1000 else "quaternion")
+    if flags & 0x800000:
+        bits.append("segment-scale")
+    return {
+        "index": index,
+        "name": bone[6] if len(bone) > 6 else "",
+        "parent": bone[0],
+        "scale": _vec(bone[3]),
+        "rotation": _vec(bone[7] if len(bone) > 7 else bone[2]),
+        "translation": _vec(bone[1]),
+        "flags": flags,
+        "flagText": " ".join(bits),
+        "rigidIndex": bone[5] if len(bone) > 5 else 0,
+        "smoothIndex": bone[8] if len(bone) > 8 else None,
+        "quaternion": _vec(bone[2]),
+        "world": _matrix_json(worlds[index] if index < len(worlds) else None),
+    }
+
+
+def _bone_table(bones, worlds) -> list[dict]:
+    return [_bone_row(bones, worlds, index) for index in range(len(bones))]
+
+
+def _shape_report(name, lod, skin_count, bone_index, slots, bones, palette, worlds, before, after, material_index, materials, flags) -> dict:
+    counts: dict[int, int] = {}
+    if slots is None:
+        if 0 <= bone_index < len(bones) or not bones:
+            counts[bone_index] = 0
+    else:
+        for slot in slots:
+            if palette and 0 <= slot < len(palette):
+                index = palette[slot]
+            else:
+                index = slot
+            counts[index] = counts.get(index, 0) + 1
+    used = []
+    for index in sorted(counts):
+        chain = _bone_chain(bones, index) if bones else []
+        used.append(
+            {
+                "bone": index,
+                "vertices": counts[index],
+                "chain": [_bone_row(bones, worlds, item) for item in chain] if bones else [],
+            }
+        )
+    material = ""
+    if materials and 0 <= material_index < len(materials):
+        material = materials[material_index].name
+    return {
+        "name": name,
+        "lod": lod,
+        "decoded": True,
+        "flags": flags,
+        "material": material,
+        "skinCount": skin_count,
+        "boneIndex": bone_index,
+        "paletteSlots": None if slots is None else sorted(set(slots))[:32],
+        "bones": used,
+        "before": before,
+        "after": after,
+    }
 
 
 def _rigid(positions, bones, bone_index: int) -> list[tuple[float, float, float]]:

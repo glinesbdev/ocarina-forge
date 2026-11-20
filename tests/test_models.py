@@ -185,7 +185,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-23", "895e8d12d649b6f92223a062c60b4b3074a15bbab69bc6292be2b5af9bb88209")
+    pinned = ("models-24", "abcd4ac7f1fe0ee63b03336681369e71badb0205cb238a8a89bbc3266eb3bc51")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1582,6 +1582,52 @@ def test_terrain_atlas_is_cached_apart_from_the_glb(tmp_path, monkeypatch):
     other, _other_cols = _pack_atlas([_solid_cell((0, 0, 1))])
     assert other != again
     assert other[:8] == b"\x89PNG\r\n\x1a\n" or other[:2] == b"\xff\xd8"
+
+
+def test_model_debug_prints_skin_and_the_actor_placement(tmp_path, capsys):
+    import json
+
+    from bancwright.__main__ import print_model_debug
+    from bancwright.formats.bfres import _shape_report, _worlds, inspect
+
+    rgba = bytes([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255])
+    blob = sample_bfres("Pyramid", [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)], rgba, 2, 2)
+    report = inspect(blob)
+    assert report["error"] == ""
+    shape = report["models"][0]["shapes"][0]
+    assert shape["decoded"] is True
+    assert shape["name"] == "Body"
+    assert shape["before"] == shape["after"]
+    assert report["models"][0]["bones"] == []
+
+    import math
+
+    quat = _euler_quat(0.0, math.pi / 2, 0.0)
+    raw = (0.0, math.pi / 2, 0.0, 0.0)
+    bones = [
+        (-1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0, 0, "root", (0.0, 0.0, 0.0, 1.0), -1),
+        (0, (0.0, 0.0, 0.0), quat, (1.0, 1.0, 1.0), 0x1000, 0, "panel", raw, -1),
+    ]
+    worlds = _worlds(bones)
+    baked = _bind_pose([(1.0, 0.0, 0.0)], bones, [], 1, None)
+    row = _shape_report("Door", 0, 0, 1, None, bones, [], worlds, {"min": [1, 0, 0], "max": [1, 0, 0]}, {"min": list(baked[0]), "max": list(baked[0])}, 0, [], 0)
+    chain = row["bones"][0]["chain"]
+    assert [bone["name"] for bone in chain] == ["root", "panel"]
+    assert "euler-xyz" in chain[1]["flagText"]
+    assert chain[1]["rotation"][1] == math.pi / 2
+    assert abs(row["after"]["min"][2] + 1.0) < 1e-4
+
+    dump = build_fixture(tmp_path / "dump")
+    assert print_model_debug("Npc_Kokiri_F_01", dump=str(dump), banc=KOKIRI_STATIC) == 0
+    text = capsys.readouterr().out
+    assert "skin" in text
+    assert "translate 2.00000 0.00000 3.00000" in text
+    assert "Fado" in text
+    capsys.readouterr()
+    assert print_model_debug("Npc_Kokiri_F_01", as_json=True, dump=str(dump), banc=KOKIRI_STATIC) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["placements"][0]["translate"] == [2.0, 0.0, 3.0]
+    assert payload["files"][0]["models"][0]["shapes"]
 
 
 def test_import_cache_stores_meshopt_geometry_and_keeps_the_texture():
