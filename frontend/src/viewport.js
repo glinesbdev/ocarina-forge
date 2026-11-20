@@ -120,6 +120,7 @@ export function createViewport(host, hooks) {
   let drawDistance = 0;
   let showTerrainDebug = false;
   let generation = 0;
+  let rebuildTimer = 0;
   let loadQueue = null;
   let pendingLoads = 0;
   const loadDelta = new THREE.Vector3();
@@ -192,9 +193,17 @@ export function createViewport(host, hooks) {
     }
   }
 
-  function clearActors() {
+  function clearActors(options = {}) {
     transform.detach();
-    clearBatches();
+    if (rebuildTimer) {
+      clearTimeout(rebuildTimer);
+      rebuildTimer = 0;
+    }
+    // Dropping the batches here is the blink after a save: every model leaves
+    // until the replacement BatchedMesh objects finish building. A scene change
+    // keeps them until rebuildBatches has the next set, unless the viewport is
+    // going away (keepBatches stays false).
+    if (!options.keepBatches) clearBatches();
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
   }
@@ -305,7 +314,7 @@ export function createViewport(host, hooks) {
   }
 
   function setActors(actors, options = {}) {
-    clearActors();
+    clearActors({ keepBatches: true });
     // The field is not part of the actor diff. Clearing it here is what turned
     // the ground black for a couple of seconds after POST /api/scene/edit.
     const token = ++generation;
@@ -374,11 +383,7 @@ export function createViewport(host, hooks) {
         model: null,
         modelMeta: metaCache.get(actor.gyaml) || null,
         label: null,
-        labelText: actor.companion
-          ? `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`
-          : recipe
-            ? `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`
-            : actor.name || actor.gyaml,
+        labelText: actorLabel(actor, recipe),
       });
     });
     if (selected && !entries.has(selected)) selected = null;
@@ -405,6 +410,65 @@ export function createViewport(host, hooks) {
         if (next === terrainToken) loadTerrain(next, banc);
       }, 300);
     }
+  }
+
+  function actorLabel(actor, recipe) {
+    if (actor.companion) return `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`;
+    if (recipe) return `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`;
+    return actor.name || actor.gyaml;
+  }
+
+  function applyActorRecord(entry, actor) {
+    const recipe = actor.status === "recipe";
+    const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
+    const [x, y, z] = actor.translate;
+    const [rx, ry, rz] = actor.rotate;
+    const [sx, sy, sz] = actor.scale || [1, 1, 1];
+    entry.pivot.position.set(x, y, z);
+    entry.pivot.rotation.set(rx, ry, rz);
+    entry.pivot.scale.set(sx || 1, sy || 1, sz || 1);
+    entry.status = actor.status;
+    entry.category = actor.category;
+    entry.gyaml = actor.gyaml;
+    if (!entry.parts || !entry.parts.length) entry.volume = Boolean(actor.volume);
+    entry.companion = Boolean(actor.companion);
+    entry.pickable = actor.pickable !== false;
+    entry.color = color;
+    entry.material.color.setHex(color);
+    entry.locked = actorLocked({
+      category: actor.category,
+      categories,
+      companion: entry.companion,
+      pickable: entry.pickable,
+    });
+    entry.pivot.visible = actorShown({
+      status: actor.status,
+      category: actor.category,
+      volume: entry.volume,
+      showHidden,
+      categories,
+      hideVolumes,
+    });
+    entry.labelText = actorLabel(actor, recipe);
+    if (entry.label) entry.label.element.textContent = entry.labelText;
+    paint(entry);
+    syncInstanceMatrix(entry);
+  }
+
+  function patchActors(actors) {
+    if (!Array.isArray(actors)) return false;
+    const rows = [];
+    for (const actor of actors) {
+      const entry = actor && actor.id ? entries.get(actor.id) : null;
+      if (!entry) return false;
+      rows.push([entry, actor]);
+    }
+    for (const [entry, actor] of rows) applyActorRecord(entry, actor);
+    syncBatchVisibility();
+    syncLabels();
+    attach();
+    requestRender();
+    return true;
   }
 
   function fitBounds(entry, bounds) {
@@ -611,6 +675,10 @@ export function createViewport(host, hooks) {
       publish(queue.length === 0);
       const workers = Math.min(GLB_SLOTS, queue.length);
       if (workers) await Promise.all(Array.from({ length: workers }, () => glbWorker()));
+      if (token !== generation) return;
+      // Models that were already on screen stay until this rebuild swaps them.
+      // A box-only scene still has to run it, or the previous batches never leave.
+      queueRebuild();
     };
     run().finally(releaseLoad);
   }
@@ -909,7 +977,9 @@ export function createViewport(host, hooks) {
   }
 
   function rebuildBatches() {
-    clearBatches();
+    const previous = batches.slice();
+    const nextBatches = [];
+    for (const entry of entries.values()) entry.slots = [];
     const groups = new Map();
     naiveDraws = 0;
     for (const entry of entries.values()) {
@@ -1010,12 +1080,23 @@ export function createViewport(host, hooks) {
       mesh.raycast = raycastBatch;
       mesh.computeBoundingSphere();
       scene.add(mesh);
-      batches.push({ mesh, ids, water });
+      nextBatches.push({ mesh, ids, water });
+    }
+    const expectMeshes = [...entries.values()].some((entry) => entry.parts && entry.parts.length);
+    if (!nextBatches.length && expectMeshes && previous.length) {
+      for (const entry of entries.values()) entry.slots = [];
+      console.error("Actor batches failed to build; the meshes already on screen stay up.");
+      return;
+    }
+    batches.length = 0;
+    for (const batch of nextBatches) batches.push(batch);
+    for (const batch of previous) {
+      batch.mesh.removeFromParent();
+      batch.mesh.dispose();
     }
     syncBatchVisibility();
   }
 
-  let rebuildTimer = 0;
   function queueRebuild() {
     if (rebuildTimer) clearTimeout(rebuildTimer);
     rebuildTimer = window.setTimeout(() => {
@@ -1881,6 +1962,7 @@ uniform float terrainLayerMissing;`
 
   return {
     setActors,
+    patchActors,
     select,
     setNav,
     setGizmo,

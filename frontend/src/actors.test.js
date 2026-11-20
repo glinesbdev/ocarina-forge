@@ -1,0 +1,69 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+import { planActorRefresh } from "./actors.js";
+
+function actor(id, gyaml, translate) {
+  return {
+    id,
+    gyaml,
+    translate,
+    rotate: [0, 0, 0],
+    scale: [1, 1, 1],
+    status: "stock",
+    category: "object",
+    name: id,
+    pickable: true,
+    companion: false,
+    volume: false,
+  };
+}
+
+test("moving one copy patches that actor and leaves the other copy alone", () => {
+  const before = [actor("grass-a", "Obj_Grass", [0, 0, 0]), actor("grass-b", "Obj_Grass", [4, 0, 0]), actor("tree", "Obj_Tree", [2, 0, 1])];
+  const after = [actor("grass-a", "Obj_Grass", [9, 2, 1]), actor("grass-b", "Obj_Grass", [4, 0, 0]), actor("tree", "Obj_Tree", [2, 0, 1])];
+  const plan = planActorRefresh(before, after);
+  assert.equal(plan.mode, "patch");
+  assert.deepEqual(plan.actors.map((item) => item.id), ["grass-a"]);
+});
+
+test("undo can patch every moved actor without rebuilding an untouched copy", () => {
+  const before = [actor("grass-a", "Obj_Grass", [9, 2, 1]), actor("rock", "Obj_Rock", [1, 0, 1]), actor("grass-b", "Obj_Grass", [4, 0, 0])];
+  const after = [actor("grass-a", "Obj_Grass", [0, 0, 0]), actor("rock", "Obj_Rock", [3, 1, 0]), actor("grass-b", "Obj_Grass", [4, 0, 0])];
+  const plan = planActorRefresh(before, after);
+  assert.equal(plan.mode, "patch");
+  assert.deepEqual(plan.actors.map((item) => item.id), ["grass-a", "rock"]);
+});
+
+test("an identical refresh keeps the batches", () => {
+  const actors = [actor("tree", "Obj_Tree", [2, 0, 1])];
+  assert.deepEqual(planActorRefresh(actors, actors.map((item) => ({ ...item }))), { mode: "keep" });
+});
+
+test("adding, removing, or swapping a model rebuilds", () => {
+  const before = [actor("tree", "Obj_Tree", [0, 0, 0]), actor("rock", "Obj_Rock", [1, 0, 0])];
+  assert.equal(planActorRefresh(before, before.slice(0, 1)).mode, "rebuild");
+  assert.equal(planActorRefresh(before.slice(0, 1), before).mode, "rebuild");
+  const swapped = [actor("tree", "Obj_Tree_B", [0, 0, 0]), actor("rock", "Obj_Rock", [1, 0, 0])];
+  assert.equal(planActorRefresh(before, swapped).mode, "rebuild");
+  assert.equal(planActorRefresh(null, before).mode, "rebuild");
+});
+
+test("a saved transform does not clear the actor batches", () => {
+  const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+  const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
+  assert.match(main, /planActorRefresh\(previousActors, composed\.actors\)/);
+  assert.match(main, /viewport\.patchActors\(plan\.actors\)/);
+  const clear = viewport.slice(viewport.indexOf("function clearActors"), viewport.indexOf("function helperVisible"));
+  assert.match(clear, /keepBatches/);
+  assert.match(viewport, /clearActors\(\{ keepBatches: true \}\)/);
+  const rebuild = viewport.slice(viewport.indexOf("function rebuildBatches"), viewport.indexOf("function queueRebuild"));
+  assert.doesNotMatch(rebuild, /clearBatches\(\)/);
+  assert.ok(rebuild.indexOf("scene.add(mesh)") < rebuild.lastIndexOf("removeFromParent"));
+  const patch = viewport.slice(viewport.indexOf("function applyActorRecord"), viewport.indexOf("function fitBounds"));
+  assert.match(patch, /function patchActors/);
+  assert.match(patch, /syncInstanceMatrix\(entry\)/);
+  assert.doesNotMatch(patch, /clearBatches\(/);
+  assert.doesNotMatch(patch, /loadModels\(/);
+});

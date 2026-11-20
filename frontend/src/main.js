@@ -1,4 +1,5 @@
 import { api } from "./api.js";
+import { planActorRefresh } from "./actors.js";
 import { createViewport } from "./viewport.js";
 
 const $ = (id) => document.getElementById(id);
@@ -730,13 +731,16 @@ function noteCompanion() {
 }
 
 function applyView(view, { frame = false, select } = {}) {
+  const previousActors = state.view ? state.view.actors : null;
   state.raw = view;
   const composed = composeView(view);
   state.view = composed;
   if (select !== undefined) state.selected = select;
   else if (view.focus) state.selected = view.focus;
   if (state.selected && !composed.actors.some((actor) => actor.id === state.selected)) state.selected = null;
-  viewport.setActors(composed.actors, { frame, banc: view.banc });
+  const plan = frame ? { mode: "rebuild" } : planActorRefresh(previousActors, composed.actors);
+  const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
+  if (!patched) viewport.setActors(composed.actors, { frame, banc: view.banc });
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
   const warnings = $("warnings");
@@ -828,7 +832,9 @@ async function edit(command) {
   } catch (error) {
     state.history.undo.pop();
     toast(error.message);
-    if (state.view) viewport.setActors(state.view.actors, { frame: false, banc: state.banc });
+    if (state.view && !viewport.patchActors(state.view.actors)) {
+      viewport.setActors(state.view.actors, { frame: false, banc: state.banc });
+    }
     viewport.select(state.selected);
   }
   updateHistoryButtons();
