@@ -47,7 +47,7 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PATH = re.compile(rb"(?:Model|Terrain|Map)/[A-Za-z0-9_./+-]{1,180}\.bfres(?:\.zs)?")
 _NUMBERED = re.compile(r"^(?P<stem>.+?)_(?P<num>\d+)\.(?P=stem)_(?P=num)\.bfres(?:\.zs)?$")
 _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbName"}
-_CACHE_VERSION = b"models-12\0"
+_CACHE_VERSION = b"models-13\0"
 _BNTX_VERSION = b"bntx-2\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -2149,6 +2149,7 @@ def _tile_row(info: heightmap.TileInfo, path: str = "") -> dict:
         "directory": info.directory,
         "mate": info.mate,
         "mateNote": info.mate_note,
+        "mateHistogram": info.mate_histogram,
         "ao": info.ao,
         "step": info.step,
     }
@@ -2344,7 +2345,9 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                     layers = mate_layers
                     note = mate_note
                     info.mate = mate_path
-                    info.mate_note = mate_note
+                    info.mate_histogram, info.mate_note = heightmap.split_histogram(mate_note)
+                    if not info.mate_note:
+                        info.mate_note = mate_note
                     mate_errors = []
                     break
                 mate_errors.append(f"{mate_path}: {mate_note}")
@@ -2405,6 +2408,7 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
                 report.directory = prior.directory
                 report.mate = prior.mate
                 report.mate_note = prior.mate_note
+                report.mate_histogram = prior.mate_histogram
                 report.ao = prior.ao
                 if prior.reason:
                     report.reason = prior.reason if not report.reason else f"{report.reason}. {prior.reason}"

@@ -81,6 +81,7 @@ def main(argv: list[str]) -> int:
         folder = row.get("directory") or "(no dir)"
         mate = row.get("mate") or "(no mate)"
         mate_note = row.get("mateNote") or "(mate not decoded)"
+        histogram = row.get("mateHistogram") or "-"
         step = row.get("step") or "-"
         ao = row.get("ao") or ""
         print(
@@ -88,7 +89,7 @@ def main(argv: list[str]) -> int:
             f"dir {folder}  centre {row.get('center')}  edge {row.get('edge')}  "
             f"triangles {row.get('triangles') or 0}  step {step}  layers {layers}  "
             f"height {row.get('heightMin')}..{row.get('heightMax')}  "
-            f"hght {where}  mate {mate}  {mate_note}  {ao}  {row.get('reason') or ''}"
+            f"hght {where}  mate {mate}  hist {histogram}  {mate_note}  {ao}  {row.get('reason') or ''}"
         )
     if not tiles and info.get("status") == "mesh" and "terrain proxy" in (info.get("reason") or ""):
         print("no TerrainArc for this scene. The static-map bfres is the untextured stand-in and is not drawn.")

@@ -25,14 +25,16 @@ coarser one. Every tile that meets the placed actors, expanded by 200 m, is
 meshed. There is no fixed tile cap. Tiles near that area are sampled more
 finely than tiles at the edge of the margin.
 
-The per-corner material is `<tile>.mate`. A `.mate` is the same TARB-and-zstd
-wrapper. The grid is 257×257 or 256×256 records of four bytes (first
-material, second material, blend, extra), which is the Breath of the Wild
-mate layout and is a guess here. Blend at or above 128 uses the second
-index. A byte or u16 grid is accepted when the values can be MaterialAlb
-layers. The block at `.hght` `+0x1C` is only a fallback when no `.mate`
-decodes. `<tile>.<child|adult>.bake_ao.extm` is used as occlusion when it
-is a single-channel grid of the same size. `<tile>.custom.extm` is left unused.
+The per-corner material is `<tile>.mate`, the same TARB-and-zstd wrapper as a
+heightmap. After the header, `+0x2C` is a relative offset to a 4-byte texel
+block and `+0x30` is its size. Retail blocks are two copies of the 257×257
+block-linear surface used by heights (log2 4, 417792 bytes each). A texel is
+material A, material B, then two blend bytes. 255 and 127 mean “no index”,
+and 0x7f in a blend byte is neutral, so material A is used. That reading is
+a guess. A tight linear grid is still accepted, and there blend at or above
+128 selects material B. The block at `.hght` `+0x1C` is only a fallback when
+no `.mate` decodes. `<tile>.<child|adult>.bake_ao.extm` uses the same header
+and is a 1-byte or 4-byte block-linear grid. `<tile>.custom.extm` is left unused.
 
 A coarser tile does not cover ground that a finer tile also covers.
 """
@@ -76,6 +78,7 @@ class TileInfo:
     directory: str = ""
     mate: str = ""
     mate_note: str = ""
+    mate_histogram: str = ""
     ao: str = ""
     step: int = 0
 
@@ -266,12 +269,141 @@ def _linear_or_swizzled(block: bytes, width: int, channels: int) -> bytes | None
     tight = width * width * channels
     if len(block) == tight:
         return block
-    if width != SIZE or len(block) != surface_bytes(SIZE, SIZE, 1, 1, channels, _HEIGHT_LOG2):
+    planes = _swizzled_planes(block, channels, width=width)
+    for plane in planes:
+        if plane is not None:
+            return plane
+    return None
+
+
+def _swizzled_planes(block: bytes, channels: int, width: int = SIZE) -> list[bytes | None]:
+    """Linear images packed one after another in the block-linear surface.
+
+    A retail mate is two 257×257 surfaces. The second is often zeros. An empty
+    surface is None so it is not read as material 0.
+    """
+    if width != SIZE:
+        return []
+    tight = SIZE * SIZE * channels
+    if len(block) == tight:
+        return [block]
+    for log2 in (_HEIGHT_LOG2, 5, 3, 2, 1, 0):
+        one = surface_bytes(SIZE, SIZE, 1, 1, channels, log2)
+        if one <= 0 or len(block) < one or len(block) % one != 0:
+            continue
+        count = len(block) // one
+        if count > 4:
+            continue
+        planes: list[bytes | None] = []
+        for index in range(count):
+            piece = block[index * one : (index + 1) * one]
+            if not any(piece):
+                planes.append(None)
+                continue
+            linear = deswizzle(SIZE, SIZE, 1, 1, channels, 0, log2, piece)
+            planes.append(linear[:tight] if len(linear) >= tight else None)
+        if any(plane is not None for plane in planes):
+            return planes
+    return []
+
+
+def _fmt_counts(counts: dict[int, int], limit: int = 12) -> str:
+    ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    shown = ", ".join(f"{layer}×{count}" for layer, count in ordered[:limit])
+    extra = len(ordered) - limit
+    if extra > 0:
+        shown += f", +{extra} more"
+    return shown or "empty"
+
+
+def _sentinel_mate(raw: bytes) -> bool:
+    """True when the blend bytes are 0 or 0x7f, which is the retail mate pattern."""
+    count = SIZE * SIZE
+    if len(raw) < count * 4:
+        return False
+    hits = 0
+    seen = 0
+    for index in range(0, count, 16):
+        blend = raw[index * 4 + 2]
+        extra = raw[index * 4 + 3]
+        seen += 1
+        if blend in (0, 0x7F) and extra in (0, 0x7F):
+            hits += 1
+    return seen > 0 and hits / seen >= 0.9
+
+
+def _read_sentinel_plane(raw: bytes) -> tuple[list[int], dict[int, int], dict[int, int]]:
+    """Chosen layer per sample, plus how often each index appears in byte 0 and byte 1.
+
+    (0, 0, 0, 0) is an empty texel, not material 0. 255 and 127 are not indices.
+    When both indices are real and the blend bytes are the 0x7f sentinel, byte 0
+    is the one drawn. A blend byte other than 0 or 0x7f is a 0..255 weight, and
+    128 or more selects byte 1. That weight rule is a guess.
+    """
+    chosen = []
+    seen0: dict[int, int] = {}
+    seen1: dict[int, int] = {}
+    for index in range(SIZE * SIZE):
+        b0, b1, b2, b3 = raw[index * 4 : index * 4 + 4]
+        if (b0, b1, b2, b3) == (0, 0, 0, 0):
+            chosen.append(-1)
+            continue
+        first = b0 if b0 <= _MATE_LAYER else None
+        second = b1 if b1 <= _MATE_LAYER else None
+        if first is not None:
+            seen0[first] = seen0.get(first, 0) + 1
+        if second is not None:
+            seen1[second] = seen1.get(second, 0) + 1
+        weight = next((item for item in (b2, b3) if item not in (0, 0x7F)), None)
+        if first is not None and second is not None and weight is not None and weight >= 128:
+            chosen.append(second)
+        elif first is not None:
+            chosen.append(first)
+        elif second is not None:
+            chosen.append(second)
+        else:
+            chosen.append(-1)
+    return chosen, seen0, seen1
+
+
+def _decode_retail_planes(planes: list[bytes | None]) -> tuple[list[int], str] | None:
+    decoded: list[list[int] | None] = []
+    parts = []
+    for number, plane in enumerate(planes, start=1):
+        if plane is None or not _sentinel_mate(plane):
+            decoded.append(None)
+            continue
+        chosen, seen0, seen1 = _read_sentinel_plane(plane)
+        if not seen0 and not seen1:
+            decoded.append(None)
+            continue
+        decoded.append(chosen)
+        text = f"image {number} b0 {_fmt_counts(seen0)}, b1 {_fmt_counts(seen1)}"
+        parts.append(text.replace("; ", ", "))
+    if not any(item is not None for item in decoded):
+        if any(plane is not None and _sentinel_mate(plane) for plane in planes):
+            return [-1] * (SIZE * SIZE), "hist empty; 257×257×4 block-linear, indices were 255 or 127 (a guess)"
         return None
-    linear = deswizzle(SIZE, SIZE, 1, 1, channels, 0, _HEIGHT_LOG2, block)
-    if len(linear) < tight:
-        return None
-    return linear[:tight]
+    merged = []
+    for index in range(SIZE * SIZE):
+        layer = -1
+        for plane in decoded:
+            if plane is not None and plane[index] >= 0:
+                layer = plane[index]
+                break
+        merged.append(layer)
+    merged, kept, dropped = _cap_mate(merged)
+    note = (
+        "hist "
+        + " | ".join(parts)
+        + f"; 257×257×4 block-linear, {len(planes)} image(s), "
+        + "255 and 127 mean no material, 0x7f blend keeps byte 0 (a guess)"
+    )
+    if dropped:
+        note += f", {dropped} rarer materials left as the earth colour"
+    if not kept and not any(item >= 0 for item in merged):
+        note = "hist empty; 257×257×4 block-linear decoded with no material index (a guess)"
+    return merged, note
 
 
 def _cap_mate(chosen: list[int]) -> tuple[list[int], list[int], int]:
@@ -342,9 +474,22 @@ def _index_grid(raw: bytes, width: int, kind: str) -> tuple[list[int], str] | No
 
 
 def _parse_mate_block(block: bytes) -> tuple[list[int], str] | None:
+    planes = _swizzled_planes(block, 4)
+    if planes:
+        retail = _decode_retail_planes(planes)
+        if retail:
+            return retail
+        raw = next((plane for plane in planes if plane is not None), None)
+        if raw is not None:
+            parsed = _blend_grid(raw, SIZE)
+            if parsed:
+                layers, note = parsed
+                if len(block) != SIZE * SIZE * 4:
+                    note += ", block-linear"
+                return layers, note
     for width in (SIZE, 256):
         raw = _linear_or_swizzled(block, width, 4)
-        if raw is not None:
+        if raw is not None and not _sentinel_mate(raw):
             parsed = _blend_grid(raw, width)
             if parsed:
                 swizzle = "" if len(block) == width * width * 4 else ", block-linear"
@@ -363,6 +508,14 @@ def _parse_mate_block(block: bytes) -> tuple[list[int], str] | None:
     return None
 
 
+def split_histogram(note: str) -> tuple[str, str]:
+    """The `hist ...` clause, and the rest of the mate note."""
+    if note.startswith("hist ") and "; " in note:
+        first, rest = note.split("; ", 1)
+        return first[len("hist ") :], rest
+    return "", note
+
+
 def read_mate(data: bytes, dicts=None) -> tuple[list[int] | None, str]:
     """Per-sample MaterialAlb index, or None when the file is not a material grid.
 
@@ -376,15 +529,21 @@ def read_mate(data: bytes, dicts=None) -> tuple[list[int] | None, str]:
     if parsed:
         layers, note = parsed
         return layers, f"{note} (payload)"
+    seen = []
     for at, label in ((0x2C, "+0x2C"), (0x1C, "+0x1C")):
         block = _block(payload, at)
         if not block:
             continue
+        seen.append(f"{label} {len(block)} bytes")
         parsed = _parse_mate_block(block)
         if parsed:
             layers, note = parsed
+            format_byte = payload[4] if len(payload) > 4 else None
+            if format_byte is not None:
+                note += f", format byte {format_byte:#04x}"
             return layers, f"{note} ({label})"
-    return None, "mate did not contain a material grid"
+    where = ", ".join(seen) if seen else "no image block"
+    return None, f"mate did not contain a material grid ({where})"
 
 
 def _occlusion_grid(raw: bytes, width: int) -> list[float] | None:
@@ -402,28 +561,69 @@ def _occlusion_varies(values: list[float]) -> bool:
     return 0.15 <= mean <= 0.98 and variance >= 0.0004
 
 
+def _occlusion_from_plane(plane: bytes, channels: int) -> list[float] | None:
+    count = SIZE * SIZE
+    if channels == 1:
+        if len(plane) < count:
+            return None
+        return [plane[index] / 255.0 for index in range(count)]
+    if len(plane) < count * 4:
+        return None
+    values = []
+    for index in range(count):
+        b0, b1, b2, b3 = plane[index * 4 : index * 4 + 4]
+        if (b0, b1, b2, b3) == (0, 0, 0, 0):
+            values.append(1.0)
+            continue
+        if b1 in (0, 0x7F) and b2 in (0, 0x7F) and b3 in (0, 0x7F):
+            values.append(b0 / 255.0)
+            continue
+        parts = [item for item in (b0, b1, b2, b3) if item != 0x7F]
+        shade = sum(parts) / len(parts) if parts else b0
+        values.append(shade / 255.0)
+    return values
+
+
 def read_occlusion(data: bytes, dicts=None) -> tuple[list[float] | None, str]:
     """0..1 occlusion per height sample, 1 meaning open ground. None when the file is not that grid."""
     try:
         payload = unpack_hght(data, dicts)
     except TerrainError as exc:
         return None, str(exc)
-    blocks = [payload]
+    format_byte = payload[4] if len(payload) > 0x30 else None
+    blocks = []
     for at in (0x2C, 0x1C):
         block = _block(payload, at)
         if block:
             blocks.append(block)
+    if not blocks:
+        blocks.append(payload)
+    order = (4, 1) if format_byte == 0x06 else (1, 4)
+    flat_note = ""
     for block in blocks:
-        for width in (SIZE, 256, 128, 64):
-            raw = _linear_or_swizzled(block, width, 1)
-            if raw is None:
-                continue
-            values = _occlusion_grid(raw, width)
-            if values and _occlusion_varies(values):
-                return values, f"bake_ao {width}×{width} applied as vertex shade"
-            if values:
-                return None, f"bake_ao {width}×{width} was flat or not an occlusion range, so it was not applied"
-    return None, "bake_ao is not a single-channel occlusion grid"
+        for channels in order:
+            planes = _swizzled_planes(block, channels)
+            if not planes and channels == 1:
+                for width in (SIZE, 256, 128, 64):
+                    raw = _linear_or_swizzled(block, width, 1)
+                    if raw is None:
+                        continue
+                    values = _occlusion_grid(raw, width)
+                    if values and _occlusion_varies(values):
+                        return values, f"bake_ao {width}×{width} applied as vertex shade"
+                    if values:
+                        flat_note = f"bake_ao {width}×{width} was flat or not an occlusion range, so it was not applied"
+            for plane in planes:
+                if plane is None:
+                    continue
+                values = _occlusion_from_plane(plane, channels)
+                if values and _occlusion_varies(values):
+                    kind = "4-byte" if channels == 4 else "1-byte"
+                    shown = f", format byte {format_byte:#04x}" if format_byte is not None else ""
+                    return values, f"bake_ao 257×257 {kind} block-linear applied as vertex shade{shown}"
+                if values:
+                    flat_note = "bake_ao decoded but it was flat or outside an occlusion range, so it was not applied"
+    return None, flat_note or "bake_ao is not a single-channel occlusion grid"
 
 
 def sample_steps(tiles, scale: float, origin, focus: tuple[float, float]) -> tuple[dict[str, int], str]:

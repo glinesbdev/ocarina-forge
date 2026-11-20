@@ -657,6 +657,45 @@ def test_mate_blend_uses_the_second_index_and_rejects_noise():
     assert "did not contain" in rejected
 
 
+def test_swizzled_mate_keeps_material_a_and_lists_material_b():
+    import struct
+
+    from bancwright.formats.swizzle import swizzle
+    from bancwright.formats.terrain import SIZE, read_mate, read_occlusion, split_histogram
+
+    count = SIZE * SIZE
+    raw = bytearray()
+    for index in range(count):
+        if index % 2 == 0:
+            raw.extend((0x0F, 0x7F, 0x7F, 0x7F))
+        else:
+            raw.extend((0x0F, 0x0B, 0x7F, 0x7F))
+    packed = swizzle(SIZE, SIZE, 1, 1, 4, 0, 4, bytes(raw))
+    block = packed + bytes(len(packed))
+    header = bytearray(0x34)
+    header[4] = 0x06
+    struct.pack_into("<I", header, 0x2C, 8)
+    struct.pack_into("<I", header, 0x30, len(block))
+    layers, note = read_mate(bytes(header) + block)
+    histogram, rest = split_histogram(note)
+    assert layers is not None
+    assert layers[0] == 0x0F
+    assert layers[1] == 0x0F
+    assert "15×" in histogram and "11×" in histogram
+    assert "0x7f" in rest and "0x06" in note
+    shade = bytearray()
+    for index in range(count):
+        shade.extend((40 if index < count // 2 else 220, 0x7F, 0x7F, 0x7F))
+    ao_packed = swizzle(SIZE, SIZE, 1, 1, 4, 0, 4, bytes(shade))
+    ao_block = ao_packed + bytes(len(ao_packed))
+    ao_header = bytearray(header)
+    struct.pack_into("<I", ao_header, 0x30, len(ao_block))
+    values, ao_note = read_occlusion(bytes(ao_header) + ao_block)
+    assert values is not None
+    assert values[0] < 0.2 and values[-1] > 0.8
+    assert "4-byte" in ao_note
+
+
 def test_tiles_inside_the_clip_are_not_capped():
     from bancwright.models import _choose_tiles
 
