@@ -7,6 +7,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
 import { chooseLod, isTerrainProxy } from "./cull.js";
+import { formatStats, keepRendering } from "./frame.js";
 import { chooseHit } from "./pick.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -109,6 +110,7 @@ export function createViewport(host, hooks) {
   let showTerrainDebug = false;
   let generation = 0;
   let loadQueue = null;
+  let pendingLoads = 0;
   const loadDelta = new THREE.Vector3();
   const loadForward = new THREE.Vector3();
   let terrainRoot = null;
@@ -408,6 +410,16 @@ export function createViewport(host, hooks) {
     return best;
   }
 
+  function retainLoad() {
+    pendingLoads += 1;
+    requestRender();
+  }
+
+  function releaseLoad() {
+    pendingLoads = Math.max(0, pendingLoads - 1);
+    requestRender();
+  }
+
   function prioritizeLoad() {
     if (!loadQueue || loadQueue.length < 2) return;
     camera.getWorldDirection(loadForward);
@@ -509,7 +521,9 @@ export function createViewport(host, hooks) {
       }
     }
     const workers = Math.min(6, queue.length);
-    if (workers) Promise.all(Array.from({ length: workers }, () => worker()));
+    if (!workers) return;
+    retainLoad();
+    Promise.all(Array.from({ length: workers }, () => worker())).finally(releaseLoad);
   }
 
   function ensureTemplate(url) {
@@ -1070,6 +1084,15 @@ uniform float terrainLayerMissing;`
     clearTerrain();
     clearGround();
     if (!banc || !hooks.fetchTerrain) return;
+    retainLoad();
+    try {
+      await loadTerrainBody(token, banc);
+    } finally {
+      releaseLoad();
+    }
+  }
+
+  async function loadTerrainBody(token, banc) {
     let meta;
     try {
       meta = await hooks.fetchTerrain(banc);
@@ -1498,7 +1521,7 @@ uniform float terrainLayerMissing;`
     frameHandle = requestAnimationFrame(tick);
   }
 
-  function writeStats() {
+  function writeStats(rendering) {
     if (!showStats) return;
     const now = performance.now();
     frameTimes.push(now);
@@ -1507,9 +1530,13 @@ uniform float terrainLayerMissing;`
       fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
     }
     const info = renderer.info.render;
-    const tris = info.triangles >= 1000 ? `${Math.round(info.triangles / 100) / 10}k` : String(info.triangles);
-    const rate = fps ? `${fps} fps` : "idle";
-    statsEl.textContent = `${rate} · ${info.calls} draws · ${naiveDraws} model draws if each copy was separate · ${tris} tris`;
+    statsEl.textContent = formatStats({
+      rendering,
+      fps,
+      draws: info.calls,
+      separate: naiveDraws,
+      tris: info.triangles,
+    });
   }
 
   function tick() {
@@ -1533,8 +1560,16 @@ uniform float terrainLayerMissing;`
     }
     renderer.render(scene, camera);
     labels.render(scene, camera);
-    writeStats();
-    if (flying || damped || looking || transform.dragging) requestRender();
+    const loading = pendingLoads > 0;
+    const again = keepRendering({
+      flying,
+      damped,
+      looking,
+      dragging: transform.dragging,
+      loading,
+    });
+    writeStats(again);
+    if (again) requestRender();
   }
   orbit.addEventListener("start", () => requestRender());
   orbit.addEventListener("change", () => requestRender());

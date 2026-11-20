@@ -1,6 +1,6 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. None of the items below are started.
+Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is underway; the other items are not started. Numbers for each slice are in [performance.md](performance.md).
 
 ## 1. Performance pass
 
