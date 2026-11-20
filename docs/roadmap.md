@@ -1,49 +1,63 @@
 # Roadmap
 
-Approved next, in this order. The terrain overlay split (main floor and `_sub` as separate layers) is in the build these notes ship with. The performance pass is in this build. The WebGPU trial is shelved on three r170. Editing UX has undo, redo, ground snap, Ctrl+K search, live validation, and opt-in hot reload in this build. Grid snap is not started. The behavior editor edits fields on existing nodes, and the panels dock. Numbers for each slice are in [performance.md](performance.md).
+On November 20, 2026 the main editor moved into Longshot. It is the in-game editor in the developer UI, on branch `editor-bridge` of Origin `glinesbdev/longshot`, built with `--with-editor`. The game-side notes are `docs/editor-bridge.md` in that repo.
 
-## 1. Performance pass
+Ocarina Forge's 3D viewer and web UI are frozen. Bug fixes only. No new viewer features.
 
-Render on change, so an idle view does not redraw. Instance repeated models on the GPU. Frustum and occlusion culling. Real LODs: the game’s LOD meshes where the file has them, and a generated mesh otherwise, with low-mip textures at distance. A GPU-ready import cache (glTF with meshopt, and KTX2). Nearest-first streaming. Prebaked terrain and atlases per scene.
+The data and export side stays maintained: the BYML, zstd, BFRES, and BNTX parsers; behavior and AI schedule decoding; the typed change format with stable ids; validation; and the exporters. That side should import Longshot's `<overlay>/edits.jsonl` into a project.
 
-## 2. WebGPU trial (shelved)
+## Maintained
 
-The opt-in stays behind `?webgpu=1` (or `?renderer=webgpu`), and WebGL stays the default. The stage-bar checkbox is gone, and a saved `?gpu=1` link loads WebGL. Three stays on r170. No adapter keeps that renderer on its WebGL2 backend, and the stats line says `WebGPU (WebGL2 fallback)`. On a real Kokiri GPU the frame stayed 3–12× slower than WebGL (the last pass was 247.9 ms and 338 draws, against WebGL under 30 ms). r170 has no multi-draw, so one shared material is still one draw per index range. The render-call loop (up to about 80 `render()` calls in a frame) and the remaining solid grass cards are unresolved. Revisit this on a newer three. The measurements are in [performance.md](performance.md).
+Parsers, decoding, the project format, validation, and export stay the job of this repo. New editing is built in Longshot, not in the page.
 
-## 3. Editing UX
+- BYML, zstd, BFRES, and BNTX. The container rules are [formats.md](formats.md). Textures and the Switch 2 GOB order are [textures.md](textures.md).
+- Behavior and AI schedule decoding. A decoded graph keeps the dump's node, pin, and edge ids. A field edit is a `set field` op stored beside the base graph. See [project-format.md](project-format.md) and [longshot-mapping.md](longshot-mapping.md).
+- Typed scene changes. An actor's identity is its banc `Hash`, also stored as `Phive.Placement.ID`. A hash this project mints sets bit 62 and is not rewritten when the actor moves.
+- Validation (`ocarina_forge.validate.diagnose`, `python -m ocarina_forge problems`) and the exporters: the rebuilt romfs, and the Longshot package described in [longshot-mapping.md](longshot-mapping.md).
+- **New level** stays on this side. It starts from an existing area's terrain, climate, and actor packs instead of an empty banc. It is not built.
 
-In this build: instant undo and redo (Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y) for a move, a rotate, a property edit, add, delete, duplicate, hide, and the Areas / System lock. The stack is in memory and the project diff is written from the same shot, so a transform undo patches the instance matrix and does not reload the scene. **Changes** lists that session above the project diff. **Snap** (checkbox, or V) raycasts the terrain and collision volumes while a move or a new actor is dropped.
+### Import `<overlay>/edits.jsonl`
 
-In this build: Ctrl+K (or the Search button) opens a palette. It fuzzy-matches actors in the open scene by name, class, and hash, plus scene files and editor commands. Enter frames the actor, opens the scene, or runs the command.
+Longshot writes one typed op per line under the overlay. Each op names `banc`, the actor `Hash`, `field`, `old`, and `new`. Forge should read that file into a project, matched to the scene diff by banc path and actor hash. This import is not built yet.
 
-In this build: **Problems** (and the same lines under the selected actor in Properties) lists diagnostics from the open scene. A model that fails in the view is grouped there by the error, with the actors listed under it; a click selects and frames that actor. The Problems tab shows the count. The view itself keeps the stats line and the loading progress, and does not list those errors on top of the mesh. Each one names a file, a JSON pointer or an actor hash, a code, a message, and a severity. The list is fetched again after an edit and after undo. Copy, JSON, and Markdown export the full list, and `python -m ocarina_forge problems <banc> [--json]` prints the same report. It reports an unknown actor class, a pack that names a model file the dump does not have, a duplicate hash, a parameter whose kind does not match the scene file, a link whose `Dst` (or `Hash`) is not in this scene or the other bancs in the same folder, and a flag name whose murmur3 is not a GameDataList `Hash`. Vanilla links use `{Dst, Src, Gyaml: Reference, Name: Reference}`. `Src` has to be the actor’s own hash. An unedited link or flag is a warning; editing it makes the same finding an error. Effect locators (`EftLoc_`, `Loc_`, `Tag_`) and packs with no ModelInfo are not missing models. A vanilla scene with no edits should show no errors. A dump without `GameData/GameDataList.Product.110.byml.zs` or without `Pack/Actor` gets one warning instead of a row per actor.
+## Frozen viewer
 
-In this build: **Project → Hot reload** is off until a Longshot mod folder is saved. A scene save waits a moment, builds the mod, and writes each file into that folder with an atomic replace. Files this editor wrote last time, and that the new build no longer contains, are removed. Other files in the folder stay. The stage bar says how many files were written. Longshot reads placement when the map loads, so leave the map and enter it again to see the change. A folder whose name starts with `_` or `-` is refused, because Longshot ignores it. An After the Ocarina project still builds with that pipeline, which does not merge scene actor diffs.
+The page still does what this build already shipped. It does not gain features. Numbers for the viewer are in [performance.md](performance.md). Shortcuts are in [controls.md](controls.md).
 
-Still later: snap to a grid.
+The performance pass is in this build: redraw on change, instanced repeats, frustum culling, the game's LOD meshes where the file has them, a generated mesh otherwise, low-mip textures at distance, a glTF meshopt and KTX2 cache, nearest-first streaming, and prebaked terrain atlases. The terrain overlay split (main floor and `_sub` as separate layers) is in this build. The WebGPU trial is shelved; see Paused.
 
-## 4. Behavior editor
+Editing that already shipped stays: undo and redo, ground snap, Ctrl+K search, live validation, opt-in hot reload, docked panels, and field edits on existing behavior nodes. **Behavior** draws the selected actor's AINB graph, its schedule rows, and its event-flow hooks. Export writes a behavior file only after a round trip. A schedule that lives in another actor's pack is labeled shared.
 
-In this build: the panels dock. **Window** shows and hides Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, Problems, and Stats. A tab can be dragged onto another panel or beside it, and the splits resize. Double-click a tab, or **Max**, to fill the window. The layout is saved in this browser (`ocarinaforge.layout`). **Reset layout** puts a large behavior graph under the view. **Pop out Behavior**, **Pop out Details**, and **Pop out Inspector** open those panels in their own windows. Details starts closed. It holds the model summary and the material dump, and the saved layout remembers whether it is open. The pop-out is the same page, so the selection, the edits, and undo stay in sync. Shortcuts are in [controls.md](controls.md).
+## Paused
 
-In this build: **Behavior** (or B) draws the selected actor's AINB AI graph, its schedule rows, and its event-flow hooks. **Friendly** uses the curated names. **Raw** shows every node, including ones that did not decode. Node, pin, and edge ids come from the dump file and stay put when the graph is drawn again. A field on a decoded node can be changed. Each change is a `set field` op stored beside the base graph, and undo uses the same history as a scene edit. A flag field picks names from GameData. Export writes the file only after a round trip. A schedule that lives in another actor's pack is labeled shared, and the inspector says which actors that edit changes. Connecting nodes and adding nodes are not in this build. The mapping to the Longshot package is [longshot-mapping.md](longshot-mapping.md).
+These were viewer milestones, or the plan to drop the Python server. They are not next.
 
-Graph layout, search, and meshopt decode stay on the main thread. A worker was slower than the decode, and the other two are already a few milliseconds. Texture decode, pack decompression, and terrain atlases stay on the server. The timings are in [performance.md](performance.md).
+### Run without the Python server
 
-Still later: connecting and adding nodes, custom graphs, a quests browser, and live previews of schedules, event flows, and dialog.
+Not started. This was the plan to leave the Python process behind. The frontend would have stayed JavaScript and three.js.
 
-## 5. Asset library
+Step one ports the hot paths to a Rust crate and calls that crate from Python with PyO3 and maturin. The paths are swizzle and deswizzle, BNTX and ASTC decode, BFRES mesh conversion, and zstd and archive reading. The per-model convert and texture times in [performance.md](performance.md) were going to decide which of those moved first.
 
-An asset library browser. Drag an actor from the library onto the scene the way Unity drops a prefab. This stays on the roadmap. It is not in this build.
+Step two compiles that same crate to WebAssembly and moves parsing and conversion into the browser. The dump folder would be picked with the File System Access API.
 
-## 6. New level
+### Blueprint phase B
 
-**New level** starts from an existing area's setup (terrain, climate, and the actor packs that area already uses) instead of an empty banc. This stays on the roadmap. It is not in this build.
+Connecting and adding nodes, and the palette and wire drag that edit them. The unfinished add, connect, and disconnect ops are on branch `glinesbdev/blueprint-nodes-a68c`. They are not on `ato-import`. The frozen viewer still edits fields on existing nodes only.
 
-## 7. Run without the Python server
+### Baked lighting
 
-Later. Not started. The frontend stays JavaScript and three.js.
+`bake0` and `bake1`, and the mesh `bake` UV, are not sampled. [models.md](models.md) records that. A per-scene lightmap in the viewer is paused. The heightmap's `bake_ao` grid is already applied to the ground and stays as it is.
 
-Step one ports the hot paths to a Rust crate and calls that crate from Python with PyO3 and maturin. The paths are swizzle and deswizzle, BNTX and ASTC decode, BFRES mesh conversion, and zstd and archive reading. The per-model convert and texture times in [performance.md](performance.md) decide which of those moves first.
+### Terrain and occlusion
 
-Step two compiles that same crate to WebAssembly and moves parsing and conversion into the browser. The dump folder is picked with the File System Access API. Opening the page is the whole install.
+Further terrain and occlusion work in the viewer is paused. The shipped heightmap, the `_sub` overlay, frustum culling, and the `bake_ao` grid stay. New occlusion culling, and a new terrain presentation, are not viewer work.
+
+### Asset browser
+
+An asset library browser. Drag an actor from the library onto the scene the way Unity drops a prefab. Not started.
+
+### Other viewer work
+
+Snap to a grid. Custom behavior graphs, a quests browser, and live previews of schedules, event flows, and dialog. Dialog editing and a desktop package.
+
+The WebGPU trial stays shelved on three r170. The opt-in remains `?webgpu=1` (or `?renderer=webgpu`), and WebGL stays the default. No adapter keeps that renderer on its WebGL2 backend. On a real Kokiri GPU the frame stayed 3–12× slower than WebGL. Revisit it only if the frozen viewer needs a bug fix on a newer three. The measurements are in [performance.md](performance.md).

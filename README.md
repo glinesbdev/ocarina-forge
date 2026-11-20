@@ -1,8 +1,10 @@
 # Ocarina Forge
 
-Ocarina Forge is a local workbench for placing actors in the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
+Ocarina Forge is the data and export side for mods to the 2026 Nintendo Switch 2 remake of *The Legend of Zelda: Ocarina of Time* (version 1.1.1), as played through the Longshot PC recompilation.
 
-This version lets you browse every banc scene in a dump, move and edit actors in a 3D view, and export a mod folder Longshot will load. Actor meshes come from `Model/<Project>.<Fmdb>.bfres.zs` and the albedo sampler from `Tex/`, loaded at runtime (bind pose, no animation) and cached under `~/.cache/ocarina-forge/models`. A second open reuses that cache without converting again. A missing texture borrows a sibling albedo or a rock, vine, or cloth colour. Numbered terra materials use one layer of the `MaterialAlb` array. The field itself is the TerrainArc heightmap, with those same layers when the tile carries an index, and Ground starts on for it. Water is a single faint sheet (the viewport toggle starts on), and alpha-tested foliage is a cutout. Areas and other volumes are outlines, and the untextured `KokiriForest_01` stand-in stays hidden until Ground is turned on. The scene stays usable while the nearest models load first. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches, and a recipe that places an actor (the Spiritual Stones) can be moved like any actor, with the new transform written back to the recipe YAML. The build still produces those files. Dialog editing, event-flow graphs, and a desktop package are later stages.
+The main editor is moving into Longshot itself: the in-game editor in the developer UI, on branch `editor-bridge` of Origin `glinesbdev/longshot`, built with `--with-editor`. The game-side notes are `docs/editor-bridge.md` in that repo. Ocarina Forge's 3D viewer and web UI are frozen. Bug fixes only. No new viewer features. What stays maintained here is the parsers (BYML, zstd, BFRES, BNTX), behavior and AI schedule decoding, the typed change format with stable ids, validation, and the exporters. Forge should import Longshot's `<overlay>/edits.jsonl` into a project: one typed op per line, with `banc`, the actor `Hash`, `field`, `old`, and `new`. That import is not built yet. The split is [docs/roadmap.md](docs/roadmap.md).
+
+The frozen viewer still browses every banc scene in a dump, moves and edits actors in a 3D view, and exports a mod folder Longshot will load. Actor meshes come from `Model/<Project>.<Fmdb>.bfres.zs` and the albedo sampler from `Tex/`, loaded at runtime (bind pose, no animation) and cached under `~/.cache/ocarina-forge/models`. A second open reuses that cache without converting again. A missing texture borrows a sibling albedo or a rock, vine, or cloth colour. Numbered terra materials use one layer of the `MaterialAlb` array. The field itself is the TerrainArc heightmap, with those same layers when the tile carries an index, and Ground starts on for it. Water is a single faint sheet (the viewport toggle starts on), and alpha-tested foliage is a cutout. Areas and other volumes are outlines, and the untextured `KokiriForest_01` stand-in stays hidden until Ground is turned on. The scene stays usable while the nearest models load first. It also builds an After the Ocarina project: text, events, gamedata, logic, schedules, and the tapestry are advanced patches, and a recipe that places an actor (the Spiritual Stones) can be moved like any actor, with the new transform written back to the recipe YAML. The build still produces those files. Dialog editing, event-flow graphs, and a desktop package are paused with the rest of the viewer.
 
 Ocarina Forge reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
 
@@ -63,10 +65,10 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 
 | Path | Role |
 | --- | --- |
-| `ocarina_forge/` | Python library and FastAPI server. This is the piece that can later replace a mod’s build step. |
-| `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL. |
-| `ocarina_forge/domains.py` | Where a future dialog, event, or table exporter plugs into the build. |
-| `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. |
+| `ocarina_forge/` | Python library and FastAPI server. Parsers, validation, and exporters. This is the maintained data side. |
+| `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL, BFRES, and BNTX. |
+| `ocarina_forge/domains.py` | Where a dialog, event, or table exporter plugs into the build. |
+| `frontend/` | Vite + Three.js viewer. Frozen. Bug fixes only. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. |
 | `examples/sample-project/` | A small project in the format. |
 | `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the simple scene importer. |
 | `examples/after-the-ocarina/` | The imported After the Ocarina project (Bradyn's YAML only). |
@@ -84,4 +86,4 @@ python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 
 ## Not in this version
 
-Skeletal animation, a dialog editor, and desktop packaging. Panels dock, and a field on an existing behavior node can be edited. Connecting and adding nodes is still later. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
+The viewer does not grow. Skeletal animation, a dialog editor, desktop packaging, blueprint phase B (connecting and adding nodes), baked lighting, further terrain and occlusion work, and an asset browser are paused. See [docs/roadmap.md](docs/roadmap.md). Panels dock, and a field on an existing behavior node can be edited. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
