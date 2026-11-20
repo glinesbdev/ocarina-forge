@@ -16,6 +16,7 @@ from ocarina_forge.formats.swizzle import (
     default_block_log2,
     deswizzle,
     div_up,
+    fill_partial_gob,
     surface_bytes,
 )
 
@@ -446,6 +447,8 @@ def _decode_swizzle(
     stored height and say so.
     """
     linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, log2, raw)
+    if codec != "rgba8":
+        linear = fill_partial_gob(linear, width, height, block_w, block_h, bytes_per)
     rgba, note = _decode(codec, width, height, linear, fmt)
     rgba = _channels(rgba, width, height, channels)
     if tile == 1 or width < 32 or height < 32:
@@ -464,6 +467,8 @@ def _decode_swizzle(
         if surface_bytes(width, height, block_w, block_h, bytes_per, alt) != expected:
             continue
         alt_linear = deswizzle(width, height, block_w, block_h, bytes_per, tile, alt, raw)
+        if codec != "rgba8":
+            alt_linear = fill_partial_gob(alt_linear, width, height, block_w, block_h, bytes_per)
         try:
             alt_rgba, _alt_note = _decode(codec, width, height, alt_linear, fmt)
         except BntxError:

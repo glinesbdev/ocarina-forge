@@ -262,6 +262,45 @@ def test_sparse_heightmap_is_a_few_files_inside_a_large_index():
     assert _sparse_heightmap([{"status": "drawn", "reason": ""}]) is False
 
 
+def test_a_455_bc1_partial_gob_is_filled_from_the_last_full_block():
+    """114 BC1 blocks pitch to 120. Blocks 112 and 113 are the partial GOB.
+
+    tegra_swizzle with block height 1 addresses that column at GOB 14
+    (byte 896, pitch 960). A zero block there is what repeats as the black
+    border. The fill copies the last full block, and a block that already
+    has bytes stays put.
+    """
+    from ocarina_forge.formats.bntx import _decode
+    from ocarina_forge.formats.swizzle import deswizzle, fill_partial_gob, surface_bytes, swizzle
+
+    blocks = 114
+    assert surface_bytes(455, 455, 4, 4, 8, 0) == 120 * 8 * 120
+    red = bytes([0x00, 0xF8, 0x01, 0x00, 0, 0, 0, 0])
+    linear = bytearray(blocks * blocks * 8)
+    for y in range(112):
+        for x in range(112):
+            linear[(y * blocks + x) * 8 : (y * blocks + x) * 8 + 8] = red
+    packed = swizzle(455, 455, 4, 4, 8, 0, 0, bytes(linear))
+    assert len(packed) == 115200
+    # Block (112, 0) is GOB column 14, the same address tegra_swizzle uses.
+    assert packed[14 * 512 : 14 * 512 + 8] == b"\0" * 8
+    raw = deswizzle(455, 455, 4, 4, 8, 0, 0, packed)
+    assert raw[112 * 8 : 112 * 8 + 8] == b"\0" * 8
+    filled = fill_partial_gob(raw, 455, 455, 4, 4, 8)
+    assert filled[112 * 8 : 112 * 8 + 16] == red + red
+    assert filled[(112 * blocks + 10) * 8 : (112 * blocks + 10) * 8 + 8] == red
+    assert filled[(113 * blocks + 113) * 8 : (113 * blocks + 113) * 8 + 8] == red
+    marked = bytearray(raw)
+    marked[112 * 8] = 0xAB
+    assert fill_partial_gob(bytes(marked), 455, 455, 4, 4, 8)[112 * 8] == 0xAB
+    rgba, _note = _decode("bc1", 455, 455, filled, 0x1A06)
+    edge = rgba[(16 * 455 + 454) * 4 : (16 * 455 + 454) * 4 + 3]
+    bottom = rgba[(454 * 455 + 16) * 4 : (454 * 455 + 16) * 4 + 3]
+    corner = rgba[(454 * 455 + 454) * 4 : (454 * 455 + 454) * 4 + 3]
+    assert edge[0] > 200 and bottom[0] > 200 and corner[0] > 200
+    assert edge != b"\0\0\0"
+
+
 def test_a_455_wide_bc1_surface_roundtrips_and_log2_0_is_its_own_size():
     """455 is 114 BC1 blocks, padded to 120. Log2 0 is a smaller surface than the usual 16.
 
@@ -338,7 +377,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-36", "1b4ad8339a04ca113ff9506a538b2312267ef6f810119dd5665ab8bb9a5cbf86")
+    pinned = ("models-37", "55de67b2a5722caed8338f979161cc85dcc9a54d95bc2e11210cb9c9ae185033")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."

@@ -156,6 +156,65 @@ def deswizzle(
     return _move(width, height, block_w, block_h, bytes_per, tile_mode, log2, swizzled, to_swizzle=False)
 
 
+def fill_partial_gob(
+    linear: bytes,
+    width: int,
+    height: int,
+    block_w: int,
+    block_h: int,
+    bytes_per: int,
+) -> bytes:
+    """Copy the last full GOB block into a zero block on a partial edge.
+
+    A GOB is 64 bytes wide and 8 block-rows tall. 455 BC1 blocks is 114, so
+    blocks 112 and 113 sit in the last GOB (pitch 120) and are left zero.
+    With repeat wrap that black border is the dotted line on the stone.
+    A block that already has bytes is left alone. Heightmaps do not call this:
+    a zero sample there is a real height.
+    """
+    if bytes_per <= 0 or bytes_per > 64 or 64 % bytes_per:
+        return linear
+    blocks_x = max(1, div_up(width, max(block_w, 1)))
+    blocks_y = max(1, div_up(height, max(block_h, 1)))
+    gob_x = 64 // bytes_per
+    need = blocks_x * blocks_y * bytes_per
+    if len(linear) < need or blocks_x < gob_x and blocks_y < 8:
+        return linear
+    out = bytearray(linear[:need])
+    full_x = (blocks_x // gob_x) * gob_x
+    full_y = (blocks_y // 8) * 8
+    empty = b"\0" * bytes_per
+
+    def at(x: int, y: int) -> int:
+        return (y * blocks_x + x) * bytes_per
+
+    def take(dst_x: int, dst_y: int, src_x: int, src_y: int) -> None:
+        if src_x < 0 or src_y < 0 or src_x >= blocks_x or src_y >= blocks_y:
+            return
+        src = at(src_x, src_y)
+        if out[src : src + bytes_per] == empty:
+            return
+        dst = at(dst_x, dst_y)
+        out[dst : dst + bytes_per] = out[src : src + bytes_per]
+
+    if 0 < full_y < blocks_y:
+        for y in range(full_y, blocks_y):
+            for x in range(blocks_x):
+                if out[at(x, y) : at(x, y) + bytes_per] != empty:
+                    continue
+                src_x = x if full_x == 0 or x < full_x else full_x - 1
+                take(x, y, src_x, full_y - 1)
+    if 0 < full_x < blocks_x:
+        for y in range(blocks_y):
+            for x in range(full_x, blocks_x):
+                if out[at(x, y) : at(x, y) + bytes_per] != empty:
+                    continue
+                take(x, y, full_x - 1, y)
+    if len(linear) > need:
+        return bytes(out) + linear[need:]
+    return bytes(out)
+
+
 def _move(
     width: int,
     height: int,
