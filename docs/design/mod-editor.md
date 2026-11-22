@@ -1,0 +1,227 @@
+# Mod editor
+
+November 22, 2026. Ocarina Forge is the editor again. The in-game editor on Origin `glinesbdev/longshot`, branch `editor-mod` (`docs/editor-mod.md`, `docs/editor-bridge.md`, `mods/longshot-editor`), worked: a Save wrote a placements patch, the area reloaded, and Link was put back. Editing live game memory still does not feel like editing the game. The camera, the gizmos, and the actor writes all live inside the running process.
+
+The new plan is a standalone visual editor. Maps, actors, behaviors, and dialog are edited in Forge. Every edit is a visual front end for a Longshot mod, built with upstream's Modding API ([PR 1958](https://git.magicbean.dev/MagicBeanDev/Longshot/pulls/1958), branch `mod-api`). The running game is only a live preview. Forge tells a game started with `longshot mod run` to reload the mod and to teleport Link. The picture Bradyn works in is Forge's own renderer (Three.js, BFRES materials), not the game's. A game-quality renderer is a large job, so it is planned one step at a time.
+
+Nothing in this note is posted upstream. Gaps are recorded here so a later change can be proposed by a person, not by this repo.
+
+## Architecture
+
+```text
+Forge editor (Three.js, this repo)
+        |  save
+        v
+mod folder on disk
+  mod.json
+  romfs/.keep
+  patches/<name>.json
+  src/*.ts                 only when a content declaration is required
+        |  longshot mod check / pack / dev
+        v
+game started with `longshot mod run`
+        ^
+        |  control bridge: mod_reload, teleport, shot
+        |
+Forge preview
+```
+
+The editor does not use the in-game listener on `127.0.0.1:47321`. That port belongs to a `--with-editor` build. Preview uses the control bridge that `longshot mod run` already opens for tools. The commands are the ones in `docs/modding/tools.md` on `editor-mod`:
+
+| Tool | Bridge | What Forge uses it for |
+| --- | --- | --- |
+| `longshot mod dev` | `mod_reload` after `check` passes | Watch the mod folder and ask the running game to load it again |
+| `longshot mod restart` | `mod_restart` | Start that mod's runtime again. Does not re-read `mod.json` |
+| `longshot mod restart --manifest` | `relaunch` | Start the game again so a new `mod.json`, or a larger banc, is read |
+| `longshot mod teleport [DESTINATION]` | `teleport` | Put Link on the map under edit |
+| `longshot mod shot [PATH]` | `shot` | A PNG of the next frame, so the preview can be checked without looking at Forge's renderer |
+
+`longshot mod check` compiles and links `src/` with the game's compiler and typechecks when `tsc` 7 is present. `longshot mod pack` writes the `.lsmod`. `longshot mod dev --once` copies the folder into the game's `mods/<owner>/<name>/` before the first launch.
+
+A manifest mod with no `romfs/` directory is skipped before `patches/` are indexed (`host/mods.c` `index_layers` on `editor-mod`: the walk continues when `romfs` is missing). `mods/static-move` keeps `romfs/.keep` so the folder counts as a mod and the patches still apply. An empty `romfs/` also works. Forge's generated mod ships one of those. The same skip disagrees with the file watch a few lines above, which treats `patches/` as enough. That is an upstream note. It has not been posted, and this repo does not post it.
+
+### What carries over
+
+From `editor-mod` and from `mods/static-move`:
+
+- The placements patch. One JSON file per banc. `target` is the romfs path. `placements` is a list of ops. A move of an actor that is already in the file is `op: "set"`, `hash` (`0x` and 16 hex digits), `path` (`Translate`, `Rotate`, or `Scale`), and `value` (three floats). `Rotate` is radians, the same unit the banc stores. `content.place`'s `rotation` is degrees; a placements patch must not copy that unit. The sign patch that Bradyn already confirmed is the shape:
+
+```json
+{
+  "target": "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs",
+  "description": "KokiriForest_013 (Obj_Kokiri_Signboard_A_01) moved on X.",
+  "placements": [
+    { "op": "set", "hash": "0x4a13f8880eb01a43", "path": "Translate", "value": [-9.75, 111.6, 10.24] }
+  ]
+}
+```
+
+  `5337883246609832515` is that same hash. The actor is `Obj_Kokiri_Signboard_A_01` in `KokiriForest_Child_Static`. The pot from the same edit is Dynamic hash `0x473ed5ff7535e13e`.
+
+- Typed change ops. Forge's scene YAML stays the source ([project-format.md](../project-format.md)). The mod folder is export output, the way `build/` is today. An `edited` actor with `translate` / `rotate` / `scale` becomes one `set` per field that changed. The hash is not rewritten when the actor moves.
+
+- Hot reload. A `set` of a `Translate` or `Rotate` the placement already has, written into a container that placement does not share, stays the same file size. The game log says the banc is served anew from its next load. Leaving the area and entering it again shows the pose. `longshot mod dev` rebuilds a folder mod after the files have been still for 0.3 s and then sends `mod_reload`. A change under `patches/` or `romfs/` does not reload the mod's script. The editor mod's own Save rebuilds immediately and, when the log says served anew, reloads the area and puts Link back. Forge can ask for `mod_reload` and then `teleport`. It cannot invent an area reload the bridge does not have. Re-entry is the load.
+
+- Adds need a process start. `Scale` on a placement that has no `Scale` key is an `add` of that path. A new actor is an `add` of the whole placement. Either one grows the served file. The size table is read once at process start. A file larger than the entry the process allocated is not served until the next start. The Save hint on `editor-mod` says to restart. There is no live `setScale`. `content.change` is also not a hot path: the content module runs at game start and emits its patches into that start's layers. A `params` edit shows up on the next `longshot mod restart --manifest` (or `longshot mod stop` and `longshot mod run`), not on `mod_reload` alone.
+
+- Size-table headroom. A shared BYML container must not be overwritten in place. Kokiri's sign is the example: `Actors/77/Translate` is a container other actors share, and writing into it would move all of them. The patch writer makes a private copy of that array. The copy is only a few dozen bytes, but any growth asks the size table for `entry + (now - start) * 8 + 4096`, then rounded up to 32. For that sign the editor measured `132360 + 30036 * 8 + 4096 = 376744`, which rounds to `376768`. The game's entry is `132360` over a `132068`-byte file, so the copy does not fit. Rewriting with no shared containers grew the file from `132068` to `162104` bytes. The editor mod, when it is enabled at process start, walks every `Banc/*_Static.bcett.byml.zs` and `*_Dynamic.bcett.byml.zs`, rewrites each the way a `set` will, and reserves that entry. The log line is `editor: banc headroom:`. A later start with the same files reuses the table. A new key or a new actor can still grow past the reserved entry, and that Save says to restart. Forge does not inherit that reservation by installing `local/longshot-editor`. A Forge mod that grows the Kokiri Static file will not appear until a process start whose size table covers the new file. Milestone 1 treats that restart as the expected first apply, and says so in the UI.
+
+### What gets dropped
+
+These belong to the in-game editor. Forge does not call them.
+
+- The in-game camera. `camera.override`, `setPosition`, `setTarget`, `setFov`, and the F6 pull-back. Forge's own camera is the one in [controls.md](../controls.md).
+- The in-game gizmos. `gfx.world` lines, boxes, circles, and billboards, and the W / E / R handles drawn in the game view. Forge draws its own gizmos on its own meshes.
+- Memory actor hooks. `actors.write` (`setPosition`, `setRotation`, and the rest) writes the live actor by guest address and does not write the banc. `actors.spawn` / `actors.remove` only cover actors that mod spawned, and a co-op room has no spawner. The live registry, the ActorLink walk, and the physics ray stay in the game. Forge selects and moves the actor in its own scene, then writes a patch.
+
+Placement and collision research used by that in-game editor is Hyblitze's and Zirem's, from Heros Legacy (`heros-legacy/v3.0.0` at `6ce46cc7`). Hyblitze traced the actor-pack path and the physics ray. Zirem wrote the spawn request block that follows those notes. `docs/editor-bridge.md` on `editor-mod` records the layouts. Forge's preview does not use them. A later milestone that snaps against the game's collision, or that matches that actor layout, names them again. Their code is not copied into this repo.
+
+## Mapping
+
+Forge's typed records stay the source. The exporter writes the mod. [longshot-mapping.md](../longshot-mapping.md) described an older revision of the spec, before placements were keyed by hash. The table below is the `mod-api` shape on `editor-mod`, checked against `mods/static-move`, `docs/modding/content.md`, and `docs/editor-mod.md`.
+
+| Forge record | Mod API | Notes |
+| --- | --- | --- |
+| `edited` + `translate` | placements `set` of `Translate`, three metres | Same-size when the array is not a shared container. The Kokiri sign's array is shared, so the first write grows the file. |
+| `edited` + `rotate` | placements `set` of `Rotate`, three radians | Do not emit `content.place`'s degrees. |
+| `edited` + `scale`, key already present | placements `set` of `Scale` | Same-size, hot reload. |
+| `edited` + `scale`, key absent | placements `add` of `Scale` | Grows the file. Next process start. |
+| `set` of an existing `Dynamic.*` scalar (string, number, bool) | `content.change({ file, placement, params })` | `placement` in the API text is the id without `0x` (`00a1b2c3d4e5f607`). The patch `hash` keeps `0x`. Applied at the next game start, because the content module runs then. A missing key is a stage error and the mod's content is not added. |
+| `gyaml` on an existing actor | `content.change({ file, placement, actor })` | Same start rule. This changes what is placed there. It does not move it. |
+| `added` | `content.place({ id, map, age, actor, position, rotation, scale, params, layer })` or a placements `add` of the whole actor | `content.place` adds a second actor and leaves the original. `rotation` is degrees. `layer` is `"static"` or `"dynamic"` (dynamic when omitted). `map` is `KokiriForest_Child`, not a new map name. New maps are refused: terrain, baked collision, and lighting are not something a mod can make yet. The in-game editor's new-actor hash sets bit 63. Forge mints bit 62. See open questions. |
+| `hidden` / `removed` | no op | `actors.remove` refuses a banc actor. Omitting the actor from a full file rewrite is the old exporter, and it fights the size table. The project still stores the state. Export warns and does not write a patch until an op exists. |
+| Links, group lists | no op | Unchanged from [longshot-mapping.md](../longshot-mapping.md). Export warns and leaves them. |
+| Behavior `set field` | no merge into the game's AINB | `content.tree({ id, from, add, patch })` copies a tree for a new actor. The game's own graph is still last-layer-wins. The project keeps the op. Export does not write a replaced graph. |
+| Text label | `content.text({ file, label, text })` | One string, or an object by language. Control tags (colours, icons, pauses) are not in this API yet. |
+| New flag | `content.flag({ id, kind, default, values, reset })` | Not saved. A flag kept with the save is `storage.save.flags`, a different feature. |
+| Events, schedules | no merge | Stored as typed ops in the project. Not a replaced flow file. |
+
+`mod.json` for a generated preview mod carries no Nintendo name in the id or the title. A workable shape, copied from `mods/static-move/mod.json` and stripped to what a patch-only mod needs:
+
+```json
+{
+  "id": "local/forge-edits",
+  "name": "Forge edits",
+  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "api": "0.1",
+  "runtime": "js",
+  "entry": "src/main.ts",
+  "game": { "builds": ["*"] },
+  "permissions": [],
+  "multiplayer": "all"
+}
+```
+
+`src/main.ts` can be an empty entry until a milestone emits `content.change` or `content.place`. Those declarations need `content.add` in `permissions` and `"multiplayer": "all"`. A patch-only mod does not. `check` still wants the entry file, because `runtime` is `js`.
+
+## Milestones
+
+Each one is shippable on its own and is something Bradyn can check on his machine. The renderer stays Forge's. A step is done when the check below passes, not when the picture matches the game in every way.
+
+### 1. Move the Kokiri sign, and see it in the game
+
+Open `KokiriForest_Child` in Forge. Select `Obj_Kokiri_Signboard_A_01` (Static, `KokiriForest_013`, hash `0x4a13f8880eb01a43`). Move it. Save writes a mod folder: `mod.json` as above, `romfs/.keep`, `src/main.ts`, and `patches/kokiri-static.json` with one `set` of `Translate`. `longshot mod check` passes.
+
+Preview, on a game already started with `longshot mod run`, the mod turned on: Forge runs `longshot mod dev --once` if the folder is not installed yet, then tells him the first apply needs a process start, because this sign's `Translate` is a shared container and the file grows. He runs `longshot mod stop` and `longshot mod run` (or `restart --manifest`). Forge then runs `longshot mod teleport` to the child Kokiri destination and `longshot mod shot`. The sign in the PNG stands at the pose he set. The patch file on disk matches the `static-move` shape. A second move that does not grow the file again is the hot-reload check: `mod_reload`, leave the area, enter it, shot. If that second shot is still the old pose, the size table is still short and the UI says restart, which is the headroom caveat and not a failed move.
+
+### 2. Rotate, then scale, the same sign
+
+Rotate writes `Rotate` in radians (45 degrees is `0.7853981633974483`, the value in `kokiri-static.json`). Scale writes `set` when the key exists and `add` when it does not, and the UI says that `add` waits for the next process start. A shot shows the new yaw. Scale is checked the same way after a restart.
+
+### 3. Materials and UVs, one surface at a time
+
+The sign, then one wooden prop, then one foliage card. Each step binds the albedo the material names (`_a0`, then `_a1` or `_a2`), on the UV the assign names (`_u0`, `_u1`, or `_u2`). A sampler index of `0xFF` stays off. Normals and the packed ORM map stay on the following step, not this one. `material-debug` is the dump-side check. A `shot` of the same actor is the game-side check. Mismatch on one surface is a failed step. [models.md](../models.md) is the assign layout.
+
+### 4. Terrain tiling
+
+Kokiri's walkable floor meets the actors' feet. The `_sub` scene stays the upper layer (about 13–24 m on Kokiri), not a replacement of the main floor. `check_terrain.py` is the numeric check: origin, world scale, height scale, and one line per tile. A shot from the same teleport is the visual check. Tile boundaries and the partial last column of a `.hght` are the known cases in [formats.md](../formats.md).
+
+### 5. Scale, one known case at a time
+
+These are the scale cases already written down. Each is its own step, with a fixture or a shot:
+
+- Bone flag `0x800000`, segment-scale compensation, on a mesh that uses it.
+- Bone flag `0x1000`, Euler XYZ in radians, composed `Rz · Ry · Rx`. `Obj_HrlCastle_SwitchShutter_A_01` is the tilted door in [models.md](../models.md).
+- A recipe actor's `y_offset`, so the gizmo Y is not applied twice.
+- A land actor scaled to 8 m or more stays a volume outline and does not lose a real mesh when it has one.
+
+### 6. Editor UX that is still missing
+
+Fly, orbit, pan, dock, undo, and F to frame are already in [controls.md](../controls.md). This step adds what that list does not have, matching the in-game editor's feel without using its renderer:
+
+- A scale gizmo beside move (G) and rotate (R). The corner names the mode.
+- A ground grid and a corner axis indicator (X red, Y green, Z blue).
+- Grid snap at 0.5 m, separate from ground snap (V).
+- F frames the selection and sets the orbit pivot there.
+
+Check: move, rotate, and scale the sign from the gizmos alone, with the grid on, then F. No typed numbers. The patch from milestone 1 still updates.
+
+### 7. Add an actor. Record remove as a gap
+
+Add a pot (or any `Pack/Actor` class the dump has) with `content.place` or a placements `add`. Position in the patch is metres. Rotation emitted through `content.place` is degrees. The new hash is recorded in the open questions until Bradyn picks bit 62 or bit 63. After a process start and a teleport, the shot shows the new actor and the original sign is still there. `content.place` adds; it does not replace.
+
+Remove and hide stay in the project and in the view. Export writes no patch and says why: the API has no remove for a banc actor. That gap is not posted upstream.
+
+### 8. Behavior graph, read-only
+
+Select a Kokiri NPC. **Behavior** draws the AINB graph, the schedule rows, and the event-flow hooks, with the dump's node ids. Nothing is written. This is the graph the page already draws. The check is that opening it does not create a `patches/` file or a `content.tree` call.
+
+### 9. Behavior field edits stay in the project
+
+A field change is still a `set field` op in `behaviors/<gyaml>.yaml`, with the node's stable id. Undo uses the same history as a scene edit. Export does not write a replaced AINB. If the milestone can show the edited value in Forge's graph, that is the test. The game does not change until a merge op exists. `content.tree` is only for a tree the mod owns.
+
+### 10. One dialog line, then events as data
+
+Change one existing label through `content.text`. `check` passes. After a process start, the line is visible in the game (a shot is not enough if the line is inside a conversation; the check is then the game's text plus the mod log). Control tags are out of scope. Event flows and schedules stay typed ops in the project and are not exported as whole files. A quests browser and live dialog preview wait until that export is real.
+
+The Rust port below is part of this direction. It is not one of the ten, and it is not waiting until they finish. Baked lighting (`bake0` / `bake1`), an asset browser, a new level, and blueprint phase B (add and connect, still on `glinesbdev/blueprint-nodes-a68c`) stay later than the ten. The WebGPU trial stays shelved on three r170. [performance.md](../performance.md) has the measurements already taken. It does not have retail Kokiri or Hyrule Castle load times. This checkout does not contain those dumps.
+
+### R1. Profile a cold load before any port
+
+No Rust yet. Time a cold load, then the warm load of the same scene, on Bradyn's machine. First `KokiriForest_Child`. Then a heavy map, Hyrule Castle (the castle scene he already opens, not a new dump). Use `ocarina-forge warm` twice per scene: the first line is `cache=miss`, the second is `cache=hit`. **Stats** already splits `conv`, `tex`, `dl`, and `up`. The server line already splits `convert=` and `texture=`. Write those numbers into [performance.md](../performance.md). The sample walk in this checkout (16 models, 76.4 ms convert, 0.4 ms texture, one core) is not a stand-in for those two scenes.
+
+The candidates, in the order a profile is allowed to reorder them:
+
+- Swizzle and deswizzle, including the Switch 2 order for 16-byte elements. That is the bit-5 / bit-6 swap in [textures.md](../textures.md). Castle brick albedos are the known case: `Land_HrlCastle_Wall_Brick_A_Lighter_Alb` (ASTC 8×5) and `Land_HrlCastle_Wall_Brick_Blend_A_Alb` (ASTC 6×6). 8-byte and 4-byte elements stay on the Tegra X1 address. The formula already in `formats/swizzle.py` is what a port matches. Do not copy a third-party swizzle or encoder.
+- BNTX and ASTC decode.
+- BFRES mesh conversion.
+- zstd, archive, and BYML reading.
+
+A path is a candidate only if its share of the cold wall time is large on at least one of those two scenes. If `dl` and `up` are the cold time, and the Python paths are a small share, this step stops and says so. No port is started to have a port.
+
+### R2. Port the top hot spot, still called from Python
+
+One crate, called from Python with PyO3 and maturin. The hot functions take bytes and return bytes. No Python types inside them. That is what lets step two compile the same crate to WebAssembly later. The Python server stays. The frontend stays JavaScript and Three.js.
+
+Ship the winner from R1 only. Before and after wall times for the same Kokiri cold load and the same castle cold load go in [performance.md](../performance.md). Parity tests call the Python function and the crate on the same bytes and require the same output: deswizzled blocks, decoded images, mesh vertices and indices, or parsed BYML, whichever path moved. For the swizzle path, the two castle albedos above are the extra fixtures when the dump is present, and a round trip through `swizzle` must match. Existing unit fixtures cover the path when the dump is not. If the bytes match, the glb cache prefix stays. Bump it only when the output changes.
+
+Where it sits next to the other milestones:
+
+- A texture or swizzle win lands before milestone 3, so the material check is not waiting on the Python deswizzle, and so milestone 3's cache rebuild is the one that records the new time.
+- A mesh win lands before milestone 5, for the same reason. Milestones 3 and 4 can proceed on the Python converter.
+- A banc-reading win can land with milestone 1. It must not change the patch JSON. Opening the scene and writing the mod are the timings.
+
+### R3. Port the second hot spot, or stop
+
+Same crate, same parity rule, same two scenes. If R1 named only one path with a large share, this step is the note that says the second candidate was not worth it. Do not port the rest of the list for completeness.
+
+### Step two, kept in mind and not scheduled
+
+The same crate, compiled to WebAssembly, is how parsing and conversion could later move into the browser. The dump folder would be picked with the File System Access API, and the Python server could then go away. That host is not a milestone. R2's byte API is the part that keeps the option open. Revisit it only after a port has a measured gain on Kokiri and on the castle.
+
+Later, not one of these steps: baked lighting, an asset browser, a new level, and blueprint phase B, as above.
+
+## Open questions
+
+1. Confirm the source of truth. This note keeps the scene YAML as the source and treats the mod folder as export output. Should a Forge project *be* the mod folder instead, with `patches/*.json` as the only placement record?
+2. Is `local/forge-edits` the right id, and should Save install it with `longshot mod dev --once` into the game Bradyn already runs, or into a path he picks?
+3. For milestone 1, is a full process start the acceptable first apply for the Kokiri sign, given the shared `Translate` container? Or should Forge also reserve size-table headroom the way `local/longshot-editor` does at startup?
+4. New-actor hashes. Forge sets bit 62. The in-game editor sets bit 63. Which bit should a placements `add` use?
+5. `content.change` documents `placement` without a `0x` prefix. The patch `hash` uses `0x` and 16 hex digits. Should the exporter treat those as the same id with two spellings, and is the no-prefix form what `read.placements` returns?
+6. Hide and remove have no banc op. Is "shown in Forge, warned on export, still present in the game" the right behavior until an op exists?
+7. Which scale case is first after terrain: the shutter door (`0x1000`), segment-scale compensation (`0x800000`), recipe `y_offset`, or the 8 m volume rule?
+8. After `mod_reload`, is "teleport, then you walk out and back" an acceptable preview, or does milestone 1 need a bridge command that reloads the current area? No such command is in `docs/modding/tools.md` today. This question is not an upstream post.
+9. Should `src/main.ts` stay empty for patch-only saves, or should every save emit `content.change` / `content.place` and let the content module own the patch files?
+10. The After the Ocarina pipeline still builds its own romfs. Does that stay beside the mod-API exporter, or does new work stop writing a rebuilt banc?
+11. If the R1 profile says GPU upload and download are the cold time, and the Python paths are a small share, should the port stop there? The note says yes. Confirm that before R2 starts.
