@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ocarina-forge-native"
+version = "0.1.0"
+description = "BC7 encode and BNTX decode for Ocarina Forge."
+requires-python = ">=3.11"
+
+[tool.maturin]
+module-name = "ocarina_forge_native"
+manifest-path = "Cargo.toml"

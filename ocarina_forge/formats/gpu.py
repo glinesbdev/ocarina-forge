@@ -147,6 +147,12 @@ def _mip_chain(image) -> tuple[int, int, int, list[bytes]] | None:
     native_vk, native_blocks = _native_base(image, width, height)
     vk = native_vk or VK_BC7
     encoder = encode_bc1 if vk == VK_BC1 else encode_bc7
+    if encoder is encode_bc7:
+        rust_levels = _rust_bc7_chain(width, height, pixels)
+        if rust_levels is not None and _chain_ok(width, height, rust_levels):
+            if native_blocks is not None:
+                rust_levels = [native_blocks, *rust_levels[1:]]
+            return vk, width, height, rust_levels
     levels: list[bytes] = []
     w, h, mip = width, height, pixels
     first = True
@@ -290,7 +296,62 @@ def _bc1_block(pixels: list[bytes]) -> bytes:
 
 
 def encode_bc7(width: int, height: int, rgba: bytes) -> bytes:
-    """Mode 6, one subset, 4-bit indices. Good enough that a brick stays a brick."""
+    """Mode 6, one subset, 4-bit indices. Good enough that a brick stays a brick.
+
+    `ocarina_forge_native` does this same mode when it is built. The Python
+    loop below is the fallback, and the reference the Rust blocks match.
+    """
+    native = _rust_encode_bc7(width, height, rgba)
+    if native is not None:
+        return native
+    return _encode_bc7_py(width, height, rgba)
+
+
+def _native_mod():
+    """The extension, or None when maturin has not built it."""
+    from ocarina_forge.extension import module
+
+    return module()
+
+
+def _rust_encode_bc7(width: int, height: int, rgba: bytes) -> bytes | None:
+    native = _native_mod()
+    if native is None or width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return None
+    try:
+        out = native.encode_bc7(int(width), int(height), rgba)
+    except Exception:
+        return None
+    if out is None or len(out) != _block_count(width, height) * 16:
+        return None
+    return bytes(out)
+
+
+def _rust_bc7_chain(width: int, height: int, rgba: bytes) -> list[bytes] | None:
+    native = _native_mod()
+    if native is None:
+        return None
+    try:
+        levels = native.bc7_mip_chain(int(width), int(height), rgba)
+    except Exception:
+        return None
+    if not levels:
+        return None
+    return [bytes(level) for level in levels]
+
+
+def _chain_ok(width: int, height: int, levels: list[bytes]) -> bool:
+    w, h = width, height
+    for index, level in enumerate(levels):
+        if len(level) != _block_count(w, h) * 16:
+            return False
+        if w == 1 and h == 1:
+            return index == len(levels) - 1
+        w, h = max(1, w // 2), max(1, h // 2)
+    return False
+
+
+def _encode_bc7_py(width: int, height: int, rgba: bytes) -> bytes:
     if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
         return b""
     out = bytearray()

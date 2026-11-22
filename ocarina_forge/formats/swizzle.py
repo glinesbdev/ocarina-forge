@@ -203,6 +203,19 @@ def _gob_address(
     return gob + _gob_local(x * bytes_per, y, chosen)
 
 
+def _rust_move(width, height, block_w, block_h, bytes_per, tile_mode, log2, data, to_swizzle: bool, order):
+    from ocarina_forge.extension import module
+
+    native = module()
+    if native is None:
+        return None
+    try:
+        fn = native.swizzle if to_swizzle else native.deswizzle
+        return bytes(fn(width, height, block_w, block_h, bytes_per, tile_mode, log2, data, order or ""))
+    except Exception:
+        return None
+
+
 def swizzle(
     width: int,
     height: int,
@@ -219,6 +232,9 @@ def swizzle(
     ``order`` defaults to ``gob_order``. Swizzle and deswizzle use the same
     address, so an export writes the order the decoder reads.
     """
+    packed = _rust_move(width, height, block_w, block_h, bytes_per, tile_mode, log2, linear, True, order)
+    if packed is not None:
+        return packed
     return _move(
         width, height, block_w, block_h, bytes_per, tile_mode, log2, linear, to_swizzle=True, order=order
     )
@@ -236,6 +252,9 @@ def deswizzle(
     order: str | None = None,
 ) -> bytes:
     """Unpack block-linear data into linear blocks, one block after another."""
+    linear = _rust_move(width, height, block_w, block_h, bytes_per, tile_mode, log2, swizzled, False, order)
+    if linear is not None:
+        return linear
     return _move(
         width, height, block_w, block_h, bytes_per, tile_mode, log2, swizzled, to_swizzle=False, order=order
     )
@@ -257,6 +276,14 @@ def fill_partial_gob(
     A block that already has bytes is left alone. Heightmaps do not call this:
     a zero sample there is a real height.
     """
+    from ocarina_forge.extension import module
+
+    native = module()
+    if native is not None:
+        try:
+            return bytes(native.fill_partial_gob(linear, width, height, block_w, block_h, bytes_per))
+        except Exception:
+            pass
     if bytes_per <= 0 or bytes_per > 64 or 64 % bytes_per:
         return linear
     blocks_x = max(1, div_up(width, max(block_w, 1)))

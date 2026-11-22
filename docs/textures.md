@@ -76,7 +76,7 @@ The viewer ignores that ranking. A 16-byte element is Switch 2. A line marked `d
 
 ## Cache
 
-The glb prefix is `models-44`. Decoded BNTX images are keyed with `bntx-6`, so an old `bntx/*.bwtx` is not reused. A `bntx-6` file also stores the linear blocks. Older files in the cache folder are left on disk. Albedo in the glb is a KTX2 of those blocks (BC1, BC3, or BC7; ASTC is re-encoded to BC7) plus a JPEG or PNG fallback. See [performance.md](performance.md).
+The glb prefix is `models-45`. Decoded BNTX images are keyed with `bntx-6`, so an old `bntx/*.bwtx` is not reused. A `bntx-6` file also stores the linear blocks. Older files in the cache folder are left on disk. Albedo in the glb is a KTX2 of those blocks (BC1, BC3, or BC7; ASTC is re-encoded to BC7) plus a JPEG or PNG fallback. See [performance.md](performance.md).
 
 ## Check on a dump
 

@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-44\0"
+_CACHE_VERSION = b"models-45\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -135,6 +135,10 @@ _FILE_SIG: dict[str, tuple[int, int, str]] = {}
 _BNTX_MEM: dict[str, list] = {}
 _BNTX_ORDER: list[str] = []
 _FILES: contextvars.ContextVar[list | None] = contextvars.ContextVar("banc_tex_files", default=None)
+# One convert. The same Tex name is asked for again by the next material, and
+# the decoded-image cache does not skip the zstd read or the magenta scan.
+_LOAD_MEM: contextvars.ContextVar[dict | None] = contextvars.ContextVar("forge_load_mem", default=None)
+_READ_MEM: contextvars.ContextVar[dict | None] = contextvars.ContextVar("forge_read_mem", default=None)
 
 
 class CacheMiss(Exception):
@@ -355,6 +359,16 @@ def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: 
         return cached["digest"], _with_timing(cached["info"], "hit", clock)
     if not convert:
         raise CacheMiss()
+    load_token = _LOAD_MEM.set({})
+    read_token = _READ_MEM.set({})
+    try:
+        return _convert_uncached(blob, dump, hint, terrain, clock, pointer)
+    finally:
+        _LOAD_MEM.reset(load_token)
+        _READ_MEM.reset(read_token)
+
+
+def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: ConvertClock, pointer: Path) -> tuple[str, dict]:
     models = parse(blob)
     if models and not any(model.parts for model in models):
         flagged = [model for model in models if any(note.startswith("geometry format not decoded") for note in model.notes)]
@@ -1677,6 +1691,60 @@ def _alpha_label(mode: str, cutoff: float) -> str:
     return "opaque"
 
 
+def _load_cache_key(dump, model, name, hints, alpha, cutoff, forced, layer, flatten_alpha, keep_data):
+    if isinstance(hints, (list, tuple)):
+        hint_key = tuple(str(item) for item in hints)
+    else:
+        hint_key = (str(hints),)
+    try:
+        cut = float(cutoff)
+    except (TypeError, ValueError):
+        cut = 0.0
+    return (
+        id(dump) if dump is not None else 0,
+        id(model) if model is not None else 0,
+        name or "",
+        hint_key,
+        alpha or "",
+        cut,
+        forced or "",
+        None if layer is None else int(layer),
+        bool(flatten_alpha),
+        bool(keep_data),
+    )
+
+
+def _remember_load(key, result, blob, relative) -> None:
+    mem = _LOAD_MEM.get()
+    if mem is None or key is None:
+        return
+    copied = dict(result)
+    copied["tried"] = list(result.get("tried") or [])
+    mem[key] = {"result": copied, "blob": blob, "relative": relative or ""}
+
+
+def _load_from_mem(stored, dump, raws) -> dict:
+    blob = stored.get("blob")
+    if blob is not None:
+        raws.append(blob)
+    relative = stored.get("relative") or ""
+    if relative:
+        _track_file(dump, relative)
+    result = dict(stored["result"])
+    result["tried"] = list(stored["result"].get("tried") or [])
+    return result
+
+
+def _read_tex(dump, relative: str) -> bytes:
+    mem = _READ_MEM.get()
+    if mem is not None and relative in mem:
+        return mem[relative]
+    blob, _dict_id = dump.read_file(relative)
+    if mem is not None:
+        mem[relative] = blob
+    return blob
+
+
 def _load_named(
     dump,
     model,
@@ -1691,10 +1759,22 @@ def _load_named(
     flatten_alpha: bool = False,
     keep_data: bool = False,
 ) -> dict:
+    mem = _LOAD_MEM.get()
+    key = None
+    if mem is not None:
+        key = _load_cache_key(dump, model, name, hints, alpha, cutoff, forced, layer, flatten_alpha, keep_data)
+        stored = mem.get(key)
+        if stored is not None:
+            return _load_from_mem(stored, dump, raws)
+
+    def finish(result, blob=None, relative=""):
+        _remember_load(key, result, blob, relative)
+        return result
+
     result = {"image": None, "error": "", "tried": [], "found": "", "alpha": alpha, "cutoff": cutoff, "images": 0}
     if not name and not forced:
         result["error"] = "material has no texture names"
-        return result
+        return finish(result)
     embedded = None
     if model is not None and name:
         embedded = model.images.get(name) or model.images.get(name.lower())
@@ -1707,10 +1787,10 @@ def _load_named(
         result["cutoff"] = used_cut
         result["error"] = note
         result["image"] = image
-        return result
+        return finish(result)
     if dump is None:
         result["error"] = "no Tex file matched"
-        return result
+        return finish(result)
     relative = forced
     tried: list[str] = []
     if not relative:
@@ -1724,26 +1804,26 @@ def _load_named(
     result["tried"] = tried
     if not relative:
         result["error"] = "no Tex file matched"
-        return result
+        return finish(result)
     try:
-        blob, _dict_id = dump.read_file(relative)
+        blob = _read_tex(dump, relative)
     except BancError as exc:
         result["found"] = relative
         result["error"] = exc.message
-        return result
+        return finish(result)
     raws.append(blob)
     _track_file(dump, relative)
     if blob[:4] != b"BNTX":
         result["found"] = relative
         result["error"] = f"{relative} is not a BNTX"
-        return result
+        return finish(result, blob, relative)
     result["found"] = relative
     if layer is not None:
         try:
             picked = _decode_layer_cached(blob, layer, flatten_alpha=flatten_alpha, tex_path=relative)
         except BntxError as exc:
             result["error"] = str(exc)
-            return result
+            return finish(result, blob, relative)
         result["images"] = 1
         image, mode, used_cut, note = _accept(picked, "opaque" if flatten_alpha else alpha, cutoff, keep_data=keep_data)
         if flatten_alpha:
@@ -1752,12 +1832,12 @@ def _load_named(
         result["cutoff"] = used_cut
         result["image"] = image
         result["error"] = note or ""
-        return result
+        return finish(result, blob, relative)
     try:
         decoded = _decode_bntx_cached(blob, relative)
     except BntxError as exc:
         result["error"] = str(exc)
-        return result
+        return finish(result, blob, relative)
     result["images"] = len(decoded)
     picked, why = pick_image(decoded, name)
     if picked is None:
@@ -1765,7 +1845,7 @@ def _load_named(
         result["error"] = why or (failed.note if failed else "BNTX has no usable image")
         if failed is not None and failed.fmt and "format" not in result["error"]:
             result["error"] = f"{result['error']} (0x{failed.fmt:04X})"
-        return result
+        return finish(result, blob, relative)
     image, mode, used_cut, note = _accept(picked, alpha, cutoff, keep_data=keep_data)
     result["alpha"] = mode
     result["cutoff"] = used_cut
@@ -1776,7 +1856,7 @@ def _load_named(
         result["error"] = note
     elif why:
         result["error"] = why
-    return result
+    return finish(result, blob, relative)
 
 
 def pick_image(decoded, wanted: str):

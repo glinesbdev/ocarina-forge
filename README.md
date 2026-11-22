@@ -16,6 +16,8 @@ Python 3.11 or newer, and Node 20 or newer.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install maturin
+maturin develop --release --manifest-path native/Cargo.toml
 
 cd frontend
 npm install
@@ -80,6 +82,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | --- | --- |
 | `ocarina_forge/` | Python library and FastAPI server. Parsers, validation, and exporters. This is the maintained data side. |
 | `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL, BFRES, and BNTX. |
+| `native/` | BC7 mode 6, block decode, and deswizzle. Optional. Without `maturin develop`, those paths stay Python. |
 | `ocarina_forge/domains.py` | Where a dialog, event, or table exporter plugs into the build. |
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. New renderer work follows [docs/design/mod-editor.md](docs/design/mod-editor.md). |
 | `docs/design/mod-editor.md` | How an edit becomes a Longshot mod, and the milestone plan. |

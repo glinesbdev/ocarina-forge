@@ -62,7 +62,7 @@ The view uploads the blocks with `CompressedTexture` when the GPU has the matchi
 
 Without the extension, the trailing JPEG or PNG is decoded with `createImageBitmap`, off the main thread. A vkFormat of 0 still goes to three's Basis transcoder under `/basis/`. Meshopt still compresses the geometry and copies the image bytes through.
 
-The glb prefix is `models-44` and decoded images are `bntx-6`, so the first open after this build misses the glb cache. The decoded BNTX files are reused. The first GPU build left castle walls near black and roofs, trees, and some ground flat white, with an empty Problems list. GLTFLoader calls `loader.load` on the KTX2 loader. The stand-in only implemented `parse`, so `load` threw, the loader swallowed the error, and the material kept no map. A one-level KTX that does upload still samples black: three then assigns LinearMipmapLinear from the sampler, and a compressed texture cannot invent the missing mips. `prepareMaterial` also used to turn `generateMipmaps` back on, which WebGL rejects for BC formats. Each albedo now stores the whole chain, the loader implements `load`, and a compressed map is forced to that chain's filter after the sampler write. A size that is not a multiple of 4 stays a JPEG or PNG, because WebGL rejects that level 0. A compressed upload the GPU refuses falls back to that bitmap and shows up in Problems. `?textures=bitmap` (or Settings → GPU textures off) uses the bitmap on purpose, for an A/B against the blocks. Headless Chrome with ANGLE SwiftShader, which exposes S3TC and BPTC, drew a 4-level BC1 quad and its JPEG through GLTFLoader as the same pixel. A one-level file stayed that color on SwiftShader and kept LinearMipmapLinear until the repair pass set Linear. A desktop GL that samples an incomplete compressed texture as black is the case that repair covers. The sample Kokiri walk on this machine, one core, is 16 models, 2 converted, 76.4 ms convert, and 0.4 ms texture the first time. The second run is 2 cache hits and 0 ms. That is server time. There is no display GPU here, so the browser upload is not in that number. Retail Kokiri and Hyrule Castle are not in this checkout. Time them with the warm command in Stream timings: the first run is cold, the second is warm, and Stats shows `conv`, `tex`, `dl`, and `up`.
+The glb prefix is `models-45` and decoded images are `bntx-6`, so the first open after this build misses the glb cache. Mode 6 blocks match the previous encoder. The prefix moved because the converter sources in the cache stamp changed. The decoded BNTX files are reused. The first GPU build left castle walls near black and roofs, trees, and some ground flat white, with an empty Problems list. GLTFLoader calls `loader.load` on the KTX2 loader. The stand-in only implemented `parse`, so `load` threw, the loader swallowed the error, and the material kept no map. A one-level KTX that does upload still samples black: three then assigns LinearMipmapLinear from the sampler, and a compressed texture cannot invent the missing mips. `prepareMaterial` also used to turn `generateMipmaps` back on, which WebGL rejects for BC formats. Each albedo now stores the whole chain, the loader implements `load`, and a compressed map is forced to that chain's filter after the sampler write. A size that is not a multiple of 4 stays a JPEG or PNG, because WebGL rejects that level 0. A compressed upload the GPU refuses falls back to that bitmap and shows up in Problems. `?textures=bitmap` (or Settings → GPU textures off) uses the bitmap on purpose, for an A/B against the blocks. Headless Chrome with ANGLE SwiftShader, which exposes S3TC and BPTC, drew a 4-level BC1 quad and its JPEG through GLTFLoader as the same pixel. A one-level file stayed that color on SwiftShader and kept LinearMipmapLinear until the repair pass set Linear. A desktop GL that samples an incomplete compressed texture as black is the case that repair covers. The sample Kokiri walk on this machine, one core, is 16 models, 2 converted, 76.4 ms convert, and 0.4 ms texture the first time. The second run is 2 cache hits and 0 ms. That is server time. There is no display GPU here, so the browser upload is not in that number. Retail Kokiri and Hyrule Castle are not in this checkout. Time them with the warm command in Stream timings: the first run is cold, the second is warm, and Stats shows `conv`, `tex`, `dl`, and `up`.
 
 ## Converter cores
 
@@ -120,7 +120,7 @@ Opening a scene sends one `POST /api/models/batch` with every actor name. Cache 
 
 `profile` times the Python convert. Browser `dl` and GPU `up` are not in the process. If those dominate **Stats** on a cold open, the Rust port stops.
 
-The default cache is a fresh directory under the temp folder. It does not read `~/.cache/ocarina-forge/models`, so a cold `cache=miss` is expected and is not a changed cache key. The key is still `models-44`. `--home-cache` uses the normal directory instead. The stage timers wrap the functions the converter already calls, so this command does not rebuild a normal editor cache. `zstd` includes the model-file read before the convert clock and is not subtracted from `convert`. Vertex and index time are inside BFRES parse. Deswizzle and block decode are inside the texture clock. `other` is what is left.
+The default cache is a fresh directory under the temp folder. It does not read `~/.cache/ocarina-forge/models`, so a cold `cache=miss` is expected and is not a changed cache key. The key is `models-45`. `--home-cache` uses the normal directory instead. The stage timers wrap the functions the converter already calls, so this command does not rebuild a normal editor cache. `zstd` includes the model-file read before the convert clock and is not subtracted from `convert`. Vertex and index time are inside BFRES parse. Deswizzle and block decode are inside the texture clock. `other` is what is left. The log line `native bc7/decode: rust` means the extension loaded. `python` means this process is on the fallback.
 
 One model:
 
@@ -137,6 +137,61 @@ python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 --limit 12 --j
 ```
 
 On the synthetic Kokiri child Static fixture (11 actor classes, two real meshes) a cold wall was 82.6 ms, of which convert was 80.5 ms and texture 0.4 ms. The five candidate phases together were about 1.1 ms (zstd 0.15, BYML 0.12, BFRES parse 0.53, swizzle 0.31, decode 0). The warm wall was 1.5 ms with both meshes cached. A cProfile of `Npc_Kokiri_F_01` put most of that cold convert in the meshopt helper's first poll (about 55 ms) and in JPEG encode, not in swizzle or ASTC. Decode was 0 because the fixture is not castle ASTC. Do not treat this as the retail split.
+
+## House profile and the native crate
+
+`Land_Kokiri_House_Inside_E_04` on Bradyn's PC, `mod-editor-m1` at `a176bd6`, cold cache. This checkout does not have that model, so these before numbers are his, not a re-run:
+
+| stage | time |
+| --- | --- |
+| cold convert | 233.4 s |
+| encode | 156.1 s |
+| `gpu_image` / mip chain | 134 s |
+| `encode_bc7` | 121.7 s over 86 calls |
+| `_mode6` | 116 s over 568k calls |
+| `_index` tottime | 76.2 s over 8.67M calls |
+| texture clock | 49.9 s (decode 18.0 s, swizzle 5.8 s) |
+| `_choose_material` / `_load_named` | 73.7 s, 70 `_load_named` calls |
+| bfres | 2.7 s |
+| glb | 0.3 s |
+| meshopt | 0.07 s |
+| other | 24.3 s |
+| warm | 1.5 ms |
+
+`_load_named` includes the texture clock. The 70 calls are not 70 decodes. `_decode_bntx_cached` already returns the image when the path is cached, and it does not start the texture clock on that hit. Each call still decompressed the `.bntx.zs` and `_accept` still walked the pixels. `external` is filled after a successful load and was not checked first. A convert now remembers a load by dump, model, name, hints, alpha, cutoff, layer, and the data flags, and remembers the decompressed bytes by path. A second call with the same key does not read the file. A different name in the same file still skips the decompress. That is the `other` bucket. It does not remove the first decode.
+
+The encoder is this mode 6, not bc7enc and not the Intel ISPC texture compressor. Those search partitions and modes. ISPC and AVX2 ports are not a `wasm32-unknown-unknown` build, and they would change the blocks. The profile's time is the Python `_index` loop, 16 weights by 4 channels, 8.67 million calls. The crate is that loop. `cargo build --manifest-path native/Cargo.toml --no-default-features --target wasm32-unknown-unknown --release` compiles it here. PyO3 stays out of that build.
+
+Decode uses `bcdec_rs` for BC7 and `astc-decode` for ASTC LDR. Both are pure Rust. BC1, BC3, BC4, and BC5 are written here so the 565 expansion matches `texture2ddecoder` (bcdec's scale is off by one on some endpoints). BC2 on this `texture2ddecoder` has no entry point and is decoded as BC3, and the crate does the same. BC6 stays on `texture2ddecoder`.
+
+Measured on this machine, release, one thread. Not the house:
+
+| work | Python | Rust |
+| --- | --- | --- |
+| BC7 mode 6, 512² | 2320.3 ms | 16.8 ms |
+| BC7 mode 6, 1024² | | 67.2 ms |
+| BC7 mip chain, 1024² | | 94.7 ms |
+| RGBA deswizzle, 1024², log2 4 | 692.2 ms | 6.9 ms |
+| ASTC 8×5 decode, 1024×1020, one repeated block | 177.5 ms | 5.0 ms |
+| BC7 decode, 512² | 48.7 ms | 1.8 ms |
+| channel reorder, 1024² | 429.4 ms | 3.2 ms |
+
+512² is 16,384 blocks. His 568k `_mode6` calls are about 35 of those images. 2320.3 / 16.8 is 138× on this CPU. Applied to his 121.7 s of `encode_bc7`, that is about 0.9 s for the same blocks. That is a ratio, not a new house convert. A 1024² Python encode was not run. Four times the 512² Python time is about 9.3 s, against 67.2 ms of Rust.
+
+BFRES is 2.7 s, and vertex decode is inside it. That is not ported. Meshopt is 0.07 s and glb is 0.3 s. The next profile is what says whether anything left is still large.
+
+There is no complete before number for a full `KokiriForest_Child` cold open. At `bbfd77c` the walk was killed at 600 s after 89 models, with about 599 s of convert. The command below prints a cold total for each Kokiri child banc, then the castle. Read the Kokiri totals. The first line must say `native bc7/decode: rust`.
+
+```bash
+pip install maturin
+maturin develop --release --manifest-path native/Cargo.toml
+python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 \
+  --model Land_Kokiri_House_Inside_E_04 \
+  --cprofile /tmp/house-inside-e04.prof
+python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0
+```
+
+Without the extension, the same commands run the Python fallback and the house stays near 233 s. The first open after this build misses `models-45` once. Decoded `bntx-6` files are reused.
 
 ## WebGPU trial (shelved)
 

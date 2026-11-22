@@ -1,0 +1,22 @@
+[package]
+name = "ocarina-forge-native"
+version = "0.1.0"
+edition = "2021"
+description = "BC7 mode 6 encoder for Ocarina Forge. Bytes in, bytes out, no Python types."
+license = "MIT"
+publish = false
+
+[lib]
+name = "ocarina_forge_native"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["python"]
+# PyO3 stays behind this feature so `cargo build --no-default-features
+# --target wasm32-unknown-unknown` can compile the encoder alone.
+python = ["dep:pyo3"]
+
+[dependencies]
+bcdec_rs = "0.2"
+astc-decode = "0.3"
+pyo3 = { version = "0.23.5", features = ["extension-module", "abi3-py311"], optional = true }

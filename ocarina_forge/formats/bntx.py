@@ -769,6 +769,18 @@ def _decode(
     fmt: int,
     footprint: tuple[int, int] | None = None,
 ) -> tuple[bytes, str]:
+    from ocarina_forge.extension import module
+
+    native = module()
+    if native is not None:
+        bw, bh = footprint or (0, 0)
+        try:
+            hit = native.decode_linear(codec, width, height, linear, bw, bh)
+        except Exception:
+            hit = None
+        if hit is not None:
+            rgba, note = hit
+            return bytes(rgba), note
     if codec == "rgba8":
         need = width * height * 4
         return bytes(linear[:need]).ljust(need, b"\0"), ""
@@ -934,6 +946,14 @@ def _bgra_to_rgba(bgra: bytes, width: int, height: int) -> bytes:
 
 
 def _channels(rgba: bytes, width: int, height: int, channels: bytes) -> bytes:
+    from ocarina_forge.extension import module
+
+    native = module()
+    if native is not None:
+        try:
+            return bytes(native.apply_channels(rgba, width, height, channels or b""))
+        except Exception:
+            pass
     if len(channels) < 4 or channels == bytes((2, 3, 4, 5)):
         return rgba
     out = bytearray(len(rgba))

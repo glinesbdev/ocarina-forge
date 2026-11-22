@@ -234,9 +234,9 @@ The Rust port below is part of this direction. It is not one of the ten, and it 
 
 ### R1. Profile a cold load before any port
 
-No Rust yet. `python -m ocarina_forge profile --dump <dump> --model <gyaml> --cprofile out.prof` times one actor, cold then warm, and writes a cProfile of the cold convert. The stage lines split file decompress, BFRES parse, vertex decode, index decode, meshopt or the Python lod fallback, JPEG/PNG/GPU encode, glTF pack, deswizzle, and block decode. A scene walk takes `--limit N` and `--jobs N`. The default is one model at a time and every model, which is how Kokiri child was killed at 600 seconds. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. If they dominate a cold open, R2 does not start.
+`python -m ocarina_forge profile --dump <dump> --model <gyaml> --cprofile out.prof` times one actor, cold then warm, and writes a cProfile of the cold convert. The stage lines split file decompress, BFRES parse, vertex decode, index decode, meshopt or the Python lod fallback, JPEG/PNG/GPU encode, glTF pack, deswizzle, and block decode. A scene walk takes `--limit N` and `--jobs N`. The default is one model at a time and every model. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. The house profile that picked R2 is in [performance.md](../performance.md).
 
-The command uses a private cache directory unless `--home-cache` is set. A cold `cache=miss` is that directory. The glb key is still `models-44`. Profile does not change it. [performance.md](../performance.md) has the command and the sample fixture. Retail numbers are measured on Bradyn's machine, not in this note.
+The command uses a private cache directory unless `--home-cache` is set. A cold `cache=miss` is that directory. The glb key is `models-45`. Profile does not change it by itself. [performance.md](../performance.md) has the command and the house numbers. Retail numbers are measured on Bradyn's machine, not in this note.
 
 The candidates, in the order a profile is allowed to reorder them:
 
@@ -249,9 +249,9 @@ A path is a candidate only if its share of the cold wall time is large on at lea
 
 ### R2. Port the top hot spot, still called from Python
 
-One crate, called from Python with PyO3 and maturin. The hot functions take bytes and return bytes. No Python types inside them. That is what lets step two compile the same crate to WebAssembly later. The Python server stays. The frontend stays JavaScript and Three.js.
+One crate, `native/`, called from Python with PyO3 and maturin. The hot functions take bytes and return bytes. No Python types inside them. That is what lets step two compile the same crate to WebAssembly later. The Python server stays. The frontend stays JavaScript and Three.js. If `ocarina_forge_native` does not import, the Python functions run.
 
-Ship the winner from R1 only. Before and after wall times for the same Kokiri cold load and the same castle cold load go in [performance.md](../performance.md). Parity tests call the Python function and the crate on the same bytes and require the same output: deswizzled blocks, decoded images, mesh vertices and indices, or parsed BYML, whichever path moved. For the swizzle path, the two castle albedos above are the extra fixtures when the dump is present, and a round trip through `swizzle` must match. Existing unit fixtures cover the path when the dump is not. If the bytes match, the glb cache prefix stays. Bump it only when the output changes.
+The house profile named BC7 mode 6 first (121.7 s) and ASTC/BC decode plus deswizzle next (about 24 s). Both are in this crate. A full bc7enc or Intel ISPC search was the other encoder. Those kernels are not a wasm32 build, and they would change the blocks. The crate ports this mode 6 instead, so the blocks match. Decode uses `bcdec_rs` for BC7 and `astc-decode` for ASTC, both pure Rust. BC1, BC3, BC4, and BC5 are our own so the 565 expansion matches `texture2ddecoder`. Parity tests compare bytes. The BC7 test also keeps a 40 dB PSNR bar against the Python decode, which is the bar if a later encoder is allowed to differ. The glb prefix is `models-45` because `gpu.py`, `swizzle.py`, `bntx.py`, and `models.py` are in the cache stamp. The mode 6 blocks themselves match the previous encoder. Before and after numbers are in [performance.md](../performance.md).
 
 Where it sits next to the other milestones:
 
@@ -261,7 +261,7 @@ Where it sits next to the other milestones:
 
 ### R3. Port the second hot spot, or stop
 
-Same crate, same parity rule, same two scenes. If R1 named only one path with a large share, this step is the note that says the second candidate was not worth it. Do not port the rest of the list for completeness.
+Decode and deswizzle shipped with R2, in the same crate. What is left on the house profile is the 24.3 s `other` bucket and BFRES at 2.7 s. `other` is the part of `_load_named` outside the texture clock: the same `.bntx.zs` was decompressed again, and `_accept` walked the pixels again. Decode itself was already cached. A convert now remembers the load and the decompressed bytes. BFRES vertex decode is inside that 2.7 s and is not ported. The next profile says whether anything still large is left. Do not port the rest of the list for completeness.
 
 ### Step two, kept in mind and not scheduled
 

@@ -12,5 +12,6 @@ fixtures/dump/
 frontend/node_modules/
 frontend/dist/
 build/
+native/target/
 *.zip
 .DS_Store
