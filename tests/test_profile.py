@@ -19,13 +19,14 @@ def test_one_model_profile_writes_cprofile_and_uses_a_private_cache(tmp_path):
     )
     assert out.is_file() and out.stat().st_size > 0
     assert report["cachePrivate"] is True
-    assert report["cacheKey"] == "models-48"
+    assert report["cacheKey"] == "models-49"
     assert report["cacheKept"] is False
     assert not Path(report["cache"]).exists()
     assert report["bc7"] in {"rust", "python"}
     assert report["pixels"] in {"rust", "python"}
     assert report["mesh"] in {"rust", "python"}
     assert report["normals"] in {"rust", "python"}
+    assert report["skin"] in {"rust", "python"}
     assert "ocarina-forge-profile-" in report["cache"]
     cold = report["models"]["cold"][0]
     warm = report["models"]["warm"][0]
@@ -89,10 +90,10 @@ def test_markers_stay_boxes_without_a_search(tmp_path):
     dump = Dump(build_fixture(tmp_path / "dump"))
     air = models.describe_actor(dump, "FldObj_AirWall_A")
     loc = models.describe_actor(dump, "EftLoc_Smoke")
-    assert air["status"] == "box" and air["reason"].startswith("Marker")
-    assert loc["status"] == "box" and "Tried" not in loc["reason"]
+    assert air["status"] == "box" and air["reason"] == "No mesh."
+    assert loc["status"] == "box" and "Tried" not in loc["reason"] and "No model" not in loc["reason"]
     missing = models.describe_actor(dump, "Npc_Kokiri_M_01")
-    assert "No model" in missing["reason"]
+    assert missing["reason"] == "No mesh."
 
 
 def test_cprofile_without_one_model_is_rejected(tmp_path):

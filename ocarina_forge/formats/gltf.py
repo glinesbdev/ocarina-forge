@@ -101,7 +101,21 @@ def _limit_rgba_py(width: int, height: int, rgba: bytes, limit: int = 1024) -> t
 def encode_albedo(width: int, height: int, rgba: bytes, alpha: str = "opaque") -> tuple[bytes, str]:
     """Cap the long edge at 1024. Opaque images become JPEG; cutouts stay PNG."""
     width, height, rgba = limit_rgba(width, height, rgba, 1024)
-    opaque = alpha == "opaque" and not any(rgba[index] < 250 for index in range(3, len(rgba), 4))
+    solid = True
+    try:
+        from ocarina_forge.extension import module
+
+        native = module()
+    except Exception:
+        native = None
+    if native is not None and hasattr(native, "rgba_opaque"):
+        try:
+            solid = bool(native.rgba_opaque(rgba))
+        except Exception:
+            solid = not any(rgba[index] < 250 for index in range(3, len(rgba), 4))
+    else:
+        solid = not any(rgba[index] < 250 for index in range(3, len(rgba), 4))
+    opaque = alpha == "opaque" and solid
     if opaque:
         jpeg = _jpeg(width, height, rgba)
         if jpeg:
@@ -282,7 +296,9 @@ def face_normals(positions: list[tuple[float, float, float]], indices: list[int]
 
 
 def _pack_f32(rows, width: int) -> bytes:
-    """Little-endian f32. The crate walks the tuples. ``array`` is the fallback."""
+    """Little-endian f32. Packed f64 buffers skip the tuple walk."""
+    from ocarina_forge.formats.bfres import Vecs
+
     native = None
     try:
         from ocarina_forge.extension import module
@@ -290,6 +306,13 @@ def _pack_f32(rows, width: int) -> bytes:
         native = module()
     except Exception:
         native = None
+    if isinstance(rows, Vecs) and rows.width == width and native is not None and hasattr(native, "pack_f64"):
+        try:
+            packed = native.pack_f64(rows.bytes())
+        except Exception:
+            packed = b""
+        if len(packed) == len(rows) * width * 4:
+            return bytes(packed)
     if native is not None and width:
         try:
             packed = native.pack_f32(rows, int(width))
@@ -308,6 +331,8 @@ def _pack_f32(rows, width: int) -> bytes:
 
 def _normal_bytes(positions, indices) -> bytes:
     """Packed f32 normals. The crate skips the Python tuple list."""
+    from ocarina_forge.formats.bfres import Vecs, _u32_bytes
+
     native = None
     try:
         from ocarina_forge.extension import module
@@ -315,6 +340,15 @@ def _normal_bytes(positions, indices) -> bytes:
         native = module()
     except Exception:
         native = None
+    if isinstance(positions, Vecs) and positions.width == 3 and native is not None and hasattr(native, "face_normal_packed"):
+        raw_index = _u32_bytes(indices)
+        if raw_index is not None:
+            try:
+                packed = native.face_normal_packed(positions.bytes(), raw_index)
+            except Exception:
+                packed = b""
+            if len(packed) == len(positions) * 12:
+                return bytes(packed)
     if native is not None and hasattr(native, "face_normal_bytes") and positions:
         try:
             packed = native.face_normal_bytes(positions, indices)
@@ -381,8 +415,18 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if len(indices) % 3:
             indices = indices[: len(indices) - (len(indices) % 3)]
         pos_bytes = _pack_f32(positions, 3)
-        min_p = [min(p[axis] for p in positions) for axis in range(3)]
-        max_p = [max(p[axis] for p in positions) for axis in range(3)]
+        from ocarina_forge.formats.bfres import Vecs
+
+        if isinstance(positions, Vecs):
+            found = positions.bounds()
+            if found and len(found[0]) >= 3:
+                min_p, max_p = list(found[0][:3]), list(found[1][:3])
+            else:
+                min_p = [0.0, 0.0, 0.0]
+                max_p = [0.0, 0.0, 0.0]
+        else:
+            min_p = [min(p[axis] for p in positions) for axis in range(3)]
+            max_p = [max(p[axis] for p in positions) for axis in range(3)]
         use_short = max(indices) < 65535
         idx_bytes = _pack_indices(indices, use_short)
         nrm_bytes = _normal_bytes(positions, indices) if not prim.normals else _pack_f32(prim.normals, 3)
@@ -399,8 +443,12 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if prim.marks and len(prim.marks) == len(positions):
             attributes["TEXCOORD_3"] = accessor(view(_pack_f32(prim.marks, 2), 34962), len(prim.marks), "VEC2", 5126)
         if prim.colors and len(prim.colors) == len(positions):
-            wide = any(len(item) >= 4 for item in prim.colors)
-            if wide:
+            from ocarina_forge.formats.bfres import Vecs
+
+            wide = prim.colors.width >= 4 if isinstance(prim.colors, Vecs) else any(len(item) >= 4 for item in prim.colors)
+            if wide and isinstance(prim.colors, Vecs) and prim.colors.width == 4:
+                attributes["COLOR_0"] = accessor(view(_pack_f32(prim.colors, 4), 34962), len(prim.colors), "VEC4", 5126)
+            elif wide:
                 padded = [item if len(item) > 3 else (item[0], item[1], item[2], 1.0) for item in prim.colors]
                 attributes["COLOR_0"] = accessor(view(_pack_f32(padded, 4), 34962), len(prim.colors), "VEC4", 5126)
             else:

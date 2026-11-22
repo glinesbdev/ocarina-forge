@@ -36,6 +36,136 @@ class FresError(ValueError):
     pass
 
 
+class Vecs:
+    """Interleaved little-endian f64. ``len`` is the vector count.
+
+    Bind pose, UV seams, and bounds run on these bytes. Iterating still
+    yields tuples so a test can index a vertex, but the convert path does not.
+    """
+
+    __slots__ = ("width", "data")
+
+    def __init__(self, width: int, data: array.array | None = None):
+        self.width = int(width)
+        self.data = data if data is not None else array.array("d")
+
+    def __len__(self) -> int:
+        if self.width <= 0:
+            return 0
+        return len(self.data) // self.width
+
+    def __bool__(self) -> bool:
+        return len(self) > 0
+
+    def __iter__(self):
+        width = self.width
+        raw = self.data
+        for index in range(0, len(raw) - width + 1, width):
+            yield tuple(raw[index : index + width])
+
+    def __getitem__(self, index):
+        count = len(self)
+        if isinstance(index, slice):
+            return [self[item] for item in range(*index.indices(count))]
+        if index < 0:
+            index += count
+        if index < 0 or index >= count:
+            raise IndexError(index)
+        start = index * self.width
+        return tuple(self.data[start : start + self.width])
+
+    def __eq__(self, other):
+        if isinstance(other, Vecs):
+            return self.width == other.width and self.data == other.data
+        if isinstance(other, (list, tuple)):
+            return len(other) == len(self) and all(tuple(mine) == tuple(theirs) for mine, theirs in zip(self, other, strict=False))
+        return NotImplemented
+
+    def bytes(self) -> bytes:
+        raw = self.data
+        if sys.byteorder != "little":
+            raw = array.array("d", raw)
+            raw.byteswap()
+        return raw.tobytes()
+
+    @classmethod
+    def from_bytes(cls, width: int, raw: bytes) -> "Vecs":
+        data = array.array("d")
+        data.frombytes(bytes(raw[: len(raw) - (len(raw) % 8)]))
+        if sys.byteorder != "little":
+            data.byteswap()
+        return cls(width, data)
+
+    def bounds(self) -> tuple[list[float], list[float]] | None:
+        native = _mesh_native()
+        if native is not None and hasattr(native, "vec_bounds") and self:
+            try:
+                found = native.vec_bounds(self.bytes(), self.width)
+            except Exception:
+                found = None
+            if found:
+                low, high = found
+                return list(_le_array("d", low)), list(_le_array("d", high))
+        if not self:
+            return None
+        low = [float("inf")] * self.width
+        high = [float("-inf")] * self.width
+        for point in self:
+            for axis, value in enumerate(point):
+                if value < low[axis]:
+                    low[axis] = value
+                if value > high[axis]:
+                    high[axis] = value
+        return low, high
+
+
+def _as_f64(rows, width: int) -> bytes | None:
+    if isinstance(rows, Vecs):
+        if rows.width != width:
+            return None
+        return rows.bytes()
+    if not rows:
+        return b""
+    data = array.array("d")
+    try:
+        for point in rows:
+            got = 0
+            for value in point:
+                if got >= width:
+                    break
+                data.append(float(value))
+                got += 1
+            if got != width:
+                return None
+    except (TypeError, ValueError):
+        return None
+    if sys.byteorder != "little":
+        data.byteswap()
+    return data.tobytes()
+
+
+def _i32_bytes(values) -> bytes:
+    data = array.array("i", (int(value) for value in values))
+    if sys.byteorder != "little":
+        data.byteswap()
+    return data.tobytes()
+
+
+def _u32_bytes(values) -> bytes | None:
+    data = array.array("I")
+    try:
+        for value in values:
+            number = int(value)
+            if number < 0 or number > 0xFFFFFFFF:
+                return None
+            data.append(number)
+    except (TypeError, ValueError):
+        return None
+    if sys.byteorder != "little":
+        data.byteswap()
+    return data.tobytes()
+
+
 # Big-endian ushort ids. See BfresLibrary VertexAttrib.SwitchAttribFormat.
 _F32 = 0x0516
 _F32_2 = 0x0517
@@ -1854,22 +1984,39 @@ def _bulk_rows(fvtx: dict, attribute: dict, count: int):
         return []
     layout = _attr_layout(fvtx, attribute)
     native = _mesh_native()
-    if layout is None or native is None:
+    if layout is None or native is None or not hasattr(native, "decode_attribute"):
         return None
     blob, stride, offset, fmt, comps = layout
     try:
-        rows = native.decode_rows(blob, int(count), stride, offset, int(fmt))
+        raw = native.decode_attribute(blob, int(count), stride, offset, int(fmt))
     except Exception:
         return None
-    if rows is None or len(rows) != count:
+    if not raw or len(raw) != count * comps * 8:
         return None
-    return rows
+    return Vecs.from_bytes(comps, raw)
+
+
+def _narrow_vecs(rows: Vecs, take: int) -> Vecs:
+    data = array.array("d")
+    width = rows.width
+    raw = rows.data
+    for index in range(0, len(raw), width):
+        if take == 2 and width < 2:
+            data.append(raw[index])
+            data.append(0.0)
+        else:
+            data.extend(raw[index : index + take])
+    return Vecs(take, data)
 
 
 def _bulk_taken(fvtx: dict, attribute: dict, count: int, take: int):
     rows = _bulk_rows(fvtx, attribute, count)
     if rows is None:
         return None
+    if isinstance(rows, Vecs):
+        if not rows or rows.width == take:
+            return rows
+        return _narrow_vecs(rows, take)
     if not rows or len(rows[0]) == take:
         return rows
     out = []
@@ -2037,6 +2184,11 @@ def _triangles(indices: list[int], primitive: int) -> list[int]:
 def _point_bounds(positions) -> dict | None:
     if not positions:
         return None
+    if isinstance(positions, Vecs):
+        found = positions.bounds()
+        if not found:
+            return None
+        return {"min": list(found[0][:3]), "max": list(found[1][:3])}
     mins = [min(point[axis] for point in positions) for axis in range(3)]
     maxs = [max(point[axis] for point in positions) for axis in range(3)]
     return {"min": mins, "max": maxs}
@@ -2161,6 +2313,9 @@ def _bind_pose(positions, bones, palette, bone_index: int, slots: list[int] | No
     if not bones:
         return positions
     worlds = _worlds(bones)
+    baked = _bind_pose_native(positions, worlds, bones, palette, bone_index, slots)
+    if baked is not None:
+        return baked
 
     def matrix_for(slot: int | None):
         index = bone_index
@@ -2277,6 +2432,43 @@ def _mul(a, b) -> list[list[float]]:
         for col in range(4):
             out[row][col] = sum(a[row][k] * b[k][col] for k in range(4))
     return out
+
+
+def _bind_pose_native(positions, worlds, bones, palette, bone_index: int, slots):
+    """One crate call. None means the Python vertex loop still runs."""
+    native = _mesh_native()
+    if native is None or not hasattr(native, "transform_positions") or not positions:
+        return None
+    count = len(positions)
+    if slots is not None and len(slots) != count:
+        return None
+    packed = _as_f64(positions, 3)
+    if not packed:
+        return None
+    flat = array.array("d")
+    for matrix in worlds:
+        if not matrix:
+            flat.extend((1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
+            continue
+        for row in matrix:
+            flat.extend(float(value) for value in row)
+    if sys.byteorder != "little":
+        flat.byteswap()
+    rigid = [int(bone[5]) if len(bone) > 5 else 0 for bone in bones]
+    try:
+        raw = native.transform_positions(
+            packed,
+            flat.tobytes(),
+            int(bone_index),
+            b"" if slots is None else _i32_bytes(slots),
+            _i32_bytes(palette or []),
+            _i32_bytes(rigid),
+        )
+    except Exception:
+        return None
+    if len(raw) != count * 3 * 8:
+        return None
+    return Vecs.from_bytes(3, raw)
 
 
 def _apply(matrix, point) -> tuple[float, float, float]:
@@ -2681,6 +2873,9 @@ def _close_uv_seams(positions, uvs, indices, extras=None):
     """
     if not uvs or len(uvs) != len(positions) or len(indices) < 3:
         return positions, uvs, indices
+    closed = _close_uv_seams_native(positions, uvs, indices, extras)
+    if closed is not None:
+        return closed
     pos = list(positions)
     uv = [(float(u), float(v)) for u, v in uvs]
     idx = list(indices)
@@ -2729,6 +2924,45 @@ def _close_uv_seams(positions, uvs, indices, extras=None):
     return pos, uv, idx
 
 
+def _close_uv_seams_native(positions, uvs, indices, extras):
+    native = _mesh_native()
+    if native is None or not hasattr(native, "close_uv_seams"):
+        return None
+    pos_bytes = _as_f64(positions, 3)
+    uv_bytes = _as_f64(uvs, 2)
+    idx_bytes = _u32_bytes(indices)
+    if not pos_bytes or uv_bytes is None or idx_bytes is None:
+        return None
+    blobs = []
+    widths = []
+    for item in extras or []:
+        width = item.width if isinstance(item, Vecs) else (len(item[0]) if item else 0)
+        blob = _as_f64(item, width) if width else b""
+        if blob is None:
+            return None
+        blobs.append(blob)
+        widths.append(width)
+    try:
+        found = native.close_uv_seams(pos_bytes, uv_bytes, idx_bytes, blobs, widths)
+    except Exception:
+        return None
+    if not found:
+        return None
+    pos_raw, uv_raw, idx_raw, carried_raw = found
+    new_pos = Vecs.from_bytes(3, pos_raw)
+    new_uv = Vecs.from_bytes(2, uv_raw)
+    new_idx = list(_le_array("I", idx_raw))
+    if extras is not None:
+        rebuilt = []
+        for item, raw, width in zip(extras, carried_raw, widths, strict=False):
+            vec = Vecs.from_bytes(width, raw)
+            rebuilt.append(vec if isinstance(item, Vecs) else list(vec))
+        extras[:] = rebuilt
+    if isinstance(positions, Vecs):
+        return new_pos, new_uv, new_idx
+    return list(new_pos), list(new_uv), new_idx
+
+
 def _extra_uvs(fvtx: dict, count: int) -> dict[str, list[tuple[float, float]]]:
     found = {}
     for attribute in fvtx.get("attributes") or []:
@@ -2755,6 +2989,11 @@ def _colors(fvtx: dict, count: int) -> list[tuple[float, float, float, float]] |
     if attribute is None or count <= 0:
         return None
     rows = _bulk_rows(fvtx, attribute, count)
+    if isinstance(rows, Vecs):
+        if rows.width == 4:
+            return rows
+        if rows.width not in (1, 3):
+            return None
     if rows is None:
         found = []
         for index in range(count):
@@ -2803,12 +3042,12 @@ def _part_from(
         colors = None
     carried = []
     if colors:
-        carried.append(list(colors))
+        carried.append(colors if isinstance(colors, Vecs) else list(colors))
     extra_names = []
     for channel_name, channel in (uv_extra or {}).items():
         if len(channel) == len(positions):
             extra_names.append(channel_name)
-            carried.append(list(channel))
+            carried.append(channel if isinstance(channel, Vecs) else list(channel))
     if uvs and indices:
         positions, uvs, indices = _close_uv_seams(positions, uvs, indices, carried or None)
     cursor = 0
@@ -2931,6 +3170,17 @@ def _alpha_from_render_strings(states: list[str]) -> tuple[str, float, bool, str
 
 
 def _shape_key(part: Part) -> tuple:
+    native = _mesh_native()
+    if native is not None and hasattr(native, "shape_key") and part.positions:
+        packed = _as_f64(part.positions, 3)
+        indices = _u32_bytes(part.indices)
+        if packed and indices is not None:
+            try:
+                key = native.shape_key(packed, indices)
+            except Exception:
+                key = b""
+            if key:
+                return key
     points = tuple((round(x, 4), round(y, 4), round(z, 4)) for x, y, z in part.positions)
     triangles = []
     for index in range(0, len(part.indices) - 2, 3):

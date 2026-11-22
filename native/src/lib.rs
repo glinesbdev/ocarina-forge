@@ -4,13 +4,15 @@ mod decode;
 mod image;
 mod mesh;
 mod swizzle;
+mod verts;
 
 pub use bc7::{bc7_mip_chain, encode_bc7};
 pub use bfres::{attribute_bounds, attribute_values, decode_attribute, decode_triangles, pack_f32};
 pub use mesh::{face_normal_bytes, face_normals};
 pub use decode::{apply_channels, decode_linear, decode_swizzle, noise};
-pub use image::{bc1_mip_chain, blit_channel, downsample, encode_bc1, has_near_magenta, limit_rgba};
+pub use image::{bc1_mip_chain, blit_channel, downsample, encode_bc1, has_near_magenta, limit_rgba, rgba_opaque};
 pub use swizzle::{deswizzle, fill_partial_gob, swizzle};
+pub use verts::{close_uv_seams, pack_f32_from_f64, shape_key, transform_positions, vec_bounds};
 
 #[cfg(feature = "python")]
 mod py {
@@ -18,8 +20,10 @@ mod py {
         apply_channels, attribute_bounds, attribute_values, bc1_mip_chain, bc7_mip_chain, blit_channel, decode_attribute,
         decode_linear,
         decode_swizzle, decode_triangles, deswizzle, downsample, encode_bc1, encode_bc7, fill_partial_gob, has_near_magenta,
-        face_normal_bytes, face_normals, limit_rgba, noise, swizzle,
+        face_normal_bytes, face_normals, limit_rgba, noise, pack_f32_from_f64, rgba_opaque, shape_key, swizzle,
+        transform_positions, vec_bounds,
     };
+    use super::close_uv_seams;
     use pyo3::prelude::*;
     use pyo3::types::{PyByteArray, PyByteArrayMethods, PyBytes, PyList, PyTuple};
 
@@ -388,6 +392,172 @@ mod py {
         Ok(list.unbind().into_any())
     }
 
+    fn f64_buf(bytes: &[u8]) -> Option<Vec<f64>> {
+        if bytes.len() % 8 != 0 {
+            return None;
+        }
+        Some(bytes.chunks_exact(8).map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap())).collect())
+    }
+
+    fn i32_buf(bytes: &[u8]) -> Option<Vec<i32>> {
+        if bytes.len() % 4 != 0 {
+            return None;
+        }
+        Some(bytes.chunks_exact(4).map(|chunk| i32::from_le_bytes(chunk.try_into().unwrap())).collect())
+    }
+
+    fn u32_buf(bytes: &[u8]) -> Option<Vec<u32>> {
+        if bytes.len() % 4 != 0 {
+            return None;
+        }
+        Some(bytes.chunks_exact(4).map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap())).collect())
+    }
+
+    fn f64_bytes(values: &[f64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(values.len() * 8);
+        for value in values {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        out
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "transform_positions")]
+    fn transform_positions_py(
+        py: Python<'_>,
+        positions: &[u8],
+        worlds: &[u8],
+        bone_index: i32,
+        slots: &[u8],
+        palette: &[u8],
+        rigid: &[u8],
+    ) -> PyResult<Py<PyBytes>> {
+        let Some(xyz) = f64_buf(positions) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let Some(matrices) = f64_buf(worlds) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let Some(slot_idx) = i32_buf(slots) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let Some(palette_idx) = i32_buf(palette) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let Some(rigid_idx) = i32_buf(rigid) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let out = py.allow_threads(move || transform_positions(&xyz, &matrices, bone_index, &slot_idx, &palette_idx, &rigid_idx));
+        Ok(PyBytes::new(py, &f64_bytes(&out)).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "vec_bounds")]
+    fn vec_bounds_py(py: Python<'_>, values: &[u8], width: usize) -> PyResult<Py<PyAny>> {
+        let Some(data) = f64_buf(values) else {
+            return Ok(py.None());
+        };
+        let found = py.allow_threads(move || vec_bounds(&data, width));
+        let Some((low, high)) = found else {
+            return Ok(py.None());
+        };
+        Ok(PyTuple::new(py, [PyBytes::new(py, &f64_bytes(&low)), PyBytes::new(py, &f64_bytes(&high))])?.into_any().unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "pack_f64")]
+    fn pack_f64_py(py: Python<'_>, values: &[u8]) -> PyResult<Py<PyBytes>> {
+        let Some(data) = f64_buf(values) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let out = py.allow_threads(move || pack_f32_from_f64(&data));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "shape_key")]
+    fn shape_key_py(py: Python<'_>, positions: &[u8], indices: &[u8]) -> PyResult<Py<PyBytes>> {
+        let Some(xyz) = f64_buf(positions) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let Some(index) = u32_buf(indices) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let out = py.allow_threads(move || shape_key(&xyz, &index));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "face_normal_packed")]
+    fn face_normal_packed_py(py: Python<'_>, positions: &[u8], indices: &[u8]) -> PyResult<Py<PyBytes>> {
+        let Some(xyz) = f64_buf(positions) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let Some(index) = u32_buf(indices) else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let out = py.allow_threads(move || face_normal_bytes(&xyz, &index));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "close_uv_seams")]
+    fn close_uv_seams_py(
+        py: Python<'_>,
+        positions: &[u8],
+        uvs: &[u8],
+        indices: &[u8],
+        extras: Vec<Vec<u8>>,
+        widths: Vec<usize>,
+    ) -> PyResult<Py<PyAny>> {
+        let Some(xyz) = f64_buf(positions) else {
+            return Ok(py.None());
+        };
+        let Some(uv) = f64_buf(uvs) else {
+            return Ok(py.None());
+        };
+        let Some(index) = u32_buf(indices) else {
+            return Ok(py.None());
+        };
+        let mut extra_f64 = Vec::new();
+        for blob in &extras {
+            let Some(data) = f64_buf(blob) else {
+                return Ok(py.None());
+            };
+            extra_f64.push(data);
+        }
+        let found = py.allow_threads(move || close_uv_seams(&xyz, &uv, &index, &extra_f64, &widths));
+        let Some((pos, uv_out, idx, carried)) = found else {
+            return Ok(py.None());
+        };
+        let extra_list = PyList::empty(py);
+        for item in carried {
+            extra_list.append(PyBytes::new(py, &f64_bytes(&item)))?;
+        }
+        let mut raw_idx = Vec::with_capacity(idx.len() * 4);
+        for value in idx {
+            raw_idx.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(PyTuple::new(
+            py,
+            [
+                PyBytes::new(py, &f64_bytes(&pos)).into_any(),
+                PyBytes::new(py, &f64_bytes(&uv_out)).into_any(),
+                PyBytes::new(py, &raw_idx).into_any(),
+                extra_list.into_any(),
+            ],
+        )?
+        .into_any()
+        .unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "rgba_opaque")]
+    fn rgba_opaque_py(py: Python<'_>, rgba: &[u8]) -> PyResult<bool> {
+        let owned = rgba.to_vec();
+        Ok(py.allow_threads(move || rgba_opaque(&owned)))
+    }
+
     #[pyfunction]
     #[pyo3(name = "apply_channels")]
     fn apply_channels_py(
@@ -425,6 +595,13 @@ mod py {
         module.add_function(wrap_pyfunction!(pack_f32_py, module)?)?;
         module.add_function(wrap_pyfunction!(face_normals_py, module)?)?;
         module.add_function(wrap_pyfunction!(face_normal_bytes_py, module)?)?;
+        module.add_function(wrap_pyfunction!(transform_positions_py, module)?)?;
+        module.add_function(wrap_pyfunction!(vec_bounds_py, module)?)?;
+        module.add_function(wrap_pyfunction!(pack_f64_py, module)?)?;
+        module.add_function(wrap_pyfunction!(shape_key_py, module)?)?;
+        module.add_function(wrap_pyfunction!(face_normal_packed_py, module)?)?;
+        module.add_function(wrap_pyfunction!(close_uv_seams_py, module)?)?;
+        module.add_function(wrap_pyfunction!(rgba_opaque_py, module)?)?;
         Ok(())
     }
 }

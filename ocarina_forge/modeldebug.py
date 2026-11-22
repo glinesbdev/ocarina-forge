@@ -46,7 +46,7 @@ def load_bytes(dump, target: str) -> tuple[str, bytes]:
         return relative, _fres_bytes(raw, None, relative)
     from ocarina_forge.models import _actor_plan, _realize
 
-    plan, tried = _actor_plan(dump, target)
+    plan, tried, _referenced = _actor_plan(dump, target)
     errors: list[str] = []
     found = list(_realize(dump, plan, errors))
     if not found:
@@ -88,7 +88,7 @@ def debug_actor(dump, target: str) -> dict:
     if not Path(target).expanduser().is_file():
         from ocarina_forge.models import _actor_plan, _realize
 
-        plan, _tried = _actor_plan(dump, target)
+        plan, _tried, _referenced = _actor_plan(dump, target)
         errors: list[str] = []
         for label, extra in _realize(dump, plan, errors):
             if label == source:
@@ -168,7 +168,7 @@ def model_file(dump, gyaml: str, cache: dict[str, str]) -> str:
     from ocarina_forge.models import _actor_plan
 
     try:
-        plan, tried = _actor_plan(dump, gyaml)
+        plan, tried, _referenced = _actor_plan(dump, gyaml)
     except BancError as exc:
         cache[gyaml] = f"(unread: {exc.message})"
         return cache[gyaml]

@@ -400,6 +400,44 @@ def test_face_normals_match_python_and_skip_a_bad_index():
     assert face_normals(flat, [0, 1, 2]) == [(0.0, 1.0, 0.0)] * 3
 
 
+def test_packed_bind_pose_seams_and_bounds_match_python():
+    from ocarina_forge.formats.bfres import Vecs, _bind_pose, _close_uv_seams, _euler_quat
+
+    native = extension.module()
+    if native is None or not hasattr(native, "transform_positions"):
+        pytest.skip("native extension is not built")
+    quat = _euler_quat(0.0, math.pi / 2, 0.0)
+    bones = [
+        (-1, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0, 0),
+        (0, (0.0, 0.0, 0.0), quat, (1.0, 1.0, 1.0), 0x1000, 0),
+        (0, (4.0, 0.0, 0.0), (0.0, 0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0, -1),
+    ]
+    points = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+    rust = _bind_pose(points, bones, [1, 2], 0, [0, 1])
+    python = _without_native(lambda: _bind_pose(points, bones, [1, 2], 0, [0, 1]))
+    assert isinstance(rust, Vecs)
+    for got, want in zip(rust, python, strict=True):
+        assert got == pytest.approx(want)
+    positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)]
+    uvs = [(0.02, 0.2), (0.98, 0.2), (0.04, 0.8)]
+    colors = [[(1.0, 0.0, 0.0, 1.0), (0.0, 1.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0)]]
+    rust_seam = _close_uv_seams(positions, uvs, [0, 1, 2], colors)
+    colors_py = [[(1.0, 0.0, 0.0, 1.0), (0.0, 1.0, 0.0, 1.0), (0.0, 0.0, 1.0, 1.0)]]
+    python_seam = _without_native(lambda: _close_uv_seams(positions, uvs, [0, 1, 2], colors_py))
+    assert rust_seam[2] == python_seam[2]
+    assert len(rust_seam[0]) == len(python_seam[0])
+    for got, want in zip(rust_seam[0], python_seam[0], strict=True):
+        assert got == pytest.approx(want)
+    for got, want in zip(rust_seam[1], python_seam[1], strict=True):
+        assert got == pytest.approx(tuple(want))
+    assert colors[0][-1] == pytest.approx(colors_py[0][-1])
+    packed = Vecs.from_bytes(3, Vecs(3, __import__("array").array("d", [1.0, -2.0, 3.5, 4.0, 0.0, -1.0])).bytes())
+    assert packed.bounds()[0] == pytest.approx([1.0, -2.0, -1.0])
+    assert packed.bounds()[1] == pytest.approx([4.0, 0.0, 3.5])
+    assert native.rgba_opaque(bytes([1, 2, 3, 255, 4, 5, 6, 250])) is True
+    assert native.rgba_opaque(bytes([1, 2, 3, 249])) is False
+
+
 def test_glb_float_pack_matches_struct():
     import struct
 

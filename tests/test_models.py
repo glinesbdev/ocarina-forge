@@ -622,7 +622,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-48", "489a4f711f591a0457a35856993d0c9733e8da1a85f5910ac668e3ded9c9338c")
+    pinned = ("models-49", "477ecb35ddecb06e57076780d1af2b9b5e05ef3446925751b93fb2b706febf53")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -660,8 +660,8 @@ def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
 
     missing = describe_actor(dump, "Npc_Kokiri_M_01")
     assert missing["status"] == "box"
-    assert "No model" in missing["reason"]
-    assert "Model/Npc_Kokiri_M_01.Npc_Kokiri_M_01.bfres.zs" in missing["reason"]
+    assert missing["reason"] == "No mesh."
+    assert "No model" not in missing["reason"]
 
     assert describe_actor(dump, "../etc/passwd")["status"] == "box"
 
@@ -671,6 +671,25 @@ def test_fixture_models_cache_outside_the_repo(tmp_path, monkeypatch):
     assert terrain["textures"] >= 1
     assert describe_terrain(dump, "Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs")["status"] == "none"
     assert os.environ["OCARINA_FORGE_CACHE"] == str(cache)
+
+
+def test_a_referenced_model_that_is_missing_says_no_model(tmp_path):
+    """A pack that names a bfres logs No model. A pack that names none does not."""
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    gyaml = "Area_Kokiri_Town"
+    info = dumps({"FmdbName": "Area_Kokiri_Town_Missing", "ModelProjectName": "Area_Kokiri_Town"})
+    archive = pack({f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info})
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dump.dicts(), level=3))
+    missing = describe_actor(dump, gyaml)
+    assert missing["status"] == "box"
+    assert missing["reason"].startswith("No model")
+    assert "Area_Kokiri_Town.Area_Kokiri_Town_Missing.bfres" in missing["reason"]
+    quiet = describe_actor(dump, "AnchorAction_Kokiri")
+    assert quiet["status"] == "box" and quiet["reason"] == "No mesh."
 
 
 def test_volume_flags():

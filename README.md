@@ -82,7 +82,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | --- | --- |
 | `ocarina_forge/` | Python library and FastAPI server. Parsers, validation, and exporters. This is the maintained data side. |
 | `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL, BFRES, and BNTX. |
-| `native/` | BC7 mode 6, BC1, block decode, deswizzle, the per-pixel loops, and BFRES vertex, index, and glb float packing. Optional. Without `maturin develop`, those paths stay Python. |
+| `native/` | BC7 mode 6, BC1, block decode, deswizzle, the per-pixel loops, BFRES vertex and index decode, bind pose, UV seams, bounds, and glb float packing. Optional. Without `maturin develop`, those paths stay Python. |
 | `ocarina_forge/domains.py` | Where a dialog, event, or table exporter plugs into the build. |
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. New renderer work follows [docs/design/mod-editor.md](docs/design/mod-editor.md). |
 | `docs/design/mod-editor.md` | How an edit becomes a Longshot mod, and the milestone plan. |

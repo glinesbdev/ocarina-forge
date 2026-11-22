@@ -5,6 +5,19 @@
 //! same code builds for wasm32. PNG stays in Python: a fast deflate that
 //! only run-length-encodes zeros made tiled maps several megabytes.
 
+/// True when every alpha byte is at least 250. The scan is the same test
+/// `encode_albedo` used to run as a Python generator.
+pub fn rgba_opaque(rgba: &[u8]) -> bool {
+    let mut index = 3usize;
+    while index < rgba.len() {
+        if rgba[index] < 250 {
+            return false;
+        }
+        index += 4;
+    }
+    true
+}
+
 pub fn limit_rgba(width: i32, height: i32, rgba: &[u8], limit: i32) -> (i32, i32, Vec<u8>) {
     if width <= 0 || height <= 0 || limit <= 0 {
         return (width, height, rgba.to_vec());

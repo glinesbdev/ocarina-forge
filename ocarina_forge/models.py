@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-48\0"
+_CACHE_VERSION = b"models-49\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -177,14 +177,12 @@ def cache_dir() -> Path:
 def describe_actor(dump, gyaml: str, *, convert: bool = True) -> dict:
     if not _NAME.fullmatch(gyaml or ""):
         return _box(gyaml, "That is not an actor pack name.")
-    from ocarina_forge.actors import is_marker
-
-    if is_marker(gyaml):
-        return _box(gyaml, "Marker. It stays a box.")
     try:
-        plan, tried = _actor_plan(dump, gyaml)
+        plan, tried, referenced = _actor_plan(dump, gyaml)
     except BancError as exc:
         return _box(gyaml, exc.message)
+    if not referenced:
+        return _box(gyaml, "No mesh.")
     if not any(item[0] == "blob" or (dump.romfs / item[1]).is_file() for item in plan):
         return _box(gyaml, _missing(gyaml, tried))
     return _first_mesh(gyaml, plan, f"/api/models/{gyaml}/model.glb", dump, tried, convert=convert)
@@ -745,7 +743,7 @@ def _remember_img(token: str, encoded: bytes) -> None:
     if token in _IMG_ORDER:
         _IMG_ORDER.remove(token)
     _IMG_ORDER.append(token)
-    while len(_IMG_ORDER) > 64:
+    while len(_IMG_ORDER) > 1024:
         _IMG_MEM.pop(_IMG_ORDER.pop(0), None)
 
 
@@ -811,14 +809,27 @@ def _water_ripple():
     return Texture(_WATER_TEX, width, height, bytes(rgba), 0, "generated water stand-in")
 
 
-def _span(positions) -> float:
+def _axis_bounds(positions):
+    from ocarina_forge.formats.bfres import Vecs
+
     if not positions:
+        return None
+    if isinstance(positions, Vecs):
+        found = positions.bounds()
+        if not found or len(found[0]) < 3:
+            return None
+        return found[0][:3], found[1][:3]
+    return (
+        [min(point[axis] for point in positions) for axis in range(3)],
+        [max(point[axis] for point in positions) for axis in range(3)],
+    )
+
+
+def _span(positions) -> float:
+    found = _axis_bounds(positions)
+    if not found:
         return 0.0
-    axes = []
-    for axis in range(3):
-        values = [point[axis] for point in positions]
-        axes.append(max(values) - min(values))
-    return max(axes)
+    return max(high - low for low, high in zip(found[0], found[1], strict=False))
 
 
 def _untextured_bounds_box(part, labeled) -> bool:
@@ -1037,7 +1048,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
     triangles = 0
     texture_count = 0
     seen_images: set[int] = set()
-    positions: list[tuple[float, float, float]] = []
+    boxes: list[tuple] = []
     for model in models:
         notes.extend(model.notes)
         png_for: dict[int, bytes] = {}
@@ -1214,7 +1225,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                         )
                     )
             triangles += len(part.indices) // 3
-            positions.extend(part.positions)
+            span = _axis_bounds(part.positions)
+            if span:
+                boxes.append(span)
     if not primitives:
         reasons = []
         for model in models:
@@ -1224,10 +1237,10 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
         raise FresError("; ".join(reasons) if reasons else "the model has no triangles")
     glb = finish_glb(to_glb(primitives))
     bounds = None
-    if positions:
+    if boxes:
         bounds = {
-            "min": [min(point[axis] for point in positions) for axis in range(3)],
-            "max": [max(point[axis] for point in positions) for axis in range(3)],
+            "min": [min(box[0][axis] for box in boxes) for axis in range(3)],
+            "max": [max(box[1][axis] for box in boxes) for axis in range(3)],
         }
     unique_notes = list(dict.fromkeys(note for note in notes if note))[:12]
     return glb, {
@@ -2252,7 +2265,7 @@ def _tex_candidates(name: str) -> list[str]:
     return paths
 
 
-def _actor_plan(dump, gyaml: str) -> tuple[list, list[str]]:
+def _actor_plan(dump, gyaml: str) -> tuple[list, list[str], bool]:
     plan: list = []
     seen: set[str] = set()
 
@@ -2304,7 +2317,16 @@ def _actor_plan(dump, gyaml: str) -> tuple[list, list[str]]:
     for label, blob in embedded:
         plan.append(("blob", label, blob))
     tried = [item[1] for item in plan if item[0] == "file"]
-    return plan, tried
+    referenced = bool(pairs or embedded or named)
+    conventional = (
+        f"Model/{gyaml}.{gyaml}.bfres.zs",
+        f"Model/{gyaml}.{gyaml}.bfres",
+        f"Model/{gyaml}.bfres.zs",
+        f"Model/{gyaml}.bfres",
+    )
+    if any((dump.romfs / relative).is_file() for relative in conventional):
+        referenced = True
+    return plan, tried, referenced
 
 
 def _modelinfo_pairs(archive: Sarc) -> list[tuple[str, str]]:
@@ -3409,7 +3431,7 @@ def flag10_ground(dump, banc: str) -> list[dict]:
     rows = []
     for gyaml in names[:80]:
         try:
-            plan, _tried = _actor_plan(dump, gyaml)
+            plan, _tried, _referenced = _actor_plan(dump, gyaml)
         except BancError as exc:
             rows.append({"gyaml": gyaml, "status": "unread", "reason": exc.message, "shapes": [], "source": ""})
             continue

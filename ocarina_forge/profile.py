@@ -69,6 +69,7 @@ def profile_dump(
     pixels = "rust" if native is not None and hasattr(native, "limit_rgba") else "python"
     mesh = "rust" if native is not None and hasattr(native, "decode_attribute") else "python"
     normals = "rust" if native is not None and hasattr(native, "face_normal_bytes") else "python"
+    skin = "rust" if native is not None and hasattr(native, "transform_positions") else "python"
     previous = os.environ.get("OCARINA_FORGE_CACHE")
     private = None
     if not home_cache:
@@ -98,10 +99,12 @@ def profile_dump(
     report["pixels"] = pixels
     report["mesh"] = mesh
     report["normals"] = normals
+    report["skin"] = skin
     log(f"native bc7/decode: {bc7}")
     log(f"native pixels: {pixels}")
     log(f"native mesh: {mesh}")
     log(f"native normals: {normals}")
+    log(f"native skin: {skin}")
     log(
         "Browser dl and up are not in these numbers. "
         "If those dominate Stats on a cold open, stop the Rust port."
@@ -409,7 +412,7 @@ def _print_stages(log, row: dict) -> None:
 
 def _brief(row: dict) -> str:
     reason = row.get("reason") or ""
-    if row.get("status") == "box" and reason.startswith("Marker"):
+    if row.get("status") == "box" and (reason.startswith("Marker") or reason.startswith("No mesh")):
         reason = ""
     else:
         reason = f" {reason}" if row.get("status") not in ("mesh", "") and reason else ""
