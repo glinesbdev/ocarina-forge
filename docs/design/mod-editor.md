@@ -14,7 +14,7 @@ Forge editor (Three.js, this repo)
         v
 mod folder on disk
   mod.json
-  romfs/.keep
+  romfs/                 empty directory, only when a patch was written
   patches/<name>.json
   src/*.ts                 only when a content declaration is required
         |  longshot mod check / pack / dev
@@ -38,7 +38,7 @@ The editor does not use the in-game listener on `127.0.0.1:47321`. That port bel
 
 `longshot mod check` compiles and links `src/` with the game's compiler and typechecks when `tsc` 7 is present. `longshot mod pack` writes the `.lsmod`. `longshot mod dev --once` copies the folder into the game's `mods/<owner>/<name>/` before the first launch.
 
-A manifest mod with no `romfs/` directory is skipped before `patches/` are indexed (`host/mods.c` `index_layers` on `editor-mod`: the walk continues when `romfs` is missing). `mods/static-move` keeps `romfs/.keep` so the folder counts as a mod and the patches still apply. An empty `romfs/` also works. Forge's generated mod ships one of those. The same skip disagrees with the file watch a few lines above, which treats `patches/` as enough. That is an upstream note. It has not been posted, and this repo does not post it.
+A manifest mod with no `romfs/` directory is skipped before `patches/` are indexed (`host/mods.c` on `editor-mod`: `has_romfs` is `dir_exists` of that directory, and the index continues when it is missing). An empty directory is enough. `docs/modding/files.md` says the directory may be empty. `romfs/.keep` is not required by that check, and `index_romfs` would count the file as an added RomFS file, so Forge does not write it. `longshot mod check` does not require a script for a file-only mod (`docs/modding/manifest.md`: leave `runtime` out). The skip of a manifest mod that has patches and no `romfs/` directory disagrees with the file watch a few lines above. That is an upstream note. It has not been posted, and this repo does not post it.
 
 ### What carries over
 
@@ -88,8 +88,8 @@ Forge's typed records stay the source. The exporter writes the mod. [longshot-ma
 | `edited` + `scale`, key absent | placements `add` of `Scale` | Grows the file. Next process start. |
 | `set` of an existing `Dynamic.*` scalar (string, number, bool) | `content.change({ file, placement, params })` | `placement` in the API text is the id without `0x` (`00a1b2c3d4e5f607`). The patch `hash` keeps `0x`. Applied at the next game start, because the content module runs then. A missing key is a stage error and the mod's content is not added. |
 | `gyaml` on an existing actor | `content.change({ file, placement, actor })` | Same start rule. This changes what is placed there. It does not move it. |
-| `added` | `content.place({ id, map, age, actor, position, rotation, scale, params, layer })` or a placements `add` of the whole actor | `content.place` adds a second actor and leaves the original. `rotation` is degrees. `layer` is `"static"` or `"dynamic"` (dynamic when omitted). `map` is `KokiriForest_Child`, not a new map name. New maps are refused: terrain, baked collision, and lighting are not something a mod can make yet. The in-game editor's new-actor hash sets bit 63. Forge mints bit 62. See open questions. |
-| `hidden` / `removed` | no op | `actors.remove` refuses a banc actor. Omitting the actor from a full file rewrite is the old exporter, and it fights the size table. The project still stores the state. Export warns and does not write a patch until an op exists. |
+| `added` | `content.place({ id, map, age, actor, position, rotation, scale, params, layer })` or a placements `add` of the whole actor | `content.place` adds a second actor and leaves the original. `rotation` is degrees. `layer` is `"static"` or `"dynamic"` (dynamic when omitted). `map` is `KokiriForest_Child`, not a new map name. New maps are refused: terrain, baked collision, and lighting are not something a mod can make yet. The in-game editor's new-actor hash sets bit 63. Forge mints bit 62. This slice warns and does not write an add. |
+| `hidden` / `removed` | not written yet | The project still stores the state. Export warns. `docs/modding/files.md` describes a placements `remove`. This slice does not emit it. |
 | Links, group lists | no op | Unchanged from [longshot-mapping.md](../longshot-mapping.md). Export warns and leaves them. |
 | Behavior `set field` | no merge into the game's AINB | `content.tree({ id, from, add, patch })` copies a tree for a new actor. The game's own graph is still last-layer-wins. The project keeps the op. Export does not write a replaced graph. |
 | Text label | `content.text({ file, label, text })` | One string, or an object by language. Control tags (colours, icons, pauses) are not in this API yet. |
@@ -100,20 +100,49 @@ Forge's typed records stay the source. The exporter writes the mod. [longshot-ma
 
 ```json
 {
-  "id": "local/forge-edits",
-  "name": "Forge edits",
+  "id": "local/kokiri-sign",
+  "name": "Kokiri sign",
   "version": "0.1.0",
-  "license": "GPL-3.0-or-later",
-  "api": "0.1",
-  "runtime": "js",
-  "entry": "src/main.ts",
-  "game": { "builds": ["*"] },
-  "permissions": [],
-  "multiplayer": "all"
+  "author": "Bradyn"
 }
 ```
 
-`src/main.ts` can be an empty entry until a milestone emits `content.change` or `content.place`. Those declarations need `content.add` in `permissions` and `"multiplayer": "all"`. A patch-only mod does not. `check` still wants the entry file, because `runtime` is `js`.
+`id`, `name`, and `version` are the fields the loader requires (`host/mod_manifest.c`). `author` and `license` are written only when the project sets them. `description` is not a `mod.json` field on `editor-mod`; it stays in `manifest.yaml`. `runtime` and `entry` are omitted, so no `src/main.ts` is written. A later milestone that emits `content.change` or `content.place` adds `runtime`, `entry`, `api`, and `content.add` at that point, and only then.
+
+## Projects
+
+One project is one mod. The source is the Forge folder: `manifest.yaml`, `scenes/`, and the other domain files in [project-format.md](../project-format.md). Selection, camera, panel layout, undo, and caches stay there. They are not copied into the mod.
+
+Projects live outside the game install and outside the dump:
+
+```text
+~/.local/share/ocarina-forge/projects/<project-id>/
+```
+
+`OCARINA_FORGE_PROJECTS`, or `projects:` in the config file, moves that folder. Creating a project with a blank folder uses it. The mod id is `local/<project-id>`. The id is lower case, and each half follows the rules in `docs/modding/manifest.md` on `editor-mod`.
+
+Save installs into the test game:
+
+```text
+~/Games/Longshot/mod-test/mods/local/<project-id>/
+```
+
+`OCARINA_FORGE_GAME`, `--game`, or `game:` in the config file changes the install. The default is Bradyn's test install.
+
+After the Ocarina is one project of this kind: `examples/after-the-ocarina`, format 2, `engine: after-ocarina`. Opening it opens that folder. Its romfs build stays the Build romfs action. A Longshot-mod save of that project exports only placement ops that differ from the dump. It does not replace the pipeline.
+
+## Lean export
+
+A mod never ships a file that does not change the game. Export writes:
+
+- nothing, when every edit matches the dump or was moved back
+- otherwise `mod.json`, `patches/<Scene>.json` for each banc that still has an op, and an empty `romfs/` directory
+
+No empty patch file. No `romfs/.keep`. No `src/`. No project YAML, undo history, or cache. Installing an empty result deletes `mods/local/<project-id>` so a previous move does not stay in the game.
+
+`content.change`'s placement id (no `0x`) and the patch `hash` (`0x` plus 16 hex digits) are the same integer. Forge stores `0x` and 16 lower-case hex digits. A 16-digit hex string and the decimal form normalize to that.
+
+Hide and remove stay in the project and in the view. Export warns and writes no op. `docs/modding/files.md` on `editor-mod` describes a placements `remove`. This slice does not emit it. Turning the warning into that op is the next export step, not this one. That note is not posted upstream.
 
 ## Milestones
 
@@ -121,7 +150,7 @@ Each one is shippable on its own and is something Bradyn can check on his machin
 
 ### 1. Move the Kokiri sign, and see it in the game
 
-Open `KokiriForest_Child` in Forge. Select `Obj_Kokiri_Signboard_A_01` (Static, `KokiriForest_013`, hash `0x4a13f8880eb01a43`). Move it. Save writes a mod folder: `mod.json` as above, `romfs/.keep`, `src/main.ts`, and `patches/kokiri-static.json` with one `set` of `Translate`. `longshot mod check` passes.
+Create a project, open `KokiriForest_Child`, select `Obj_Kokiri_Signboard_A_01` (Static, `KokiriForest_013`, hash `0x4a13f8880eb01a43`), and move it. Save writes `mod.json`, an empty `romfs/`, and `patches/KokiriForest_Child_Static.json` with one `set` of `Translate`. `longshot mod check` is the game-side check. The commands are in [performance.md](../performance.md) and the README.
 
 Preview, on a game already started with `longshot mod run`, the mod turned on: Forge runs `longshot mod dev --once` if the folder is not installed yet, then tells him the first apply needs a process start, because this sign's `Translate` is a shared container and the file grows. He runs `longshot mod stop` and `longshot mod run` (or `restart --manifest`). Forge then runs `longshot mod teleport` to the child Kokiri destination and `longshot mod shot`. The sign in the PNG stands at the pose he set. The patch file on disk matches the `static-move` shape. A second move that does not grow the file again is the hot-reload check: `mod_reload`, leave the area, enter it, shot. If that second shot is still the old pose, the size table is still short and the UI says restart, which is the headroom caveat and not a failed move.
 
@@ -139,7 +168,7 @@ Kokiri's walkable floor meets the actors' feet. The `_sub` scene stays the upper
 
 ### 5. Scale, one known case at a time
 
-These are the scale cases already written down. Each is its own step, with a fixture or a shot:
+The first scale case is the Kokiri Emerald, `Obj_TimeTemple_SpiritStone_A_01` (`AtO_SpiritStone_Forest` in the After the Ocarina project), if opening it shows a scale mismatch. If it does not, the next case is the shutter door. The cases already written down, each its own step:
 
 - Bone flag `0x800000`, segment-scale compensation, on a mesh that uses it.
 - Bone flag `0x1000`, Euler XYZ in radians, composed `Rz · Ry · Rx`. `Obj_HrlCastle_SwitchShutter_A_01` is the tilted door in [models.md](../models.md).
@@ -159,7 +188,7 @@ Check: move, rotate, and scale the sign from the gizmos alone, with the grid on,
 
 ### 7. Add an actor. Record remove as a gap
 
-Add a pot (or any `Pack/Actor` class the dump has) with `content.place` or a placements `add`. Position in the patch is metres. Rotation emitted through `content.place` is degrees. The new hash is recorded in the open questions until Bradyn picks bit 62 or bit 63. After a process start and a teleport, the shot shows the new actor and the original sign is still there. `content.place` adds; it does not replace.
+Add a pot (or any `Pack/Actor` class the dump has) with `content.place` or a placements `add`. Position in the patch is metres. Rotation emitted through `content.place` is degrees. The new hash sets bit 62. After a process start and a teleport, the shot shows the new actor and the original sign is still there. `content.place` adds; it does not replace.
 
 Remove and hide stay in the project and in the view. Export writes no patch and says why: the API has no remove for a banc actor. That gap is not posted upstream.
 
@@ -179,7 +208,9 @@ The Rust port below is part of this direction. It is not one of the ten, and it 
 
 ### R1. Profile a cold load before any port
 
-No Rust yet. Time a cold load, then the warm load of the same scene, on Bradyn's machine. First `KokiriForest_Child`. Then a heavy map, Hyrule Castle (the castle scene he already opens, not a new dump). Use `ocarina-forge warm` twice per scene: the first line is `cache=miss`, the second is `cache=hit`. **Stats** already splits `conv`, `tex`, `dl`, and `up`. The server line already splits `convert=` and `texture=`. Write those numbers into [performance.md](../performance.md). The sample walk in this checkout (16 models, 76.4 ms convert, 0.4 ms texture, one core) is not a stand-in for those two scenes.
+No Rust yet. `python -m ocarina_forge profile --dump <dump>` times a cold load and the warm load after it, in a fresh cache, for every `KokiriForest_Child` banc and every Hyrule Castle Static or Dynamic banc in that dump. It prints banc-read time and, inside the convert, zstd, BYML, BFRES parse, deswizzle, and block decode. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. If they dominate a cold open, R2 does not start.
+
+Retail Kokiri and Hyrule Castle are not on the machine that wrote this note. The synthetic fixture is not those numbers. [performance.md](../performance.md) records the command and the sample, and says what is still missing.
 
 The candidates, in the order a profile is allowed to reorder them:
 
@@ -212,16 +243,18 @@ The same crate, compiled to WebAssembly, is how parsing and conversion could lat
 
 Later, not one of these steps: baked lighting, an asset browser, a new level, and blueprint phase B, as above.
 
-## Open questions
+## Decisions
 
-1. Confirm the source of truth. This note keeps the scene YAML as the source and treats the mod folder as export output. Should a Forge project *be* the mod folder instead, with `patches/*.json` as the only placement record?
-2. Is `local/forge-edits` the right id, and should Save install it with `longshot mod dev --once` into the game Bradyn already runs, or into a path he picks?
-3. For milestone 1, is a full process start the acceptable first apply for the Kokiri sign, given the shared `Translate` container? Or should Forge also reserve size-table headroom the way `local/longshot-editor` does at startup?
-4. New-actor hashes. Forge sets bit 62. The in-game editor sets bit 63. Which bit should a placements `add` use?
-5. `content.change` documents `placement` without a `0x` prefix. The patch `hash` uses `0x` and 16 hex digits. Should the exporter treat those as the same id with two spellings, and is the no-prefix form what `read.placements` returns?
-6. Hide and remove have no banc op. Is "shown in Forge, warned on export, still present in the game" the right behavior until an op exists?
-7. Which scale case is first after terrain: the shutter door (`0x1000`), segment-scale compensation (`0x800000`), recipe `y_offset`, or the 8 m volume rule?
-8. After `mod_reload`, is "teleport, then you walk out and back" an acceptable preview, or does milestone 1 need a bridge command that reloads the current area? No such command is in `docs/modding/tools.md` today. This question is not an upstream post.
-9. Should `src/main.ts` stay empty for patch-only saves, or should every save emit `content.change` / `content.place` and let the content module own the patch files?
-10. The After the Ocarina pipeline still builds its own romfs. Does that stay beside the mod-API exporter, or does new work stop writing a rebuilt banc?
-11. If the R1 profile says GPU upload and download are the cold time, and the Python paths are a small share, should the port stop there? The note says yes. Confirm that before R2 starts.
+November 22, answered by Bradyn:
+
+1. The scene YAML and the other typed files are the source. The mod folder is export output.
+2. The mod id is `local/<project-id>`. Save installs into the test game's `mods/local/` folder. The default game is `~/Games/Longshot/mod-test`. `OCARINA_FORGE_GAME` changes it.
+3. A full process restart for the first save in an area is acceptable. Size-table headroom is later.
+4. New-actor hashes keep Forge's bit 62.
+5. The no-prefix placement id and the `0x` hash are the same id. The internal form is `0x` and 16 hex digits.
+6. Hide and remove are shown in Forge and warned on export. `files.md` describes `remove`; this slice still does not emit it.
+7. After terrain, the Kokiri Emerald scale is first, then the cases already listed.
+8. Teleport, then walking out and back, is enough preview for milestone 1.
+9. Patch-only saves do not write `src/main.ts`.
+10. The After the Ocarina romfs build stays beside the mod exporter.
+11. Stop the Rust port when download and GPU upload dominate the cold time. The Python profile does not measure those. Compare it with **Stats** `dl` and `up` on a real open.

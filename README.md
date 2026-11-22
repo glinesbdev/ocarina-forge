@@ -26,6 +26,17 @@ cd ..
 
 Then open http://127.0.0.1:47231.
 
+A project lives in `~/.local/share/ocarina-forge/projects/<name>/` unless `OCARINA_FORGE_PROJECTS` says otherwise. The mod id is `local/<name>`. Saving a Longshot mod installs it under the test game, `~/Games/Longshot/mod-test` unless `OCARINA_FORGE_GAME` is set.
+
+```bash
+python -m ocarina_forge project create kokiri-sign --title "Kokiri sign" --author Bradyn
+python -m ocarina_forge edit KokiriForest_Child --gyaml Obj_Kokiri_Signboard_A_01 --translate -9.75,111.6,10.24 --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge mod-export --install --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0
+```
+
+`edit` looks the sign up in `KokiriForest_Child` Static or Dynamic. `mod-export` writes `build/mod` only when an actor still differs from the dump, and `--install` copies that folder to `<game>/mods/local/kokiri-sign/`. `profile` times a cold load and the warm load of Kokiri child and of Hyrule Castle. It uses its own cache and does not measure the browser.
+
 The API listens on 127.0.0.1:47232. Vite proxies `/api` to it. `scripts/dev.sh` starts both and stops the API when you quit.
 
 The first screen asks for the dump folder, the one that contains `romfs`. On a typical Longshot install that is:

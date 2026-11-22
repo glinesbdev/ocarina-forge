@@ -359,6 +359,7 @@ document.querySelectorAll("[data-close]").forEach((button) => {
   button.addEventListener("click", () => button.closest("dialog").close());
 });
 $("build-run").addEventListener("click", runBuild);
+$("mod-export").addEventListener("click", runModExport);
 $("add-search").addEventListener("input", () => loadActorNames($("add-search").value));
 $("create-project").addEventListener("click", createProject);
 $("open-project").addEventListener("click", openProject);
@@ -713,6 +714,7 @@ function openProjectDialog() {
   catalog.replaceChildren();
   if (projectReady()) catalog.append(catalogList(project.catalog));
   fillProjectChanges();
+  fillLibrary();
   $("project-dialog").showModal();
 }
 
@@ -772,15 +774,49 @@ function catalogList(catalog) {
   return root;
 }
 
+async function fillLibrary() {
+  const host = $("project-library");
+  if (!host) return;
+  host.replaceChildren(empty("Loading projects…"));
+  try {
+    const data = await api.projects();
+    host.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "muted tight";
+    note.textContent = data.root;
+    host.append(note);
+    if (!data.projects.length) {
+      host.append(empty("No projects there yet. Leave the folder blank to create one in it."));
+      return;
+    }
+    for (const item of data.projects) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "name-row";
+      button.textContent = `${item.title} · ${item.modId}`;
+      button.addEventListener("click", () => {
+        $("open-dir").value = item.root;
+        openProject();
+      });
+      host.append(button);
+    }
+  } catch (error) {
+    host.replaceChildren(empty(error.message));
+  }
+}
+
 async function createProject() {
   try {
-    await api.createProject({
-      directory: $("new-dir").value.trim(),
+    const directory = $("new-dir").value.trim();
+    const body = {
       name: $("new-name").value.trim(),
       title: $("new-title").value.trim(),
       author: $("new-author").value.trim(),
+      description: ($("new-description") && $("new-description").value.trim()) || "",
       version: $("new-version").value.trim() || "0.1.0",
-    });
+    };
+    if (directory) body.directory = directory;
+    await api.createProject(body);
     state.status = await api.status();
     closeDialogs();
     renderChrome();
@@ -1953,6 +1989,30 @@ function chooseActor(name) {
     return;
   }
   edit({ command: "add", actor: name, translate: viewport.spawnPoint() });
+}
+
+async function runModExport() {
+  const log = $("build-log");
+  log.replaceChildren();
+  const line = document.createElement("li");
+  line.textContent = "Writing the Longshot mod…";
+  log.append(line);
+  try {
+    const result = await api.exportLongshot({ install: true });
+    log.replaceChildren();
+    for (const entry of result.log || []) {
+      const item = document.createElement("li");
+      item.className = entry.level;
+      item.textContent = entry.message;
+      log.append(item);
+    }
+  } catch (error) {
+    log.replaceChildren();
+    const item = document.createElement("li");
+    item.className = "error";
+    item.textContent = error.message;
+    log.append(item);
+  }
 }
 
 async function runBuild() {

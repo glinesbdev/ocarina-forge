@@ -1,6 +1,8 @@
 # Project format
 
-An Ocarina Forge project is a folder of small text files. Format versions **1** and **2** are read. Format 1 is a scene-editor project. Format 2 is the same folder plus an `engine` key, so a build can run a scripted pipeline. The folder is meant to be committed. The game dump is not.
+An Ocarina Forge project is a folder of small text files. One project is one mod. Format versions **1** and **2** are read. Format 1 is a scene-editor project. Format 2 is the same folder plus an `engine` key, so a build can run a scripted pipeline. The folder is meant to be committed. The game dump is not.
+
+New projects are created in `~/.local/share/ocarina-forge/projects/<project-id>/` (or `OCARINA_FORGE_PROJECTS`). That folder is outside the dump and outside the game. The mod id is `local/<project-id>`. **Save Longshot mod** writes `build/mod/` and, when asked, copies it to `<game>/mods/local/<project-id>/`. The default game is `~/Games/Longshot/mod-test` (`OCARINA_FORGE_GAME`). `build/mod/` is export output. Editor state stays in the project. The export rules are [design/mod-editor.md](design/mod-editor.md).
 
 ```text
 my-mod/

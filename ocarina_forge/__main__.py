@@ -32,10 +32,28 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["problems", "model-debug", "ground-debug", "material-debug", "material-audit", "tex-debug", "tex-audit", "behavior", "behavior-audit", "behavior-export", "warm", "serve"],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, tex-audit, behavior, behavior-audit, behavior-export, and warm print or convert. The default is the editor server.",
+        choices=[
+            "problems",
+            "model-debug",
+            "ground-debug",
+            "material-debug",
+            "material-audit",
+            "tex-debug",
+            "tex-audit",
+            "behavior",
+            "behavior-audit",
+            "behavior-export",
+            "warm",
+            "serve",
+            "project",
+            "edit",
+            "mod-export",
+            "profile",
+        ],
+        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, tex-audit, behavior, behavior-audit, behavior-export, warm, project, edit, mod-export, and profile. The default is the editor server.",
     )
-    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, bfres path, or actor class for behavior.")
+    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action (list, create, open), or actor class.")
+    parser.add_argument("extra", nargs="?", help="Project name for 'project create' and 'project open'.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
     parser.add_argument("--trace", action="store_true", help="behavior prints the pack, each component, and every path it tried.")
     parser.add_argument("--nodes", action="store_true", help="behavior lists every node. A large graph prints the files and entry points without this.")
@@ -56,7 +74,17 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--png", help="tex-debug writes the current decode to this PNG.")
     parser.add_argument("--out", help="material-audit also writes the report to this file.")
-    parser.add_argument("--project", help="Project folder. Defaults to the saved config, or an empty project.")
+    parser.add_argument("--project", help="Project folder or library name. Defaults to the saved config.")
+    parser.add_argument("--title", default="", help="Project title. Shown as the mod's name.")
+    parser.add_argument("--author", default="", help="Stored on the project. Written to mod.json when set.")
+    parser.add_argument("--version", default="0.1.0", help="Mod version, major.minor.patch.")
+    parser.add_argument("--description", default="", help="Project description. Stays in the project, not in mod.json.")
+    parser.add_argument("--gyaml", default="", help="Actor class to edit, for example Obj_Kokiri_Signboard_A_01.")
+    parser.add_argument("--translate", default="", help="x,y,z metres for edit.")
+    parser.add_argument("--rotate", default="", help="x,y,z radians for edit.")
+    parser.add_argument("--scale", default="", help="x,y,z for edit.")
+    parser.add_argument("--install", action="store_true", help="mod-export copies the mod into the game's mods/local folder.")
+    parser.add_argument("--game", default="", help="Game install. Default ~/Games/Longshot/mod-test, or config game, or OCARINA_FORGE_GAME.")
     parser.add_argument("--all", action="store_true", help="warm converts every scene instead of one banc and its neighbors.")
     parser.add_argument("--scene-only", action="store_true", help="warm converts the named scene and does not walk neighboring scenes.")
     parser.add_argument("--host", default=setting("HOST", "127.0.0.1"))
@@ -118,6 +146,16 @@ def main(argv: list[str] | None = None) -> None:
         if not args.all and not args.banc:
             parser.error("warm needs a banc path or --all")
         raise SystemExit(print_warm("all" if args.all else args.banc, dump=args.dump, scene_only=args.scene_only))
+    if args.command == "project":
+        raise SystemExit(print_project(args))
+    if args.command == "edit":
+        if not args.banc:
+            parser.error("edit needs a scene path or a name such as KokiriForest_Child")
+        raise SystemExit(print_edit(args))
+    if args.command == "mod-export":
+        raise SystemExit(print_mod_export(args))
+    if args.command == "profile":
+        raise SystemExit(print_profile(args.dump))
     if args.static:
         from ocarina_forge.server import mount_frontend
 
@@ -655,6 +693,207 @@ def _render_tex(report: dict) -> str:
         lines.append(f"png {report['png']}")
     lines.append("")
     return "\n".join(lines)
+
+
+def print_project(args) -> int:
+    from ocarina_forge.config import load_config, save_config
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.project import Project
+    from ocarina_forge.modexport import mod_id
+    from ocarina_forge.projects import create_in_library, list_projects, projects_root, resolve_project
+
+    config = load_config()
+    action = args.banc or "list"
+    try:
+        if action == "list":
+            rows = list_projects(config)
+            print(f"Projects in {projects_root(config)}")
+            if not rows:
+                print("(none)")
+            for row in rows:
+                print(f"{row['modId']}\t{row['title']}\t{row['root']}")
+            return 0
+        if action == "create":
+            if not args.extra:
+                print("project create needs a name, for example kokiri-sign.", file=sys.stderr)
+                return 2
+            project = create_in_library(
+                args.extra,
+                title=args.title or args.extra,
+                author=args.author,
+                version=args.version,
+                description=args.description,
+                config=config,
+            )
+            save_config(project=str(project.root))
+            print(f"Created {project.manifest['name']} at {project.root}")
+            print(f"Mod id {mod_id(project.manifest['name'])}")
+            return 0
+        if action == "open":
+            if not args.extra and not args.project:
+                print("project open needs a library name or a folder.", file=sys.stderr)
+                return 2
+            token = args.extra or args.project
+            root = resolve_project(token, config)
+            Project(root)
+            save_config(project=str(root))
+            print(f"Opened {root}")
+            return 0
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    print("project needs list, create, or open.", file=sys.stderr)
+    return 2
+
+
+def print_edit(args) -> int:
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.project import Project
+    from ocarina_forge.projects import resolve_project
+    from ocarina_forge.scene import apply_command, scene_view
+
+    config = load_config()
+    dump_path = args.dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump.", file=sys.stderr)
+        return 2
+    project_token = args.project or config.get("project") or ""
+    if not project_token:
+        print("No project is open. Pass --project, or run project create.", file=sys.stderr)
+        return 2
+    try:
+        project = Project(resolve_project(project_token, config))
+        dump = Dump(dump_path)
+        banc, ident, document = _find_actor(dump, args.banc, gyaml=args.gyaml, actor=args.id or "")
+        diff = project.load_scene_diff(banc)
+        command = {"command": "transform", "id": ident}
+        if args.translate:
+            command["translate"] = _triple(args.translate, "Position")
+        if args.rotate:
+            command["rotate"] = _triple(args.rotate, "Rotation")
+        if args.scale:
+            command["scale"] = _triple(args.scale, "Scale")
+        if len(command) == 2:
+            print("edit needs --translate, --rotate, or --scale.", file=sys.stderr)
+            return 2
+        diff, focus = apply_command(document, diff, command)
+        project.save_scene_diff(diff)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    view = scene_view(document, diff)
+    actor = next(row for row in view["actors"] if row["id"] == focus)
+    print(f"{banc}")
+    print(f"{actor.get('gyaml')} {focus}")
+    print(f"translate {actor.get('translate')}")
+    print("Saved in the project. Export with: python -m ocarina_forge mod-export --install")
+    return 0
+
+
+def print_mod_export(args) -> int:
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.modexport import export_mod
+    from ocarina_forge.project import Project
+    from ocarina_forge.projects import resolve_project
+
+    config = load_config()
+    dump_path = args.dump or config.get("dump") or ""
+    project_token = args.project or config.get("project") or ""
+    if not dump_path or not project_token:
+        print("mod-export needs a dump and a project. Pass --dump and --project.", file=sys.stderr)
+        return 2
+    try:
+        result = export_mod(
+            Project(resolve_project(project_token, config)),
+            Dump(dump_path),
+            install=args.install,
+            game=Path(args.game).expanduser() if args.game else None,
+        )
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        for line in result["log"]:
+            print(f"{line['level']}: {line['message']}")
+        if result["files"]:
+            print("files: " + ", ".join(result["files"]))
+        else:
+            print("files: (none)")
+    return 0
+
+
+def print_profile(dump: str | None) -> int:
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.profile import profile_dump
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump.", file=sys.stderr)
+        return 2
+    try:
+        profile_dump(Dump(dump_path))
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    return 0
+
+
+def _find_actor(dump, query: str, *, gyaml: str, actor: str):
+    from ocarina_forge.actors import format_hash, parse_hash
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.scene import scene_view
+
+    scenes = [item["path"] for item in dump.list_scenes()]
+    if query in scenes:
+        bancs = [query]
+    else:
+        bancs = [path for path in scenes if query in path]
+    if not bancs:
+        raise BancError(f"No scene matches {query!r}.", "not_found")
+    wanted = format_hash(parse_hash(actor)) if actor else ""
+    found = []
+    for banc in bancs:
+        try:
+            document, _dict_id, _raw = dump.read_byml(banc)
+        except BancError:
+            continue
+        view = scene_view(document, {"banc": banc, "actors": {}})
+        for row in view["actors"]:
+            if wanted and row["id"] != wanted:
+                continue
+            if gyaml and row.get("gyaml") != gyaml:
+                continue
+            if not wanted and not gyaml:
+                continue
+            found.append((banc, row["id"], document))
+    if not gyaml and not wanted:
+        raise BancError("Name the actor with --gyaml or --id.", "edit")
+    if not found:
+        raise BancError(f"No actor {gyaml or wanted} in {query}.", "edit")
+    if len(found) > 1:
+        listed = ", ".join(f"{item[1]} in {item[0]}" for item in found[:6])
+        raise BancError(f"{len(found)} actors match. Pass --id. {listed}", "edit")
+    return found[0]
+
+
+def _triple(text: str, label: str) -> list[float]:
+    from ocarina_forge.errors import BancError
+
+    parts = [part.strip() for part in text.split(",")]
+    if len(parts) != 3:
+        raise BancError(f"{label} needs three comma-separated numbers.", "edit")
+    try:
+        return [float(part) for part in parts]
+    except ValueError as exc:
+        raise BancError(f"{label} needs three comma-separated numbers.", "edit") from exc
 
 
 if __name__ == "__main__":

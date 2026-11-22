@@ -116,6 +116,16 @@ Opening a scene sends one `POST /api/models/batch` with every actor name. Cache 
 
 **Stats** adds `queued`, `loading`, and `loaded`. While Kokiri is streaming, `loading` should sit near 8 and `queued` should fall. After it settles, `loading` is 0 and `loaded` is the number of distinct models.
 
+## R1 profile
+
+`python -m ocarina_forge profile --dump <dump>` times Kokiri child and every Hyrule Castle Static or Dynamic banc. Cold and warm each use a fresh cache under a temp directory, so `~/.cache/ocarina-forge` is left alone. The lines split banc read (zstd + BYML) from zstd, BYML, BFRES parse, deswizzle, and block decode inside the convert. A remainder line is convert time outside those five. Browser `dl` and GPU `up` are not in the process. If those dominate **Stats** on a cold open, the Rust port stops.
+
+Retail Kokiri and Hyrule Castle are not in this checkout, so those numbers are not here. On the synthetic Kokiri child Static fixture (11 actor classes, two real meshes) a cold wall was 82.6 ms, of which convert was 80.5 ms and texture 0.4 ms. The five candidate phases together were about 1.1 ms (zstd 0.15, BYML 0.12, BFRES parse 0.53, swizzle 0.31, decode 0). The warm wall was 1.5 ms with both meshes cached. A cProfile of `Npc_Kokiri_F_01` put most of that cold convert in the meshopt helper's first poll (about 55 ms) and in JPEG encode, not in swizzle or ASTC. Decode was 0 because the fixture is not castle ASTC. Do not treat this as the retail split.
+
+```bash
+.venv/bin/python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0
+```
+
 ## WebGPU trial (shelved)
 
 WebGL stays the default. The stage-bar checkbox is gone. `?webgpu=1` or `?renderer=webgpu` still reloads on `WebGPURenderer`. `?gpu=0` / `?renderer=webgl` force WebGL. A saved `?gpu=1` link, the old checkbox flag, is stripped on boot and loads WebGL. There is no further work on this path. It can be revisited when three is newer than r170 (`0.170.0`).

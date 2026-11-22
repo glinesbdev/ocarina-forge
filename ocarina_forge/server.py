@@ -595,28 +595,54 @@ def setup_sample():
     return status()
 
 
+@app.get("/api/projects")
+def get_projects():
+    from ocarina_forge.projects import list_projects, projects_root
+
+    config = load_config()
+    return {"root": str(projects_root(config)), "projects": list_projects(config)}
+
+
 @app.post("/api/project")
 def create_project(body: dict):
+    from ocarina_forge.projects import create_in_library
+
+    name = str(body.get("name") or "my-mod")
+    title = str(body.get("title") or body.get("name") or "My mod")
+    author = str(body.get("author") or "")
+    version = str(body.get("version") or "0.1.0")
+    description = str(body.get("description") or "")
     directory = body.get("directory")
-    if not directory:
-        raise BancError("Choose a folder for the project.", "project")
-    project = Project.create(
-        Path(directory),
-        name=str(body.get("name") or "my-mod"),
-        title=str(body.get("title") or body.get("name") or "My mod"),
-        author=str(body.get("author") or ""),
-        version=str(body.get("version") or "0.1.0"),
-    )
+    if directory:
+        project = Project.create(
+            Path(directory),
+            name=name,
+            title=title,
+            author=author,
+            version=version,
+            description=description,
+        )
+    else:
+        project = create_in_library(
+            name,
+            title=title,
+            author=author,
+            version=version,
+            description=description,
+            config=load_config(),
+        )
     save_config(project=str(project.root))
     return project.summary()
 
 
 @app.post("/api/project/open")
 def open_project(body: dict):
+    from ocarina_forge.projects import resolve_project
+
     directory = body.get("directory")
     if not directory:
         raise BancError("Choose a project folder.", "project")
-    project = Project(directory)
+    project = Project(resolve_project(str(directory), load_config()))
     save_config(project=str(project.root))
     return project.summary()
 
@@ -927,6 +953,20 @@ def actors(q: str = ""):
     if query:
         names = [name for name in names if query in name.lower()]
     return {"names": names[:400], "total": len(dump.actor_names()), "matched": len(names)}
+
+
+@app.post("/api/mod-export")
+def export_longshot_mod(body: dict | None = None):
+    from ocarina_forge.modexport import export_mod as export_longshot
+
+    body = body or {}
+    game = body.get("game")
+    return export_longshot(
+        _open_project(),
+        _open_dump(),
+        install=bool(body.get("install")),
+        game=Path(str(game)).expanduser() if game else None,
+    )
 
 
 @app.post("/api/export")

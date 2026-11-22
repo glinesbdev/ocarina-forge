@@ -119,6 +119,8 @@ class Project:
         data.setdefault("title", data["name"])
         data.setdefault("version", "0.1.0")
         data.setdefault("author", "")
+        data.setdefault("description", "")
+        data.setdefault("license", "")
         data.setdefault("engine", "scenes")
         target = data.get("target") or {}
         data["target"] = {
@@ -129,7 +131,14 @@ class Project:
         return data
 
     @staticmethod
-    def create(root: Path, name: str, title: str, author: str, version: str) -> "Project":
+    def create(
+        root: Path,
+        name: str,
+        title: str,
+        author: str,
+        version: str,
+        description: str = "",
+    ) -> "Project":
         root = Path(root).expanduser().resolve()
         if (root / "manifest.yaml").is_file():
             raise BancError(f"{root} already has a manifest.yaml. Open it instead of creating a new one.", "project")
@@ -140,6 +149,7 @@ class Project:
             "title": title.strip() or name,
             "version": version.strip() or "0.1.0",
             "author": author.strip(),
+            "description": description.strip(),
             "target": {"game": "oot-switch2", "version": "1.1.1", "host": "longshot"},
             "domains": list(DOMAINS),
         }

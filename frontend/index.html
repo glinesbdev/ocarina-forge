@@ -204,10 +204,12 @@
           <button type="button" class="ghost" data-close>Close</button>
         </header>
         <p class="muted">Changed placement files are re-encoded with the dump’s zstd dictionary. The size table is only raised. The dump’s own files are not modified.</p>
-        <label class="check"><input id="build-install" type="checkbox" checked /> Install into mods/&lt;project&gt; under the dump</label>
+        <label class="check"><input id="build-install" type="checkbox" checked /> Install the romfs build into mods/&lt;project&gt; under the dump</label>
         <label class="check"><input id="build-zip" type="checkbox" /> Also write a zip</label>
+        <p class="muted">Save Longshot mod writes patches for the edits that differ from the dump and installs them into the test game’s mods/local folder. The default game is ~/Games/Longshot/mod-test. Set OCARINA_FORGE_GAME to use another install.</p>
         <div class="dialog-actions">
-          <button id="build-run" type="button" class="primary">Build</button>
+          <button id="build-run" type="button" class="primary">Build romfs</button>
+          <button id="mod-export" type="button">Save Longshot mod</button>
           <a id="build-download" class="ghost linkish" href="/api/export/download" hidden>Download zip</a>
         </div>
         <ol id="build-log" class="log"></ol>
@@ -226,15 +228,17 @@
         <div class="split">
           <fieldset>
             <legend>New project</legend>
-            <label>Folder<input id="new-dir" placeholder="projects/my-mod" /></label>
-            <label>Mod name<input id="new-name" placeholder="after-the-ocarina" /></label>
-            <label>Title<input id="new-title" placeholder="After the Ocarina" /></label>
+            <label>Folder<input id="new-dir" placeholder="Blank uses the Forge projects folder" /></label>
+            <label>Mod name<input id="new-name" placeholder="kokiri-sign" /></label>
+            <label>Title<input id="new-title" placeholder="Kokiri sign" /></label>
             <label>Author<input id="new-author" placeholder="Your name" /></label>
+            <label>Description<input id="new-description" placeholder="Stays in the project" /></label>
             <label>Version<input id="new-version" value="0.1.0" /></label>
             <button id="create-project" type="button" class="primary">Create project</button>
           </fieldset>
           <fieldset>
             <legend>Open</legend>
+            <div id="project-library"></div>
             <label>Folder with manifest.yaml<input id="open-dir" placeholder="projects/sample" /></label>
             <button id="open-project" type="button">Open folder</button>
             <button id="open-ato" type="button" class="ghost">Open After the Ocarina</button>

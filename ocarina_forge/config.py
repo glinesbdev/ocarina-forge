@@ -63,6 +63,8 @@ def load_config() -> dict:
     return {
         "dump": data.get("dump") or "",
         "project": data.get("project") or "",
+        "projects": data.get("projects") or "",
+        "game": data.get("game") or "",
         "hotReload": hot_reload_settings(data),
         "workers": workers,
         "path": str(path),
@@ -74,6 +76,8 @@ def save_config(
     project: str | None = None,
     hot_reload: dict | None = None,
     workers: int | None = None,
+    projects: str | None = None,
+    game: str | None = None,
 ) -> dict:
     current = load_config()
     if dump is not None:
@@ -84,12 +88,20 @@ def save_config(
         current["hotReload"] = hot_reload_settings({"hotReload": hot_reload})
     if workers is not None:
         current["workers"] = max(1, int(workers))
+    if projects is not None:
+        current["projects"] = projects
+    if game is not None:
+        current["game"] = game
     path = Path(current["path"])
     payload = {
         "dump": current["dump"],
         "project": current["project"],
         "hotReload": current["hotReload"],
     }
+    if current.get("projects"):
+        payload["projects"] = current["projects"]
+    if current.get("game"):
+        payload["game"] = current["game"]
     if current.get("workers"):
         payload["workers"] = current["workers"]
     atomic_write(path, dump_yaml(payload))
