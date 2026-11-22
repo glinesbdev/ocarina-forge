@@ -31,11 +31,13 @@ A project lives in `~/.local/share/ocarina-forge/projects/<name>/` unless `OCARI
 ```bash
 python -m ocarina_forge project create kokiri-sign --title "Kokiri sign" --author Bradyn
 python -m ocarina_forge edit KokiriForest_Child --gyaml Obj_Kokiri_Signboard_A_01 --id 0x4a13f8880eb01a43 --translate -9.75,111.6,10.24 --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge edit KokiriForest_Child --gyaml Obj_Kokiri_Signboard_A_01 --id 0x4a13f8880eb01a43 --rotate 0,0.785398,0 --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge edit KokiriForest_Child --gyaml Obj_Kokiri_Signboard_A_01 --id 0x4a13f8880eb01a43 --scale 1.5,1.5,1.5 --dump ~/Games/Longshot/rc/v3.0.0
 python -m ocarina_forge mod-export --install --dump ~/Games/Longshot/rc/v3.0.0
 python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 --model Land_Kokiri_House_Inside_E_04 --cprofile /tmp/house-inside-e04.prof
 ```
 
-`edit` needs `--id`. That class is placed more than once in Kokiri child, and a match of several actors writes nothing and exits non-zero. The sign above is Static `KokiriForest_013`, hash `0x4a13f8880eb01a43`. `mod-export` writes `build/mod` only when an actor still differs from the dump, and `--install` copies that folder to `<game>/mods/local/kokiri-sign/`. `profile` times one model in a private cache, so a cold `cache=miss` does not mean the key changed. A scene walk stays one model at a time unless you pass `--jobs`, and `--limit N` stops each scene early. It does not measure the browser.
+`edit` needs `--id`. That class is placed more than once in Kokiri child, and a match of several actors writes nothing and exits non-zero. The sign above is Static `KokiriForest_013`, hash `0x4a13f8880eb01a43`. Rotate is radians. Scale is `set` when the banc already has `Scale`, and `add` when it does not. An `add` grows the file and waits for the next process start. The export log says so. `mod-export` writes `build/mod` only when an actor still differs from the dump, and `--install` copies that folder to `<game>/mods/local/kokiri-sign/`. `profile` times one model in a private cache, so a cold `cache=miss` does not mean the key changed. A scene walk stays one model at a time unless you pass `--jobs`, and `--limit N` stops each scene early. It does not measure the browser.
 
 The API listens on 127.0.0.1:47232. Vite proxies `/api` to it. `scripts/dev.sh` starts both and stops the API when you quit.
 

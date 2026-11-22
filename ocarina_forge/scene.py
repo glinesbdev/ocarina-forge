@@ -238,9 +238,19 @@ def sibling_bancs(banc: str, available: set[str]) -> list[str]:
 def scene_view(document: dict, diff: dict) -> dict:
     actors, statuses, removed, warnings, gone = compose(document, diff, drop_hidden=False)
     warnings = warnings + reference_warnings(_shadow(document, actors), gone)
+    base = _base_map(document)
+    rows = []
+    for actor, status in zip(actors, statuses):
+        row = view_actor(actor, status)
+        ident = row.get("id")
+        original = base.get(ident) if ident else None
+        # Added actors are not in the banc. A missing Scale on a placed actor
+        # becomes an add op, which waits for the next process start.
+        row["scaleInFile"] = status == "added" or bool(original and "Scale" in original)
+        rows.append(row)
     return {
         "banc": diff.get("banc"),
-        "actors": [view_actor(actor, status) for actor, status in zip(actors, statuses)],
+        "actors": rows,
         "removed": removed,
         "warnings": warnings,
         "diff": {"actors": diff.get("actors") or {}},

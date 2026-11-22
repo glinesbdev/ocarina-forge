@@ -5,7 +5,8 @@ from pathlib import Path
 
 from ocarina_forge.actors import format_hash, read_vec
 from ocarina_forge.dump import Dump
-from ocarina_forge.fixtures import FADO, KOKIRI_STATIC, build_fixture
+from ocarina_forge.fixtures import FADO, KOKIRI_STATIC, TREE, build_fixture
+from ocarina_forge.scene import scene_view
 from ocarina_forge.modexport import canonical_hash, content_placement_id, export_mod
 from ocarina_forge.project import Project
 from ocarina_forge.scene import apply_command
@@ -108,6 +109,67 @@ def test_a_move_writes_one_patch_and_installs_under_mods_local(tmp_path):
     cleared = export_mod(project, dump, install=True, game=game)
     assert cleared["files"] == []
     assert not installed.exists()
+
+
+def test_the_view_says_whether_scale_is_already_in_the_banc(tmp_path):
+    dump, _project, document = _world(tmp_path)
+    view = scene_view(document, {"banc": KOKIRI_STATIC, "actors": {}})
+    by_id = {row["id"]: row for row in view["actors"]}
+    assert by_id[format_hash(FADO)]["scaleInFile"] is False
+    assert by_id[format_hash(TREE)]["scaleInFile"] is True
+    assert dump.root
+
+
+def test_rotate_alone_writes_one_set_in_radians(tmp_path):
+    dump, project, document = _world(tmp_path)
+    ident = format_hash(FADO)
+    diff, _focus = apply_command(
+        document,
+        {"format": 1, "banc": KOKIRI_STATIC, "actors": {}},
+        {"command": "transform", "id": ident, "rotate": [0, 0.7853981633974483, 0]},
+    )
+    project.save_scene_diff(diff)
+    result = export_mod(project, dump)
+    folder = project.root / "build" / "mod"
+    assert result["files"] == ["mod.json", "patches/KokiriForest_Child_Static.json"]
+    assert list((folder / "romfs").iterdir()) == []
+    patch = json.loads((folder / "patches" / "KokiriForest_Child_Static.json").read_text(encoding="utf-8"))
+    assert patch["placements"] == [
+        {"op": "set", "hash": ident, "path": "Rotate", "value": [0.0, 0.785398, 0.0]},
+    ]
+
+
+def test_scale_adds_when_the_banc_has_no_scale_and_sets_when_it_does(tmp_path):
+    dump, project, document = _world(tmp_path)
+    fado = format_hash(FADO)
+    tree = format_hash(TREE)
+    empty = {"format": 1, "banc": KOKIRI_STATIC, "actors": {}}
+    grown, _focus = apply_command(
+        document,
+        empty,
+        {"command": "transform", "id": fado, "scale": [2, 2, 2]},
+    )
+    project.save_scene_diff(grown)
+    added = export_mod(project, dump)
+    folder = project.root / "build" / "mod"
+    patch = json.loads((folder / "patches" / "KokiriForest_Child_Static.json").read_text(encoding="utf-8"))
+    assert patch["placements"] == [
+        {"op": "add", "hash": fado, "path": "Scale", "value": [2.0, 2.0, 2.0]},
+    ]
+    assert any("next game start" in line["message"] for line in added["log"])
+    assert list((folder / "romfs").iterdir()) == []
+
+    changed, _focus = apply_command(
+        document,
+        empty,
+        {"command": "transform", "id": tree, "scale": [2, 2, 2]},
+    )
+    project.save_scene_diff(changed)
+    export_mod(project, dump)
+    patch = json.loads((folder / "patches" / "KokiriForest_Child_Static.json").read_text(encoding="utf-8"))
+    assert patch["placements"] == [
+        {"op": "set", "hash": tree, "path": "Scale", "value": [2.0, 2.0, 2.0]},
+    ]
 
 
 def test_hide_is_warned_and_not_written(tmp_path):

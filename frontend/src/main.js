@@ -144,7 +144,7 @@ viewport = await createViewport($("viewport"), {
     noteCompanion();
     if (id && window.matchMedia("(max-width: 980px)").matches) showTab("props");
   },
-  onPreview: (id, translate, rotate) => {
+  onPreview: (id, translate, rotate, scale) => {
     if (id !== state.selected) return;
     fillNumber("tx", translate[0]);
     fillNumber("ty", translate[1]);
@@ -152,6 +152,11 @@ viewport = await createViewport($("viewport"), {
     fillNumber("rx", deg(rotate[0]));
     fillNumber("ry", deg(rotate[1]));
     fillNumber("rz", deg(rotate[2]));
+    if (scale) {
+      fillNumber("sx", scale[0]);
+      fillNumber("sy", scale[1]);
+      fillNumber("sz", scale[2]);
+    }
   },
   onDeviceLost: (message) => toast(message),
   onWarm(names) {
@@ -163,15 +168,13 @@ viewport = await createViewport($("viewport"), {
     if (readout && readout.textContent !== text) readout.textContent = text;
     refreshStreamLog();
   },
-  onTransform: (id, translate, rotate) => {
-    const actor = selectedActor();
-    const scale = actor && actor.id === id ? actor.scale : undefined;
+  onTransform: (id, translate, rotate, scale) => {
     edit({
       command: "transform",
       id,
       translate: translate.map(round4),
       rotate: rotate.map(round4),
-      ...(scale ? { scale } : {}),
+      scale: (scale || [1, 1, 1]).map(round4),
     });
   },
 });
@@ -1556,7 +1559,7 @@ function renderProps() {
   panel.replaceChildren();
   const actor = selectedActor();
   if (!actor) {
-    panel.append(empty("Select an actor in the view or the list. Move and Rotate use the gizmo. G moves, R rotates, F frames."));
+    panel.append(empty("Select an actor in the view or the list. Move, Rotate, and Scale use the gizmo. G moves, R rotates, F frames."));
     return;
   }
   const head = document.createElement("div");
@@ -1600,6 +1603,12 @@ function renderProps() {
   panel.append(vectorFields("Position (metres)", "t", actor.translate));
   panel.append(vectorFields("Rotation (degrees, X then Y then Z)", "r", actor.rotate.map(deg)));
   panel.append(vectorFields("Scale", "s", actor.scale));
+  if (actor.scaleInFile === false) {
+    const scaleNote = document.createElement("p");
+    scaleNote.className = "muted";
+    scaleNote.textContent = "This actor has no Scale in the banc. Saving a different scale writes an add. The patch grows the file, and the game applies it on the next process start.";
+    panel.append(scaleNote);
+  }
 
   const actions = document.createElement("div");
   actions.className = "actions";

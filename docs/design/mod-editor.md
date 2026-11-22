@@ -165,7 +165,23 @@ Preview, on a game already started with `longshot mod run`, the mod turned on: F
 
 ### 2. Rotate, then scale, the same sign
 
-Rotate writes `Rotate` in radians (45 degrees is `0.7853981633974483`, the value in `kokiri-static.json`). Scale writes `set` when the key exists and `add` when it does not, and the UI says that `add` waits for the next process start. A shot shows the new yaw. Scale is checked the same way after a restart.
+Rotate writes `Rotate` in radians (45 degrees is `0.785398`, six digits in the patch). Scale writes `set` when the banc already has `Scale`, and `add` when it does not. The inspector says an `add` grows the file and waits for the next process start. The export log says the same. A shot shows the new yaw. Scale is checked the same way after a restart.
+
+The class is placed more than once, so both commands name `--id`. Use the same project as the move. A yaw that is already the banc value writes no rotate op.
+
+```bash
+python -m ocarina_forge edit KokiriForest_Child \
+  --gyaml Obj_Kokiri_Signboard_A_01 --id 0x4a13f8880eb01a43 \
+  --rotate 0,0.785398,0 \
+  --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge edit KokiriForest_Child \
+  --gyaml Obj_Kokiri_Signboard_A_01 --id 0x4a13f8880eb01a43 \
+  --scale 1.5,1.5,1.5 \
+  --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge mod-export --install --dump ~/Games/Longshot/rc/v3.0.0
+```
+
+The patch stays one file. Translate is included only if it still differs. `Scale` is `add` when the sign has no scale key, and the log says it waits for the next game start. In the editor, Scale is the toolbar button. S remains fly-back. The stage bar names the mode by which button is on.
 
 ### 3. Materials and UVs, one surface at a time
 
@@ -188,7 +204,8 @@ The first scale case is the Kokiri Emerald, `Obj_TimeTemple_SpiritStone_A_01` (`
 
 Fly, orbit, pan, dock, undo, and F to frame are already in [controls.md](../controls.md). This step adds what that list does not have, matching the in-game editor's feel without using its renderer:
 
-- A scale gizmo beside move (G) and rotate (R). The corner names the mode.
+- The scale gizmo is the Scale button, beside Move (G) and Rotate (R). The pressed button names the mode. S stays fly-back.
+- A ground grid and a corner axis indicator (X red, Y green, Z blue). The grid is still missing.
 - A ground grid and a corner axis indicator (X red, Y green, Z blue).
 - Grid snap at 0.5 m, separate from ground snap (V).
 - F frames the selection and sets the orbit pivot there.

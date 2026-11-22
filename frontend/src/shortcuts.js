@@ -33,6 +33,7 @@ export const SHORTCUT_GROUPS = [
     items: [
       { keys: "G", action: "Move" },
       { keys: "R", action: "Rotate" },
+      { keys: "Scale button", action: "Scale the selection. S stays fly-back, so scale has no letter." },
       { keys: "Drag a handle", action: "Transform the selection" },
     ],
   },

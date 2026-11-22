@@ -72,6 +72,7 @@ export function editLabel(command, actor, options = {}) {
   const name = actorName(actor, command);
   const kind = command && command.command;
   if (kind === "transform") {
+    if (options.gizmo === "scale") return `Scale ${name}`;
     if (options.gizmo === "rotate") return `Rotate ${name}`;
     const moved = !actor || !sameVec(command.translate, actor.translate);
     const turned = !actor || !sameVec(command.rotate, actor.rotate);

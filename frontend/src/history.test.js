@@ -61,6 +61,7 @@ test("every edit kind gets a history label", () => {
   assert.equal(editLabel({ command: "transform", translate: [0, 0, 0], rotate: [0, 1, 0], scale: [1, 1, 1] }, actor), "Rotate Fado");
   assert.equal(editLabel({ command: "transform", translate: [0, 0, 0], rotate: [0, 0, 0], scale: [2, 1, 1] }, actor), "Scale Fado");
   assert.equal(editLabel({ command: "transform", translate: [1, 0, 0], rotate: [0, 0, 0] }, actor, { gizmo: "rotate" }), "Rotate Fado");
+  assert.equal(editLabel({ command: "transform", translate: [0, 0, 0], rotate: [0, 0, 0], scale: [2, 2, 2] }, actor, { gizmo: "scale" }), "Scale Fado");
   assert.equal(editLabel({ command: "set" }, actor), "Edit Fado");
   assert.equal(editLabel({ command: "set_name" }, actor), "Rename Fado");
   assert.equal(editLabel({ command: "set_gyaml" }, actor), "Change Fado");

@@ -26,6 +26,7 @@ The editor shows this same list with ? or the Shortcuts button.
 
 - G: Move
 - R: Rotate
+- Scale button: Scale the selection. S stays fly-back, so scale has no letter.
 - Drag a handle: Transform the selection
 
 ## Undo and redo

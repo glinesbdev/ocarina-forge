@@ -2126,7 +2126,11 @@ uniform float terrainLayerMissing;`
 
   function setGizmo(mode) {
     transform.setMode(mode);
-    transform.setSpace(mode === "rotate" ? "local" : "world");
+    transform.setSpace(mode === "translate" ? "world" : "local");
+  }
+
+  function pivotScale(pivot) {
+    return [pivot.scale.x, pivot.scale.y, pivot.scale.z];
   }
 
   function applyTerrainUniforms() {
@@ -2461,7 +2465,7 @@ uniform float terrainLayerMissing;`
     const axis = transform.axis;
     if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) maybeSnap(entry);
     const p = entry.pivot.position;
-    hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot));
+    hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
     syncInstanceMatrix(entry);
     requestRender();
   });
@@ -2476,7 +2480,7 @@ uniform float terrainLayerMissing;`
     if (!entry || !entry.id) return;
     maybeSnap(entry);
     const p = entry.pivot.position;
-    hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot));
+    hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
   });
 
   let keyWindow = null;
