@@ -28,7 +28,7 @@ The first milestone is the Kokiri sign, as one project and one mod: create the p
 
 The performance pass is in this build: redraw on change, instanced repeats, frustum culling, the game's LOD meshes where the file has them, a generated mesh otherwise, low-mip textures at distance, a glTF meshopt and KTX2 cache, nearest-first streaming, and prebaked terrain atlases. The terrain overlay split (main floor and `_sub` as separate layers) is in this build. The WebGPU trial is shelved; see Later.
 
-BC7 mode 6, ASTC/BC/RGBA decode, and deswizzle are in `native/`, called from Python. The Python functions remain when the extension is not built. BFRES is 2.7 s on the house and is not ported. The same crate builds for wasm32 without PyO3. That host is not scheduled. Numbers and the re-profile commands are in [performance.md](performance.md). The steps are [design/mod-editor.md](design/mod-editor.md).
+BC7 mode 6, ASTC/BC/RGBA decode, deswizzle, and the remaining per-pixel loops (the 1024 box limit, the near-magenta scan, ORM blits, the noise score, BC1, and downsampling) are in `native/`, called from Python. The Python functions remain when the extension is not built. PNG is zlib level 1. BFRES is 1.0 s on the measured house and is not ported. The same crate builds for wasm32 without PyO3. That host is not scheduled. Numbers and the re-profile commands are in [performance.md](performance.md). The steps are [design/mod-editor.md](design/mod-editor.md).
 
 Editing that already shipped stays: undo and redo, ground snap, Ctrl+K search, live validation, opt-in hot reload, docked panels, and field edits on existing behavior nodes. **Behavior** draws the selected actor's AINB graph, its schedule rows, and its event-flow hooks. Export writes a behavior file only after a round trip. A schedule that lives in another actor's pack is labeled shared.
 
@@ -38,7 +38,7 @@ These are not the next slice. Where one of them is a numbered milestone, or a Ru
 
 ### Rust hot paths, then maybe no Python server
 
-R1 and the first ports are in this build: BC7 mode 6, then ASTC/BC/RGBA decode and deswizzle, in one crate called from Python. BFRES, zstd, and BYML stay in Python until a new profile says they are still a large share. The frontend stays JavaScript and three.js. The Python server stays.
+R1 and the ports through the per-pixel loops are in this build: BC7 mode 6, ASTC/BC/RGBA decode, deswizzle, then the box limit, magenta scan, ORM blit, noise score, BC1, and downsample, in one crate called from Python. BFRES, zstd, and BYML stay in Python until a new profile says they are still a large share. The frontend stays JavaScript and three.js. The Python server stays.
 
 Step two is still the same crate compiled to WebAssembly, with the dump picked through the File System Access API. It is not scheduled. The crate's hot functions stay bytes in and bytes out so that compile stays possible.
 

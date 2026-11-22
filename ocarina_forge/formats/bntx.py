@@ -577,6 +577,19 @@ def _quieter_footprint(
 
 def _noise(rgba: bytes, width: int, height: int) -> float:
     """Mean absolute difference between samples four pixels apart."""
+    if width >= 8 and height >= 8 and len(rgba) >= width * height * 4:
+        from ocarina_forge.extension import module
+
+        native = module()
+        if native is not None:
+            try:
+                return float(native.noise(rgba, int(width), int(height)))
+            except Exception:
+                pass
+    return _noise_py(rgba, width, height)
+
+
+def _noise_py(rgba: bytes, width: int, height: int) -> float:
     if width < 8 or height < 8 or len(rgba) < width * height * 4:
         return 0.0
     step = 4

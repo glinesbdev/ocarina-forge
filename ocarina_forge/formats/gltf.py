@@ -38,9 +38,32 @@ class Primitive:
     normal1_png: bytes | None = None
 
 
+def _native():
+    from ocarina_forge.extension import module
+
+    return module()
+
+
 def limit_rgba(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
     """Box-filter an image so the long edge is at most ``limit`` pixels."""
-    if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+    if width <= 0 or height <= 0 or limit <= 0 or len(rgba) < width * height * 4:
+        return width, height, rgba
+    if width <= limit and height <= limit:
+        return width, height, rgba
+    native = _native()
+    if native is not None:
+        try:
+            nw, nh, out = native.limit_rgba(int(width), int(height), rgba, int(limit))
+            nw, nh = int(nw), int(nh)
+            if nw > 0 and nh > 0 and len(out) == nw * nh * 4:
+                return nw, nh, bytes(out)
+        except Exception:
+            pass
+    return _limit_rgba_py(width, height, rgba, limit)
+
+
+def _limit_rgba_py(width: int, height: int, rgba: bytes, limit: int = 1024) -> tuple[int, int, bytes]:
+    if width <= 0 or height <= 0 or limit <= 0 or len(rgba) < width * height * 4:
         return width, height, rgba
     if width <= limit and height <= limit:
         return width, height, rgba
@@ -195,6 +218,13 @@ def _texture_entry(source: int, mime: str) -> dict:
 
 
 def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
+    """RGBA PNG. The IDAT is zlib level 1.
+
+    Level 6 matched level 1's size on a detailed image and took about twice
+    as long. A compressor that only run-length-encodes zeros was faster and
+    then wrote several megabytes for a tiled map, so the browser download
+    would grow. Cutouts, normals, and ORM stay PNG. Opaque albedos are JPEG.
+    """
     rows = bytearray()
     stride = width * 4
     for y in range(height):
@@ -204,7 +234,7 @@ def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
         return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF)
 
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(rows), 1)) + chunk(b"IEND", b"")
 
 
 def face_normals(positions: list[tuple[float, float, float]], indices: list[int]) -> list[tuple[float, float, float]]:

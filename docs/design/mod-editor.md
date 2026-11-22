@@ -236,7 +236,7 @@ The Rust port below is part of this direction. It is not one of the ten, and it 
 
 `python -m ocarina_forge profile --dump <dump> --model <gyaml> --cprofile out.prof` times one actor, cold then warm, and writes a cProfile of the cold convert. The stage lines split file decompress, BFRES parse, vertex decode, index decode, meshopt or the Python lod fallback, JPEG/PNG/GPU encode, glTF pack, deswizzle, and block decode. A scene walk takes `--limit N` and `--jobs N`. The default is one model at a time and every model. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. The house profile that picked R2 is in [performance.md](../performance.md).
 
-The command uses a private cache directory unless `--home-cache` is set. A cold `cache=miss` is that directory. The glb key is `models-45`. Profile does not change it by itself. [performance.md](../performance.md) has the command and the house numbers. Retail numbers are measured on Bradyn's machine, not in this note.
+The command uses a private cache directory unless `--home-cache` is set. A cold `cache=miss` is that directory. The glb key is `models-46`. Profile does not change it by itself. [performance.md](../performance.md) has the command and the house numbers. Retail numbers are measured on Bradyn's machine, not in this note.
 
 The candidates, in the order a profile is allowed to reorder them:
 
@@ -251,7 +251,7 @@ A path is a candidate only if its share of the cold wall time is large on at lea
 
 One crate, `native/`, called from Python with PyO3 and maturin. The hot functions take bytes and return bytes. No Python types inside them. That is what lets step two compile the same crate to WebAssembly later. The Python server stays. The frontend stays JavaScript and Three.js. If `ocarina_forge_native` does not import, the Python functions run.
 
-The house profile named BC7 mode 6 first (121.7 s) and ASTC/BC decode plus deswizzle next (about 24 s). Both are in this crate. A full bc7enc or Intel ISPC search was the other encoder. Those kernels are not a wasm32 build, and they would change the blocks. The crate ports this mode 6 instead, so the blocks match. Decode uses `bcdec_rs` for BC7 and `astc-decode` for ASTC, both pure Rust. BC1, BC3, BC4, and BC5 are our own so the 565 expansion matches `texture2ddecoder`. Parity tests compare bytes. The BC7 test also keeps a 40 dB PSNR bar against the Python decode, which is the bar if a later encoder is allowed to differ. The glb prefix is `models-45` because `gpu.py`, `swizzle.py`, `bntx.py`, and `models.py` are in the cache stamp. The mode 6 blocks themselves match the previous encoder. Before and after numbers are in [performance.md](../performance.md).
+The house profile named BC7 mode 6 first (121.7 s) and ASTC/BC decode plus deswizzle next (about 24 s). Both are in this crate. A full bc7enc or Intel ISPC search was the other encoder. Those kernels are not a wasm32 build, and they would change the blocks. The crate ports this mode 6 instead, so the blocks match. Decode uses `bcdec_rs` for BC7 and `astc-decode` for ASTC, both pure Rust. BC1, BC3, BC4, and BC5 are our own so the 565 expansion matches `texture2ddecoder`. Parity tests compare bytes. The BC7 test also keeps a 40 dB PSNR bar against the Python decode, which is the bar if a later encoder is allowed to differ. On `4afe3f7` the house convert was 32.6 s. What remained was per-pixel Python: the 1024 box limit, the near-magenta scan, the ORM blit, the noise score, BC1 blocks, and one-step downsampling. Those are in the same crate, and the Python functions remain the fallback. PNG IDAT is zlib level 1. The glb prefix is `models-46` because those converter sources are in the cache stamp. Mode 6 blocks still match. PNG pixels stay the same. Before and after numbers are in [performance.md](../performance.md).
 
 Where it sits next to the other milestones:
 
@@ -261,7 +261,7 @@ Where it sits next to the other milestones:
 
 ### R3. Port the second hot spot, or stop
 
-Decode and deswizzle shipped with R2, in the same crate. What is left on the house profile is the 24.3 s `other` bucket and BFRES at 2.7 s. `other` is the part of `_load_named` outside the texture clock: the same `.bntx.zs` was decompressed again, and `_accept` walked the pixels again. Decode itself was already cached. A convert now remembers the load and the decompressed bytes. BFRES vertex decode is inside that 2.7 s and is not ported. The next profile says whether anything still large is left. Do not port the rest of the list for completeness.
+Decode and deswizzle shipped with R2. On the measured house (`4afe3f7`, 32.6 s) the load memo had already removed the repeated reads, and the time left was the per-pixel loops now in the same crate. BFRES is 1.0 s on that run and is not ported. A full Kokiri cold open is still being measured. Do not port the rest of the list until that profile says something else is still large.
 
 ### Step two, kept in mind and not scheduled
 

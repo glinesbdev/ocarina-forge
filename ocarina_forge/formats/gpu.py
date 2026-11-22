@@ -149,7 +149,13 @@ def _mip_chain(image) -> tuple[int, int, int, list[bytes]] | None:
     encoder = encode_bc1 if vk == VK_BC1 else encode_bc7
     if encoder is encode_bc7:
         rust_levels = _rust_bc7_chain(width, height, pixels)
-        if rust_levels is not None and _chain_ok(width, height, rust_levels):
+        if rust_levels is not None and _chain_ok(width, height, rust_levels, 16):
+            if native_blocks is not None:
+                rust_levels = [native_blocks, *rust_levels[1:]]
+            return vk, width, height, rust_levels
+    if encoder is encode_bc1:
+        rust_levels = _rust_bc1_chain(width, height, pixels)
+        if rust_levels is not None and _chain_ok(width, height, rust_levels, 8):
             if native_blocks is not None:
                 rust_levels = [native_blocks, *rust_levels[1:]]
             return vk, width, height, rust_levels
@@ -196,6 +202,19 @@ def _native_base(image, width: int, height: int) -> tuple[int | None, bytes | No
 
 def _downsample(width: int, height: int, rgba: bytes) -> tuple[int, int, bytes]:
     """Box-filter one step. A 1-pixel side stays 1."""
+    native = _native_mod()
+    if native is not None and width > 0 and height > 0 and len(rgba) >= width * height * 4:
+        try:
+            nw, nh, out = native.downsample(int(width), int(height), rgba)
+            nw, nh = int(nw), int(nh)
+            if nw > 0 and nh > 0 and len(out) == nw * nh * 4:
+                return nw, nh, bytes(out)
+        except Exception:
+            pass
+    return _downsample_py(width, height, rgba)
+
+
+def _downsample_py(width: int, height: int, rgba: bytes) -> tuple[int, int, bytes]:
     nw = max(1, width // 2)
     nh = max(1, height // 2)
     out = bytearray(nw * nh * 4)
@@ -229,6 +248,13 @@ def _block_count(width: int, height: int) -> int:
 
 def encode_bc1(width: int, height: int, rgba: bytes) -> bytes:
     """BC1, four opaque colours. Used for mip 0 passthrough's lower levels."""
+    native = _rust_encode_bc1(width, height, rgba)
+    if native is not None:
+        return native
+    return _encode_bc1_py(width, height, rgba)
+
+
+def _encode_bc1_py(width: int, height: int, rgba: bytes) -> bytes:
     if width <= 0 or height <= 0 or len(rgba) < width * height * 4:
         return b""
     out = bytearray()
@@ -327,6 +353,32 @@ def _rust_encode_bc7(width: int, height: int, rgba: bytes) -> bytes | None:
     return bytes(out)
 
 
+def _rust_encode_bc1(width: int, height: int, rgba: bytes) -> bytes | None:
+    native = _native_mod()
+    if native is None or width <= 0 or height <= 0 or len(rgba) < width * height * 4:
+        return None
+    try:
+        out = native.encode_bc1(int(width), int(height), rgba)
+    except Exception:
+        return None
+    if out is None or len(out) != _block_count(width, height) * 8:
+        return None
+    return bytes(out)
+
+
+def _rust_bc1_chain(width: int, height: int, rgba: bytes) -> list[bytes] | None:
+    native = _native_mod()
+    if native is None:
+        return None
+    try:
+        levels = native.bc1_mip_chain(int(width), int(height), rgba)
+    except Exception:
+        return None
+    if not levels:
+        return None
+    return [bytes(level) for level in levels]
+
+
 def _rust_bc7_chain(width: int, height: int, rgba: bytes) -> list[bytes] | None:
     native = _native_mod()
     if native is None:
@@ -340,10 +392,10 @@ def _rust_bc7_chain(width: int, height: int, rgba: bytes) -> list[bytes] | None:
     return [bytes(level) for level in levels]
 
 
-def _chain_ok(width: int, height: int, levels: list[bytes]) -> bool:
+def _chain_ok(width: int, height: int, levels: list[bytes], block_bytes: int) -> bool:
     w, h = width, height
     for index, level in enumerate(levels):
-        if len(level) != _block_count(w, h) * 16:
+        if len(level) != _block_count(w, h) * block_bytes:
             return False
         if w == 1 and h == 1:
             return index == len(levels) - 1

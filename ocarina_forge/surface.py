@@ -109,12 +109,8 @@ def pack_layer(entries: list[tuple[str, str, Texture]]) -> tuple[Texture | None,
     if not slots:
         return None, ""
     width, height = _output_size(slots)
-    rgba = bytearray(width * height * 4)
-    for index in range(width * height):
-        rgba[index * 4] = _AO_FILL
-        rgba[index * 4 + 1] = _ROUGH_FILL
-        rgba[index * 4 + 2] = _METAL_FILL
-        rgba[index * 4 + 3] = _HEIGHT_FILL
+    pixel = bytes((_AO_FILL, _ROUGH_FILL, _METAL_FILL, _HEIGHT_FILL))
+    rgba = bytearray(pixel * (width * height))
     _write(rgba, width, height, slots.get("ao"), 0)
     _write(rgba, width, height, slots.get("roughness"), 1)
     _write(rgba, width, height, slots.get("metal"), 2)
@@ -279,6 +275,28 @@ def _write(out: bytearray, width: int, height: int, slot, dest: int) -> None:
     if slot is None:
         return
     image, channel, _sampler = slot
+    from ocarina_forge.extension import module
+
+    native = module()
+    if native is not None and image.width > 0 and image.height > 0:
+        try:
+            native.blit_channel(
+                out,
+                int(width),
+                int(height),
+                image.rgba,
+                int(image.width),
+                int(image.height),
+                int(channel),
+                int(dest),
+            )
+            return
+        except Exception:
+            pass
+    _write_py(out, width, height, image, channel, dest)
+
+
+def _write_py(out: bytearray, width: int, height: int, image, channel: int, dest: int) -> None:
     for y in range(height):
         sy = min(image.height - 1, y * image.height // height) if image.height else 0
         for x in range(width):

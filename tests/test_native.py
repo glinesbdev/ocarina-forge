@@ -154,3 +154,100 @@ def test_a_repeated_texture_load_reads_the_file_once(tmp_path, monkeypatch):
     _load_named(dump, None, "Npc_Kokiri_F_01_Alb", [], "opaque", 0.5, {}, raws)
     _load_named(dump, None, "Npc_Kokiri_F_01_Alb", [], "opaque", 0.5, {}, raws)
     assert reads["n"] == 2
+
+
+def _png_pixels(blob: bytes) -> bytes:
+    import struct
+    import zlib
+
+    assert blob.startswith(b"\x89PNG")
+    at = 8
+    width = height = 0
+    payload = b""
+    while at + 8 <= len(blob):
+        size = struct.unpack_from(">I", blob, at)[0]
+        tag = blob[at + 4 : at + 8]
+        data = blob[at + 8 : at + 8 + size]
+        if tag == b"IHDR":
+            width, height = struct.unpack_from(">II", data)
+        elif tag == b"IDAT":
+            payload += data
+        elif tag == b"IEND":
+            break
+        at += 12 + size
+    rows = zlib.decompress(payload)
+    stride = width * 4
+    out = bytearray()
+    for y in range(height):
+        start = y * (stride + 1)
+        assert rows[start] == 0
+        out += rows[start + 1 : start + 1 + stride]
+    return bytes(out)
+
+
+def test_python_pixel_fallbacks_match_the_pure_python_bodies():
+    from ocarina_forge.formats.gltf import limit_rgba, png_rgba
+    from ocarina_forge.formats.gpu import _downsample, encode_bc1
+    from ocarina_forge.models import _has_near_magenta
+
+    rgba = bytes((index * 19) % 256 for index in range(8 * 6 * 4))
+    shrunk = _without_native(lambda: limit_rgba(8, 6, rgba, 4))
+    assert shrunk[0] == 4 and len(shrunk[2]) == shrunk[0] * shrunk[1] * 4
+    assert _png_pixels(png_rgba(8, 6, rgba)) == rgba
+    assert _without_native(lambda: encode_bc1(8, 8, rgba + rgba[: 8 * 2 * 4]))
+    assert _without_native(lambda: _downsample(8, 6, rgba))[0] == 4
+    assert _without_native(lambda: _has_near_magenta(rgba)) is False
+
+
+@pytest.mark.skipif(extension.module() is None, reason="ocarina_forge_native is not built")
+def test_rust_pixel_loops_match_python():
+    from ocarina_forge.formats.bntx import Texture, _noise
+    from ocarina_forge.formats.gltf import limit_rgba, png_rgba
+    from ocarina_forge.formats.gpu import _downsample, _mip_chain, encode_bc1
+    from ocarina_forge.models import _has_near_magenta
+    from ocarina_forge.surface import pack_layer
+
+    images = []
+    for width, height, limit in ((8, 4, 2), (17, 13, 8), (100, 60, 30), (64, 40, 1024)):
+        rgba = bytes((index * 13 + (index // 7)) % 256 for index in range(width * height * 4))
+        images.append((width, height, rgba, limit))
+    for width, height, rgba, limit in images:
+        rust = limit_rgba(width, height, rgba, limit)
+        python = _without_native(lambda width=width, height=height, rgba=rgba, limit=limit: limit_rgba(width, height, rgba, limit))
+        assert rust == python
+        assert _png_pixels(png_rgba(width, height, rgba)) == rgba
+        assert _downsample(width, height, rgba) == _without_native(
+            lambda width=width, height=height, rgba=rgba: _downsample(width, height, rgba)
+        )
+
+    block = bytes((index * 17) % 256 for index in range(32 * 32 * 4))
+    assert encode_bc1(32, 32, block) == _without_native(lambda: encode_bc1(32, 32, block))
+    odd = bytes((index * 3) % 256 for index in range(6 * 6 * 4))
+    assert encode_bc1(6, 6, odd) == _without_native(lambda: encode_bc1(6, 6, odd))
+    image = Texture(name="t", width=32, height=32, rgba=block, fmt=0, codec="bc1", blocks=encode_bc1(32, 32, block))
+    rust_chain = _mip_chain(image)
+    python_chain = _without_native(lambda: _mip_chain(image))
+    assert rust_chain[0] == python_chain[0]
+    assert rust_chain[3] == python_chain[3]
+
+    plain = bytes([20, 30, 40, 255]) * 8
+    dash = bytearray(plain)
+    dash[4:8] = bytes([200, 10, 210, 255])
+    assert _has_near_magenta(plain) is False
+    assert _has_near_magenta(bytes(dash)) is True
+    assert _has_near_magenta(bytes(dash)) == _without_native(lambda: _has_near_magenta(bytes(dash)))
+    noisy = bytes((index * 9) % 256 for index in range(32 * 24 * 4))
+    assert _noise(noisy, 32, 24) == _without_native(lambda: _noise(noisy, 32, 24))
+
+    rough = Texture(
+        name="rough",
+        width=6,
+        height=4,
+        rgba=bytes((index * 11) % 256 for index in range(6 * 4 * 4)),
+        fmt=0,
+    )
+    ao = Texture(name="ao", width=3, height=5, rgba=bytes((80 + index) % 256 for index in range(3 * 5 * 4)), fmt=0)
+    packed = pack_layer([("_rgh0", "roughness", rough), ("_ao0", "ao", ao)])
+    python_pack = _without_native(lambda: pack_layer([("_rgh0", "roughness", rough), ("_ao0", "ao", ao)]))
+    assert packed[0].rgba == python_pack[0].rgba
+    assert packed[0].width == python_pack[0].width

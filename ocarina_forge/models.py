@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-45\0"
+_CACHE_VERSION = b"models-46\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1933,6 +1933,18 @@ def _near_magenta(red: int, green: int, blue: int, alpha: int) -> bool:
 
 
 def _has_near_magenta(rgba: bytes) -> bool:
+    from ocarina_forge.extension import module
+
+    native = module()
+    if native is not None:
+        try:
+            return bool(native.has_near_magenta(rgba))
+        except Exception:
+            pass
+    return _has_near_magenta_py(rgba)
+
+
+def _has_near_magenta_py(rgba: bytes) -> bool:
     for at in range(0, len(rgba) - 3, 4):
         if _near_magenta(rgba[at], rgba[at + 1], rgba[at + 2], rgba[at + 3]):
             return True

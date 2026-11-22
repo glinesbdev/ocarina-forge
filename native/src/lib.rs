@@ -1,18 +1,21 @@
 mod bc7;
 mod decode;
+mod image;
 mod swizzle;
 
 pub use bc7::{bc7_mip_chain, encode_bc7};
-pub use decode::{apply_channels, decode_linear, decode_swizzle};
+pub use decode::{apply_channels, decode_linear, decode_swizzle, noise};
+pub use image::{bc1_mip_chain, blit_channel, downsample, encode_bc1, has_near_magenta, limit_rgba};
 pub use swizzle::{deswizzle, fill_partial_gob, swizzle};
 
 #[cfg(feature = "python")]
 mod py {
     use super::{
-        apply_channels, bc7_mip_chain, decode_linear, decode_swizzle, deswizzle, encode_bc7, fill_partial_gob, swizzle,
+        apply_channels, bc1_mip_chain, bc7_mip_chain, blit_channel, decode_linear, decode_swizzle, deswizzle, downsample,
+        encode_bc1, encode_bc7, fill_partial_gob, has_near_magenta, limit_rgba, noise, swizzle,
     };
     use pyo3::prelude::*;
-    use pyo3::types::PyBytes;
+    use pyo3::types::{PyByteArray, PyByteArrayMethods, PyBytes};
 
     fn order_of(order: Option<&str>) -> Option<&str> {
         match order {
@@ -162,6 +165,72 @@ mod py {
     }
 
     #[pyfunction]
+    #[pyo3(name = "limit_rgba")]
+    fn limit_rgba_py(py: Python<'_>, width: i32, height: i32, rgba: &[u8], limit: i32) -> PyResult<(i32, i32, Py<PyBytes>)> {
+        let owned = rgba.to_vec();
+        let (nw, nh, out) = py.allow_threads(move || limit_rgba(width, height, &owned, limit));
+        Ok((nw, nh, PyBytes::new(py, &out).unbind()))
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "downsample")]
+    fn downsample_py(py: Python<'_>, width: i32, height: i32, rgba: &[u8]) -> PyResult<(i32, i32, Py<PyBytes>)> {
+        let owned = rgba.to_vec();
+        let (nw, nh, out) = py.allow_threads(move || downsample(width, height, &owned));
+        Ok((nw, nh, PyBytes::new(py, &out).unbind()))
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "has_near_magenta")]
+    fn has_near_magenta_py(rgba: &[u8]) -> bool {
+        has_near_magenta(rgba)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "noise")]
+    fn noise_py(rgba: &[u8], width: i32, height: i32) -> f64 {
+        noise(rgba, width, height)
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "encode_bc1")]
+    fn encode_bc1_py(py: Python<'_>, width: u32, height: u32, rgba: &[u8]) -> PyResult<Py<PyBytes>> {
+        let owned = rgba.to_vec();
+        let out = py.allow_threads(move || encode_bc1(width, height, &owned));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "bc1_mip_chain")]
+    fn bc1_mip_chain_py(py: Python<'_>, width: u32, height: u32, rgba: &[u8]) -> PyResult<Vec<Py<PyBytes>>> {
+        let owned = rgba.to_vec();
+        let levels = py.allow_threads(move || bc1_mip_chain(width, height, &owned));
+        Ok(levels
+            .into_iter()
+            .map(|level| PyBytes::new(py, &level).unbind())
+            .collect())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "blit_channel")]
+    fn blit_channel_py(
+        out: &Bound<'_, PyByteArray>,
+        width: i32,
+        height: i32,
+        src: &[u8],
+        src_w: i32,
+        src_h: i32,
+        channel: i32,
+        dest: i32,
+    ) -> PyResult<()> {
+        // The bytearray stays the Python object pack_layer already built.
+        // Nothing in this call resizes it, and the GIL is held.
+        let buffer = unsafe { out.as_bytes_mut() };
+        blit_channel(buffer, width, height, src, src_w, src_h, channel, dest);
+        Ok(())
+    }
+
+    #[pyfunction]
     #[pyo3(name = "apply_channels")]
     fn apply_channels_py(
         py: Python<'_>,
@@ -184,6 +253,13 @@ mod py {
         module.add_function(wrap_pyfunction!(decode_linear_py, module)?)?;
         module.add_function(wrap_pyfunction!(decode_swizzle_py, module)?)?;
         module.add_function(wrap_pyfunction!(apply_channels_py, module)?)?;
+        module.add_function(wrap_pyfunction!(limit_rgba_py, module)?)?;
+        module.add_function(wrap_pyfunction!(downsample_py, module)?)?;
+        module.add_function(wrap_pyfunction!(has_near_magenta_py, module)?)?;
+        module.add_function(wrap_pyfunction!(noise_py, module)?)?;
+        module.add_function(wrap_pyfunction!(encode_bc1_py, module)?)?;
+        module.add_function(wrap_pyfunction!(bc1_mip_chain_py, module)?)?;
+        module.add_function(wrap_pyfunction!(blit_channel_py, module)?)?;
         Ok(())
     }
 }

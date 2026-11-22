@@ -539,7 +539,7 @@ pub fn apply_channels(rgba: &[u8], width: i32, height: i32, channels: &[u8]) -> 
     out
 }
 
-fn noise(rgba: &[u8], width: i32, height: i32) -> f64 {
+pub fn noise(rgba: &[u8], width: i32, height: i32) -> f64 {
     if width < 8 || height < 8 || rgba.len() < (width as usize) * (height as usize) * 4 {
         return 0.0;
     }

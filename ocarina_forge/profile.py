@@ -59,7 +59,9 @@ def profile_dump(
     key = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     from ocarina_forge.formats.gpu import _native_mod
 
-    bc7 = "rust" if _native_mod() is not None else "python"
+    native = _native_mod()
+    bc7 = "rust" if native is not None else "python"
+    pixels = "rust" if native is not None and hasattr(native, "limit_rgba") else "python"
     previous = os.environ.get("OCARINA_FORGE_CACHE")
     private = None
     if not home_cache:
@@ -82,7 +84,9 @@ def profile_dump(
     report["cachePrivate"] = private is not None
     report["cacheKey"] = key
     report["bc7"] = bc7
+    report["pixels"] = pixels
     log(f"native bc7/decode: {bc7}")
+    log(f"native pixels: {pixels}")
     log(
         "Browser dl and up are not in these numbers. "
         "If those dominate Stats on a cold open, stop the Rust port."

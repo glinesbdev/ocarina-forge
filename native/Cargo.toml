@@ -2,7 +2,7 @@
 name = "ocarina-forge-native"
 version = "0.1.0"
 edition = "2021"
-description = "BC7 mode 6 encoder for Ocarina Forge. Bytes in, bytes out, no Python types."
+description = "Hot pixel paths for Ocarina Forge. Bytes in, bytes out, no Python types."
 license = "MIT"
 publish = false
 
