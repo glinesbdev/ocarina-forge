@@ -17,9 +17,10 @@ def test_one_model_profile_writes_cprofile_and_uses_a_private_cache(tmp_path):
     )
     assert out.is_file() and out.stat().st_size > 0
     assert report["cachePrivate"] is True
-    assert report["cacheKey"] == "models-46"
+    assert report["cacheKey"] == "models-47"
     assert report["bc7"] in {"rust", "python"}
     assert report["pixels"] in {"rust", "python"}
+    assert report["mesh"] in {"rust", "python"}
     assert "ocarina-forge-profile-" in report["cache"]
     cold = report["models"]["cold"][0]
     warm = report["models"]["warm"][0]

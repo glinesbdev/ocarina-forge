@@ -1,9 +1,11 @@
 mod bc7;
+mod bfres;
 mod decode;
 mod image;
 mod swizzle;
 
 pub use bc7::{bc7_mip_chain, encode_bc7};
+pub use bfres::{attribute_bounds, attribute_values, decode_attribute, decode_triangles, pack_f32};
 pub use decode::{apply_channels, decode_linear, decode_swizzle, noise};
 pub use image::{bc1_mip_chain, blit_channel, downsample, encode_bc1, has_near_magenta, limit_rgba};
 pub use swizzle::{deswizzle, fill_partial_gob, swizzle};
@@ -11,11 +13,13 @@ pub use swizzle::{deswizzle, fill_partial_gob, swizzle};
 #[cfg(feature = "python")]
 mod py {
     use super::{
-        apply_channels, bc1_mip_chain, bc7_mip_chain, blit_channel, decode_linear, decode_swizzle, deswizzle, downsample,
-        encode_bc1, encode_bc7, fill_partial_gob, has_near_magenta, limit_rgba, noise, swizzle,
+        apply_channels, attribute_bounds, attribute_values, bc1_mip_chain, bc7_mip_chain, blit_channel, decode_attribute,
+        decode_linear,
+        decode_swizzle, decode_triangles, deswizzle, downsample, encode_bc1, encode_bc7, fill_partial_gob, has_near_magenta,
+        limit_rgba, noise, swizzle,
     };
     use pyo3::prelude::*;
-    use pyo3::types::{PyByteArray, PyByteArrayMethods, PyBytes};
+    use pyo3::types::{PyByteArray, PyByteArrayMethods, PyBytes, PyList, PyTuple};
 
     fn order_of(order: Option<&str>) -> Option<&str> {
         match order {
@@ -231,6 +235,104 @@ mod py {
     }
 
     #[pyfunction]
+    #[pyo3(name = "decode_rows")]
+    fn decode_rows_py(
+        py: Python<'_>,
+        buffer: &[u8],
+        count: u32,
+        stride: u32,
+        offset: u32,
+        format: u32,
+    ) -> PyResult<Py<PyAny>> {
+        let owned = buffer.to_vec();
+        let values = py.allow_threads(move || attribute_values(&owned, count, stride, offset, format));
+        let Some(values) = values else {
+            return Ok(py.None());
+        };
+        if count == 0 {
+            return Ok(PyList::empty(py).unbind().into_any());
+        }
+        let width = values.len() / count as usize;
+        if width == 0 || values.len() != count as usize * width {
+            return Ok(py.None());
+        }
+        let list = PyList::empty(py);
+        for chunk in values.chunks(width) {
+            list.append(PyTuple::new(py, chunk.iter().copied())?)?;
+        }
+        Ok(list.unbind().into_any())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "decode_attribute")]
+    fn decode_attribute_py(
+        py: Python<'_>,
+        buffer: &[u8],
+        count: u32,
+        stride: u32,
+        offset: u32,
+        format: u32,
+    ) -> PyResult<Py<PyBytes>> {
+        let owned = buffer.to_vec();
+        let out = py.allow_threads(move || decode_attribute(&owned, count, stride, offset, format));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "attribute_bounds")]
+    fn attribute_bounds_py(
+        py: Python<'_>,
+        buffer: &[u8],
+        count: u32,
+        stride: u32,
+        offset: u32,
+        format: u32,
+    ) -> PyResult<Option<(u32, Py<PyBytes>, Py<PyBytes>)>> {
+        let owned = buffer.to_vec();
+        let found = py.allow_threads(move || attribute_bounds(&owned, count, stride, offset, format));
+        Ok(found.map(|(finite, low, high)| (finite, PyBytes::new(py, &low).unbind(), PyBytes::new(py, &high).unbind())))
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "decode_triangles")]
+    fn decode_triangles_py(
+        py: Python<'_>,
+        blob: &[u8],
+        width: u32,
+        pairs: Vec<u32>,
+        first: u32,
+        primitive: u32,
+    ) -> PyResult<Py<PyBytes>> {
+        let owned = blob.to_vec();
+        let out = py.allow_threads(move || decode_triangles(&owned, width, &pairs, first, primitive));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "pack_f32")]
+    fn pack_f32_py(py: Python<'_>, rows: &Bound<'_, PyAny>, width: usize) -> PyResult<Py<PyBytes>> {
+        if width == 0 || width > 4 {
+            return Ok(PyBytes::new(py, b"").unbind());
+        }
+        let mut out = Vec::new();
+        for item in rows.try_iter()? {
+            let mut got = 0usize;
+            for component in item?.try_iter()? {
+                if got == width {
+                    break;
+                }
+                let value = component?.extract::<f64>()? as f32;
+                out.extend_from_slice(&value.to_le_bytes());
+                got += 1;
+            }
+            if got != width {
+                return Ok(PyBytes::new(py, b"").unbind());
+            }
+        }
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
     #[pyo3(name = "apply_channels")]
     fn apply_channels_py(
         py: Python<'_>,
@@ -260,6 +362,11 @@ mod py {
         module.add_function(wrap_pyfunction!(encode_bc1_py, module)?)?;
         module.add_function(wrap_pyfunction!(bc1_mip_chain_py, module)?)?;
         module.add_function(wrap_pyfunction!(blit_channel_py, module)?)?;
+        module.add_function(wrap_pyfunction!(decode_attribute_py, module)?)?;
+        module.add_function(wrap_pyfunction!(decode_rows_py, module)?)?;
+        module.add_function(wrap_pyfunction!(attribute_bounds_py, module)?)?;
+        module.add_function(wrap_pyfunction!(decode_triangles_py, module)?)?;
+        module.add_function(wrap_pyfunction!(pack_f32_py, module)?)?;
         Ok(())
     }
 }

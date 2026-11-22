@@ -21,9 +21,11 @@ Nothing in it comes from a game.
 
 from __future__ import annotations
 
+import array
 import math
 import re
 import struct
+import sys
 from dataclasses import dataclass, field
 
 from ocarina_forge.formats.bntx import BntxError, Texture, textures as read_bntx
@@ -1572,6 +1574,9 @@ class _File:
                 ranges.append((offset, count))
         else:
             ranges.append((0, index_count))
+        native_indices = _bulk_triangles(blob, width, ranges, first, primitive)
+        if native_indices is not None:
+            return {"indices": native_indices}
         indices: list[int] = []
         for offset, count in ranges:
             for item in range(count):
@@ -1595,13 +1600,16 @@ class _File:
             raise FresError("the shape has no position attribute (_p0)")
         needed = set(lod["indices"])
         count = fvtx["count"]
-        positions = []
-        uvs = [] if uv else None
-        for index in range(count):
-            positions.append(_read_attr(fvtx, position, index)[:3])
-            if uv is not None and uvs is not None:
-                raw = _read_attr(fvtx, uv, index)
-                uvs.append((raw[0], raw[1] if len(raw) > 1 else 0.0))
+        positions = _bulk_taken(fvtx, position, count, 3)
+        uvs = _bulk_taken(fvtx, uv, count, 2) if uv is not None else None
+        if positions is None or (uv is not None and uvs is None):
+            positions = []
+            uvs = [] if uv else None
+            for index in range(count):
+                positions.append(_read_attr(fvtx, position, index)[:3])
+                if uv is not None and uvs is not None:
+                    raw = _read_attr(fvtx, uv, index)
+                    uvs.append((raw[0], raw[1] if len(raw) > 1 else 0.0))
         if needed and max(needed) >= count:
             raise FresError("an index points past the vertex buffer")
         return positions, uvs
@@ -1627,23 +1635,27 @@ def _attr_ranges(fvtx: dict) -> list[dict]:
     for attribute in fvtx.get("attributes") or []:
         name = attribute.get("name") or ""
         fmt = int(attribute.get("format") or 0)
-        lows: list[float] = []
-        highs: list[float] = []
-        count = 0
-        for index in range(count_in):
-            try:
-                raw = _read_attr(fvtx, attribute, index)
-            except (FresError, struct.error, IndexError):
-                break
-            if not raw or any(not math.isfinite(value) for value in raw):
-                continue
-            if not lows:
-                lows = [math.inf] * len(raw)
-                highs = [-math.inf] * len(raw)
-            for slot, value in enumerate(raw):
-                lows[slot] = min(lows[slot], value)
-                highs[slot] = max(highs[slot], value)
-            count += 1
+        bounded = _bulk_bounds(fvtx, attribute, count_in)
+        if bounded is None:
+            lows: list[float] = []
+            highs: list[float] = []
+            count = 0
+            for index in range(count_in):
+                try:
+                    raw = _read_attr(fvtx, attribute, index)
+                except (FresError, struct.error, IndexError):
+                    break
+                if not raw or any(not math.isfinite(value) for value in raw):
+                    continue
+                if not lows:
+                    lows = [math.inf] * len(raw)
+                    highs = [-math.inf] * len(raw)
+                for slot, value in enumerate(raw):
+                    lows[slot] = min(lows[slot], value)
+                    highs[slot] = max(highs[slot], value)
+                count += 1
+        else:
+            count, lows, highs = bounded
         if not count:
             continue
         found.append(
@@ -1790,6 +1802,126 @@ def _attr(attributes: list[dict], names: tuple[str, ...]) -> dict | None:
         if attribute["name"] in names:
             return attribute
     return None
+
+
+def _le_array(kind: str, raw: bytes) -> array.array:
+    values = array.array(kind)
+    values.frombytes(bytes(raw))
+    if sys.byteorder != "little":
+        values.byteswap()
+    return values
+
+
+def _mesh_native():
+    from ocarina_forge.extension import module
+
+    return module()
+
+
+_ATTR_COMPONENTS = {
+    _F32: 1,
+    _F16: 1,
+    _U8: 1,
+    _F32_2: 2,
+    _F16_2: 2,
+    _U8_2: 2,
+    _U16_2: 2,
+    _S16_2: 2,
+    _F32_3: 3,
+    _SN10: 3,
+    _UN10: 3,
+    _F32_4: 4,
+    _F16_4: 4,
+    _U8_4: 4,
+    _S8_4: 4,
+}
+
+
+def _attr_layout(fvtx: dict, attribute: dict):
+    fmt = int(attribute.get("format") or 0)
+    comps = _ATTR_COMPONENTS.get(fmt)
+    if not comps:
+        return None
+    buffer_index = attribute["buffer"]
+    if buffer_index >= len(fvtx["buffers"]):
+        return None
+    stride = fvtx["strides"][buffer_index] or _format_size(fmt)
+    return fvtx["buffers"][buffer_index], int(stride), int(attribute["offset"]), fmt, comps
+
+
+def _bulk_rows(fvtx: dict, attribute: dict, count: int):
+    if count <= 0:
+        return []
+    layout = _attr_layout(fvtx, attribute)
+    native = _mesh_native()
+    if layout is None or native is None:
+        return None
+    blob, stride, offset, fmt, comps = layout
+    try:
+        rows = native.decode_rows(blob, int(count), stride, offset, int(fmt))
+    except Exception:
+        return None
+    if rows is None or len(rows) != count:
+        return None
+    return rows
+
+
+def _bulk_taken(fvtx: dict, attribute: dict, count: int, take: int):
+    rows = _bulk_rows(fvtx, attribute, count)
+    if rows is None:
+        return None
+    if not rows or len(rows[0]) == take:
+        return rows
+    out = []
+    for raw in rows:
+        if take == 2:
+            out.append((raw[0], raw[1] if len(raw) > 1 else 0.0))
+        else:
+            out.append(tuple(raw[:take]))
+    return out
+
+
+def _bulk_bounds(fvtx: dict, attribute: dict, count: int):
+    if count <= 0:
+        return 0, [], []
+    layout = _attr_layout(fvtx, attribute)
+    native = _mesh_native()
+    if layout is None or native is None:
+        return None
+    blob, stride, offset, fmt, comps = layout
+    try:
+        found = native.attribute_bounds(blob, int(count), stride, offset, int(fmt))
+    except Exception:
+        return None
+    if not found:
+        return None
+    finite, low, high = found
+    finite = int(finite)
+    if finite <= 0:
+        return 0, [], []
+    if len(low) != comps * 8 or len(high) != comps * 8:
+        return None
+    return finite, list(_le_array("d", low)), list(_le_array("d", high))
+
+
+def _bulk_triangles(blob: bytes, width: int, ranges: list[tuple[int, int]], first: int, primitive: int):
+    if primitive not in (3, 4) or width not in (1, 2, 4):
+        return None
+    native = _mesh_native()
+    if native is None:
+        return None
+    pairs = []
+    expect = 0
+    for offset, count in ranges:
+        pairs.extend((int(offset), int(count)))
+        expect += int(count)
+    try:
+        raw = native.decode_triangles(blob, int(width), pairs, int(first) & 0xFFFFFFFF, int(primitive))
+    except Exception:
+        return None
+    if len(raw) % 4 or (not raw and expect):
+        return None
+    return _le_array("I", raw).tolist()
 
 
 def _read_index(fvtx: dict, attribute: dict, index: int) -> int:
@@ -2603,13 +2735,15 @@ def _extra_uvs(fvtx: dict, count: int) -> dict[str, list[tuple[float, float]]]:
         name = attribute.get("name") or ""
         if name not in {"_u1", "_u2", "u1", "u2"}:
             continue
-        channel = []
-        try:
-            for index in range(count):
-                raw = _read_attr(fvtx, attribute, index)
-                channel.append((float(raw[0]), float(raw[1]) if len(raw) > 1 else 0.0))
-        except (FresError, struct.error, IndexError):
-            continue
+        channel = _bulk_taken(fvtx, attribute, count, 2)
+        if channel is None:
+            channel = []
+            try:
+                for index in range(count):
+                    raw = _read_attr(fvtx, attribute, index)
+                    channel.append((float(raw[0]), float(raw[1]) if len(raw) > 1 else 0.0))
+            except (FresError, struct.error, IndexError):
+                continue
         if len(channel) == count:
             found[name if name.startswith("_") else f"_{name}"] = channel
     return found
@@ -2620,18 +2754,32 @@ def _colors(fvtx: dict, count: int) -> list[tuple[float, float, float, float]] |
     attribute = _attr(fvtx["attributes"], ("_c0", "c0", "_c"))
     if attribute is None or count <= 0:
         return None
+    rows = _bulk_rows(fvtx, attribute, count)
+    if rows is None:
+        found = []
+        for index in range(count):
+            try:
+                raw = _read_attr(fvtx, attribute, index)
+            except (FresError, struct.error, IndexError):
+                return None
+            if len(raw) >= 4:
+                found.append((float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3])))
+            elif len(raw) == 3:
+                found.append((float(raw[0]), float(raw[1]), float(raw[2]), 1.0))
+            elif len(raw) == 1:
+                found.append((float(raw[0]), float(raw[0]), float(raw[0]), 1.0))
+            else:
+                return None
+        return found
+    width = len(rows[0]) if rows else 0
+    if width == 4:
+        return rows
     found = []
-    for index in range(count):
-        try:
-            raw = _read_attr(fvtx, attribute, index)
-        except (FresError, struct.error, IndexError):
-            return None
-        if len(raw) >= 4:
-            found.append((float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3])))
-        elif len(raw) == 3:
-            found.append((float(raw[0]), float(raw[1]), float(raw[2]), 1.0))
-        elif len(raw) == 1:
-            found.append((float(raw[0]), float(raw[0]), float(raw[0]), 1.0))
+    for raw in rows:
+        if width == 3:
+            found.append((raw[0], raw[1], raw[2], 1.0))
+        elif width == 1:
+            found.append((raw[0], raw[0], raw[0], 1.0))
         else:
             return None
     return found

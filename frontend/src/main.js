@@ -238,7 +238,9 @@ $("settings-form").addEventListener("submit", async (event) => {
     const previous = localStorage.getItem("ocarinaforge.gpuTextures") === "0" ? "0" : "1";
     const next = $("gpu-textures").checked ? "1" : "0";
     localStorage.setItem("ocarinaforge.gpuTextures", next);
-    await api.saveConfig({ workers: Number($("worker-count").value) });
+    const workers = Number($("worker-count").value);
+    await api.saveConfig({ workers });
+    viewport.setConvertSlots(workers);
     if (previous !== next && !$("gpu-textures").disabled) {
       window.location.reload();
       return;
@@ -464,6 +466,7 @@ async function boot() {
     return;
   }
   renderChrome();
+  viewport.setConvertSlots(state.status.workers && state.status.workers.count);
   refreshHotReload();
   if (!dumpReady()) {
     showGate();

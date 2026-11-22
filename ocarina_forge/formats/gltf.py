@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import array
 import json
 import struct
+import sys
 import zlib
 from dataclasses import dataclass
 
@@ -265,6 +267,38 @@ def face_normals(positions: list[tuple[float, float, float]], indices: list[int]
     return out
 
 
+def _pack_f32(rows, width: int) -> bytes:
+    """Little-endian f32. The crate walks the tuples. ``array`` is the fallback."""
+    native = None
+    try:
+        from ocarina_forge.extension import module
+
+        native = module()
+    except Exception:
+        native = None
+    if native is not None and width:
+        try:
+            packed = native.pack_f32(rows, int(width))
+        except Exception:
+            packed = b""
+        if len(packed) == len(rows) * width * 4:
+            return bytes(packed)
+    flat = array.array("f")
+    for row in rows:
+        for index in range(width):
+            flat.append(float(row[index]))
+    if sys.byteorder != "little":
+        flat.byteswap()
+    return flat.tobytes()
+
+
+def _pack_indices(indices: list[int], use_short: bool) -> bytes:
+    packed = array.array("H" if use_short else "I", indices)
+    if sys.byteorder != "little":
+        packed.byteswap()
+    return packed.tobytes()
+
+
 def to_glb(primitives: list[Primitive]) -> bytes:
     bin_blob = bytearray()
     buffer_views = []
@@ -314,38 +348,31 @@ def to_glb(primitives: list[Primitive]) -> bytes:
         if len(indices) % 3:
             indices = indices[: len(indices) - (len(indices) % 3)]
         normals = prim.normals or face_normals(positions, indices)
-        pos_bytes = b"".join(struct.pack("<3f", *xyz) for xyz in positions)
+        pos_bytes = _pack_f32(positions, 3)
         min_p = [min(p[axis] for p in positions) for axis in range(3)]
         max_p = [max(p[axis] for p in positions) for axis in range(3)]
         use_short = max(indices) < 65535
-        idx_bytes = b"".join(struct.pack("<H" if use_short else "<I", index) for index in indices)
-        nrm_bytes = b"".join(struct.pack("<3f", *xyz) for xyz in normals)
+        idx_bytes = _pack_indices(indices, use_short)
+        nrm_bytes = _pack_f32(normals, 3)
         attributes = {
             "POSITION": accessor(view(pos_bytes, 34962), len(positions), "VEC3", 5126, min_p, max_p),
             "NORMAL": accessor(view(nrm_bytes, 34962), len(normals), "VEC3", 5126),
         }
         if prim.uvs and len(prim.uvs) == len(positions):
-            uv_bytes = b"".join(struct.pack("<2f", u, v) for u, v in prim.uvs)
-            attributes["TEXCOORD_0"] = accessor(view(uv_bytes, 34962), len(prim.uvs), "VEC2", 5126)
+            attributes["TEXCOORD_0"] = accessor(view(_pack_f32(prim.uvs, 2), 34962), len(prim.uvs), "VEC2", 5126)
         if prim.uvs2 and len(prim.uvs2) == len(positions):
-            uv_bytes = b"".join(struct.pack("<2f", u, v) for u, v in prim.uvs2)
-            attributes["TEXCOORD_1"] = accessor(view(uv_bytes, 34962), len(prim.uvs2), "VEC2", 5126)
+            attributes["TEXCOORD_1"] = accessor(view(_pack_f32(prim.uvs2, 2), 34962), len(prim.uvs2), "VEC2", 5126)
         if prim.shades and len(prim.shades) == len(positions):
-            shade_bytes = b"".join(struct.pack("<2f", weight, shade) for weight, shade in prim.shades)
-            attributes["TEXCOORD_2"] = accessor(view(shade_bytes, 34962), len(prim.shades), "VEC2", 5126)
+            attributes["TEXCOORD_2"] = accessor(view(_pack_f32(prim.shades, 2), 34962), len(prim.shades), "VEC2", 5126)
         if prim.marks and len(prim.marks) == len(positions):
-            mark_bytes = b"".join(struct.pack("<2f", hue, folder) for hue, folder in prim.marks)
-            attributes["TEXCOORD_3"] = accessor(view(mark_bytes, 34962), len(prim.marks), "VEC2", 5126)
+            attributes["TEXCOORD_3"] = accessor(view(_pack_f32(prim.marks, 2), 34962), len(prim.marks), "VEC2", 5126)
         if prim.colors and len(prim.colors) == len(positions):
             wide = any(len(item) >= 4 for item in prim.colors)
             if wide:
-                color_bytes = b"".join(
-                    struct.pack("<4f", item[0], item[1], item[2], item[3] if len(item) > 3 else 1.0) for item in prim.colors
-                )
-                attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC4", 5126)
+                padded = [item if len(item) > 3 else (item[0], item[1], item[2], 1.0) for item in prim.colors]
+                attributes["COLOR_0"] = accessor(view(_pack_f32(padded, 4), 34962), len(prim.colors), "VEC4", 5126)
             else:
-                color_bytes = b"".join(struct.pack("<3f", item[0], item[1], item[2]) for item in prim.colors)
-                attributes["COLOR_0"] = accessor(view(color_bytes, 34962), len(prim.colors), "VEC3", 5126)
+                attributes["COLOR_0"] = accessor(view(_pack_f32(prim.colors, 3), 34962), len(prim.colors), "VEC3", 5126)
         index_accessor = accessor(view(idx_bytes, 34963), len(indices), "SCALAR", 5123 if use_short else 5125)
         def image_index_for(blob: bytes | None) -> int | None:
             if not blob:

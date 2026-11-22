@@ -62,6 +62,7 @@ def profile_dump(
     native = _native_mod()
     bc7 = "rust" if native is not None else "python"
     pixels = "rust" if native is not None and hasattr(native, "limit_rgba") else "python"
+    mesh = "rust" if native is not None and hasattr(native, "decode_attribute") else "python"
     previous = os.environ.get("OCARINA_FORGE_CACHE")
     private = None
     if not home_cache:
@@ -85,8 +86,10 @@ def profile_dump(
     report["cacheKey"] = key
     report["bc7"] = bc7
     report["pixels"] = pixels
+    report["mesh"] = mesh
     log(f"native bc7/decode: {bc7}")
     log(f"native pixels: {pixels}")
+    log(f"native mesh: {mesh}")
     log(
         "Browser dl and up are not in these numbers. "
         "If those dominate Stats on a cold open, stop the Rust port."

@@ -251,3 +251,150 @@ def test_rust_pixel_loops_match_python():
     python_pack = _without_native(lambda: pack_layer([("_rgh0", "roughness", rough), ("_ao0", "ao", ao)]))
     assert packed[0].rgba == python_pack[0].rgba
     assert packed[0].width == python_pack[0].width
+
+
+def _same_rows(got, expected) -> bool:
+    if len(got) != len(expected):
+        return False
+    for left, right in zip(got, expected):
+        if len(left) != len(right):
+            return False
+        for a, b in zip(left, right):
+            if math.isnan(a) and math.isnan(b):
+                continue
+            if a != b:
+                return False
+    return True
+
+
+def _f64s(raw: bytes) -> list[float]:
+    import array
+
+    values = array.array("d")
+    values.frombytes(raw)
+    return list(values)
+
+
+def _u32s(raw: bytes) -> list[int]:
+    import array
+
+    values = array.array("I")
+    values.frombytes(raw)
+    return list(values)
+
+
+def test_python_mesh_fallback_still_reads_a_vertex():
+    from ocarina_forge.formats.bfres import _F32_3, _decode
+
+    blob = struct_f32(1.0, 2.0, 3.0)
+    assert _without_native(lambda: _decode(blob, 0, _F32_3)) == (1.0, 2.0, 3.0)
+
+
+def struct_f32(*values: float) -> bytes:
+    import struct
+
+    return struct.pack("<" + "f" * len(values), *values)
+
+
+@pytest.mark.skipif(extension.module() is None, reason="ocarina_forge_native is not built")
+def test_rust_attributes_and_triangles_match_python():
+    import struct
+
+    from ocarina_forge.formats.bfres import (
+        _F16,
+        _F16_2,
+        _F16_4,
+        _F32,
+        _F32_2,
+        _F32_3,
+        _F32_4,
+        _S16_2,
+        _S8_4,
+        _SN10,
+        _U16_2,
+        _U8,
+        _U8_2,
+        _U8_4,
+        _UN10,
+        _decode,
+        _format_size,
+        _triangles,
+    )
+
+    native = extension.module()
+    formats = (
+        _F32,
+        _F32_2,
+        _F32_3,
+        _F32_4,
+        _F16,
+        _F16_2,
+        _F16_4,
+        _U8,
+        _U8_2,
+        _U8_4,
+        _S8_4,
+        _U16_2,
+        _S16_2,
+        _SN10,
+        _UN10,
+    )
+    for fmt in formats:
+        size = _format_size(fmt)
+        count = 6
+        stride = size + 3
+        offset = 2
+        body = bytearray()
+        for index in range(count):
+            body += bytes((index * 17 + slot * 3) % 256 for slot in range(size))
+            body += b"\xab\xcd\xef"
+        blob = b"\x11\x22" + bytes(body)
+        python = [_decode(blob, index * stride + offset, fmt) for index in range(count)]
+        raw = native.decode_attribute(blob, count, stride, offset, fmt)
+        flat = _f64s(raw)
+        width = len(python[0])
+        got = [tuple(flat[index * width : (index + 1) * width]) for index in range(count)]
+        assert _same_rows(got, python)
+        finite, low, high = native.attribute_bounds(blob, count, stride, offset, fmt)
+        kept = [row for row in python if all(math.isfinite(value) for value in row)]
+        assert finite == len(kept)
+        if kept:
+            assert _f64s(low) == [min(row[slot] for row in kept) for slot in range(width)]
+            assert _f64s(high) == [max(row[slot] for row in kept) for slot in range(width)]
+
+    signed = bytes([0x80, 0, 127, 1])
+    assert native.decode_attribute(signed, 1, 0, 0, _S8_4)
+    assert _f64s(native.decode_attribute(signed, 1, 0, 0, _S8_4))[0] == -128 / 127.0
+    half = struct.pack("<HHHH", 0x3C00, 0xC000, 0x0001, 0x7C00)
+    values = _f64s(native.decode_attribute(half, 1, 0, 0, _F16_4))
+    assert values[0] == 1.0
+    assert values[1] == -2.0
+    assert 0 < values[2] < 1e-6
+    assert values[3] == float("inf")
+    assert native.decode_attribute(b"\x00\x00", 4, 0, 0, _F32) == b""
+
+    nan = struct.pack("<fff", float("nan"), 1.0, 1.0)
+    one = struct.pack("<fff", 2.0, 3.0, 4.0)
+    finite, low, high = native.attribute_bounds(nan + one, 2, 12, 0, _F32_3)
+    assert finite == 1
+    assert _f64s(low) == [2.0, 3.0, 4.0]
+    assert _f64s(high) == [2.0, 3.0, 4.0]
+
+    strip = bytes([0, 1, 2, 3, 3])
+    assert _u32s(native.decode_triangles(strip, 1, [0, 5], 10, 4)) == [index + 10 for index in _triangles([0, 1, 2, 3, 3], 4)]
+    listed = bytes([0, 1, 2, 3, 4, 5, 6])
+    assert _u32s(native.decode_triangles(listed, 1, [0, 7], 0, 3)) == _triangles(list(listed), 3)
+    assert native.decode_triangles(listed, 1, [0, 3], 0, 1) == b""
+
+
+def test_glb_float_pack_matches_struct():
+    import struct
+
+    from ocarina_forge.formats.gltf import _pack_f32, _pack_indices
+
+    rows = [(1.5, -2.25, 0.1), (math.pi, 1e-8, -0.0)]
+    assert _pack_f32(rows, 3) == b"".join(struct.pack("<3f", *row) for row in rows)
+    uvs = [(0.0, 1.0), (0.5, -0.25)]
+    assert _pack_f32(uvs, 2) == b"".join(struct.pack("<2f", *row) for row in uvs)
+    assert _pack_indices([0, 1, 70000], False) == struct.pack("<III", 0, 1, 70000)
+    assert _pack_indices([0, 1, 2], True) == struct.pack("<HHH", 0, 1, 2)

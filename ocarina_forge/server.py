@@ -83,6 +83,7 @@ _POOL_LOCK = threading.Lock()
 _POOL_SIZE = 0
 _POOL_INFLIGHT = 0
 _POOL_WANT: int | None = None
+_PREFETCH: set[asyncio.Task] = set()
 
 
 def _configured_workers() -> tuple[int, int, str]:
@@ -846,7 +847,20 @@ async def models_batch(body: dict):
                 found[name] = _queued_model(name)
         return found
 
-    return {"models": await asyncio.to_thread(lookup)}
+    found = await asyncio.to_thread(lookup)
+    # The page only asks for a handful of glbs at once. Start the rest on the
+    # process pool now, so a scene open is not limited to those slots. The
+    # loop keeps only a weak reference to a task, so the set holds them. One
+    # worker keeps the old path: the batch stays a lookup, and the GET starts
+    # the convert. That is what the single-worker cache test locks.
+    count, _, _ = _configured_workers()
+    if count > 1:
+        for name, info in found.items():
+            if info.get("status") == "queued":
+                task = asyncio.create_task(_describe_model(name, interactive=True))
+                _PREFETCH.add(task)
+                task.add_done_callback(_PREFETCH.discard)
+    return {"models": found}
 
 
 @app.get("/api/models/{gyaml}")

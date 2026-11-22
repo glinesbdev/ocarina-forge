@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-46\0"
+_CACHE_VERSION = b"models-47\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -600,7 +600,10 @@ def _touch_bntx(key: str) -> None:
 def _remember_bntx(key: str, decoded: list) -> None:
     _BNTX_MEM[key] = decoded
     _touch_bntx(key)
-    while len(_BNTX_ORDER) > 32:
+    # A scene reuses the same bricks across hundreds of models. 32 slots
+    # threw them out, and the next model zlib-decompressed the cache file
+    # again. That read sits outside the texture clock, in the profile's other.
+    while len(_BNTX_ORDER) > 512:
         old = _BNTX_ORDER.pop(0)
         _BNTX_MEM.pop(old, None)
 

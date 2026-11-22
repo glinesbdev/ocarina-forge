@@ -166,7 +166,9 @@ export async function createViewport(host, hooks) {
   }));
   const templateCache = new Map();
   const modelRequests = new Map();
-  const GLB_SLOTS = 8;
+  // The server pool (one core left free) does the converts. The page only
+// parses this many glbs at once; GLTFLoader.parse is on the main thread.
+let convertSlots = 8;
   const metaCache = new Map();
   const categories = { area: "show", system: "show" };
   const boxCategories = {
@@ -872,7 +874,7 @@ export async function createViewport(host, hooks) {
       loadQueue = queue;
       statQueued = queue.length;
       publish(queue.length === 0);
-      const workers = Math.min(GLB_SLOTS, queue.length);
+      const workers = Math.min(convertSlots, queue.length);
       if (workers) await Promise.all(Array.from({ length: workers }, () => glbWorker()));
       if (token !== generation) return;
       // Models that were already on screen stay until this rebuild swaps them.
@@ -2713,6 +2715,12 @@ uniform float terrainLayerMissing;`
     frame,
     spawnPoint,
     resize,
+    setConvertSlots(count) {
+      const parsed = Number(count);
+      const cores = typeof navigator !== "undefined" && navigator.hardwareConcurrency ? navigator.hardwareConcurrency - 1 : 8;
+      const wanted = Number.isFinite(parsed) && parsed > 0 ? parsed : cores;
+      convertSlots = Math.max(1, Math.min(16, wanted));
+    },
     setWarm(status) {
       const total = status && Number(status.total);
       statWarmDone = total ? Number(status.done) || 0 : null;
