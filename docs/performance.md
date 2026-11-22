@@ -245,7 +245,7 @@ The remaining glb time is `face_normals`, which runs inside `to_glb`. The float 
 
 Air walls and effect locators (`EftLoc_`, `Loc_`, `Tag_`, `TeraTreeTag_`, and any name containing `AirWall` or `Locator`) are markers. They stay boxes. The editor does not log an error for each one, and profile does not print a "No model" line for them. An actor that should have a mesh and does not still says `No model`.
 
-There is no new house or scene wall time for this build. The 5.5 s house line and the 280 s scene total are the before. The log must say `native bc7/decode: rust`, `native pixels: rust`, and `native mesh: rust`. `native mesh: rust` now also means face normals. An extension from `dcaac45` has no `face_normals` and stays on the Python normal loop. The private cache is removed at the end. Pass `--keep-cache` to inspect it. The command below prints one house, then a cold total for each Kokiri child banc and the castle.
+There is no new house or scene wall time for this build. The 5.5 s house line and the 280 s scene total are the before. The log must say `native bc7/decode: rust`, `native pixels: rust`, `native mesh: rust`, and `native normals: rust`. An extension from `dcaac45` prints `native normals: python` and stays on the Python normal loop. The private cache is removed at the end. Pass `--keep-cache` to inspect it. The command below prints one house, then a cold total for each Kokiri child banc and the castle.
 
 ```bash
 pip install maturin
