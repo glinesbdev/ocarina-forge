@@ -15,6 +15,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
 
 import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
+import { isMarker } from "./problems.js";
 import { canHoverFocus } from "./focus.js";
 import { shouldReloadTerrain } from "./terrain.js";
 import { createBackendRenderer, drawTotal } from "./backend.js";
@@ -804,7 +805,7 @@ let convertSlots = 8;
               await deliver(gyaml, meta, template);
             } catch (error) {
               const message = error.message || "The glTF did not load.";
-              console.error(`${gyaml}: ${message}`);
+              if (!isMarker(gyaml)) console.error(`${gyaml}: ${message}`);
               boxes += 1;
               for (const entry of entries.values()) {
                 if (entry.gyaml === gyaml) failEntry(entry, meta, message);

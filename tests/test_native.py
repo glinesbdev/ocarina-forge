@@ -387,6 +387,19 @@ def test_rust_attributes_and_triangles_match_python():
     assert native.decode_triangles(listed, 1, [0, 3], 0, 1) == b""
 
 
+def test_face_normals_match_python_and_skip_a_bad_index():
+    from ocarina_forge.formats.gltf import face_normals
+
+    positions = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 1.0)]
+    indices = [0, 1, 2, 1, 3, 2, 9, 9, 9]
+    rust = face_normals(positions, indices)
+    python = _without_native(lambda: face_normals(positions, indices))
+    assert rust == python
+    assert abs(rust[0][1]) == 1.0
+    flat = [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+    assert face_normals(flat, [0, 1, 2]) == [(0.0, 1.0, 0.0)] * 3
+
+
 def test_glb_float_pack_matches_struct():
     import struct
 

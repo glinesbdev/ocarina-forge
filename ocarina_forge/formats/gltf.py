@@ -240,6 +240,20 @@ def png_rgba(width: int, height: int, rgba: bytes) -> bytes:
 
 
 def face_normals(positions: list[tuple[float, float, float]], indices: list[int]) -> list[tuple[float, float, float]]:
+    native = None
+    try:
+        from ocarina_forge.extension import module
+
+        native = module()
+    except Exception:
+        native = None
+    if native is not None and hasattr(native, "face_normals") and positions:
+        try:
+            rows = native.face_normals(positions, indices)
+        except Exception:
+            rows = None
+        if rows is not None and len(rows) == len(positions):
+            return rows
     normals = [[0.0, 0.0, 0.0] for _ in positions]
     for index in range(0, len(indices) - 2, 3):
         a, b, c = indices[index], indices[index + 1], indices[index + 2]
@@ -290,6 +304,25 @@ def _pack_f32(rows, width: int) -> bytes:
     if sys.byteorder != "little":
         flat.byteswap()
     return flat.tobytes()
+
+
+def _normal_bytes(positions, indices) -> bytes:
+    """Packed f32 normals. The crate skips the Python tuple list."""
+    native = None
+    try:
+        from ocarina_forge.extension import module
+
+        native = module()
+    except Exception:
+        native = None
+    if native is not None and hasattr(native, "face_normal_bytes") and positions:
+        try:
+            packed = native.face_normal_bytes(positions, indices)
+        except Exception:
+            packed = b""
+        if len(packed) == len(positions) * 12:
+            return bytes(packed)
+    return _pack_f32(face_normals(positions, indices), 3)
 
 
 def _pack_indices(indices: list[int], use_short: bool) -> bytes:
@@ -347,16 +380,15 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             continue
         if len(indices) % 3:
             indices = indices[: len(indices) - (len(indices) % 3)]
-        normals = prim.normals or face_normals(positions, indices)
         pos_bytes = _pack_f32(positions, 3)
         min_p = [min(p[axis] for p in positions) for axis in range(3)]
         max_p = [max(p[axis] for p in positions) for axis in range(3)]
         use_short = max(indices) < 65535
         idx_bytes = _pack_indices(indices, use_short)
-        nrm_bytes = _pack_f32(normals, 3)
+        nrm_bytes = _normal_bytes(positions, indices) if not prim.normals else _pack_f32(prim.normals, 3)
         attributes = {
             "POSITION": accessor(view(pos_bytes, 34962), len(positions), "VEC3", 5126, min_p, max_p),
-            "NORMAL": accessor(view(nrm_bytes, 34962), len(normals), "VEC3", 5126),
+            "NORMAL": accessor(view(nrm_bytes, 34962), len(positions), "VEC3", 5126),
         }
         if prim.uvs and len(prim.uvs) == len(positions):
             attributes["TEXCOORD_0"] = accessor(view(_pack_f32(prim.uvs, 2), 34962), len(prim.uvs), "VEC2", 5126)

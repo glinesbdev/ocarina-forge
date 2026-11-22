@@ -5,6 +5,8 @@ Ocarina Forge never writes into the dump. Mods are built beside it, under mods/.
 
 from __future__ import annotations
 
+import threading
+from collections import deque
 from pathlib import Path
 
 from ocarina_forge.errors import BancError
@@ -12,6 +14,45 @@ from ocarina_forge.formats.byml import loads
 from ocarina_forge.formats.zsio import DictSet, decompress
 
 RSTB_REL = "System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs"
+
+# A scene re-reads the same Tex file from every model that uses it. The
+# decompressed bytes are what the profile's other bucket was spending on zstd.
+_READ_CAP = 512 * 1024 * 1024
+_READ_LOCK = threading.Lock()
+_READ_CACHE: dict[tuple, tuple[bytes, int | None]] = {}
+_READ_ORDER: deque[tuple] = deque()
+_READ_BYTES = 0
+
+
+def _recall_read(key: tuple) -> tuple[bytes, int | None] | None:
+    with _READ_LOCK:
+        found = _READ_CACHE.get(key)
+        if found is None:
+            return None
+        try:
+            _READ_ORDER.remove(key)
+        except ValueError:
+            pass
+        _READ_ORDER.append(key)
+        return found
+
+
+def _remember_read(key: tuple, payload: bytes, dict_id: int | None) -> None:
+    global _READ_BYTES
+    size = len(payload)
+    if size <= 0 or size > _READ_CAP:
+        return
+    with _READ_LOCK:
+        if key in _READ_CACHE:
+            return
+        while _READ_ORDER and _READ_BYTES + size > _READ_CAP:
+            old = _READ_ORDER.popleft()
+            dropped = _READ_CACHE.pop(old, None)
+            if dropped is not None:
+                _READ_BYTES -= len(dropped[0])
+        _READ_CACHE[key] = (payload, dict_id)
+        _READ_ORDER.append(key)
+        _READ_BYTES += size
 
 
 def resolve_dump(path: Path) -> tuple[Path, Path]:
@@ -94,7 +135,17 @@ class Dump:
                 f"{relative} is not in this dump ({self.romfs}).",
                 "not_found",
             )
-        return decompress(path.read_bytes(), self.dicts())
+        try:
+            st = path.stat()
+        except OSError as exc:
+            raise BancError(f"Cannot read {relative}: {exc}", "not_found") from exc
+        key = (str(path), st.st_size, st.st_mtime_ns)
+        cached = _recall_read(key)
+        if cached is not None:
+            return cached
+        payload, dict_id = decompress(path.read_bytes(), self.dicts())
+        _remember_read(key, payload, dict_id)
+        return payload, dict_id
 
     def read_byml(self, relative: str):
         payload, dict_id = self.read_file(relative)

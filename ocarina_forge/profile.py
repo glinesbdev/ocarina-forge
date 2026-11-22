@@ -2,8 +2,10 @@
 
 Profile points ``OCARINA_FORGE_CACHE`` at a fresh directory unless
 ``--home-cache`` is set, so it does not read ``~/.cache/ocarina-forge``.
-A cold ``cache=miss`` is that private directory. The glb cache key is
-unchanged by this command.
+A cold ``cache=miss`` is that private directory. It lives under
+``~/.cache/ocarina-forge/profile-tmp`` and is deleted when the command
+finishes, unless ``--keep-cache`` is set. The glb cache key is unchanged
+by this command.
 
 ``--model`` times one actor and can write a cProfile file. A scene walk is
 one model at a time unless ``--jobs`` is greater than 1. ``--limit`` stops
@@ -16,6 +18,7 @@ from __future__ import annotations
 import functools
 import io
 import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -29,6 +32,7 @@ _ORDER = (
     ("indices", "inside bfres: index buffer"),
     ("swizzle", "inside texture: deswizzle"),
     ("decode", "inside texture: ASTC, BC, or RGBA decode"),
+    ("texread", "texture file read and zstd, outside the texture clock"),
     ("meshopt", "meshopt simplify, or the Python lod fallback"),
     ("encode", "JPEG, PNG, or GPU container"),
     ("glb", "glTF pack and meshopt compression"),
@@ -43,6 +47,7 @@ def profile_dump(
     limit: int = 0,
     jobs: int = 1,
     home_cache: bool = False,
+    keep_cache: bool = False,
     log=print,
 ) -> dict:
     """Cold then warm. One model, or Kokiri child and Hyrule Castle when no model is named."""
@@ -66,11 +71,11 @@ def profile_dump(
     previous = os.environ.get("OCARINA_FORGE_CACHE")
     private = None
     if not home_cache:
-        private = Path(tempfile.mkdtemp(prefix="ocarina-forge-profile-"))
+        private = _private_cache_dir()
         os.environ["OCARINA_FORGE_CACHE"] = str(private)
     _install()
     try:
-        _announce_cache(private, key, log)
+        _announce_cache(private, key, keep_cache, log)
         if names:
             report = _profile_names(dump, names, cprofile=cprofile, jobs=jobs, log=log)
         else:
@@ -81,7 +86,11 @@ def profile_dump(
             os.environ.pop("OCARINA_FORGE_CACHE", None)
         else:
             os.environ["OCARINA_FORGE_CACHE"] = previous
+        if private is not None and not keep_cache:
+            shutil.rmtree(private, ignore_errors=True)
+            log(f"cache removed {private}")
     report["cache"] = str(private) if private is not None else "home"
+    report["cacheKept"] = bool(private is not None and keep_cache)
     report["cachePrivate"] = private is not None
     report["cacheKey"] = key
     report["bc7"] = bc7
@@ -97,7 +106,19 @@ def profile_dump(
     return report
 
 
-def _announce_cache(private: Path | None, key: str, log) -> None:
+def _private_cache_dir() -> Path:
+    """A disk folder, not ``/tmp``. ``/tmp`` on the measured machine is a 16 GB tmpfs."""
+    from ocarina_forge.locate import user_cache_root
+
+    root = user_cache_root() / "profile-tmp"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="ocarina-forge-profile-", dir=root))
+    except OSError:
+        return Path(tempfile.mkdtemp(prefix="ocarina-forge-profile-"))
+
+
+def _announce_cache(private: Path | None, key: str, keep_cache: bool, log) -> None:
     from ocarina_forge.locate import user_cache_root
 
     home = user_cache_root() / "models"
@@ -105,9 +126,10 @@ def _announce_cache(private: Path | None, key: str, log) -> None:
         active = os.environ.get("OCARINA_FORGE_CACHE") or str(home)
         log(f"cache: {active} (the normal model cache). Key {key}. A file already converted with that key is a hit.")
         return
+    kept = "It is left in place." if keep_cache else "It is deleted when this command finishes."
     log(
         f"cache: private {private}. This does not read {home}, so a cold cache=miss is expected. "
-        f"Key {key} is not changed by profile."
+        f"Key {key} is not changed by profile. {kept}"
     )
 
 
@@ -310,6 +332,7 @@ def _patch(buckets: dict[str, float]):
         (bfres, "_extra_uvs", "vertices"),
         (bntx, "deswizzle", "swizzle"),
         (bntx, "_decode", "decode"),
+        (models, "_read_tex", "texread"),
         (models, "meshopt_available", "meshopt"),
         (models, "simplify_mesh", "meshopt"),
         (models, "cluster_lod", "meshopt"),
@@ -377,12 +400,16 @@ def _print_stages(log, row: dict) -> None:
     log(f"  {'convert':10} {convert:10.2f} ms  cache={row.get('cache') or '-'}")
     log(
         f"  {'other':10} {other:10.2f} ms  "
-        "convert minus bfres, meshopt, encode, glb, and texture. zstd is not subtracted."
+        "convert minus bfres, texread, meshopt, encode, glb, and texture. zstd is not subtracted."
     )
 
 
 def _brief(row: dict) -> str:
-    reason = f" {row['reason']}" if row.get("status") not in ("mesh", "") and row.get("reason") else ""
+    reason = row.get("reason") or ""
+    if row.get("status") == "box" and reason.startswith("Marker"):
+        reason = ""
+    else:
+        reason = f" {reason}" if row.get("status") not in ("mesh", "") and reason else ""
     return (
         f"{row['name']} status={row.get('status') or '-'} cache={row.get('cache') or '-'} "
         f"convert={row.get('convertMs')} ms texture={row.get('textureMs')} ms{reason}"

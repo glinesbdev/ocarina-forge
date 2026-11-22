@@ -1,3 +1,16 @@
+/** Effect locators, tags, and air walls are boxes. A missing mesh is not a failure. */
+export function isMarker(gyaml) {
+  const name = gyaml || "";
+  return (
+    name.startsWith("EftLoc_") ||
+    name.startsWith("Loc_") ||
+    name.startsWith("Tag_") ||
+    name.startsWith("TeraTreeTag_") ||
+    name.includes("Locator") ||
+    name.includes("AirWall")
+  );
+}
+
 /** Group browser model failures so Problems can list the actors, not one line per copy. */
 
 export function groupModelErrors(entries, actors) {

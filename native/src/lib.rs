@@ -2,10 +2,12 @@ mod bc7;
 mod bfres;
 mod decode;
 mod image;
+mod mesh;
 mod swizzle;
 
 pub use bc7::{bc7_mip_chain, encode_bc7};
 pub use bfres::{attribute_bounds, attribute_values, decode_attribute, decode_triangles, pack_f32};
+pub use mesh::{face_normal_bytes, face_normals};
 pub use decode::{apply_channels, decode_linear, decode_swizzle, noise};
 pub use image::{bc1_mip_chain, blit_channel, downsample, encode_bc1, has_near_magenta, limit_rgba};
 pub use swizzle::{deswizzle, fill_partial_gob, swizzle};
@@ -16,7 +18,7 @@ mod py {
         apply_channels, attribute_bounds, attribute_values, bc1_mip_chain, bc7_mip_chain, blit_channel, decode_attribute,
         decode_linear,
         decode_swizzle, decode_triangles, deswizzle, downsample, encode_bc1, encode_bc7, fill_partial_gob, has_near_magenta,
-        limit_rgba, noise, swizzle,
+        face_normal_bytes, face_normals, limit_rgba, noise, swizzle,
     };
     use pyo3::prelude::*;
     use pyo3::types::{PyByteArray, PyByteArrayMethods, PyBytes, PyList, PyTuple};
@@ -332,6 +334,60 @@ mod py {
         Ok(PyBytes::new(py, &out).unbind())
     }
 
+    fn read_mesh(positions: &Bound<'_, PyAny>, indices: &Bound<'_, PyAny>) -> PyResult<Option<(Vec<f64>, Vec<u32>)>> {
+        let mut xyz = Vec::new();
+        for item in positions.try_iter()? {
+            let mut got = 0usize;
+            for component in item?.try_iter()? {
+                if got == 3 {
+                    break;
+                }
+                xyz.push(component?.extract::<f64>()?);
+                got += 1;
+            }
+            if got != 3 {
+                return Ok(None);
+            }
+        }
+        let mut index = Vec::new();
+        for item in indices.try_iter()? {
+            let value = item?.extract::<u64>()?;
+            if value > u32::MAX as u64 {
+                return Ok(None);
+            }
+            index.push(value as u32);
+        }
+        Ok(Some((xyz, index)))
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "face_normal_bytes")]
+    fn face_normal_bytes_py(py: Python<'_>, positions: &Bound<'_, PyAny>, indices: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
+        let Some((xyz, index)) = read_mesh(positions, indices)? else {
+            return Ok(PyBytes::new(py, b"").unbind());
+        };
+        let out = py.allow_threads(move || face_normal_bytes(&xyz, &index));
+        Ok(PyBytes::new(py, &out).unbind())
+    }
+
+    #[pyfunction]
+    #[pyo3(name = "face_normals")]
+    fn face_normals_py(py: Python<'_>, positions: &Bound<'_, PyAny>, indices: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let Some((xyz, index)) = read_mesh(positions, indices)? else {
+            return Ok(py.None());
+        };
+        let count = xyz.len() / 3;
+        let out = py.allow_threads(move || face_normals(&xyz, &index));
+        if out.len() != count * 3 {
+            return Ok(py.None());
+        }
+        let list = PyList::empty(py);
+        for chunk in out.chunks(3) {
+            list.append(PyTuple::new(py, chunk.iter().copied())?)?;
+        }
+        Ok(list.unbind().into_any())
+    }
+
     #[pyfunction]
     #[pyo3(name = "apply_channels")]
     fn apply_channels_py(
@@ -367,6 +423,8 @@ mod py {
         module.add_function(wrap_pyfunction!(attribute_bounds_py, module)?)?;
         module.add_function(wrap_pyfunction!(decode_triangles_py, module)?)?;
         module.add_function(wrap_pyfunction!(pack_f32_py, module)?)?;
+        module.add_function(wrap_pyfunction!(face_normals_py, module)?)?;
+        module.add_function(wrap_pyfunction!(face_normal_bytes_py, module)?)?;
         Ok(())
     }
 }

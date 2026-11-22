@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { groupModelErrors, resolveTextureIndex } from "./problems.js";
+import { groupModelErrors, isMarker, resolveTextureIndex } from "./problems.js";
 
 test("model failures group by message and keep every actor", () => {
   const actors = [
@@ -20,6 +20,12 @@ test("model failures group by message and keep every actor", () => {
   assert.equal(groups.length, 1);
   assert.equal(groups[0].count, 3);
   assert.deepEqual(groups[0].actors.map((actor) => actor.id), ["a", "b", "c"]);
+});
+
+test("air walls and effect locators are markers", () => {
+  assert.equal(isMarker("EftLoc_Smoke"), true);
+  assert.equal(isMarker("FldObj_AirWall_CharacterSight_GenerateNavMesh_Body"), true);
+  assert.equal(isMarker("Npc_Kokiri_F_01"), false);
 });
 
 test("a missing overlay texture is not requested", () => {

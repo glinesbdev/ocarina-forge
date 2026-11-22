@@ -7,7 +7,7 @@ import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { modelLine } from "./inspector.js";
 import { paletteRows } from "./palette.js";
-import { groupModelErrors } from "./problems.js";
+import { groupModelErrors, isMarker } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
 
@@ -2096,7 +2096,7 @@ function problemNotes(rows) {
 }
 
 function noteModelError(gyaml, message) {
-  if (!gyaml) return;
+  if (!gyaml || isMarker(gyaml)) return;
   const text = message || "The glTF did not load.";
   if (state.modelErrors.some((item) => item.gyaml === gyaml)) return;
   state.modelErrors = [...state.modelErrors, { gyaml, message: text }];

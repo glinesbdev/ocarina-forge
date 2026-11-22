@@ -91,7 +91,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--cprofile", default="", help="profile writes a cProfile file for one --model cold convert.")
     parser.add_argument("--limit", type=int, default=0, help="profile stops each scene after N models. 0 means every model.")
     parser.add_argument("--jobs", type=int, default=1, help="profile converts this many models at once. 1 stays in this process.")
-    parser.add_argument("--home-cache", action="store_true", help="profile uses the normal model cache. The default is a private temp cache.")
+    parser.add_argument("--home-cache", action="store_true", help="profile uses the normal model cache. The default is a private directory under ~/.cache/ocarina-forge/profile-tmp.")
+    parser.add_argument("--keep-cache", action="store_true", help="profile leaves the private cache directory in place. The default is to delete it on exit.")
     parser.add_argument("--host", default=setting("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(setting("PORT", "47232") or "47232"))
     parser.add_argument("--static", help="Serve a built frontend from this directory.")
@@ -857,6 +858,7 @@ def print_profile(args) -> int:
             limit=args.limit,
             jobs=args.jobs,
             home_cache=args.home_cache,
+            keep_cache=args.keep_cache,
         )
     except SystemExit as exc:
         text = exc.code

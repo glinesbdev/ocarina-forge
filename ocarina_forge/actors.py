@@ -50,6 +50,18 @@ def category(gyaml: str) -> str:
     return "other"
 
 
+def is_marker(gyaml: str) -> bool:
+    """An actor that is not supposed to have a mesh.
+
+    Effect locators, tags, and air walls stay boxes. Looking them up is not
+    a missing model.
+    """
+    name = gyaml or ""
+    if name.startswith(("EftLoc_", "Loc_", "Tag_", "TeraTreeTag_")) or "Locator" in name:
+        return True
+    return "AirWall" in name
+
+
 def is_region(gyaml: str) -> bool:
     """A volume that is a region, not a prop that happens to be scaled up.
 

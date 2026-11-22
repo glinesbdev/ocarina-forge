@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-47\0"
+_CACHE_VERSION = b"models-48\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -177,6 +177,10 @@ def cache_dir() -> Path:
 def describe_actor(dump, gyaml: str, *, convert: bool = True) -> dict:
     if not _NAME.fullmatch(gyaml or ""):
         return _box(gyaml, "That is not an actor pack name.")
+    from ocarina_forge.actors import is_marker
+
+    if is_marker(gyaml):
+        return _box(gyaml, "Marker. It stays a box.")
     try:
         plan, tried = _actor_plan(dump, gyaml)
     except BancError as exc:
