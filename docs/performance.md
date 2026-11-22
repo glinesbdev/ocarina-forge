@@ -118,13 +118,25 @@ Opening a scene sends one `POST /api/models/batch` with every actor name. Cache 
 
 ## R1 profile
 
-`python -m ocarina_forge profile --dump <dump>` times Kokiri child and every Hyrule Castle Static or Dynamic banc. Cold and warm each use a fresh cache under a temp directory, so `~/.cache/ocarina-forge` is left alone. The lines split banc read (zstd + BYML) from zstd, BYML, BFRES parse, deswizzle, and block decode inside the convert. A remainder line is convert time outside those five. Browser `dl` and GPU `up` are not in the process. If those dominate **Stats** on a cold open, the Rust port stops.
+`profile` times the Python convert. Browser `dl` and GPU `up` are not in the process. If those dominate **Stats** on a cold open, the Rust port stops.
 
-Retail Kokiri and Hyrule Castle are not in this checkout, so those numbers are not here. On the synthetic Kokiri child Static fixture (11 actor classes, two real meshes) a cold wall was 82.6 ms, of which convert was 80.5 ms and texture 0.4 ms. The five candidate phases together were about 1.1 ms (zstd 0.15, BYML 0.12, BFRES parse 0.53, swizzle 0.31, decode 0). The warm wall was 1.5 ms with both meshes cached. A cProfile of `Npc_Kokiri_F_01` put most of that cold convert in the meshopt helper's first poll (about 55 ms) and in JPEG encode, not in swizzle or ASTC. Decode was 0 because the fixture is not castle ASTC. Do not treat this as the retail split.
+The default cache is a fresh directory under the temp folder. It does not read `~/.cache/ocarina-forge/models`, so a cold `cache=miss` is expected and is not a changed cache key. The key is still `models-44`. `--home-cache` uses the normal directory instead. The stage timers wrap the functions the converter already calls, so this command does not rebuild a normal editor cache. `zstd` includes the model-file read before the convert clock and is not subtracted from `convert`. Vertex and index time are inside BFRES parse. Deswizzle and block decode are inside the texture clock. `other` is what is left.
+
+One model:
 
 ```bash
-.venv/bin/python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 \
+  --model Land_Kokiri_House_Inside_E_04 \
+  --cprofile /tmp/house-inside-e04.prof
 ```
+
+A scene walk is one model at a time unless `--jobs` is set. `--limit N` stops each Kokiri child banc and each Hyrule Castle Static or Dynamic banc after N models. Kokiri child on a 24-core Linux box, `mod-editor-m1` at `bbfd77c`, was killed at 600 seconds after 89 models: banc read 41 ms, cold convert about 599 s, texture about 130 s, every line `cache=miss`. That miss was the private cache. The synthetic fixture below is not that split.
+
+```bash
+python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 --limit 12 --jobs 8
+```
+
+On the synthetic Kokiri child Static fixture (11 actor classes, two real meshes) a cold wall was 82.6 ms, of which convert was 80.5 ms and texture 0.4 ms. The five candidate phases together were about 1.1 ms (zstd 0.15, BYML 0.12, BFRES parse 0.53, swizzle 0.31, decode 0). The warm wall was 1.5 ms with both meshes cached. A cProfile of `Npc_Kokiri_F_01` put most of that cold convert in the meshopt helper's first poll (about 55 ms) and in JPEG encode, not in swizzle or ASTC. Decode was 0 because the fixture is not castle ASTC. Do not treat this as the retail split.
 
 ## WebGPU trial (shelved)
 

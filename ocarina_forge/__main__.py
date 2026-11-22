@@ -87,6 +87,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--game", default="", help="Game install. Default ~/Games/Longshot/mod-test, or config game, or OCARINA_FORGE_GAME.")
     parser.add_argument("--all", action="store_true", help="warm converts every scene instead of one banc and its neighbors.")
     parser.add_argument("--scene-only", action="store_true", help="warm converts the named scene and does not walk neighboring scenes.")
+    parser.add_argument("--model", action="append", default=[], help="profile this actor class. Repeat to add another. Example: Land_Kokiri_House_Inside_E_04.")
+    parser.add_argument("--cprofile", default="", help="profile writes a cProfile file for one --model cold convert.")
+    parser.add_argument("--limit", type=int, default=0, help="profile stops each scene after N models. 0 means every model.")
+    parser.add_argument("--jobs", type=int, default=1, help="profile converts this many models at once. 1 stays in this process.")
+    parser.add_argument("--home-cache", action="store_true", help="profile uses the normal model cache. The default is a private temp cache.")
     parser.add_argument("--host", default=setting("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(setting("PORT", "47232") or "47232"))
     parser.add_argument("--static", help="Serve a built frontend from this directory.")
@@ -155,7 +160,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.command == "mod-export":
         raise SystemExit(print_mod_export(args))
     if args.command == "profile":
-        raise SystemExit(print_profile(args.dump))
+        raise SystemExit(print_profile(args))
     if args.static:
         from ocarina_forge.server import mount_frontend
 
@@ -757,11 +762,11 @@ def print_edit(args) -> int:
     config = load_config()
     dump_path = args.dump or config.get("dump") or ""
     if not dump_path:
-        print("No dump is configured. Pass --dump.", file=sys.stderr)
+        print("error: No dump is configured. Pass --dump. Nothing was written.", file=sys.stderr)
         return 2
     project_token = args.project or config.get("project") or ""
     if not project_token:
-        print("No project is open. Pass --project, or run project create.", file=sys.stderr)
+        print("error: No project is open. Pass --project, or run project create. Nothing was written.", file=sys.stderr)
         return 2
     try:
         project = Project(resolve_project(project_token, config))
@@ -776,12 +781,15 @@ def print_edit(args) -> int:
         if args.scale:
             command["scale"] = _triple(args.scale, "Scale")
         if len(command) == 2:
-            print("edit needs --translate, --rotate, or --scale.", file=sys.stderr)
+            print("error: edit needs --translate, --rotate, or --scale. Nothing was written.", file=sys.stderr)
             return 2
         diff, focus = apply_command(document, diff, command)
         project.save_scene_diff(diff)
     except BancError as exc:
-        print(exc.message, file=sys.stderr)
+        text = exc.message
+        if "Nothing was written" not in text:
+            text = f"error: {text} Nothing was written."
+        print(text, file=sys.stderr)
         return 2
     view = scene_view(document, diff)
     actor = next(row for row in view["actors"] if row["id"] == focus)
@@ -828,21 +836,35 @@ def print_mod_export(args) -> int:
     return 0
 
 
-def print_profile(dump: str | None) -> int:
+def print_profile(args) -> int:
     from ocarina_forge.config import load_config
     from ocarina_forge.dump import Dump
     from ocarina_forge.profile import profile_dump
 
     config = load_config()
-    dump_path = dump or config.get("dump") or ""
+    dump_path = args.dump or config.get("dump") or ""
     if not dump_path:
         print("No dump is configured. Pass --dump.", file=sys.stderr)
         return 2
-    try:
-        profile_dump(Dump(dump_path))
-    except SystemExit as exc:
-        print(exc, file=sys.stderr)
+    if args.cprofile and len(args.model) != 1:
+        print("--cprofile needs exactly one --model.", file=sys.stderr)
         return 2
+    try:
+        profile_dump(
+            Dump(dump_path),
+            model=args.model,
+            cprofile=args.cprofile or None,
+            limit=args.limit,
+            jobs=args.jobs,
+            home_cache=args.home_cache,
+        )
+    except SystemExit as exc:
+        text = exc.code
+        if text in (None, 0):
+            return 0
+        if isinstance(text, str):
+            print(text, file=sys.stderr)
+        return text if isinstance(text, int) else 2
     return 0
 
 
@@ -857,7 +879,7 @@ def _find_actor(dump, query: str, *, gyaml: str, actor: str):
     else:
         bancs = [path for path in scenes if query in path]
     if not bancs:
-        raise BancError(f"No scene matches {query!r}.", "not_found")
+        raise BancError(f"No scene matches {query!r}.", "edit")
     wanted = format_hash(parse_hash(actor)) if actor else ""
     found = []
     for banc in bancs:
@@ -879,8 +901,15 @@ def _find_actor(dump, query: str, *, gyaml: str, actor: str):
     if not found:
         raise BancError(f"No actor {gyaml or wanted} in {query}.", "edit")
     if len(found) > 1:
-        listed = ", ".join(f"{item[1]} in {item[0]}" for item in found[:6])
-        raise BancError(f"{len(found)} actors match. Pass --id. {listed}", "edit")
+        shown = found[:8]
+        listed = "; ".join(f"{item[1]} in {item[0]}" for item in shown)
+        extra = "" if len(found) <= 8 else f"; and {len(found) - 8} more"
+        who = gyaml or query
+        raise BancError(
+            f"error: {len(found)} actors match {who}. Nothing was written. "
+            f"Pass --id with one hash. {listed}{extra}",
+            "edit",
+        )
     return found[0]
 
 

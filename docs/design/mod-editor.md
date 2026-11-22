@@ -150,7 +150,16 @@ Each one is shippable on its own and is something Bradyn can check on his machin
 
 ### 1. Move the Kokiri sign, and see it in the game
 
-Create a project, open `KokiriForest_Child`, select `Obj_Kokiri_Signboard_A_01` (Static, `KokiriForest_013`, hash `0x4a13f8880eb01a43`), and move it. Save writes `mod.json`, an empty `romfs/`, and `patches/KokiriForest_Child_Static.json` with one `set` of `Translate`. `longshot mod check` is the game-side check. The commands are in [performance.md](../performance.md) and the README.
+Create a project, open `KokiriForest_Child`, select `Obj_Kokiri_Signboard_A_01` (Static, `KokiriForest_013`, hash `0x4a13f8880eb01a43`), and move it. Save writes `mod.json`, an empty `romfs/`, and `patches/KokiriForest_Child_Static.json` with one `set` of `Translate`. `longshot mod check` is the game-side check. The class is placed more than once, so the edit command has to name the hash. Without `--id` it writes nothing and exits non-zero.
+
+```bash
+python -m ocarina_forge project create kokiri-sign --title "Kokiri sign" --author Bradyn
+python -m ocarina_forge edit KokiriForest_Child \
+  --gyaml Obj_Kokiri_Signboard_A_01 --id 0x4a13f8880eb01a43 \
+  --translate -9.75,111.6,10.24 \
+  --dump ~/Games/Longshot/rc/v3.0.0
+python -m ocarina_forge mod-export --install --dump ~/Games/Longshot/rc/v3.0.0
+```
 
 Preview, on a game already started with `longshot mod run`, the mod turned on: Forge runs `longshot mod dev --once` if the folder is not installed yet, then tells him the first apply needs a process start, because this sign's `Translate` is a shared container and the file grows. He runs `longshot mod stop` and `longshot mod run` (or `restart --manifest`). Forge then runs `longshot mod teleport` to the child Kokiri destination and `longshot mod shot`. The sign in the PNG stands at the pose he set. The patch file on disk matches the `static-move` shape. A second move that does not grow the file again is the hot-reload check: `mod_reload`, leave the area, enter it, shot. If that second shot is still the old pose, the size table is still short and the UI says restart, which is the headroom caveat and not a failed move.
 
@@ -208,9 +217,9 @@ The Rust port below is part of this direction. It is not one of the ten, and it 
 
 ### R1. Profile a cold load before any port
 
-No Rust yet. `python -m ocarina_forge profile --dump <dump>` times a cold load and the warm load after it, in a fresh cache, for every `KokiriForest_Child` banc and every Hyrule Castle Static or Dynamic banc in that dump. It prints banc-read time and, inside the convert, zstd, BYML, BFRES parse, deswizzle, and block decode. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. If they dominate a cold open, R2 does not start.
+No Rust yet. `python -m ocarina_forge profile --dump <dump> --model <gyaml> --cprofile out.prof` times one actor, cold then warm, and writes a cProfile of the cold convert. The stage lines split file decompress, BFRES parse, vertex decode, index decode, meshopt or the Python lod fallback, JPEG/PNG/GPU encode, glTF pack, deswizzle, and block decode. A scene walk takes `--limit N` and `--jobs N`. The default is one model at a time and every model, which is how Kokiri child was killed at 600 seconds. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. If they dominate a cold open, R2 does not start.
 
-Retail Kokiri and Hyrule Castle are not on the machine that wrote this note. The synthetic fixture is not those numbers. [performance.md](../performance.md) records the command and the sample, and says what is still missing.
+The command uses a private cache directory unless `--home-cache` is set. A cold `cache=miss` is that directory. The glb key is still `models-44`. Profile does not change it. [performance.md](../performance.md) has the command and the sample fixture. Retail numbers are measured on Bradyn's machine, not in this note.
 
 The candidates, in the order a profile is allowed to reorder them:
 

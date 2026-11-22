@@ -1,52 +1,83 @@
 """Time a cold load and the warm load after it.
 
-The numbers are the Python side: zstd, BYML, BFRES parse, block deswizzle,
-and block decode. Browser download and GPU upload are not in this process.
-Those are the Stats ``dl`` and ``up`` figures. If those dominate a cold open
-on a real dump, the Rust port stops, as decided for R1.
+Profile points ``OCARINA_FORGE_CACHE`` at a fresh directory unless
+``--home-cache`` is set, so it does not read ``~/.cache/ocarina-forge``.
+A cold ``cache=miss`` is that private directory. The glb cache key is
+unchanged by this command.
 
-This command uses a fresh cache directory so it does not touch
-``~/.cache/ocarina-forge``. Retail Kokiri and Hyrule Castle are timed only
-when the dump you pass actually contains them.
+``--model`` times one actor and can write a cProfile file. A scene walk is
+one model at a time unless ``--jobs`` is greater than 1. ``--limit`` stops
+each scene after N models. Browser download and GPU upload are not in this
+process.
 """
 
 from __future__ import annotations
 
+import functools
+import io
 import os
 import tempfile
 import time
 from pathlib import Path
 
+# Nested or outside the convert clock. Printed, and not added into the remainder.
+_INSIDE = {"zstd", "vertices", "indices", "swizzle", "decode"}
+_ORDER = (
+    ("zstd", "file decompress, including the read before the convert clock"),
+    ("bfres", "BFRES parse, including vertex and index decode"),
+    ("vertices", "inside bfres: positions, uvs, and colors"),
+    ("indices", "inside bfres: index buffer"),
+    ("swizzle", "inside texture: deswizzle"),
+    ("decode", "inside texture: ASTC, BC, or RGBA decode"),
+    ("meshopt", "meshopt simplify, or the Python lod fallback"),
+    ("encode", "JPEG, PNG, or GPU container"),
+    ("glb", "glTF pack and meshopt compression"),
+)
 
-def profile_dump(dump, *, log=print) -> dict:
-    """Cold then warm ``--scene-only`` loads. Castle scenes are omitted when the dump has none."""
-    scenes = [item["path"] for item in dump.list_scenes()]
-    kokiri = [path for path in scenes if "KokiriForest_Child_" in path]
-    castle = [path for path in scenes if "HyruleCastle" in path and ("_Static" in path or "_Dynamic" in path)]
-    if not kokiri and not castle:
-        raise SystemExit("This dump has no KokiriForest_Child scene and no Hyrule Castle scene.")
 
-    cache = Path(tempfile.mkdtemp(prefix="ocarina-forge-profile-"))
+def profile_dump(
+    dump,
+    *,
+    model: list[str] | None = None,
+    cprofile: str | None = None,
+    limit: int = 0,
+    jobs: int = 1,
+    home_cache: bool = False,
+    log=print,
+) -> dict:
+    """Cold then warm. One model, or Kokiri child and Hyrule Castle when no model is named."""
+    names = [item.strip() for item in (model or []) if item and str(item).strip()]
+    if cprofile and len(names) != 1:
+        raise SystemExit("--cprofile needs exactly one --model.")
+    if jobs < 1:
+        raise SystemExit("--jobs must be at least 1.")
+    if limit < 0:
+        raise SystemExit("--limit must be 0 or a positive count. 0 means every model.")
+
+    from ocarina_forge.models import _CACHE_VERSION
+
+    key = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     previous = os.environ.get("OCARINA_FORGE_CACHE")
-    os.environ["OCARINA_FORGE_CACHE"] = str(cache)
+    private = None
+    if not home_cache:
+        private = Path(tempfile.mkdtemp(prefix="ocarina-forge-profile-"))
+        os.environ["OCARINA_FORGE_CACHE"] = str(private)
+    _install()
     try:
-        report = {
-            "cache": str(cache),
-            "kokiri": [_scene(dump, path, log) for path in kokiri],
-            "castle": [_scene(dump, path, log) for path in castle],
-            "missing": [],
-        }
+        _announce_cache(private, key, log)
+        if names:
+            report = _profile_names(dump, names, cprofile=cprofile, jobs=jobs, log=log)
+        else:
+            report = _profile_areas(dump, limit=limit, jobs=jobs, log=log)
     finally:
+        _restore()
         if previous is None:
             os.environ.pop("OCARINA_FORGE_CACHE", None)
         else:
             os.environ["OCARINA_FORGE_CACHE"] = previous
-    if not kokiri:
-        report["missing"].append("KokiriForest_Child")
-        log("No KokiriForest_Child scene in this dump.")
-    if not castle:
-        report["missing"].append("HyruleCastle")
-        log("No Hyrule Castle Static or Dynamic scene in this dump.")
+    report["cache"] = str(private) if private is not None else "home"
+    report["cachePrivate"] = private is not None
+    report["cacheKey"] = key
     log(
         "Browser dl and up are not in these numbers. "
         "If those dominate Stats on a cold open, stop the Rust port."
@@ -54,81 +85,230 @@ def profile_dump(dump, *, log=print) -> dict:
     return report
 
 
-def _scene(dump, banc: str, log) -> dict:
-    from ocarina_forge.warm import run_warm
+def _announce_cache(private: Path | None, key: str, log) -> None:
+    from ocarina_forge.locate import user_cache_root
+
+    home = user_cache_root() / "models"
+    if private is None:
+        active = os.environ.get("OCARINA_FORGE_CACHE") or str(home)
+        log(f"cache: {active} (the normal model cache). Key {key}. A file already converted with that key is a hit.")
+        return
+    log(
+        f"cache: private {private}. This does not read {home}, so a cold cache=miss is expected. "
+        f"Key {key} is not changed by profile."
+    )
+
+
+def _profile_names(dump, names: list[str], *, cprofile: str | None, jobs: int, log) -> dict:
+    root = str(dump.root)
+    if len(names) == 1 and cprofile:
+        log(f"\n{names[0]}")
+        cold_row = _profile_cprofile(root, names[0], cprofile, log)
+        log("cold")
+        _print_stages(log, cold_row)
+        warm_row = _profile_model_job(root, names[0])
+        log(f"warm {_brief(warm_row)}")
+        _print_stages(log, warm_row)
+        cold, warm = [cold_row], [warm_row]
+    else:
+        if jobs == 1 and len(names) > 1:
+            log("jobs=1, so these models run one at a time. Pass --jobs N to use N processes.")
+        cold = _run_pass(root, names, jobs, log, "cold")
+        warm = _run_pass(root, names, jobs, log, "warm")
+        log("cold total")
+        _print_stages(log, _sum_rows(cold))
+        log("warm total")
+        _print_stages(log, _sum_rows(warm))
+    return {"models": {"cold": cold, "warm": warm}, "kokiri": [], "castle": [], "missing": []}
+
+
+def _profile_areas(dump, *, limit: int, jobs: int, log) -> dict:
+    scenes = [item["path"] for item in dump.list_scenes()]
+    kokiri = [path for path in scenes if "KokiriForest_Child_" in path]
+    castle = [path for path in scenes if "HyruleCastle" in path and ("_Static" in path or "_Dynamic" in path)]
+    if not kokiri and not castle:
+        raise SystemExit("This dump has no KokiriForest_Child scene and no Hyrule Castle scene.")
+    if jobs == 1 and limit == 0:
+        log(
+            "jobs=1 and no --limit, so each scene is one model at a time. "
+            "Kokiri child did not finish in 600s that way. Pass --model, or --limit N and --jobs N."
+        )
+    report = {
+        "kokiri": [_scene(dump, path, limit, jobs, log) for path in kokiri],
+        "castle": [_scene(dump, path, limit, jobs, log) for path in castle],
+        "missing": [],
+    }
+    if not kokiri:
+        report["missing"].append("KokiriForest_Child")
+        log("No KokiriForest_Child scene in this dump.")
+    if not castle:
+        report["missing"].append("HyruleCastle")
+        log("No Hyrule Castle Static or Dynamic scene in this dump.")
+    return report
+
+
+def _scene(dump, banc: str, limit: int, jobs: int, log) -> dict:
+    from ocarina_forge.warm import scene_model_names
 
     log(f"\n{banc}")
     banc_ms = _time_banc(dump, banc)
-    log(f"banc read {banc_ms} ms (zstd + BYML, one read)")
-    buckets: dict[str, float] = {}
-    restore = _patch(buckets)
-    try:
-        cold = run_warm(dump, banc, log=log, neighbors=False)
-        cold_phases = _snapshot(buckets)
-        _zero(buckets)
-        warm = run_warm(dump, banc, log=log, neighbors=False)
-        warm_phases = _snapshot(buckets)
-    finally:
-        restore()
-    row = {
+    log(f"banc read {banc_ms} ms (zstd + BYML, one read, before any model)")
+    names = scene_model_names(dump, banc)
+    total = len(names)
+    if limit:
+        names = names[:limit]
+    log(f"{len(names)} of {total} models, jobs={jobs}")
+    if jobs == 1 and len(names) > 1:
+        log("jobs=1, so this scene is one model at a time.")
+    root = str(dump.root)
+    cold = _run_pass(root, names, jobs, log, "cold")
+    cold_total = _sum_rows(cold)
+    log("cold total")
+    _print_stages(log, cold_total)
+    warm = _run_pass(root, names, jobs, log, "warm")
+    warm_total = _sum_rows(warm)
+    log("warm total")
+    _print_stages(log, warm_total)
+    slowest = max(cold, key=lambda row: row["convertMs"], default=None)
+    if slowest is not None:
+        log(f"slowest cold {_brief(slowest)}")
+    return {
         "banc": banc,
         "bancReadMs": banc_ms,
-        "cold": {**cold, "phases": cold_phases},
-        "warm": {**warm, "phases": warm_phases},
+        "models": total,
+        "profiled": len(names),
+        "cold": cold,
+        "warm": warm,
+        "coldTotal": cold_total,
+        "warmTotal": warm_total,
     }
-    log(
-        f"phases cold zstd {cold_phases['zstd']} ms, byml {cold_phases['byml']} ms, "
-        f"bfres {cold_phases['bfres']} ms, swizzle {cold_phases['swizzle']} ms, "
-        f"decode {cold_phases['decode']} ms"
-    )
-    log(
-        f"phases warm zstd {warm_phases['zstd']} ms, byml {warm_phases['byml']} ms, "
-        f"bfres {warm_phases['bfres']} ms, swizzle {warm_phases['swizzle']} ms, "
-        f"decode {warm_phases['decode']} ms"
-    )
-    named = sum(cold_phases.values())
-    gap = round(float(cold.get("convertMs") or 0) - named, 2)
-    if gap > 5 and gap > named:
-        log(
-            f"other cold convert time {gap} ms is outside zstd, BYML, BFRES parse, swizzle, and decode"
-        )
+
+
+def _run_pass(root: str, names: list[str], jobs: int, log, label: str) -> list[dict]:
+    if jobs <= 1 or len(names) <= 1:
+        rows = []
+        for index, name in enumerate(names, start=1):
+            row = _profile_model_job(root, name)
+            rows.append(row)
+            log(f"{label} {index}/{len(names)} {_brief(row)}")
+        return rows
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    ctx = multiprocessing.get_context("spawn")
+    rows = []
+    workers = min(jobs, len(names))
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx, initializer=_init_worker) as pool:
+        futures = [pool.submit(_profile_model_job, root, name) for name in names]
+        total = len(futures)
+        for index, fut in enumerate(as_completed(futures), start=1):
+            row = fut.result()
+            rows.append(row)
+            log(f"{label} {index}/{total} {_brief(row)}")
+    return rows
+
+
+def _profile_cprofile(root: str, name: str, cprofile: str, log) -> dict:
+    import cProfile
+    import pstats
+
+    prof = cProfile.Profile()
+    prof.enable()
+    try:
+        row = _profile_model_job(root, name)
+    finally:
+        prof.disable()
+    path = Path(cprofile).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prof.dump_stats(str(path))
+    log(f"cprofile {path}")
+    buf = io.StringIO()
+    pstats.Stats(prof, stream=buf).sort_stats("cumulative").print_stats(20)
+    log(buf.getvalue().rstrip())
+    log(f"cold {_brief(row)}")
     return row
 
 
-def _time_banc(dump, banc: str) -> float:
-    started = time.perf_counter()
-    try:
-        dump.read_byml(banc)
-    except Exception:
-        return 0.0
-    return round((time.perf_counter() - started) * 1000, 2)
+def _profile_model_job(root: str, name: str) -> dict:
+    """One model. A worker installs the same stage timers in its own process."""
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.models import describe_actor
+
+    _install()
+    _zero()
+    info = describe_actor(Dump(root), name)
+    timing = info.get("timing") or {}
+    return {
+        "name": name,
+        "status": info.get("status") or "",
+        "reason": info.get("reason") or "",
+        "cache": timing.get("cache") or "",
+        "convertMs": float(timing.get("convertMs") or 0),
+        "textureMs": float(timing.get("textureMs") or 0),
+        "stages": _snapshot(),
+    }
 
 
-def _snapshot(buckets: dict[str, float]) -> dict[str, float]:
-    return {name: round(buckets.get(name, 0.0) * 1000, 2) for name in ("zstd", "byml", "bfres", "swizzle", "decode")}
+_BUCKETS: dict[str, float] = {}
+_RESTORE = None
 
 
-def _zero(buckets: dict[str, float]) -> None:
-    for key in list(buckets):
-        buckets[key] = 0.0
+def _init_worker() -> None:
+    _install()
+
+
+def _install() -> None:
+    global _RESTORE
+    if _RESTORE is not None:
+        return
+    _RESTORE = _patch(_BUCKETS)
+
+
+def _restore() -> None:
+    global _RESTORE
+    if _RESTORE is None:
+        return
+    _RESTORE()
+    _RESTORE = None
+
+
+def _zero() -> None:
+    for key in list(_BUCKETS):
+        _BUCKETS[key] = 0.0
+
+
+def _snapshot() -> dict[str, float]:
+    return {name: round(_BUCKETS.get(name, 0.0) * 1000, 2) for name, _note in _ORDER}
 
 
 def _patch(buckets: dict[str, float]):
-    """Time the functions the converters actually call, including already-imported names."""
+    """Time the names the converter already calls. The hashed sources stay untouched."""
     import ocarina_forge.dump as dump_mod
+    import ocarina_forge.formats.bfres as bfres
     import ocarina_forge.formats.bntx as bntx
+    import ocarina_forge.formats.gpu as gpu
     import ocarina_forge.models as models
 
     targets = (
         (dump_mod, "decompress", "zstd"),
-        (dump_mod, "loads", "byml"),
         (models, "parse", "bfres"),
+        (bfres._File, "_vertices", "vertices"),
+        (bfres._File, "_lod", "indices"),
+        (bfres, "_colors", "vertices"),
+        (bfres, "_extra_uvs", "vertices"),
         (bntx, "deswizzle", "swizzle"),
         (bntx, "_decode", "decode"),
+        (models, "meshopt_available", "meshopt"),
+        (models, "simplify_mesh", "meshopt"),
+        (models, "cluster_lod", "meshopt"),
+        (models, "encode_albedo", "encode"),
+        (gpu, "gpu_image", "encode"),
+        (models, "to_glb", "glb"),
+        (models, "finish_glb", "glb"),
     )
-    saved = [(module, name, getattr(module, name)) for module, name, _bucket in targets]
 
     def wrap(original, bucket: str):
+        @functools.wraps(original)
         def inner(*args, **kwargs):
             started = time.perf_counter()
             try:
@@ -138,11 +318,69 @@ def _patch(buckets: dict[str, float]):
 
         return inner
 
-    for module, name, bucket in targets:
-        setattr(module, name, wrap(getattr(module, name), bucket))
+    saved = []
+    try:
+        for module, name, bucket in targets:
+            original = getattr(module, name)
+            saved.append((module, name, original))
+            setattr(module, name, wrap(original, bucket))
+    except Exception:
+        for module, name, original in saved:
+            setattr(module, name, original)
+        raise
 
     def restore() -> None:
         for module, name, original in saved:
             setattr(module, name, original)
 
     return restore
+
+
+def _sum_rows(rows: list[dict]) -> dict:
+    stages: dict[str, float] = {}
+    convert = 0.0
+    texture = 0.0
+    for row in rows:
+        convert += float(row.get("convertMs") or 0)
+        texture += float(row.get("textureMs") or 0)
+        for name, ms in (row.get("stages") or {}).items():
+            stages[name] = stages.get(name, 0.0) + float(ms)
+    return {
+        "cache": "",
+        "convertMs": round(convert, 2),
+        "textureMs": round(texture, 2),
+        "stages": {name: round(ms, 2) for name, ms in stages.items()},
+    }
+
+
+def _print_stages(log, row: dict) -> None:
+    stages = row.get("stages") or {}
+    convert = float(row.get("convertMs") or 0)
+    texture = float(row.get("textureMs") or 0)
+    for name, note in _ORDER:
+        log(f"  {name:10} {stages.get(name, 0):10.2f} ms  {note}")
+    log(f"  {'texture':10} {texture:10.2f} ms  texture clock (swizzle and decode are inside this)")
+    accounted = sum(float(stages.get(name, 0)) for name, _note in _ORDER if name not in _INSIDE) + texture
+    other = round(convert - accounted, 2)
+    log(f"  {'convert':10} {convert:10.2f} ms  cache={row.get('cache') or '-'}")
+    log(
+        f"  {'other':10} {other:10.2f} ms  "
+        "convert minus bfres, meshopt, encode, glb, and texture. zstd is not subtracted."
+    )
+
+
+def _brief(row: dict) -> str:
+    reason = f" {row['reason']}" if row.get("status") not in ("mesh", "") and row.get("reason") else ""
+    return (
+        f"{row['name']} status={row.get('status') or '-'} cache={row.get('cache') or '-'} "
+        f"convert={row.get('convertMs')} ms texture={row.get('textureMs')} ms{reason}"
+    )
+
+
+def _time_banc(dump, banc: str) -> float:
+    started = time.perf_counter()
+    try:
+        dump.read_byml(banc)
+    except Exception:
+        return 0.0
+    return round((time.perf_counter() - started) * 1000, 2)
