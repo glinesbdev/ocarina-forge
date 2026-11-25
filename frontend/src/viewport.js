@@ -37,6 +37,15 @@ import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick,
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
+import {
+  PICK_LAYER,
+  PREVIEW_PICK_LAYER,
+  TERRAIN_PICK_LAYER,
+  createGpuPicker,
+  groupsFromPick,
+  ndcFromClient,
+} from "./gpu-pick.js";
+import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
 import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
 import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
 import { resolveTextureIndex } from "./problems.js";
@@ -67,7 +76,8 @@ export const CATEGORY_COLOR = {
  * Actors are boxes until a converted glTF arrives. The gizmo stays on `pivot`.
  * Volumes (areas, system actors, large land) are edge outlines. The fill is
  * drawn only while that volume is selected, so overlapping areas cannot wash
- * the scene. Picks prefer a solid mesh over a volume.
+ * the scene. Clicks and hovers read a GPU id buffer. Volume edges stay on the
+ * CPU, and Snap still samples the wasm ground.
  */
 export async function createViewport(host, hooks) {
   const prepared = preparedRenderer;
@@ -79,10 +89,12 @@ export async function createViewport(host, hooks) {
   let terrainNodes = null;
   let mapNodes = null;
   let blendNodes = null;
+  let pickNodes = null;
   if (created.nodes) {
     terrainNodes = await import("./terrain-node.js");
     mapNodes = await import("./cutout-node.js");
     blendNodes = await import("./blend-node.js");
+    pickNodes = await import("./gpu-pick-node.js");
   }
   if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
   const shaderDiagnostics = observeWgsl(renderer.backend);
@@ -94,6 +106,58 @@ export async function createViewport(host, hooks) {
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 8000);
   camera.position.set(12, 9, 14);
   camera.rotation.order = "YXZ";
+  const gpuPicker = createGpuPicker({
+    THREE,
+    renderer,
+    scene,
+    getCamera: () => camera,
+    createNodeMaterial: pickNodes ? (args) => pickNodes.createNodePickMaterial(args) : null,
+  });
+  await gpuPicker.attachNodeMaterial();
+  let pickFallbackWarned = false;
+  let hoverFrame = 0;
+  let hoverToken = 0;
+  let hoverPending = null;
+  let hoverScheduled = false;
+  let pickChain = Promise.resolve();
+  let orbitToken = 0;
+
+  function enqueuePick(task) {
+    const run = pickChain.then(task, task);
+    pickChain = run.then(() => {}, () => {});
+    return run;
+  }
+
+  function disposePickTexture(mesh) {
+    const texture = mesh && mesh.userData && mesh.userData.forgePickTexture;
+    if (texture && typeof texture.dispose === "function") texture.dispose();
+    if (mesh && mesh.userData) mesh.userData.forgePickTexture = null;
+  }
+
+  function bindPick(object) {
+    if (!object || object.userData.forgePickBound) return;
+    object.userData.forgePickBound = true;
+    const previous = object.onBeforeRender;
+    object.onBeforeRender = function (rendererArg, sceneArg, cameraArg, geometry, material, ...rest) {
+      const picking = Boolean(sceneArg.overrideMaterial && sceneArg.overrideMaterial.userData && sceneArg.overrideMaterial.userData.forgePick);
+      if (picking) gpuPicker.prepareObject(object, object.material);
+      if (typeof previous === "function") {
+        previous.call(this, rendererArg, sceneArg, cameraArg, geometry, picking ? object.material : material, ...rest);
+      }
+    };
+  }
+
+  function markTerrainPick(root) {
+    if (!root) return;
+    root.traverse((child) => {
+      if (!child.isMesh) return;
+      child.layers.enable(TERRAIN_PICK_LAYER);
+      child.userData.forgePickDepthOnly = 1;
+      child.userData.forgePickKind = 0;
+      child.userData.forgePickId = 0;
+      bindPick(child);
+    });
+  }
 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -156,6 +220,11 @@ export async function createViewport(host, hooks) {
   transform.setMode("translate");
   transform.setSpace("world");
   scene.add(transform.getHelper());
+  transform.getHelper().traverse((child) => {
+    child.layers.disable(PICK_LAYER);
+    child.layers.disable(PREVIEW_PICK_LAYER);
+    child.layers.disable(TERRAIN_PICK_LAYER);
+  });
 
   const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
@@ -760,6 +829,12 @@ let convertSlots = 8;
       labelText: "",
     };
     paintLabel(entry);
+    if (!volume) {
+      mesh.layers.enable(PICK_LAYER);
+      mesh.userData.forgePickKind = 0;
+      mesh.userData.forgePickId = entry.pickable && !entry.locked ? gpuPicker.idFor(key) : 0;
+      bindPick(mesh);
+    }
     entries.set(key, entry);
     return entry;
   }
@@ -838,7 +913,10 @@ let convertSlots = 8;
 
   function disposeScenePreview(asset, root) {
     root.removeFromParent();
-    for (const mesh of root.children) mesh.dispose?.();
+    for (const mesh of root.children) {
+      disposePickTexture(mesh);
+      mesh.dispose?.();
+    }
     const geometries = new Set();
     const materials = new Set();
     asset.traverse((node) => {
@@ -936,6 +1014,12 @@ let convertSlots = 8;
             mesh.userData.previewKeys = keys;
             mesh.userData.previewName = name;
             mesh.userData.previewSurface = part.userData.name || part.name;
+            mesh.layers.enable(PREVIEW_PICK_LAYER);
+            mesh.userData.forgePickKind = 2;
+            gpuPicker.writeInstanceIds(mesh, placements.map((entry) => (
+              canPick({ shown: entry.pivot.visible, locked: entry.locked }) ? gpuPicker.idFor(entry.key) : 0
+            )));
+            bindPick(mesh);
             if (part.userData.previewWater) {
               mesh.renderOrder = 2;
               mesh.visible = showWater;
@@ -1102,6 +1186,7 @@ let convertSlots = 8;
     if (rows.some(([entry]) => fishingPondFish(entry.gyaml) || entry.gyaml === FISHING_POND_WATER)) refreshPondFish();
     prioritizeLoad();
     syncBatchVisibility();
+    syncPickIds();
     syncLabels();
     attach();
     requestRender();
@@ -1819,12 +1904,15 @@ let convertSlots = 8;
         if (blendNodes) blendNodes.attachBlend(material);
       }
       const sphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : new THREE.Sphere(new THREE.Vector3(), 1);
+      const keepCpu = isPreviewWater(material, child.name || "", url || "");
+      if (keepCpu) geometry.userData.forgeKeepCpu = true;
       parts.push({
         lod: identity.lod,
         family: identity.family,
         name: child.name || "",
         geometry,
         material,
+        keepCpu,
         sphere,
         radius: sphere.radius,
         key: `${url}|${identity.lod}|${identity.family}|${index}`,
@@ -1881,6 +1969,7 @@ let convertSlots = 8;
   function clearBatches() {
     for (const batch of batches) {
       batch.mesh.removeFromParent();
+      disposePickTexture(batch.mesh);
       batch.mesh.dispose();
     }
     batches.length = 0;
@@ -2060,6 +2149,7 @@ let convertSlots = 8;
 
   function syncBatchVisibility() {
     camera.updateMatrixWorld();
+    let pickIdsDirty = false;
     // Flying out must not clip the field on a far plane framed for the village.
     const farNeed = Math.max(8000, camera.position.distanceTo(orbit.target) * 6);
     if (camera.far < farNeed) {
@@ -2114,12 +2204,14 @@ let convertSlots = 8;
           slot.shown = show;
           if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
           slot.mesh.setVisibleAt(slot.index, show);
+          pickIdsDirty = true;
         }
         if (show) visible += 1;
       }
     }
     statInstances = instances;
     statCulled = instances - visible;
+    if (pickIdsDirty) syncPickIds();
   }
 
   function looseParts() {
@@ -2158,6 +2250,15 @@ let convertSlots = 8;
       }
     }
     for (const group of groups.values()) {
+      const dropped = [];
+      for (const geometry of group.geometries.values()) {
+        if (!ensureGeometryCpu(geometry)) dropped.push(geometry.uuid);
+      }
+      for (const uuid of dropped) group.geometries.delete(uuid);
+      if (dropped.length) {
+        group.records = group.records.filter((record) => group.geometries.has(record.part.geometry.uuid));
+        console.warn("Skipped a mesh whose CPU copy could not be restored from its batch.");
+      }
       let verts = 0;
       let indices = 0;
       for (const geometry of group.geometries.values()) {
@@ -2189,17 +2290,20 @@ let convertSlots = 8;
       mesh.sortObjects = Boolean(group.material.transparent);
       const label = group.records.map((record) => record.part.name).find(Boolean);
       if (label) mesh.name = label;
-      if (renderer.backend && renderer.backend.isWebGPUBackend === true) {
-        const previous = mesh.onBeforeRender.bind(mesh);
-        mesh.onBeforeRender = function groupDraws(...args) {
-          // A quiet frame leaves the grouped ranges in place. Grouping them
-          // again would treat each run as one instance and restart the next
-          // geometry at slot 1.
-          const dirty = mesh._visibilityChanged || mesh.perObjectFrustumCulled || mesh.sortObjects;
-          previous(...args);
-          if (dirty) groupGeometryDraws(mesh);
-        };
-      }
+      const previousRender = mesh.onBeforeRender.bind(mesh);
+      const webgpuBatch = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+      mesh.onBeforeRender = function pickAndGroup(rendererArg, sceneArg, cameraArg, geometry, material, ...rest) {
+        // A quiet frame leaves the grouped ranges in place. Grouping them
+        // again would treat each run as one instance and restart the next
+        // geometry at slot 1.
+        const picking = Boolean(sceneArg.overrideMaterial && sceneArg.overrideMaterial.userData && sceneArg.overrideMaterial.userData.forgePick);
+        if (picking) gpuPicker.prepareObject(mesh, mesh.material);
+        const dirty = mesh._visibilityChanged || mesh.perObjectFrustumCulled || mesh.sortObjects;
+        previousRender(rendererArg, sceneArg, cameraArg, geometry, picking ? mesh.material : material, ...rest);
+        if (webgpuBatch && dirty) groupGeometryDraws(mesh);
+      };
+      mesh.layers.enable(PICK_LAYER);
+      mesh.userData.forgePickKind = 1;
       mesh.renderOrder = 1;
       const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
       const water = tag === "water";
@@ -2219,8 +2323,13 @@ let convertSlots = 8;
         }
       }
       if (!built) {
+        disposePickTexture(mesh);
         mesh.dispose();
         continue;
+      }
+      for (const [uuid, geometry] of group.geometries) {
+        const geometryId = geomIds.get(uuid);
+        if (geometryId !== undefined) noteGeometryBatch(geometry, mesh, geometryId);
       }
       const ids = [];
       const geometries = [];
@@ -2257,13 +2366,15 @@ let convertSlots = 8;
         });
       }
       mesh.userData.pick = { ids, geometries, spheres, count };
-      mesh.raycast = raycastBatch;
+      mesh.userData.forgeIndirect = mesh._indirectTexture;
       mesh.computeBoundingSphere();
       scene.add(mesh);
       nextBatches.push({ mesh, ids, water });
     }
     if (stagedEntries) {
       for (const batch of nextBatches) batches.push(batch);
+      syncPickIds();
+      releaseUnselectedPartGeometry();
       return actors.every((entry) => !entry.parts?.length || entry.slots.length);
     }
     const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
@@ -2277,13 +2388,73 @@ let convertSlots = 8;
     naiveDraws = looseParts();
     disposeBatches(previous);
     syncBatchVisibility();
+    syncPickIds();
+    releaseUnselectedPartGeometry();
     guardMissingUv();
     return true;
+  }
+
+  function syncPickIds() {
+    for (const batch of batches) {
+      const pick = batch.mesh.userData.pick;
+      if (!pick) continue;
+      const numeric = new Array(pick.count);
+      for (let i = 0; i < pick.count; i += 1) {
+        const key = pick.ids[i];
+        const entry = key ? entries.get(key) : null;
+        const visible = typeof batch.mesh.getVisibleAt === "function" ? batch.mesh.getVisibleAt(i) : true;
+        numeric[i] = visible && entry && canPick({ shown: entry.pivot.visible, locked: entry.locked })
+          ? gpuPicker.idFor(key) : 0;
+      }
+      gpuPicker.writeInstanceIds(batch.mesh, numeric);
+      batch.mesh.userData.forgeIndirect = batch.mesh._indirectTexture;
+    }
+    if (scenePreview) {
+      for (const meshes of scenePreview.models.values()) {
+        for (const mesh of meshes) {
+          const keys = mesh.userData.previewIds || [];
+          gpuPicker.writeInstanceIds(mesh, keys.map((key) => {
+            const entry = key ? entries.get(key) : null;
+            return entry && canPick({ shown: entry.pivot.visible, locked: entry.locked }) ? gpuPicker.idFor(key) : 0;
+          }));
+        }
+      }
+    }
+    for (const entry of entries.values()) {
+      const placeholder = !entry.volume && (!entry.parts || !entry.parts.length);
+      entry.mesh.userData.forgePickId = placeholder && canPick({ shown: entry.pivot.visible, locked: entry.locked })
+        ? gpuPicker.idFor(entry.key) : 0;
+    }
+  }
+
+  function releaseUnselectedPartGeometry() {
+    const keep = new Set();
+    const current = selected ? entries.get(selected) : null;
+    if (current && current.parts) {
+      for (const part of current.parts) if (part.geometry) keep.add(part.geometry);
+    }
+    const seen = new Set();
+    for (const parsed of parsedTemplates.values()) {
+      for (const part of parsed.parts || []) {
+        const geometry = part.geometry;
+        if (!geometry || seen.has(geometry)) continue;
+        seen.add(geometry);
+        if (part.keepCpu) geometry.userData.forgeKeepCpu = true;
+        if (geometry.userData.forgeKeepCpu || keep.has(geometry)) {
+          ensureGeometryCpu(geometry);
+          continue;
+        }
+        const link = geometry.userData.forgeBatch;
+        if (!link || !link.mesh || !link.mesh.parent) continue;
+        releaseGeometryCpu(geometry);
+      }
+    }
   }
 
   function disposeBatches(oldBatches) {
     for (const { mesh } of oldBatches) {
       mesh.removeFromParent();
+      disposePickTexture(mesh);
       mesh.dispose();
     }
   }
@@ -2326,6 +2497,7 @@ let convertSlots = 8;
           const meshes = scenePreview?.models.get(name) || [];
           for (const mesh of meshes) {
             mesh.removeFromParent();
+            disposePickTexture(mesh);
             mesh.dispose();
             scenePreview.waterMeshes.delete(mesh);
             for (const key of mesh.userData.previewKeys) scenePreview.placements.delete(key);
@@ -2411,45 +2583,10 @@ let convertSlots = 8;
     }
   }
 
-  const scratchMatrix = new THREE.Matrix4();
   const actorMatrix = new THREE.Matrix4();
-  const scratchSphere = new THREE.Sphere();
-  const scratchMesh = new THREE.Mesh();
-  const scratchHits = [];
-  scratchMesh.matrixAutoUpdate = false;
   const pondRay = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
   const pondProbe = new THREE.Mesh(undefined, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
   let pondFishShown = false;
-
-  function raycastBatch(raycaster, intersects) {
-    const pick = this.userData.pick;
-    if (!pick) return;
-    for (let i = 0; i < pick.count; i += 1) {
-      if (!pick.ids[i] || !this.getVisibleAt(i)) continue;
-      this.getMatrixAt(i, scratchMatrix);
-      const source = pick.spheres[i];
-      if (!source) continue;
-      scratchSphere.copy(source).applyMatrix4(scratchMatrix);
-      if (!raycaster.ray.intersectsSphere(scratchSphere)) continue;
-      const geometry = pick.geometries[i];
-      // Only meshes hit by a picking ray need an acceleration structure.
-      // Keep index order intact because the batch already owns a copy.
-      const count = geometry.index?.count ?? geometry.attributes.position.count;
-      if (!geometry.boundsTree && count >= 1024) geometry.computeBoundsTree({ indirect: true });
-      scratchMesh.geometry = geometry;
-      scratchMesh.material = this.material;
-      scratchMesh.matrix.copy(scratchMatrix);
-      scratchMesh.matrixWorld.copy(scratchMatrix);
-      scratchHits.length = 0;
-      scratchMesh.raycast(raycaster, scratchHits);
-      for (let j = 0; j < scratchHits.length; j += 1) {
-        const hit = scratchHits[j];
-        hit.object = this;
-        hit.batchId = i;
-        intersects.push(hit);
-      }
-    }
-  }
 
   function measureTemplate(template) {
     const box = new THREE.Box3();
@@ -2917,6 +3054,7 @@ uniform float terrainLayerMissing;`
       if (![...recentTerrain.values()].includes(previous)) disposeTerrainObject(previous);
     }
     if (nextRoot) {
+      markTerrainPick(nextRoot);
       scene.add(nextRoot);
       applyTerrainUniforms();
       textureCpuReleaseDirty = true;
@@ -3100,6 +3238,7 @@ uniform float terrainLayerMissing;`
 
   function select(id) {
     selected = id;
+    releaseUnselectedPartGeometry();
     nextDetailScan = 0;
     prioritizeLoad();
     for (const entry of entries.values()) paint(entry);
@@ -3110,30 +3249,35 @@ uniform float terrainLayerMissing;`
   }
 
   function aimOrbit(event) {
-    const rect = renderer.domElement.getBoundingClientRect();
-    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(pointer, camera);
+    const ndc = setPointer(event);
     const roots = [];
-    if (terrainRoot) roots.push(terrainRoot);
     for (const batch of batches) roots.push(batch.mesh);
     for (const entry of entries.values()) {
       if (entry.pivot.visible) roots.push(entry.pivot);
     }
     const hits = roots.length ? raycaster.intersectObjects(roots, true) : [];
     const hit = hits.find((item) => item.point);
-    if (hit) {
-      orbit.target.copy(hit.point);
-      return;
+    if (hit) orbit.target.copy(hit.point);
+    else {
+      const entry = selected ? entries.get(selected) : null;
+      if (entry) entry.pivot.getWorldPosition(orbit.target);
+      else {
+        const forward = new THREE.Vector3();
+        camera.getWorldDirection(forward);
+        orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+      }
     }
-    const entry = selected ? entries.get(selected) : null;
-    if (entry) {
-      entry.pivot.getWorldPosition(orbit.target);
-      return;
-    }
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+    const token = ++orbitToken;
+    enqueuePick(async () => {
+      try {
+        const point = await gpuPicker.pickDistance({ ndcX: ndc.x, ndcY: ndc.y, terrain: true, preview: false });
+        if (token !== orbitToken || !point) return;
+        orbit.target.copy(point);
+        requestRender();
+      } catch (error) {
+        warnPickFallback(error);
+      }
+    });
   }
 
   function requestLookLock() {
@@ -3213,6 +3357,7 @@ uniform float terrainLayerMissing;`
       syncGhost(entry);
     }
     syncBatchVisibility();
+    syncPickIds();
     applyGround();
     applyWater();
     applyTerrainUniforms();
@@ -3266,18 +3411,21 @@ uniform float terrainLayerMissing;`
 
   function auditView() {
     camera.updateMatrixWorld();
-    const surface = (name, geometry, material, visible, lod) => ({
-      name,
-      lod,
-      indices: geometry.index?.count ?? null,
-      attributes: Object.fromEntries(Object.entries(geometry.attributes).map(([key, attribute]) =>
-        [key, { components: attribute.itemSize, count: attribute.count, normalized: attribute.normalized }])),
-      material: {
-        name: material.name || material.type, textured: Boolean(material.map),
-        alphaTest: material.alphaTest, transparent: material.transparent, side: material.side,
-      },
-      visible,
-    });
+    const surface = (name, geometry, material, visible, lod) => {
+      const view = geometryAttributeView(geometry);
+      return {
+        name,
+        lod,
+        indices: view.indexCount,
+        attributes: Object.fromEntries(Object.entries(view.attributes).map(([key, attribute]) =>
+          [key, { components: attribute.itemSize, count: attribute.count, normalized: attribute.normalized }])),
+        material: {
+          name: material.name || material.type, textured: Boolean(material.map),
+          alphaTest: material.alphaTest, transparent: material.transparent, side: material.side,
+        },
+        visible,
+      };
+    };
     const entry = entries.get(selected);
     const detail = (entry?.slots || []).map((slot) => surface(slot.family,
       slot.mesh.userData.pick.geometries[slot.index], slot.mesh.material, slot.shown && slot.mesh.visible, slot.lod));
@@ -3462,11 +3610,23 @@ uniform float terrainLayerMissing;`
   const snapRay = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
 
-  function aimed(event, includePreview = false) {
+  function setPointer(event) {
     const rect = renderer.domElement.getBoundingClientRect();
-    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    const ndc = ndcFromClient(event.clientX, event.clientY, rect);
+    pointer.x = ndc.x;
+    pointer.y = ndc.y;
     raycaster.setFromCamera(pointer, camera);
+    return ndc;
+  }
+
+  function warnPickFallback(error) {
+    if (pickFallbackWarned) return;
+    pickFallbackWarned = true;
+    console.warn("GPU picking failed; using the batch mesh on the CPU.", error);
+  }
+
+  function aimed(event, includePreview = false) {
+    setPointer(event);
     const roots = [];
     for (const batch of batches) roots.push(batch.mesh);
     if (includePreview && scenePreview?.root.parent) {
@@ -3553,14 +3713,85 @@ uniform float terrainLayerMissing;`
     return [...groups.solids, "|", ...groups.edges, "|", ...groups.volumes].join(",");
   }
 
+  function applyHover(key) {
+    const next = key || null;
+    if (next === hovered) return;
+    const previous = hovered ? entries.get(hovered) : null;
+    hovered = next;
+    if (previous) syncGhost(previous);
+    const nextEntry = hovered ? entries.get(hovered) : null;
+    if (nextEntry) syncGhost(nextEntry);
+    syncLabels();
+    requestRender();
+  }
+
+  async function groupsAt(event, { preview, peel }) {
+    const ndc = setPointer(event);
+    try {
+      const keys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview, peel });
+      return groupsFromPick(keys, volumeRayHits(raycaster));
+    } catch (error) {
+      warnPickFallback(error);
+      return aimed(event, preview);
+    }
+  }
+
+  function scheduleHover(event) {
+    hoverPending = { clientX: event.clientX, clientY: event.clientY };
+    if (hoverScheduled) return;
+    hoverScheduled = true;
+    hoverFrame = requestAnimationFrame(() => {
+      hoverFrame = 0;
+      const pending = hoverPending;
+      hoverPending = null;
+      if (!pending || looking || transform.dragging) {
+        hoverScheduled = false;
+        if (hoverPending) scheduleHover(hoverPending);
+        return;
+      }
+      const token = ++hoverToken;
+      enqueuePick(async () => {
+        try {
+          const groups = await groupsAt(pending, { preview: false, peel: false });
+          if (token === hoverToken) applyHover(chooseHit(groups));
+        } finally {
+          hoverScheduled = false;
+          if (hoverPending) scheduleHover(hoverPending);
+        }
+      });
+    });
+  }
+
   function pick(event) {
-    const groups = aimed(event, true);
-    const repeat = Boolean(
-      lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
-    );
-    const id = chooseHit({ ...groups, selected, alt: event.altKey, repeat });
-    lastClick = { x: event.clientX, y: event.clientY, signature: signature(groups) };
-    hooks.onSelect(id);
+    const snapshot = { clientX: event.clientX, clientY: event.clientY, altKey: event.altKey };
+    hoverToken += 1;
+    enqueuePick(() => pickAt(snapshot));
+  }
+
+  async function pickAt(event) {
+    const ndc = setPointer(event);
+    try {
+      const frontKeys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview: true, peel: false });
+      const front = frontKeys[0] || null;
+      const repeat = Boolean(
+        lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.front === front,
+      );
+      const peel = Boolean(event.altKey || repeat);
+      const keys = peel
+        ? await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview: true, peel: true })
+        : frontKeys;
+      const groups = groupsFromPick(keys, volumeRayHits(raycaster));
+      lastClick = { x: event.clientX, y: event.clientY, front, signature: signature(groups) };
+      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }));
+    } catch (error) {
+      warnPickFallback(error);
+      const groups = aimed(event, true);
+      const repeat = Boolean(
+        lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
+      );
+      lastClick = { x: event.clientX, y: event.clientY, front: groups.solids[0] || null, signature: signature(groups) };
+      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }));
+    }
   }
 
   renderer.domElement.addEventListener(
@@ -3606,20 +3837,7 @@ uniform float terrainLayerMissing;`
       if (Math.hypot(dx, dy) > 4) lastPointer.moved = true;
     }
     if (transform.dragging) return;
-    const rect = renderer.domElement.getBoundingClientRect();
-    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    const next = chooseHit(aimed(event));
-    const key = next || null;
-    if (key !== hovered) {
-      const previous = hovered ? entries.get(hovered) : null;
-      hovered = key;
-      if (previous) syncGhost(previous);
-      const nextEntry = hovered ? entries.get(hovered) : null;
-      if (nextEntry) syncGhost(nextEntry);
-      syncLabels();
-      requestRender();
-    }
+    scheduleHover(event);
   });
 
   function endPointer(event) {
@@ -4117,8 +4335,11 @@ uniform float terrainLayerMissing;`
     },
     destroy() {
       running = false;
+      hoverToken += 1;
+      if (hoverFrame) cancelAnimationFrame(hoverFrame);
       if (rebuildTimer) clearTimeout(rebuildTimer);
       if (frameHandle) cancelAnimationFrame(frameHandle);
+      gpuPicker.dispose();
       if (keyWindow) {
         keyWindow.removeEventListener("keydown", onFlyKey);
         keyWindow.removeEventListener("keyup", onFlyUp);

@@ -13,7 +13,7 @@ The largest cause on WebGPU was that packed KTX2 textures never actually uploade
 - **WebGPU compressed textures.** `textureSupport(gl, renderer)` uses `renderer.backend.hasFeature("texture-compression-bc")` and `"texture-compression-astc"` after `WebGPURenderer.init()` (already awaited). `canUploadCompressed` does not call `compressedTexImage2D` on a context that has no WebGL probe; alignment is still checked. Packed maps upload as BC7/BC1 when the adapter supports `texture-compression-bc`.
 - **BC7 format mapping.** A Vite plugin (`frontend/webgpu-bptc-plugin.js`) inserts the missing `RGBA_BPTC_Format` case into r170's `getFormat`, and corrects r170's typo `BC7RGBAUnormSRGB: 'bc7-rgba-srgb'` to the WebGPU name `bc7-rgba-unorm-srgb`. `patchWebgpuBc7Format` in `frontend/src/backend.js` also wraps `backend.textureUtils.getFormat` at init (and when `textureUtils` is assigned later).
 - **Normals, ORM, and other data maps are packed too.** Albedos already went through `gpu_image`. Extra maps used `_encode_cached(..., gpu=False)` and stayed PNG, which is most of the unique Field textures (thousands of PNG files in the shared-v1 store vs ~1.3k packed KTX2). Those now pack as BC7 as well. `asDataMap` keeps them in linear color space and repairs the compressed sampler. Model caches are `shared-v3` / `models-53` so existing GLBs rebuild.
-- **Template geometry.** After `partsFromTemplate` clones and bakes a mesh, the source template geometries are disposed. Actors keep their part geometries for picking; `BatchedMesh.addGeometry` still has its own copy. That drops one of the three CPU vertex copies per unique mesh.
+- **Template geometry.** After `partsFromTemplate` clones and bakes a mesh, the source template geometries are disposed. `BatchedMesh.addGeometry` keeps the copy it uploaded. The part clone is dropped once that copy exists; see GPU picking below.
 - **Instrumentation.** In development, `window.__forgeMemory()` (and `viewport.getMemoryReport()`) returns a per-category breakdown: textures by format (unique sources, not clones), geometries by role, unique models vs instances, draw counts, and frame time.
 
 CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTextureCpu`). The source is marked so clones do not re-upload emptied mips. `repairCompressedTexture` will not set `needsUpdate` on a released texture.
@@ -22,7 +22,7 @@ CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTexture
 
 ### GPU instancing
 
-Identical models already share one `BatchedMesh` per material (`batchKey`). Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. Picking reads the batch id back to the actor. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Stats** shows `inst` for the live instance count.
+Identical models already share one `BatchedMesh` per material (`batchKey`). Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Stats** shows `inst` for the live instance count.
 
 ### Static batching (merge vs instances)
 
@@ -51,7 +51,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Technique | Estimated gain | Status |
 | --- | --- | --- |
 | Compressed GPU textures (BC7/BC1) | **4–8×** texture memory vs RGBA; often the difference between a Field tab surviving and OOM | Implemented this pass |
-| Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented this pass |
+| Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented. Template sources are disposed, and part clones are released after the batch copy exists (GPU picking, below) |
 | Frustum culling | Already removing off-screen instance draws | Already present |
 | Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented this pass: background fill stops at 240 unique meshes (or 2.2 GB JS heap). Far meshes evict past 280 unique or 2.8 GB heap |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
@@ -60,6 +60,24 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
+
+## GPU picking
+
+Clicks and hovers draw the visible pickable meshes into an offscreen RGBA8 target instead of raycasting a CPU copy of every part. `frontend/src/gpu-pick.js` packs a 24-bit actor id into the color (little-endian RGB, alpha 0 means a miss). A second mode packs the camera-to-surface distance into the same 24 bits so alt-drag can focus the point under the cursor. The readback is asynchronous. Hover is coalesced to one pick per frame; a click picks immediately. WebGL reads a single pixel. WebGPU reads a 64-pixel-wide strip, because three r170's `copyTextureToBuffer` aligns rows to 256 bytes and rejects a 1-pixel RGBA8 row. The cursor pixel is one texel of that strip.
+
+Instanced preview meshes sample a per-instance id texture (`gl_InstanceID` / `instanceIndex`). Batches sample the same texture through the indirect draw id. Placeholder boxes that have no mesh yet write one id. The gizmo stays on layer 0, and the pick camera never enables that layer. The editor has no marquee gesture. `uniqueIdsFromBuffer` is the decode a box select would use over a rectangle of the same target.
+
+Alpha-tested materials discard in the id shader before the id is written, so a foliage hole is not a solid hit. Alt-click, and a second click on the same front actor, peel up to eight ids front to back. `chooseHit` still walks that stack together with volume edges.
+
+After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes. These stay on the CPU on purpose:
+
+- The `BatchedMesh` arrays. They are the uploaded copy and the source for the next rebuild.
+- The selected actor's model, so selecting it does not depend on a round-trip and the mesh audit still sees its vertices.
+- Water parts. Pond fish placement raycasts the water surface.
+- Terrain meshes and their BVH. Snap uses the wasm ground sampler (`sampleGroundSurface`). It falls back to a heightmap raycast only when that sampler is absent, and it does not use the id buffer.
+- Volume and collision boxes. The test is a unit box. A volume fill is not drawn into the id target, so it cannot occlude the actors inside it.
+- Preview instance geometry, which the preview draw already needs.
+- The sync center-view audit, and the immediate alt-drag focus, raycast `BatchedMesh`'s own geometry rather than the released part clone. If the id readback throws, selection uses that same path.
 
 ## How to measure
 
@@ -132,3 +150,9 @@ Snap still sampled: island tree y=131.35319 (err 0.00019, median ~15 µs), field
 Kokiri Forest Child switched and began loading (195 of 482 unique models when the 3-minute wait ended; the same "Scene ready" hang). Mid-load: JS heap 1.11 GB, working set 4.27 GB, private 8.01 GB, 2653 draws, 31.1 ms, texture CPU 89 MB / GPU 749 MB. A handful of `GLTFLoader: Couldn't load texture blob:` messages appeared at the scene switch; they did not crash the tab. Re-check the forest visually after the settled-banner fix.
 
 `tools/measure-field-memory.mjs` also gained a 10 GB Chrome working-set cap, a 4 GB free-RAM floor, and a 10 GB start-floor so a failed run cannot again knock down other servers on the machine. It treats a resident-capped idle load (`0 queued`, `0 loading`, leftover background remaining) as finished.
+
+### GPU picking release (synthetic)
+
+Hyrule Field was not loaded for this change: this environment has no game dump and the 47241 viewer was not running. The 300–400 MB figure in issue #3 is the hoped-for size of the part clones inside the 426 MB Geo CPU line at the 241-mesh cap. That line also includes `BatchedMesh` and terrain, and those stay.
+
+The release itself was measured with three.js `BatchedMesh.addGeometry` on 25 Nov 2026: 240 meshes, 20,000 vertices each, position + normal + uv + a `Uint32` index. The part arrays were **164.79 MB**. Releasing every mesh except one marked keep-cpu (the water case) freed **164.11 MB** of those arrays. The batch buffers stayed allocated. `__forgeMemory()` will show the same drop in the part role, and no drop in the batched role. Picking no longer builds a BVH on the part clone; those trees were extra heap on top of the attribute bytes and are not in the 164 MB.
