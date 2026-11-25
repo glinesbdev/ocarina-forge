@@ -73,11 +73,11 @@ The summary line counts `shapes textured` and `flat fallback`. A material line s
 
 ## Height-diff against a Longshot scan
 
-`python -m ocarina_forge height-diff <results.json> --dump <dump> [--out report.json]` compares a height-check storage JSON (from the Longshot `world.ray` mod) to Forge. Ground is the composed surface: height tiles (unwritten 0 is no height) plus the Land_* island, cliff, soil, and hill meshes that `prepare_scene_terrain` also classifies as floors, taking the highest hit under the point. Water is a point-in-surface-mesh test on each WaterPlane / WaterSurface Front or Surface part (Back and Box volumes are ignored) with the actor transform; the highest real surface at that XZ wins, so a 135.9 m pool is not hidden by a 130.78 m lake plane, and a hole in the sheet (the Lake Hylia island) is dry. The viewport draws those same actor meshes, so it does not place water from the oversized surface AABB. To inspect one point in the same terms the viewer's snap will use after the prepared terrain cache is rebuilt:
+`python -m ocarina_forge height-diff <results.json> --dump <dump> [--out report.json]` compares a height-check storage JSON (from the Longshot `world.ray` mod) to Forge. Ground is the composed surface: height tiles (unwritten 0 is no height) plus the Land_* island, cliff, soil, and hill meshes that `prepare_scene_terrain` also classifies as floors, taking the highest hit under the point. Water is a point-in-surface-mesh test on each WaterPlane / WaterSurface Front or Surface part (Back and Box volumes are ignored) with the actor transform; the highest real surface at that XZ wins, so a 135.9 m pool is not hidden by a 130.78 m lake plane, and a hole in the sheet (the Lake Hylia island) is dry. The viewport draws those same actor meshes, so it does not place water from the oversized surface AABB. The visible terrain fit keeps the earlier ground, floor, and road cutouts and does not bake island or cliff meshes into the GLB (that mesh ran the browser out of memory on Hyrule Field). Viewer Snap queries `/api/ground`, which uses the same composed sampler. To inspect one point:
 
 ```
 python -m ocarina_forge ground-debug Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs --at=-192.39,506.95 --dump <dump>
 python -m ocarina_forge serve --dump <dump>
 ```
 
-Open the Child Hyrule Field (or Kokiri) scene, wait for the terrain fit to refresh, and toggle **Snap**. The island tree should sit on the island mesh near 131.35 m, not on the lakebed heightmap.
+Open the Child Hyrule Field (or Kokiri) scene and toggle **Snap**. Drag the island tree; it should sit on the island mesh near 131.35 m, not on the lakebed heightmap, even while the visible ground is still the lighter heightmap.

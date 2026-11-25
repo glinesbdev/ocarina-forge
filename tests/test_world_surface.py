@@ -5,8 +5,9 @@ import struct
 
 from ocarina_forge.formats.terrain import SIZE, _as_floats, read_height_file
 from ocarina_forge.world_surface import (
-    _keep_visual_part,
     MeshIndex,
+    _keep_visual_part,
+    actor_translate_overlaps,
     compose_height,
     local_to_world,
     terrain_actor,
@@ -110,3 +111,12 @@ def test_water_parts_are_front_or_surface_not_polysurface():
     assert not _keep_visual_part("pPlane_back__Mt_Water_Back", water=True)
     assert not _keep_visual_part("polySurface12__Mt_Basin", water=True)
     assert _keep_visual_part("polySurface12__Mt_Basin", water=False)
+
+def test_actor_translate_overlaps_rejects_far_pivots():
+    bounds = (-10.0, -10.0, 10.0, 10.0)
+    assert actor_translate_overlaps((-192.39, 131.35, 506.95), None)
+    assert actor_translate_overlaps((0.0, 0.0, 0.0), bounds)
+    assert actor_translate_overlaps((250.0, 0.0, 0.0), bounds)
+    assert not actor_translate_overlaps((400.0, 0.0, 0.0), bounds)
+    assert not actor_translate_overlaps((0.0, 0.0, -400.0), bounds)
+

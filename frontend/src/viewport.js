@@ -284,6 +284,8 @@ let convertSlots = 8;
   let sceneStreamStats = null;
   let snapOn = false;
   let terrainBanc = null;
+  const groundHits = [];
+  let groundInflight = null;
   const subTerrainMaterial = new THREE.MeshBasicMaterial({
     color: 0xa5c9bd, wireframe: true, transparent: true, opacity: 0.28, depthWrite: false,
   });
@@ -336,6 +338,8 @@ let convertSlots = 8;
     for (const root of recentTerrain.values()) disposeTerrainObject(root);
     recentTerrain.clear();
     terrainBanc = null;
+    groundHits.length = 0;
+    groundInflight = null;
   }
 
   function clearGround() {
@@ -2644,6 +2648,7 @@ uniform float terrainLayerMissing;`
     }
     await installTerrainModel(token, meta);
     if (terrainCurrent(token) && meta.fitPending) void refineTerrain(token, banc, meta.url);
+    if (terrainCurrent(token)) void requestGround(orbit.target.x, orbit.target.z);
   }
 
   async function refineTerrain(token, banc, previousUrl) {
@@ -2989,6 +2994,41 @@ uniform float terrainLayerMissing;`
     return name.includes("collision") || name.includes("collider");
   }
 
+  function rememberedGround(x, z, maxDistance = 1.5) {
+    let best = null;
+    let bestDistance = maxDistance;
+    for (const hit of groundHits) {
+      const distance = Math.hypot(hit.x - x, hit.z - z);
+      if (distance <= bestDistance) {
+        best = hit;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  function requestGround(x, z) {
+    if (!hooks.fetchGround || !terrainBanc) return null;
+    const banc = terrainBanc;
+    const key = `${banc}:${x.toFixed(2)},${z.toFixed(2)}`;
+    if (groundInflight && groundInflight.key === key) return groundInflight.promise;
+    const promise = hooks.fetchGround(banc, x, z).then((data) => {
+      if (terrainBanc !== banc) return data;
+      if (Number.isFinite(data.worldY)) {
+        groundHits.push({ x, z, y: data.worldY });
+        if (groundHits.length > 200) groundHits.splice(0, groundHits.length - 200);
+      }
+      return data;
+    }).catch((error) => {
+      console.warn("Could not sample the composed ground", error);
+      return null;
+    }).finally(() => {
+      if (groundInflight && groundInflight.promise === promise) groundInflight = null;
+    });
+    groundInflight = { key, promise };
+    return promise;
+  }
+
   function surfaceAt(x, y, z, ignoreId) {
     const hits = [];
     snapRay.ray.origin.set(x, y + 80, z);
@@ -3011,6 +3051,8 @@ uniform float terrainLayerMissing;`
       const top = volumeSurfaceY(entry, snapRay);
       if (top != null) hits.push({ y: top });
     }
+    const remembered = rememberedGround(x, z);
+    if (remembered) hits.push({ y: remembered.y });
     return chooseSnap(y, hits);
   }
 
@@ -3018,13 +3060,27 @@ uniform float terrainLayerMissing;`
     if (!snapOn || !entry || transform.mode !== "translate") return;
     const p = entry.pivot.position;
     const y = surfaceAt(p.x, p.y, p.z, entry.id);
-    if (y == null) return;
-    p.y = y;
+    if (y != null) p.y = y;
+    const pending = requestGround(p.x, p.z);
+    if (!pending) return;
+    return pending.then((data) => {
+      if (!snapOn || !entries.get(entry.id) || !data || !Number.isFinite(data.worldY)) return;
+      const cur = entry.pivot.position;
+      if (Math.hypot(cur.x - p.x, cur.z - p.z) > 2) return;
+      const next = surfaceAt(cur.x, cur.y, cur.z, entry.id);
+      if (next == null) return;
+      cur.y = next;
+      syncPreviewPlacement(entry);
+      hooks.onPreview(entry.id, [cur.x, cur.y, cur.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+      syncInstanceMatrix(entry);
+      requestRender();
+    });
   }
 
   function spawnPoint() {
     const point = [round(orbit.target.x), round(orbit.target.y), round(orbit.target.z)];
     if (!snapOn) return point;
+    void requestGround(point[0], point[2]);
     const y = surfaceAt(point[0], point[1], point[2], null);
     if (y == null) return point;
     return [point[0], round(y), point[2]];
@@ -3273,9 +3329,13 @@ uniform float terrainLayerMissing;`
     }
     const entry = selected ? entries.get(selected) : null;
     if (!entry || !entry.id) return;
-    maybeSnap(entry);
-    const p = entry.pivot.position;
-    hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+    const finish = () => {
+      const p = entry.pivot.position;
+      hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+    };
+    const pending = maybeSnap(entry);
+    if (pending && typeof pending.then === "function") void pending.then(finish, finish);
+    else finish();
   });
 
   let keyWindow = null;

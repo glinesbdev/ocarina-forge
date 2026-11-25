@@ -336,6 +336,32 @@ def _world_heights(report: dict, tiles: list[dict]) -> dict | None:
     return {"minY": min(lows), "maxY": max(highs)}
 
 
+def query_ground(dump, banc: str, points: list[tuple[float, float]], *, mesh_cache=None, tile_report=None, pad: float = 80.0) -> dict:
+    """Composed world height at each XZ: finest height tile plus Land_* floors."""
+    report = tile_report if tile_report is not None else _load(dump, banc)
+    surfaces = collect_terrain_surfaces(dump, banc, cache=mesh_cache, bounds=query_bounds(points, pad=pad))
+    samples = []
+    for x, z in points:
+        tile_y = None
+        if report.get("kind") == "heightmap":
+            drawn = _sample(report, x, z).get("drawn")
+            tile_y = None if not drawn else drawn.get("worldY")
+        mesh = surfaces.sample(x, z)
+        world_y, source, mesh = compose_height(tile_y, mesh)
+        samples.append(
+            {
+                "x": x,
+                "z": z,
+                "worldY": world_y,
+                "source": source,
+                "mesh": None
+                if not mesh
+                else {"gyaml": mesh.get("gyaml"), "worldY": mesh.get("worldY"), "source": mesh.get("source")},
+            }
+        )
+    return {"samples": samples, "report": report}
+
+
 def inspect_ground(dump, banc: str, points: list[tuple[float, float]]) -> dict:
     clips, actors = _actors(dump, banc)
     report = _load(dump, banc)

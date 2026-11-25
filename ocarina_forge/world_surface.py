@@ -1,12 +1,12 @@
-"""Shared walkable and water surface queries for ground-debug, height-diff, and preview.
+"""Shared walkable and water surface queries for ground-debug, height-diff, and snap.
 
-Height tiles alone miss the Land_* island, cliff, soil, and hill meshes that
-``prepare_scene_terrain`` composites into the preview, and a surface AABB
-covers holes (the Lake Hylia island) that the water mesh itself does not.
-This module classifies those floors, loads their triangles (Phive collision
-first, visual BFRES as a fallback; water is visual only), and samples the
-highest surface under an XZ point. ``scene_preview`` uses the same classifier
-and Phive loader so the viewport cutouts stay in lockstep.
+Height tiles alone miss the Land_* island, cliff, soil, and hill meshes, and a
+surface AABB covers holes (the Lake Hylia island) that the water mesh itself
+does not. This module classifies those floors, loads their triangles (Phive
+collision first, visual BFRES as a fallback; water is visual only), and samples
+the highest surface under an XZ point. The viewport keeps a lighter heightmap
+plus the earlier ground/floor/road cutouts, and Snap queries this sampler so
+those island meshes stay correct without baking them into the visible GLB.
 """
 
 from __future__ import annotations
@@ -308,6 +308,14 @@ def _iter_actors(dump, banc: str):
             yield relative, index, actor
 
 
+def actor_translate_overlaps(translate, bounds, reach: float = 300.0) -> bool:
+    """Cheap XZ reject before loading a floor mesh for a bounded query."""
+    if bounds is None:
+        return True
+    tx, tz = translate[0], translate[2]
+    return not (tx < bounds[0] - reach or tx > bounds[2] + reach or tz < bounds[1] - reach or tz > bounds[3] + reach)
+
+
 def collect_terrain_surfaces(dump, banc: str, cache: dict | None = None, bounds=None) -> MeshIndex:
     """Phive-or-visual triangles for classified Land_* floors that overlap bounds."""
     cache = cache if cache is not None else {}
@@ -317,10 +325,12 @@ def collect_terrain_surfaces(dump, banc: str, cache: dict | None = None, bounds=
         verified = rolling_rock_map(relative) and gyaml.startswith(ROLLING_ROCK_LAND)
         if not verified and not terrain_actor(gyaml):
             continue
+        translate = read_vec(actor, "Translate", [0.0, 0.0, 0.0])
+        if not actor_translate_overlaps(translate, bounds):
+            continue
         triangles, source = local_floor_triangles(dump, gyaml, cache)
         if not triangles:
             continue
-        translate = read_vec(actor, "Translate", [0.0, 0.0, 0.0])
         rotate = read_vec(actor, "Rotate", [0.0, 0.0, 0.0])
         scale = read_vec(actor, "Scale", [1.0, 1.0, 1.0])
         local = local_aabb(triangles)

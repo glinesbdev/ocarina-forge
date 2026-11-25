@@ -218,3 +218,66 @@ def test_default_scene_preview_includes_all_cached_drawable_model_types(tmp_path
     assert {source["name"] for source in manifests[-1]} == {f"Land_Model_{i}" for i in range(190)}
     _, count = scene_preview.build_scene_preview(dump, banc, limit=12, known={banc})
     assert count == len(manifests[-1]) == 12
+
+def test_visible_cutouts_keep_roads_and_skip_islands():
+    assert scene_preview._terrain_actor("Land_Kokiri_Ground_B_08")
+    assert scene_preview._terrain_actor("Land_HyruleField_Road_A_01")
+    assert not scene_preview._terrain_actor("Land_LakeHrl_Island_E_05")
+    assert not scene_preview._terrain_actor("Land_LakeHrl_Cliff_B_01")
+    assert not scene_preview._terrain_actor("Land_LakeHrl_Soil_A_01")
+    assert not scene_preview._terrain_actor("Land_Town_HouseFloor")
+    from ocarina_forge.world_surface import terrain_actor
+    assert terrain_actor("Land_LakeHrl_Island_E_05")
+
+
+def test_hyrule_field_fit_cache_uses_a_new_generation(tmp_path, monkeypatch):
+    monkeypatch.setattr(scene_preview, "cache_dir", lambda: tmp_path)
+    dump = SimpleNamespace(root=tmp_path / "dump")
+    field = scene_preview.corrected_terrain_path(dump, "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs", "base")
+    other = scene_preview.corrected_terrain_path(dump, "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs", "base")
+    assert "scene-terrain-v11" in field.parts
+    assert "scene-terrain-v10" in other.parts
+
+
+def test_islands_are_not_queued_as_visible_terrain_cutouts(tmp_path, monkeypatch):
+    dump = SimpleNamespace(root=tmp_path)
+    banc = "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs"
+    terrain = {"status": "mesh", "terrain": {"heightScale": 100}, "digest": "base"}
+    monkeypatch.setattr(scene_preview, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(scene_preview, "_cached_glb", lambda _: tmp_path / "base.glb")
+    requests = []
+    monkeypatch.setattr(scene_preview, "_run_worker", lambda request: requests.append(request) or b"fitted")
+    result = scene_preview.prepare_scene_terrain(dump, banc, terrain, actors=[
+        {"gyaml": "Land_LakeHrl_Island_E_05", "translate": [-192.39, 131.35, 506.95], "rotate": [0, 0, 0], "scale": [1, 1, 1]},
+    ])
+    assert result is None
+    assert requests == []
+    none_marker = scene_preview.corrected_terrain_path(dump, banc, "base").with_suffix(".none")
+    assert none_marker.is_file()
+
+
+def test_ground_api_returns_the_composed_surface(tmp_path, monkeypatch):
+    dump = SimpleNamespace(root=tmp_path / "dump")
+    monkeypatch.setattr(server, "_open_dump", lambda: dump)
+
+    def fake_query(_dump, banc, points):
+        x, z = points[0]
+        return [{
+            "x": x,
+            "z": z,
+            "worldY": 131.3531,
+            "source": "mesh",
+            "mesh": {"gyaml": "Land_LakeHrl_Island_E_05", "worldY": 131.3531, "source": "phive"},
+        }]
+
+    monkeypatch.setattr(server, "query_ground_cached", fake_query)
+    client = TestClient(server.app)
+    data = client.get("/api/ground", params={
+        "banc": "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs",
+        "x": -192.39,
+        "z": 506.95,
+    }).json()
+    assert data["worldY"] == 131.3531
+    assert data["source"] == "mesh"
+    assert data["mesh"]["gyaml"] == "Land_LakeHrl_Island_E_05"
+

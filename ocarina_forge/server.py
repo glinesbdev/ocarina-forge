@@ -41,6 +41,7 @@ from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
+from ocarina_forge.grounddebug import query_ground
 from ocarina_forge.scene_preview import corrected_terrain_path, prepare_scene_terrain, preview_bank, preview_path, terrain_fit_pending
 from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, shared_model_path, shared_texture_path
 from ocarina_forge.warm import scene_warm_queue
@@ -90,6 +91,8 @@ _POOL_INFLIGHT = 0
 _POOL_WANT: int | None = None
 _PREFETCH: set[asyncio.Task] = set()
 _TERRAIN_FIT_LOCK = asyncio.Lock()
+_GROUND = {}
+_GROUND_LOCK = threading.Lock()
 
 
 def _configured_workers() -> tuple[int, int, str]:
@@ -467,6 +470,27 @@ def _banc_error(_request, exc: BancError):
     return JSONResponse({"error": exc.code, "message": exc.message}, status_code=status)
 
 
+
+def _clear_ground_cache() -> None:
+    with _GROUND_LOCK:
+        _GROUND.clear()
+
+
+def query_ground_cached(dump, banc: str, points: list[tuple[float, float]]) -> list[dict]:
+    """Reuse height tiles and floor meshes across snap queries for one dump+scene."""
+    key = (str(dump.root), banc)
+    with _GROUND_LOCK:
+        state = _GROUND.setdefault(key, {"report": None, "mesh_cache": {}})
+        report = state["report"]
+        mesh_cache = state["mesh_cache"]
+    result = query_ground(dump, banc, points, mesh_cache=mesh_cache, tile_report=report)
+    with _GROUND_LOCK:
+        state = _GROUND.setdefault(key, {"report": None, "mesh_cache": mesh_cache})
+        state["report"] = result["report"]
+        state["mesh_cache"] = mesh_cache
+    return result["samples"]
+
+
 def _open_dump() -> Dump:
     config = load_config()
     if not config["dump"]:
@@ -617,6 +641,7 @@ def put_config(body: dict):
         else:
             dump_to_save = ""
         _dump_cache["key"] = None
+        _clear_ground_cache()
     if project is not None:
         if str(project).strip():
             project_to_save = str(Project(project).root)
@@ -1044,6 +1069,37 @@ def shared_texture_file(name: str):
         raise BancError("This shared model texture is not in the cache.", "not_found")
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".ktx2": "image/ktx2"}[path.suffix]
     return FileResponse(path, media_type=mime, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+
+@app.get("/api/ground")
+async def ground_at(banc: str, x: float, z: float):
+    """Composed walkable height at one XZ: height tile plus Land_* island/cliff/hill meshes."""
+    if not banc or ".." in banc or banc.startswith("/"):
+        raise BancError("That scene path is not in the dump.", "not_found")
+    dump = _open_dump()
+    samples = await asyncio.to_thread(query_ground_cached, dump, banc, [(x, z)])
+    return samples[0]
+
+
+@app.post("/api/ground")
+async def ground_batch(body: dict):
+    banc = str(body.get("banc") or "")
+    if not banc or ".." in banc or banc.startswith("/"):
+        raise BancError("That scene path is not in the dump.", "not_found")
+    points = []
+    for item in body.get("points") or []:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            raise BancError("Each ground point needs x,z metres.", "edit")
+        try:
+            points.append((float(item[0]), float(item[1])))
+        except (TypeError, ValueError) as exc:
+            raise BancError("Each ground point needs x,z metres.", "edit") from exc
+    if not points:
+        raise BancError("Pass at least one x,z point.", "edit")
+    dump = _open_dump()
+    samples = await asyncio.to_thread(query_ground_cached, dump, banc, points)
+    return {"samples": samples}
 
 
 @app.get("/api/terrain")
