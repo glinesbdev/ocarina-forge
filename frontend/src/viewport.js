@@ -828,7 +828,7 @@ let convertSlots = 8;
     const generation = textureGeneration;
     for (const job of textureQueue.take(room)) {
       textureActive += 1;
-      void paintActorTextures(job.gyaml, job.url, generation).finally(() => {
+      void paintActorTextures(job.gyaml, job.url, generation).catch(() => {}).finally(() => {
         textureActive = Math.max(0, textureActive - 1);
         if (generation !== textureGeneration) return;
         textureQueue.finish(job.gyaml);

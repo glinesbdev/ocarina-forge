@@ -91,7 +91,11 @@ async function assignSlot(material, slot, loadTexture) {
   const pending = new Map();
   const take = (url) => {
     if (!url) return null;
-    if (!pending.has(url)) pending.set(url, Promise.resolve(loadTexture(url)));
+    if (!pending.has(url)) {
+      pending.set(url, Promise.resolve()
+        .then(() => loadTexture(url))
+        .catch(() => null));
+    }
     return pending.get(url);
   };
   const [map, normalMap, orm, emissive, moss] = await Promise.all([

@@ -164,20 +164,96 @@ test("parse settles without handing non-basis bytes to the Basis loader", async 
   });
   const originalBitmap = globalThis.createImageBitmap;
   delete globalThis.createImageBitmap;
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warns.push(String(message));
   try {
     const result = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("bitmap fallback parse did not settle")), 1000);
-      fallbackLoader.parse(rawBuffer, resolve, (error) => {
+      fallbackLoader.parse(rawBuffer, (texture) => {
         clearTimeout(timer);
-        resolve(error);
+        resolve(texture);
+      }, (error) => {
+        clearTimeout(timer);
+        reject(error);
       });
     });
-    assert.equal(result instanceof Error, true);
-    assert.match(String(result.message), /bitmap fallback|no texture/);
+    assert.equal(result.userData.forgePlainFallback, true);
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /no bitmap fallback/);
+    await new Promise((resolve, reject) => {
+      fallbackLoader.parse(rawBuffer, resolve, reject);
+    });
+    assert.equal(warns.length, 1);
   } finally {
+    console.warn = originalWarn;
     if (originalBitmap) globalThis.createImageBitmap = originalBitmap;
   }
   assert.equal(basisCalls, 0);
+});
+
+test("a jpeg or png manifest file decodes and does not reject", async () => {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const choice = chooseTexture(jpeg, { enabled: true, caps: { bptc: true }, gl: {} });
+  assert.equal(choice.kind, "bitmap");
+  assert.deepEqual([...choice.bytes], [...jpeg]);
+  const THREE = {
+    SRGBColorSpace: "srgb",
+    Texture: class {
+      constructor(image) {
+        this.isTexture = true;
+        this.image = image;
+      }
+    },
+    DataTexture: class {
+      constructor(data, width, height) {
+        this.isTexture = true;
+        this.image = { data, width, height };
+        this.userData = {};
+      }
+    },
+  };
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warns.push(String(message));
+  const originalBitmap = globalThis.createImageBitmap;
+  const originalFetch = globalThis.fetch;
+  globalThis.createImageBitmap = async (blob) => {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    assert.equal(bytes[0], 0xff);
+    assert.equal(bytes[1], 0xd8);
+    return { width: 6, height: 2 };
+  };
+  globalThis.fetch = async (url) => ({
+    ok: true,
+    arrayBuffer: async () => (String(url).endsWith(".jpg") ? jpeg.buffer : jpeg.slice().buffer),
+  });
+  try {
+    const loader = createGpuTextureLoader({
+      THREE,
+      gl: null,
+      caps: {},
+      enabled: () => true,
+      basisParse() { throw new Error("basis"); },
+    });
+    const loaded = await new Promise((resolve, reject) => {
+      loader.load("/api/model-textures/abc.jpg", resolve, undefined, reject);
+    });
+    assert.equal(loaded.isTexture, true);
+    assert.equal(loaded.image.width, 6);
+    assert.equal(loaded.userData && loaded.userData.forgePlainFallback, undefined);
+    assert.equal(warns.length, 0);
+    const again = await new Promise((resolve, reject) => {
+      loader.load("/api/model-textures/abc.jpg", resolve, undefined, reject);
+    });
+    assert.equal(again.image.width, 6);
+    assert.equal(warns.length, 0);
+  } finally {
+    console.warn = originalWarn;
+    globalThis.fetch = originalFetch;
+    if (originalBitmap) globalThis.createImageBitmap = originalBitmap;
+    else delete globalThis.createImageBitmap;
+  }
 });
 
 test("releaseTextureCpu leaves a size stub after closing an ImageBitmap so mipLevelCount stays finite", () => {

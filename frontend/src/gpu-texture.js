@@ -189,7 +189,12 @@ export function chooseTexture(buffer, options) {
       reason: misaligned ? "size is not a multiple of 4" : "the GPU rejected the blocks",
     };
   }
-  if (!info || info.vkFormat !== 0) {
+  if (!info) {
+    // Not a KTX2. The texture manifest stores JPEG or PNG when the image is
+    // not a multiple of 4, and those bytes are the file, not an OCFG trailer.
+    return { kind: "bitmap", bytes: packed.ktx.length ? packed.ktx : packed.fallback, reason: "" };
+  }
+  if (info.vkFormat !== 0) {
     return { kind: "bitmap", bytes: packed.fallback, reason: "" };
   }
   return { kind: "basis", bytes: packed.ktx, reason: "" };
@@ -200,6 +205,56 @@ export function chooseTexture(buffer, options) {
  * A stand-in that only implements parse() throws, the loader swallows it, and
  * the material is left with no map. Problems stays empty.
  */
+const reportedTextureFallback = new Set();
+
+function textureKey(buffer, url) {
+  if (url) return String(url);
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer || 0);
+  const n = bytes.length;
+  return `${n}:${n ? bytes[0] : 0}:${n > 1 ? bytes[1] : 0}:${n > 16 ? bytes[16] : 0}`;
+}
+
+function warnTextureFallback(key, reason) {
+  const id = key || "texture";
+  if (reportedTextureFallback.has(id)) return;
+  reportedTextureFallback.add(id);
+  console.warn(`Texture has no bitmap fallback (${reason || "unreadable"}). Using a flat colour.`);
+}
+
+function plainTexture(THREE) {
+  const data = new Uint8Array([255, 255, 255, 255]);
+  const texture = typeof THREE.DataTexture === "function"
+    ? new THREE.DataTexture(data, 1, 1)
+    : new THREE.Texture({ width: 1, height: 1, data });
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.flipY = false;
+  texture.userData = { ...(texture.userData || {}), forgePlainFallback: true };
+  return texture;
+}
+
+function decodeBitmap(bytes) {
+  if (bytes && bytes.length && typeof createImageBitmap === "function") {
+    return createImageBitmap(new Blob([bytes]), { imageOrientation: "none", premultiplyAlpha: "none" });
+  }
+  if (!bytes || !bytes.length || typeof Image === "undefined" || typeof URL === "undefined" || typeof Blob === "undefined") {
+    return Promise.reject(new Error("no bitmap fallback"));
+  }
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([bytes]));
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("no bitmap fallback"));
+    };
+    image.src = url;
+  });
+}
+
 export function createGpuTextureLoader(options) {
   const THREE = options.THREE;
   const gl = options.gl;
@@ -208,11 +263,17 @@ export function createGpuTextureLoader(options) {
   const onFallback = options.onFallback;
   const enabled = options.enabled || (() => true);
 
-  function fail(onError, error) {
-    if (onError) onError(error instanceof Error ? error : new Error(String(error)));
+  function usePlain(onLoad, key, reason) {
+    warnTextureFallback(key, reason);
+    try {
+      onLoad(plainTexture(THREE));
+    } catch {
+      /* the caller already moved on */
+    }
   }
 
-  function parse(buffer, onLoad, onError) {
+  function parse(buffer, onLoad, onError, textureId) {
+    const key = textureId || textureKey(buffer);
     try {
       const choice = chooseTexture(buffer, { enabled: enabled(), caps, gl });
       if (choice.kind === "compressed") {
@@ -232,17 +293,18 @@ export function createGpuTextureLoader(options) {
       }
       if (choice.kind === "bitmap") {
         if (choice.reason && onFallback) onFallback(choice.reason);
-        if (choice.bytes && choice.bytes.length && typeof createImageBitmap === "function") {
-          createImageBitmap(new Blob([choice.bytes]), { imageOrientation: "none", premultiplyAlpha: "none" }).then((image) => {
+        const bytes = choice.bytes;
+        if (bytes && bytes.length) {
+          decodeBitmap(bytes).then((image) => {
             const texture = new THREE.Texture(image);
             texture.needsUpdate = true;
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.flipY = false;
             onLoad(texture);
-          }, (error) => fail(onError, error));
+          }, (error) => usePlain(onLoad, key, (error && error.message) || choice.reason || "no bitmap fallback"));
           return;
         }
-        fail(onError, new Error(choice.reason || "no bitmap fallback"));
+        usePlain(onLoad, key, choice.reason || "no bitmap fallback");
         return;
       }
       if (choice.kind === "basis" && basisParse) {
@@ -254,10 +316,10 @@ export function createGpuTextureLoader(options) {
         return;
       }
     } catch (error) {
-      fail(onError, error);
+      usePlain(onLoad, key, error && error.message);
       return;
     }
-    fail(onError, new Error("no texture"));
+    usePlain(onLoad, key, "no texture");
   }
 
   function download(url, onLoad, onError, deferred) {
@@ -265,11 +327,22 @@ export function createGpuTextureLoader(options) {
       if (!response.ok) throw new Error(`texture download failed (${response.status})`);
       return response.arrayBuffer();
     }).then((buffer) => {
-      const apply = () => parse(buffer, onLoad, onError);
+      const apply = () => {
+        try {
+          parse(buffer, onLoad, onError, url);
+        } catch (error) {
+          usePlain(onLoad, url, error && error.message);
+        }
+      };
       if (deferred && options.scheduleDetailParse) options.scheduleDetailParse(apply);
       else apply();
     }).catch((error) => {
-      if (onError) onError(error);
+      try {
+        if (onError) onError(error);
+        else usePlain(onLoad, url, error && error.message);
+      } catch {
+        usePlain(onLoad, url, error && error.message);
+      }
     });
   }
 
