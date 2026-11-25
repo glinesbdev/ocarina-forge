@@ -18,8 +18,10 @@ import {
   ndcFromClient,
   paddedPickWidth,
   pickLayerMask,
+  pickMask,
   pickStrip,
   pickTextureSize,
+  resolvePickTexture,
   pixelFromNdc,
   pointFromDistance,
   quantizeUnorm8,
@@ -114,6 +116,20 @@ test("the gizmo's layer is outside every pick camera", () => {
   assert.equal(layerIntersects(1 << PREVIEW_PICK_LAYER, pickLayerMask()), false);
   assert.equal(layerIntersects(1 << PREVIEW_PICK_LAYER, pickLayerMask({ preview: true })), true);
   assert.equal(layerIntersects(1 << TERRAIN_PICK_LAYER, pickLayerMask({ terrain: true })), true);
+});
+
+test("a pick mask is a three.js texture, including a render target's color texture", () => {
+  const texture = { isTexture: true, name: "albedo" };
+  const alpha = { isTexture: true, name: "alpha" };
+  const target = { isRenderTarget: true, texture };
+  assert.equal(resolvePickTexture(texture), texture);
+  assert.equal(resolvePickTexture(target), texture);
+  assert.equal(resolvePickTexture(null), null);
+  assert.equal(resolvePickTexture({ texture: {} }), null);
+  assert.deepEqual(pickMask({ alphaTest: 0.4, map: target }), { alphaTest: 0.4, map: texture, channel: "a" });
+  assert.deepEqual(pickMask({ alphaTest: 0.4, alphaMap: alpha }), { alphaTest: 0.4, map: alpha, channel: "g" });
+  assert.deepEqual(pickMask({ alphaTest: 0, map: texture }), { alphaTest: 0, map: null, channel: "a" });
+  assert.deepEqual(pickMask({ alphaTest: 0.4 }), { alphaTest: 0.4, map: null, channel: "a" });
 });
 
 test("the id shader packs little-endian and discards a miss", () => {
