@@ -28,7 +28,7 @@ those files while regenerating the placement patches. The game’s Ocarina Forge
 
 ## Load filters
 
-The Actors panel has a load preset and a checkbox per layer (Models, Terrain, Water, Collision, Behavior, Effects, Decorations, Lights) plus Textures. A checked layer is fetched. The eye hides a layer that is already loaded, and the Ground and Water checkboxes on the stage bar do the same for those two. `?load=terrain,models` or `?load=layout` sets the filter for the session and saves it on the open project. Full clears the query.
+The Actors panel has a load preset and a checkbox per layer (Models, Terrain, Water, Collision, Behavior, Effects, Decorations, Lights) plus Load textures. A checked layer is fetched. Load textures downloads images after the mesh. Layout, Logic, and `textures=0` leave it off. The eye hides a layer that is already loaded. The Ground, Water, and Textures checkboxes on the stage bar show or hide those things. Textures there does not dispose images and does not fetch them again. `?load=terrain,models` or `?load=layout` sets the filter for the session and saves it on the open project. Full clears the query.
 
 `load-filters.yaml` sits next to `manifest.yaml`. It is editor state. Format 1. Save, Save Longshot mod, and Build mod do not read it.
 

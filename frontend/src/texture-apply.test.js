@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { applyTextureManifest, clearTextureMaps, materialKey } from "./texture-apply.js";
+import { pickMask } from "./gpu-pick.js";
+import { applyTextureManifest, clearTextureMaps, materialKey, presentTextures } from "./texture-apply.js";
+import { createTextureQueue, orderTextureJobs, simulateTextureWave, textureSlotLimit } from "./texture-stream.js";
 
 function color(rgb) {
   return {
@@ -136,15 +138,91 @@ test("the texture toggle does not ask the model loader to run", () => {
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
   const geometry = main.slice(main.indexOf("function geometryRequest"), main.indexOf("viewport = await createViewport"));
   const change = main.slice(main.indexOf("async function applyLoadChange"), main.indexOf("async function openScene"));
+  const shown = viewport.slice(viewport.indexOf("function setTextureShown"), viewport.indexOf("function setTextureLoad"));
   assert.match(geometry, /flat: "1"/);
   assert.doesNotMatch(geometry, /textures/);
   assert.match(main, /fetchTextures:/);
+  assert.match(main, /id="show-textures"|show-textures/);
+  assert.match(main, /setTextureShown/);
+  assert.match(main, /Load textures/);
   assert.doesNotMatch(change, /invalidateModels/);
   assert.doesNotMatch(change, /forceSceneLoad/);
   assert.match(viewport, /planAssetFetches/);
   assert.match(viewport, /materialKey: identity\.family/);
-  assert.match(viewport, /if \(texturesWanted && template\) void paintActorTextures/);
-  assert.match(viewport, /function setTextures/);
+  assert.match(viewport, /if \(textureAllow && template\) enqueueTexture/);
+  assert.match(viewport, /function setTextureShown/);
+  assert.match(viewport, /function setTextureLoad/);
+  assert.doesNotMatch(shown, /fetchTextures|enqueueTexture|paintActorTextures/);
+  assert.doesNotMatch(viewport, /function setTextures/);
   assert.doesNotMatch(viewport, /function invalidateModels/);
   assert.doesNotMatch(viewport, /formatStats/);
+});
+
+test("show, hide, and show again swaps resident maps and does not fetch", async () => {
+  const mesh = material();
+  const batchMate = mesh;
+  const parts = [
+    { name: "lod0Body0", materialKey: "Body:0", material: mesh, geometry: { id: "geom" } },
+    { name: "batch", materialKey: "Body:0", material: batchMate, geometry: { id: "geom" } },
+  ];
+  let fetches = 0;
+  let disposed = 0;
+  await applyTextureManifest(parts, {
+    materials: {
+      "Body:0": { map: "/api/model-textures/albedo.ktx2", alpha: "mask", cutoff: 0.4, color: [1, 1, 1, 1] },
+    },
+  }, async (url) => {
+    fetches += 1;
+    return { url, isTexture: true, dispose() { disposed += 1; } };
+  });
+  const before = fetches;
+  const started = performance.now();
+  assert.equal(presentTextures(parts, false), 1);
+  assert.equal(presentTextures(parts, true), 1);
+  assert.equal(presentTextures(parts, false), 1);
+  const elapsed = performance.now() - started;
+  assert.equal(fetches, before);
+  assert.equal(disposed, 0);
+  assert.ok(elapsed < 30);
+  assert.equal(mesh.map, null);
+  assert.equal(mesh.alphaTest, 0);
+  assert.equal(mesh.userData.forgeLit.map.isTexture, true);
+  assert.equal(pickMask(mesh).map, null);
+  presentTextures(parts, true);
+  assert.equal(mesh.map.isTexture, true);
+  assert.equal(mesh.map.url, "/api/model-textures/albedo.ktx2");
+  assert.equal(pickMask(mesh).map, mesh.map);
+  assert.equal(batchMate.map, mesh.map);
+});
+
+test("a show toggle during the stream reveals what is resident and leaves the rest counted", async () => {
+  const near = material();
+  const far = material();
+  const nearParts = [{ name: "lod0Near0", materialKey: "Near:0", material: near }];
+  const farParts = [{ name: "lod0Far0", materialKey: "Far:0", material: far }];
+  const requests = [];
+  const queue = createTextureQueue();
+  queue.setAllow(true);
+  queue.note({ gyaml: "Far", url: "/api/models/Far/model.glb?flat=1", distance: 400, visible: false });
+  queue.note({ gyaml: "Near", url: "/api/models/Near/model.glb?flat=1", distance: 2, visible: true });
+  const [first] = queue.take(1);
+  assert.equal(first.gyaml, "Near");
+  await applyTextureManifest(nearParts, {
+    materials: { "Near:0": { map: "/api/model-textures/near.ktx2", color: [1, 1, 1, 1] } },
+  }, async (url) => {
+    requests.push(url);
+    return { url, isTexture: true, dispose() {} };
+  });
+  queue.finish(first.gyaml);
+  presentTextures(nearParts, false);
+  const progress = queue.progress();
+  assert.deepEqual(progress, { done: 1, total: 2 });
+  const before = requests.length;
+  const started = performance.now();
+  presentTextures(nearParts, true);
+  assert.ok(performance.now() - started < 30);
+  assert.equal(requests.length, before);
+  assert.equal(near.map.url, "/api/model-textures/near.ktx2");
+  assert.equal(far.map, null);
+  assert.equal(requests.some((url) => url.includes("model.glb")), false);
 });

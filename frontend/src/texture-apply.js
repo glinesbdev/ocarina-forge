@@ -28,14 +28,34 @@ const MAP_KEYS = ["map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "
 function rememberPlain(material) {
   const userData = material.userData || (material.userData = {});
   if (userData.forgePlain) return userData;
-  const plain = { alphaTest: material.alphaTest || 0, transparent: Boolean(material.transparent) };
-  if (material.color && typeof material.color.clone === "function") plain.color = material.color.clone();
-  if (material.roughness != null) plain.roughness = material.roughness;
-  if (material.metalness != null) plain.metalness = material.metalness;
-  for (const key of MAP_KEYS) plain[key] = material[key] || null;
-  plain.blendMap = material.userData && material.userData.blendMap || null;
-  userData.forgePlain = plain;
+  userData.forgePlain = snapshotAppearance(material);
   return userData;
+}
+
+function snapshotAppearance(material) {
+  const shot = {
+    alphaTest: material.alphaTest || 0,
+    transparent: Boolean(material.transparent),
+    depthWrite: material.depthWrite !== false,
+  };
+  if (material.color && typeof material.color.clone === "function") shot.color = material.color.clone();
+  if (material.roughness != null) shot.roughness = material.roughness;
+  if (material.metalness != null) shot.metalness = material.metalness;
+  for (const key of MAP_KEYS) shot[key] = material[key] || null;
+  shot.blendMap = material.userData && material.userData.blendMap || null;
+  return shot;
+}
+
+function applyAppearance(material, shot) {
+  for (const key of MAP_KEYS) material[key] = (shot && shot[key]) || null;
+  if (shot && shot.color && material.color && typeof material.color.copy === "function") material.color.copy(shot.color);
+  if (shot && shot.roughness != null) material.roughness = shot.roughness;
+  if (shot && shot.metalness != null) material.metalness = shot.metalness;
+  material.alphaTest = (shot && shot.alphaTest) || 0;
+  material.transparent = Boolean(shot && shot.transparent);
+  if (shot && shot.depthWrite != null) material.depthWrite = shot.depthWrite;
+  material.userData.blendMap = (shot && shot.blendMap) || null;
+  material.needsUpdate = true;
 }
 
 function replaceMap(material, key, texture, plain, colorSpace) {
@@ -67,7 +87,7 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
 
 async function assignSlot(material, slot, loadTexture) {
   const userData = rememberPlain(material);
-  if (userData.forgeMapUrl === (slot.map || "") && material.map && material.map.isTexture === true) return;
+  if (userData.forgeMapUrl === (slot.map || "") && userData.forgeLit) return;
   const pending = new Map();
   const take = (url) => {
     if (!url) return null;
@@ -111,7 +131,30 @@ async function assignSlot(material, slot, loadTexture) {
     material.depthWrite = false;
   }
   userData.forgeMapUrl = slot.map || "";
+  const lit = MAP_KEYS.some((key) => asTexture(material[key])) || asTexture(userData.blendMap);
+  if (lit) userData.forgeLit = snapshotAppearance(material);
   material.needsUpdate = true;
+}
+
+/**
+ * Swap the mesh between the plain material and the resident textured one.
+ * Synchronous. Does not fetch, decode, or dispose. Batches share `part.material`,
+ * so writing the maps here updates those draws.
+ */
+export function presentTextures(parts, shown) {
+  const seen = new Set();
+  let swapped = 0;
+  for (const part of parts || []) {
+    const material = part && part.material;
+    if (!material || seen.has(material)) continue;
+    seen.add(material);
+    const lit = material.userData && material.userData.forgeLit;
+    const plain = material.userData && material.userData.forgePlain;
+    if (!lit || !plain) continue;
+    applyAppearance(material, shown ? lit : plain);
+    swapped += 1;
+  }
+  return swapped;
 }
 
 /**
@@ -125,6 +168,14 @@ export function clearTextureMaps(parts, release = () => {}) {
     const material = part && part.material;
     const plain = material && material.userData && material.userData.forgePlain;
     if (!material || !plain) continue;
+    const lit = material.userData.forgeLit;
+    if (lit) {
+      for (const key of MAP_KEYS) {
+        const held = lit[key];
+        if (held && held !== plain[key]) material[key] = held;
+      }
+      if (lit.blendMap) material.userData.blendMap = lit.blendMap;
+    }
     for (const key of MAP_KEYS) {
       const current = material[key];
       material[key] = plain[key] || null;
@@ -155,6 +206,7 @@ export function clearTextureMaps(parts, release = () => {}) {
     material.transparent = plain.transparent;
     material.needsUpdate = true;
     delete material.userData.forgePlain;
+    delete material.userData.forgeLit;
     delete material.userData.forgeMapUrl;
   }
 }

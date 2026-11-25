@@ -37,7 +37,8 @@ import { formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { planAssetFetches, wantsMesh } from "./layers.js";
-import { applyTextureManifest, clearTextureMaps } from "./texture-apply.js";
+import { applyTextureManifest, presentTextures } from "./texture-apply.js";
+import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
@@ -394,10 +395,15 @@ let convertSlots = 8;
     lights: true,
   };
   let statLayersOff = [];
-  let texturesWanted = true;
-  let texturesArmed = false;
+  let textureAllow = true;
+  let texturesShown = true;
+  let texturesShownArmed = false;
   let textureGeneration = 0;
+  let textureActive = 0;
+  let statTexturesDone = 0;
+  let statTexturesTotal = 0;
   const textureDocs = new Map();
+  const textureQueue = createTextureQueue();
   let linkPairs = [];
   let showSub = false;
   let drawDistance = 0;
@@ -567,8 +573,15 @@ let convertSlots = 8;
       if (material[key]) into.add(material[key]);
     }
     const extra = material.userData || {};
-    for (const key of ["mossMap", "orm1Map", "normal1Map"]) {
+    for (const key of ["mossMap", "orm1Map", "normal1Map", "blendMap"]) {
       if (extra[key]) into.add(extra[key]);
+    }
+    const lit = extra.forgeLit;
+    if (lit) {
+      for (const key of TEXTURE_KEYS) {
+        if (lit[key]) into.add(lit[key]);
+      }
+      if (lit.blendMap) into.add(lit.blendMap);
     }
   }
 
@@ -785,42 +798,109 @@ let convertSlots = 8;
     return pending;
   }
 
+  function textureRank(gyaml) {
+    let distance = Infinity;
+    let visible = false;
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml || !entry.pivot) continue;
+      const gap = entry.pivot.position.distanceToSquared(camera.position);
+      if (gap < distance) distance = gap;
+      if (entry.pivot.visible !== false) visible = true;
+    }
+    return { distance, visible };
+  }
+
+  function publishTextureProgress() {
+    const progress = textureQueue.progress();
+    const done = progress ? progress.done : 0;
+    const total = progress ? progress.total : 0;
+    if (done === statTexturesDone && total === statTexturesTotal) return;
+    statTexturesDone = done;
+    statTexturesTotal = total;
+    paintFrame(lastRendering, false);
+  }
+
+  function pumpTextures() {
+    if (!textureAllow) return;
+    textureQueue.rank((job) => textureRank(job.gyaml));
+    const room = textureSlotLimit({ geometryBusy: statLoading > 0 || statQueued > 0 }) - textureActive;
+    if (room <= 0) return;
+    const generation = textureGeneration;
+    for (const job of textureQueue.take(room)) {
+      textureActive += 1;
+      void paintActorTextures(job.gyaml, job.url, generation).finally(() => {
+        textureActive = Math.max(0, textureActive - 1);
+        if (generation !== textureGeneration) return;
+        textureQueue.finish(job.gyaml);
+        publishTextureProgress();
+        pumpTextures();
+      });
+    }
+    publishTextureProgress();
+  }
+
+  function enqueueTexture(gyaml, url) {
+    if (!textureAllow || !gyaml || !url) return;
+    const rank = textureRank(gyaml);
+    if (!textureQueue.note({ gyaml, url, distance: rank.distance, visible: rank.visible })) return;
+    pumpTextures();
+  }
+
+  function enqueueResidentTextures() {
+    const seen = new Set();
+    for (const entry of entries.values()) {
+      if (!entry.gyaml || !entry.templateUrl || !entry.parts || seen.has(entry.gyaml)) continue;
+      seen.add(entry.gyaml);
+      enqueueTexture(entry.gyaml, entry.templateUrl);
+    }
+  }
+
   async function paintActorTextures(gyaml, url, generation = textureGeneration) {
-    if (!texturesWanted || !url) return;
+    if (!url) return;
     const parsed = parsedTemplates.get(url);
     if (!parsed) return;
     const manifest = await textureManifest(gyaml);
-    if (generation !== textureGeneration || !texturesWanted) return;
+    if (generation !== textureGeneration) return;
+    if (!parsedTemplates.has(url)) return;
     await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
-    if (generation !== textureGeneration || !texturesWanted) {
-      clearTextureMaps(parsed.parts, releaseTextureCpu);
-    }
+    if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
+    presentTextures(parsed.parts, texturesShown);
     finishTextureEdit(parsed.parts);
     requestRender();
   }
 
-  function setTextures(on) {
-    const next = Boolean(on);
-    if (texturesArmed && next === texturesWanted) return;
-    texturesArmed = true;
-    texturesWanted = next;
-    textureGeneration += 1;
-    const generation = textureGeneration;
+  function presentResidentTextures() {
     const seen = new Set();
-    for (const entry of entries.values()) {
-      if (!entry.templateUrl || !entry.gyaml || seen.has(entry.templateUrl)) continue;
-      seen.add(entry.templateUrl);
-      if (!texturesWanted) {
-        const parsed = parsedTemplates.get(entry.templateUrl);
-        if (parsed) {
-          clearTextureMaps(parsed.parts, releaseTextureCpu);
-          finishTextureEdit(parsed.parts);
-        }
-      } else {
-        void paintActorTextures(entry.gyaml, entry.templateUrl, generation);
-      }
+    for (const parsed of parsedTemplates.values()) {
+      if (!parsed || seen.has(parsed)) continue;
+      seen.add(parsed);
+      presentTextures(parsed.parts, texturesShown);
+      finishTextureEdit(parsed.parts);
     }
     requestRender();
+  }
+
+  function setTextureShown(on) {
+    const next = Boolean(on);
+    if (texturesShownArmed && next === texturesShown) return;
+    texturesShownArmed = true;
+    texturesShown = next;
+    presentResidentTextures();
+  }
+
+  function setTextureLoad(on) {
+    const next = Boolean(on);
+    if (next === textureAllow) {
+      if (next) pumpTextures();
+      return;
+    }
+    textureAllow = next;
+    textureQueue.setAllow(next);
+    if (!next) {
+      publishTextureProgress();
+      return;
+    }
+    enqueueResidentTextures();
   }
 
   function clearGround() {
@@ -1631,6 +1711,7 @@ let convertSlots = 8;
   }
 
   function unloadResidentModel(gyaml) {
+    textureQueue.forget(gyaml);
     const urls = new Set();
     for (const entry of entries.values()) {
       if (entry.gyaml !== gyaml) continue;
@@ -1766,6 +1847,7 @@ let convertSlots = 8;
         residentCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()) && queue.length > 0,
       }, foregroundSettled);
       requestRender();
+      pumpTextures();
     };
     const failEntry = (entry, meta, message) => {
       entry.modelMeta = { ...(meta || entry.modelMeta || {}), status: "box", reason: message };
@@ -1812,7 +1894,7 @@ let convertSlots = 8;
         const template = needsModelGeometry(gyaml) ? await ensureTemplate(meta.url, meta, priority) : null;
         if (token === generation) {
           deliver(gyaml, meta, template);
-          if (texturesWanted && template) void paintActorTextures(gyaml, meta.url);
+          if (textureAllow && template) enqueueTexture(gyaml, meta.url);
         }
       } catch (error) {
         if (token !== generation) return;
@@ -4554,6 +4636,8 @@ uniform float terrainLayerMissing;`
       queued: statQueued,
       loading: statLoading,
       background,
+      texturesDone: statTexturesDone,
+      texturesTotal: statTexturesTotal,
       layersOff: statLayersOff,
     });
     if (showProfile) paintProfile();
@@ -4755,7 +4839,8 @@ uniform float terrainLayerMissing;`
     ensureTerrain,
     setLinks,
     setLoadState,
-    setTextures,
+    setTextureShown,
+    setTextureLoad,
     setSnap(on) {
       snapOn = Boolean(on);
     },

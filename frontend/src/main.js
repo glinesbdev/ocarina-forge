@@ -397,6 +397,16 @@ $("show-water").addEventListener("change", (event) => {
   viewport.setFlags({ water: state.showWater, visibleLayers: state.load && state.load.visible });
   persistLoad();
 });
+const showTextures = $("show-textures");
+if (showTextures) {
+  showTextures.addEventListener("change", () => {
+    if (showTextures.checked && state.load && state.load.textures === false) {
+      void applyLoadChange(loadFromLayers(state.load.layers, true, state.load.visible));
+      return;
+    }
+    if (viewport.setTextureShown) viewport.setTextureShown(showTextures.checked);
+  });
+}
 $("show-sub").addEventListener("change", (event) => {
   state.showSub = event.target.checked;
   viewport.setFlags({ subTerrain: state.showSub });
@@ -1183,10 +1193,22 @@ function mergeViews(current, incoming) {
   return { ...(current || {}), actors: [...byId.values()], companions, diff: (current && current.diff) || (incoming && incoming.diff) };
 }
 
+let appliedTextureFilter = null;
+function syncTextureSwitch(load) {
+  const allow = Boolean(load && load.textures !== false);
+  const box = $("show-textures");
+  if (appliedTextureFilter !== allow) {
+    appliedTextureFilter = allow;
+    if (box) box.checked = allow;
+    if (viewport.setTextureShown) viewport.setTextureShown(allow);
+  }
+  if (viewport.setTextureLoad) viewport.setTextureLoad(allow);
+}
+
 function publishLoad() {
   const load = state.load || fullLoad();
   viewport.setLoadState({ off: layersOff(load) });
-  if (viewport.setTextures) viewport.setTextures(Boolean(load.textures));
+  syncTextureSwitch(load);
   const ground = $("show-ground");
   const water = $("show-water");
   state.showGround = Boolean(load.layers.terrain && load.visible.terrain !== false);
@@ -1331,7 +1353,8 @@ function textureRow(load) {
     void applyLoadChange(loadFromLayers(load.layers, box.checked, load.visible));
   });
   const name = document.createElement("span");
-  name.textContent = "Textures";
+  name.textContent = "Load textures";
+  box.title = "Download images after the mesh. Layout and textures=0 leave this off. The Textures checkbox on the stage bar shows or hides them, and does not fetch again.";
   row.append(box, name);
   return row;
 }

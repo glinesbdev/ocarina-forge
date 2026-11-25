@@ -72,8 +72,15 @@ function collectMaterialTextures(material, into) {
     if (material[key]) into.add(material[key]);
   }
   const extra = material.userData || {};
-  for (const key of ["mossMap", "orm1Map", "normal1Map"]) {
+  for (const key of ["mossMap", "orm1Map", "normal1Map", "blendMap"]) {
     if (extra[key]) into.add(extra[key]);
+  }
+  const lit = extra.forgeLit;
+  if (lit) {
+    for (const key of TEXTURE_KEYS) {
+      if (lit[key]) into.add(lit[key]);
+    }
+    if (lit.blendMap) into.add(lit.blendMap);
   }
 }
 

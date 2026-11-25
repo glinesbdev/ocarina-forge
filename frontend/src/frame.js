@@ -27,6 +27,8 @@ export function formatStatusLabel({
   queued = 0,
   loading = 0,
   background = 0,
+  texturesDone = null,
+  texturesTotal = null,
   layersOff = null,
 } = {}) {
   const parts = [];
@@ -36,6 +38,9 @@ export function formatStatusLabel({
   if (queued) parts.push(`${queued} queued`);
   if (loading) parts.push(`${loading} loading`);
   if (background) parts.push(`${background} background`);
+  const texTotal = Number(texturesTotal) || 0;
+  const texDone = Number(texturesDone) || 0;
+  if (texTotal > 0 && texDone < texTotal) parts.push(`textures ${texDone}/${texTotal}`);
   if (layersOff && layersOff.length) parts.push(`off: ${layersOff.join(", ")}`);
   return parts.join(" · ");
 }
