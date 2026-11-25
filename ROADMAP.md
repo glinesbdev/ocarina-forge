@@ -38,4 +38,4 @@ The first step is the profiling HUD, so the rest of this list is driven by a spl
 
 - [#13 Explore running the editor fully in the browser (WebAssembly)](https://github.com/glinesbdev/ocarina-forge/issues/13) — a long-term look at running the whole editor in the browser, including parsing and conversion.
 
-Dialog editing, connecting and adding behavior nodes, baked lighting, an asset browser, and a desktop package are still later. They are written up in [docs/design/mod-editor.md](docs/design/mod-editor.md).
+Dialog editing, connecting and adding behavior nodes, baked lighting, an asset browser, and a desktop package are still later. They are written up in [docs/design/mod-editor.md](docs/design/mod-editor.md). What a drag from that browser can and cannot bring with it is [docs/research/asset-library.md](docs/research/asset-library.md) ([#16](https://github.com/glinesbdev/ocarina-forge/issues/16)).
