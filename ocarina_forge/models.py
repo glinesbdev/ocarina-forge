@@ -8,8 +8,11 @@ never committed.
 A real actor pack does not contain the bfres. `Component/ModelInfo/*.bgyml`
 names `ModelProjectName` and `FmdbName`, and the mesh is
 `Model/<Project>.<Fmdb>.bfres.zs` (zstd dictionary 1). Base color is a
-separate `Tex/<name>.bntx.zs`, not a BNTX embedded in the bfres. Older
-`Model/<name>.bfres` paths and a bfres stored in the pack are still accepted.
+separate `.bntx.zs`. The game resolves the material's texture name
+case-insensitively, usually as `Tex/<name>.bntx.zs`, and also from any other
+`.bntx.zs` under the romfs, then from the actor pack and the shared packs in
+`Pack/`. Older `Model/<name>.bfres` paths and a bfres stored in the pack are
+still accepted.
 """
 
 from __future__ import annotations
@@ -41,8 +44,8 @@ from ocarina_forge.cache_prune import (
     write_version_sidecar,
 )
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
-from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
-from ocarina_forge.blend import color_span, overlay_plan
+from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, rank_albedo, texture_rank
+from ocarina_forge.blend import color_span, overlay_plan, sampler_indices
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
@@ -68,7 +71,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-56\0"
+_CACHE_VERSION = b"models-57\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -142,6 +145,7 @@ def _cache_prefix() -> bytes:
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
 _TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
+_PACK_TEX: dict[str, tuple[int, dict[str, str]]] = {}
 _FILE_SIG: dict[str, tuple[int, int, str]] = {}
 _BNTX_MEM: dict[str, list] = {}
 _BNTX_ORDER: list[str] = []
@@ -639,6 +643,9 @@ def _track_file(dump, relative: str) -> None:
     files = _FILES.get()
     if files is None or dump is None or not relative or relative.startswith("embedded"):
         return
+    packed = _parse_pack_ref(relative)
+    if packed is not None:
+        relative = packed[0]
     if any(item.get("path") == relative for item in files):
         return
     path = dump.romfs / relative
@@ -945,6 +952,8 @@ def _consider_water(names: list[str], binds, result: dict) -> dict:
         entry["textured"] = False
         entry["flat"] = True
         entry["standIn"] = "water"
+        entry["via"] = ""
+        entry["flatCause"] = "water-stand-in"
         previous = entry.get("error") or ""
         entry["error"] = f"water stand-in ({reject})" if not previous else f"water stand-in ({reject}). {previous}"
     else:
@@ -1251,10 +1260,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     if "terrain proxy" not in notes:
                         notes.append("terrain proxy")
                 elif part.texture:
-                    notes.append(f"Base color “{part.texture}” {why or 'was not usable'}, so this mesh uses a flat colour.")
+                    notes.append(_flat_colour_note(part, why))
                 elif not model.images and not external:
-                    reason = why or "No albedo sampler was usable and no Tex file matched."
-                    notes.append(f"{reason} This mesh uses a flat colour.")
+                    notes.append(_flat_colour_note(part, why))
             unlit = False
             kind = ""
             if water:
@@ -1462,6 +1470,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                     if model.materials[part.material_index] is not material:
                         continue
                     part.texture = choice["wanted"]
+                    part.texture_error = "" if choice.get("image") is not None else (choice["entry"].get("error") or "")
                     part.albedo_sampler = choice["sampler"]
                     part.normal_texture = (choice.get("maps") or {}).get("normal") or ""
                     part.emission_texture = (choice.get("maps") or {}).get("emission") or ""
@@ -1493,6 +1502,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 choice = _choose_loose(dump, model, part, hints, terrain, external, raws)
                 log.append(choice["entry"])
                 part.texture = choice["wanted"]
+                part.texture_error = "" if choice.get("image") is not None else (choice["entry"].get("error") or "")
                 part.alpha = choice["alpha"]
                 _apply_stand_in(part, choice, external)
                 if choice.get("image") is not None and choice["wanted"]:
@@ -1528,7 +1538,7 @@ def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
 
 
 def _choose_material(dump, model, material, hints, terrain, external, raws) -> dict:
-    sources = list(material.albedo)
+    sources = _albedo_sources(material)
     has_samplers = any(slot for slot, _tex in material.binds)
     pool_note = ""
     # A material that names samplers and has no _a0/_a1/_a2 stays flat.
@@ -1643,13 +1653,14 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
     elif misses and winner is not None:
         error = "; ".join(misses + ([error] if error else []))
     elif misses and winner is None:
-        error = "; ".join(misses)
+        error = _with_match_detail(material, tried, "; ".join(misses))
     elif not sources and not error:
         if material.binds:
             shown = ", ".join(f"{slot or '?'}={tex}" for slot, tex in material.binds)
             error = f"only non-color samplers ({shown})"
         else:
             error = "material has no texture names"
+        error = _with_match_detail(material, tried, error)
     if pool_note:
         error = f"{pool_note}. {error}".strip() if error and winner is None else (pool_note if not error else f"{error}. {pool_note}")
     alpha = found.get("alpha", material.alpha) if found.get("image") is not None else material.alpha
@@ -1664,6 +1675,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         entry["wanted"] = ""
         entry["error"] = "terrain proxy"
         entry["decoded"] = False
+    _tag_resolution(entry, material, sampler, wanted, found, proxy and winner is None)
     result = _consider_water(
         [material.name, getattr(material, "shader", ""), *[tex for _slot, tex in sources]],
         list(material.binds),
@@ -1925,7 +1937,11 @@ def _read_tex(dump, relative: str) -> bytes:
     mem = _READ_MEM.get()
     if mem is not None and relative in mem:
         return mem[relative]
-    blob, _dict_id = dump.read_file(relative)
+    packed = _parse_pack_ref(relative)
+    if packed is not None:
+        blob = _read_pack_member(dump, packed[0], packed[1])
+    else:
+        blob, _dict_id = dump.read_file(relative)
     if mem is not None:
         mem[relative] = blob
     return blob
@@ -2323,41 +2339,317 @@ def _hint_tokens(hint: str) -> list[str]:
     return tokens
 
 
+def _flat_colour_note(part, why: str) -> str:
+    """The viewer sentence for a mesh that did not get an albedo image."""
+    detail = getattr(part, "texture_error", "") or why or ""
+    if part.texture:
+        reason = f"Base color “{part.texture}” {detail or 'was not usable'}"
+    else:
+        reason = detail or "No albedo sampler was usable and no Tex file matched."
+        if getattr(part, "colors", None):
+            reason = f"{reason} This shape stores vertex colours and the material names no albedo texture."
+    return f"{reason} This mesh uses a flat colour."
+
+
+def _with_match_detail(material, tried: list[str], error: str) -> str:
+    """Add the sampler binds and the paths that were opened to a flat-colour error."""
+    parts = [error] if error else []
+    shown = ", ".join(f"{slot or '?'}={tex}" for slot, tex in material.binds if slot or tex)
+    if shown and shown not in (error or ""):
+        parts.append(f"samplers {shown}")
+    preview = ", ".join(dict.fromkeys(tried))
+    if len(preview) > 240:
+        preview = preview[:240].rsplit(",", 1)[0]
+    if preview and preview not in (error or ""):
+        parts.append(f"tried {preview}")
+    return ". ".join(parts)
+
+
+def _albedo_sources(material) -> list[tuple[str, str]]:
+    """Albedo binds, dropping samplers the shader variation marks unused.
+
+    ``0xFF`` in the ``+0x10`` sampler-index list means that slot is not sampled.
+    The numeric index is not a texture remap: the sampler dictionary stays
+    paired with the texture array. Dropping an unused ``_a0`` lets a later
+    albedo-named bind win instead of failing the whole material.
+    """
+    unused = _unused_sampler_names(material)
+    if not unused:
+        return list(material.albedo)
+    binds = [(slot, tex) for slot, tex in material.binds if slot not in unused]
+    return rank_albedo(binds)
+
+
+def _unused_sampler_names(material) -> set[str]:
+    seen: dict[str, list[int]] = {}
+    for block in getattr(material, "shader_blocks", None) or []:
+        if not isinstance(block, dict):
+            continue
+        for name, index in sampler_indices(block).items():
+            seen.setdefault(name, []).append(index)
+    return {name for name, indices in seen.items() if indices and all(item == 0xFF for item in indices)}
+
+
+def _tag_resolution(entry: dict, material, sampler: str, wanted: str, found: dict, proxy: bool) -> None:
+    """Mark a log row as sampler, Tex fallback, or a flat-colour cause. No texels."""
+    if proxy:
+        entry["via"] = ""
+        entry["flatCause"] = "terrain-proxy"
+        return
+    image = found.get("image")
+    if image is not None:
+        entry["via"] = _match_via(sampler, wanted, found.get("found") or "")
+        entry["flatCause"] = ""
+        return
+    entry["via"] = ""
+    entry["flatCause"] = _flat_cause(material, entry.get("error") or "")
+
+
+def _match_via(sampler: str, wanted: str, located: str) -> str:
+    if located == "embedded":
+        return "sampler" if sampler else "tex-fallback"
+    if sampler and wanted and _stem(located).lower() == _stem(wanted).lower():
+        return "sampler"
+    return "tex-fallback"
+
+
+def _flat_cause(material, error: str) -> str:
+    text = error or ""
+    lower = text.lower()
+    tokens = {
+        "".join(char for char in (slot or "").lower() if char.isalnum())
+        for slot, _tex in (getattr(material, "binds", None) or [])
+    }
+    tokens.discard("")
+    if tokens and tokens <= {"tc", "ta"}:
+        return "runtime-array"
+    if "terrain proxy" in lower:
+        return "terrain-proxy"
+    if "vertex colour" in lower:
+        return "vertex-colour"
+    if "only non-color" in lower:
+        return "non-color-samplers"
+    if "no texture names" in lower:
+        return "untextured"
+    if "magenta" in lower:
+        return "magenta-placeholder"
+    if "not a colour" in lower or "format" in lower or "bc4" in lower or "unsupported" in lower:
+        return "unsupported-format"
+    if "no tex file" in lower or "not a bntx" in lower or "was not usable" in lower:
+        return "missing-file"
+    if getattr(material, "binds", None):
+        return "non-color-samplers"
+    return "untextured"
+
+
 def _stem(name: str) -> str:
     text = name.strip().replace("\\", "/").lstrip("/")
-    if text.startswith("Work/"):
+    if text.lower().startswith("work/"):
         text = text[5:]
     stem = text.rsplit("/", 1)[-1]
+    lower = stem.lower()
     for suffix in (".bntx.zs", ".bntx"):
-        if stem.endswith(suffix):
+        if lower.endswith(suffix):
             stem = stem[: -len(suffix)]
+            lower = stem.lower()
             break
     return stem
 
 
+def _is_bntx_filename(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(".bntx.zs") or lower.endswith(".bntx")
+
+
+def _prefer_tex(paths: list[str]) -> str:
+    """Loose ``Tex/<name>.bntx.zs`` wins. That is the path the game opens."""
+
+    def score(path: str) -> tuple:
+        name = path.rsplit("/", 1)[-1].lower()
+        top = path.startswith("Tex/") and path.count("/") == 1
+        in_tex = top or path.startswith("Tex/") or "/Tex/" in f"/{path}"
+        zs = name.endswith(".bntx.zs")
+        if top and zs:
+            rank = 0
+        elif top:
+            rank = 1
+        elif in_tex and zs:
+            rank = 2
+        elif in_tex:
+            rank = 3
+        elif path.startswith("Banc/") and zs:
+            rank = 4
+        elif zs:
+            rank = 5
+        else:
+            rank = 6
+        return (rank, len(path), path.lower())
+
+    return sorted(paths, key=score)[0]
+
+
 def _tex_index(dump) -> dict[str, str]:
-    folder = dump.romfs / "Tex"
-    if not folder.is_dir():
+    """Lowercase texture stem to one romfs path.
+
+    Longshot's texture index walks every ``**/*.bntx.zs`` under the romfs, not
+    only the files sitting directly in ``Tex/``. The stem match is
+    case-insensitive. When several files share a stem, ``Tex/<name>.bntx.zs``
+    is the one the game loads.
+    """
+    root = dump.romfs
+    if not root.is_dir():
         return {}
+    stamp = 0
+    seen = False
+    for folder in (root, root / "Tex", root / "Pack", root / "Banc", root / "UI", root / "Effect"):
+        try:
+            stamp ^= folder.stat().st_mtime_ns
+            seen = True
+        except OSError:
+            continue
+    if not seen:
+        return {}
+    key = str(root)
+    cached = _TEX_INDEX.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    grouped: dict[str, list[str]] = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for filename in files:
+            if not _is_bntx_filename(filename):
+                continue
+            path = Path(dirpath) / filename
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            grouped.setdefault(_stem(filename).lower(), []).append(relative)
+    index = {stem: _prefer_tex(paths) for stem, paths in grouped.items() if paths}
+    _TEX_INDEX[key] = (stamp, index)
+    return index
+
+
+def _stem_keys(stem: str) -> list[str]:
+    key = (stem or "").lower()
+    if not key:
+        return []
+    keys = [key]
+    if key.endswith("_albedo"):
+        keys.append(key[: -len("_albedo")])
+    elif key.endswith("_alb"):
+        keys.append(key[: -len("_alb")])
+    else:
+        keys.append(f"{key}_alb")
+        keys.append(f"{key}_albedo")
+    return list(dict.fromkeys(keys))
+
+
+def _pack_ref(pack_rel: str, member: str) -> str:
+    return f"pack://{pack_rel}//{member}"
+
+
+def _parse_pack_ref(relative: str) -> tuple[str, str] | None:
+    prefix = "pack://"
+    if not relative.startswith(prefix):
+        return None
+    pack_rel, sep, member = relative[len(prefix) :].partition("//")
+    if not sep or not pack_rel or not member or ".." in pack_rel.split("/"):
+        return None
+    return pack_rel, member
+
+
+def _read_pack_member(dump, pack_rel: str, member: str) -> bytes:
+    from ocarina_forge.formats.zsio import decompress, is_zstd
+
+    blob, _dict_id = dump.read_file(pack_rel)
     try:
-        stamp = folder.stat().st_mtime_ns
+        archive = Sarc(blob)
+    except ValueError as exc:
+        raise BancError(f"{pack_rel} is not a SARC pack: {exc}", "bad_pack") from exc
+    data = archive.read(member)
+    if data[:4] == b"BNTX" or not is_zstd(data):
+        return data
+    payload, _used = decompress(data, dump.dicts())
+    return payload
+
+
+def _shared_packs(dump) -> list[str]:
+    folder = dump.romfs / "Pack"
+    if not folder.is_dir():
+        return []
+    found = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        if path.is_file() and (path.name.lower().endswith(".pack.zs") or path.name.lower().endswith(".pack")):
+            found.append(f"Pack/{path.name}")
+
+    def rank(relative: str) -> tuple:
+        lower = relative.lower()
+        if "residentcommon" in lower:
+            return (0, lower)
+        if "bootup" in lower:
+            return (1, lower)
+        if lower.endswith("/zsdic.pack.zs") or lower.endswith("/zsdic.pack"):
+            return (9, lower)
+        return (2, lower)
+
+    found.sort(key=rank)
+    return [item for item in found if not item.lower().endswith("/zsdic.pack.zs") and not item.lower().endswith("/zsdic.pack")]
+
+
+def _actor_packs(dump, hints: list[str]) -> list[str]:
+    found = []
+    for token in hints:
+        if not token or "/" in token or token in {"Model", "Tex", "Banc", "Pack"}:
+            continue
+        for suffix in (".pack.zs", ".pack"):
+            relative = f"Pack/Actor/{token}{suffix}"
+            if relative not in found and (dump.romfs / relative).is_file():
+                found.append(relative)
+    return found
+
+
+def _pack_tex_index(dump, pack_rel: str) -> dict[str, str]:
+    path = dump.romfs / pack_rel
+    try:
+        stamp = path.stat().st_mtime_ns
     except OSError:
         return {}
-    key = str(folder)
-    cached = _TEX_INDEX.get(key)
+    key = str(path)
+    cached = _PACK_TEX.get(key)
     if cached and cached[0] == stamp:
         return cached[1]
     index: dict[str, str] = {}
     try:
-        entries = list(folder.iterdir())
-    except OSError:
-        return {}
-    for path in entries:
-        if not path.is_file():
+        blob, _dict_id = dump.read_file(pack_rel)
+        archive = Sarc(blob)
+    except (BancError, ValueError, OSError):
+        _PACK_TEX[key] = (stamp, index)
+        return index
+    for name in archive.names():
+        if not _is_bntx_filename(name):
             continue
-        index.setdefault(_stem(path.name).lower(), f"Tex/{path.name}")
-    _TEX_INDEX[key] = (stamp, index)
+        index.setdefault(_stem(name).lower(), _pack_ref(pack_rel, name))
+    _PACK_TEX[key] = (stamp, index)
     return index
+
+
+def _archive_tex(dump, keys: list[str], hints: list[str]) -> list[str]:
+    """Model pack first, then shared packs. Scene banc files are loose, not in here."""
+    found = []
+    packs = _actor_packs(dump, hints) + _shared_packs(dump)
+    for pack_rel in packs:
+        index = _pack_tex_index(dump, pack_rel)
+        for key in keys:
+            ref = index.get(key)
+            if ref and ref not in found:
+                found.append(ref)
+        if found:
+            break
+    return found
 
 
 def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
@@ -2367,20 +2659,19 @@ def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
         if (dump.romfs / relative).is_file():
             return relative, tried
     index = _tex_index(dump)
-    stem = _stem(name).lower()
-    keys = [stem]
-    if stem.endswith("_alb"):
-        keys.append(stem[: -len("_alb")])
-    elif stem.endswith("_albedo"):
-        keys.append(stem[: -len("_albedo")])
-    else:
-        keys.append(f"{stem}_alb")
+    keys = _stem_keys(_stem(name))
     for key in keys:
         path = index.get(key)
         if path and path not in tried:
             tried.append(path)
             if (dump.romfs / path).is_file():
                 return path, tried
+    archived = _archive_tex(dump, keys, hints)
+    for ref in archived:
+        if ref not in tried:
+            tried.append(ref)
+    if archived:
+        return archived[0], tried
     for hint in hints:
         key = hint.lower()
         if len(key) < 4:
@@ -2403,7 +2694,7 @@ def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
 
 def _tex_candidates(name: str) -> list[str]:
     text = name.strip().replace("\\", "/").lstrip("/")
-    if text.startswith("Work/"):
+    if text.lower().startswith("work/"):
         text = text[5:]
     paths: list[str] = []
 
@@ -2411,21 +2702,18 @@ def _tex_candidates(name: str) -> list[str]:
         if path and path not in paths and ".." not in path.split("/"):
             paths.append(path)
 
+    lower = text.lower()
     if "/" in text:
-        if text.endswith(".bntx.zs"):
+        if lower.endswith(".bntx.zs"):
             add(text)
             add(text[:-3])
-        elif text.endswith(".bntx"):
+        elif lower.endswith(".bntx"):
             add(text + ".zs")
             add(text)
         else:
             add(f"{text}.bntx.zs")
             add(f"{text}.bntx")
-    stem = text.rsplit("/", 1)[-1]
-    for suffix in (".bntx.zs", ".bntx"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
+    stem = _stem(text)
     add(f"Tex/{stem}.bntx.zs")
     add(f"Tex/{stem}.bntx")
     return paths

@@ -232,6 +232,8 @@ class Part:
     emission_image: object | None = None
     emission_note: str = ""
     normals: list[tuple[float, float, float]] | None = None
+    # Why this shape stayed a flat colour, including the samplers and paths tried.
+    texture_error: str = ""
 
 
 @dataclass
@@ -2830,6 +2832,11 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     slot is still skipped. ``bake`` and ``gn`` maps are not albedo.
     A material with no sampler names still ranks texture names, which is
     how the version-9 samples are written.
+    When the named slots are not ``_a0`` / ``_a1`` / ``_a2`` (or those slots
+    were skipped because the texture is a normal or mask), a bound texture
+    whose own name is albedo is still a candidate. Runtime ``tc`` / ``ta``
+    slots and ``MaterialAlb`` / ``MaterialCmb`` stay out, and so do known
+    non-color slots such as ``_n0`` and ``s0``.
     """
     if any(sampler for sampler, _texture in binds):
         return _rank_locked_samplers(binds)
@@ -2884,7 +2891,50 @@ def _rank_locked_samplers(binds: list[tuple[str, str]]) -> list[tuple[str, str]]
             continue
         ranked.append((key, index, sampler, texture))
     ranked.sort()
-    return [(sampler, texture) for _key, _index, sampler, texture in ranked]
+    if ranked:
+        return [(sampler, texture) for _key, _index, sampler, texture in ranked]
+    return _rank_named_albedo(binds)
+
+
+_RUNTIME_SAMPLER = {"tc", "ta"}
+_RUNTIME_TEXTURE = re.compile(r"^material(?:alb|cmb)\d*$", re.I)
+
+
+def _sampler_says_albedo(token: str) -> bool:
+    """True when the slot name itself is a colour usage, even if it is not ``_a0``."""
+    if not token:
+        return False
+    if token in _PRIMARY_SAMPLER or token in _LOCKED_EXTRA or token in _EXTRA_SAMPLER:
+        return True
+    if token.startswith("alb"):
+        return True
+    return any(piece in token for piece in ("albedo", "basecolor", "diffuse"))
+
+
+def _rank_named_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Albedo-named textures on slots the locked list does not recognise.
+
+    Used only when ``_a0`` / ``_a1`` / ``_a2`` produced nothing. A normal or
+    mask on ``_a0`` is already skipped by the locked pass, so the colour
+    texture bound beside it can still win.
+    """
+    found = []
+    for index, (sampler, texture) in enumerate(binds):
+        if not texture:
+            continue
+        token = "".join(char for char in sampler.lower() if char.isalnum())
+        if token in _RUNTIME_SAMPLER or token.startswith("material"):
+            continue
+        if _sampler_rank(sampler) == 9:
+            continue
+        if _RUNTIME_TEXTURE.fullmatch(texture.rsplit("/", 1)[-1]):
+            continue
+        trank = texture_rank(texture)
+        named = _sampler_says_albedo(token)
+        if trank == 0 or (named and trank < 2):
+            found.append((0 if named else 1, trank, index, sampler, texture))
+    found.sort()
+    return [(sampler, texture) for _named, _trank, _index, sampler, texture in found]
 
 
 def base_color_name(names: list[str]) -> str:

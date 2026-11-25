@@ -3,8 +3,9 @@
 ``python -m ocarina_forge material-audit`` walks ``Model/*.bfres`` and
 ``Model/*.bfres.zs``. It reads the material header and the attribute names,
 not the vertex buffer and not the texels. A parsed header is cached, and the
-files are read in parallel. A texture is missing when no ``Tex/`` file has
-that stem. The groups are sorted by how many materials share them, so the
+files are read in parallel. A texture is missing when no ``.bntx`` or
+``.bntx.zs`` under the romfs has that stem. The groups are sorted by how many
+materials share them, so the
 shape the viewer still draws wrong comes first.
 """
 

@@ -194,24 +194,26 @@ def _viewer_albedo(dump, material) -> dict:
     """
     chosen = list(getattr(material, "albedo", []) or [])[:1]
     if not chosen:
-        return {"sampler": "", "texture": "", "size": "", "path": "", "note": "no albedo sampler"}
+        shown = ", ".join(f"{slot}={tex}" for slot, tex in (getattr(material, "binds", None) or []) if slot or tex) or "none"
+        return {"sampler": "", "texture": "", "size": "", "path": "", "note": f"no albedo sampler (samplers {shown})"}
     slot, name = chosen[0]
     info = {"sampler": slot, "texture": name, "size": "", "path": "", "note": ""}
     if dump is None:
         info["note"] = "no dump, size not read"
         return info
     from ocarina_forge.formats.bntx import image_sizes
-    from ocarina_forge.models import _resolve_tex
+    from ocarina_forge.models import _read_tex, _resolve_tex
 
     path, tried = _resolve_tex(dump, name, [])
     if not path:
-        info["note"] = "no Tex file matched"
+        tried_text = ", ".join(tried[:6])
+        info["note"] = "no Tex file matched" + (f" (tried {tried_text})" if tried_text else "")
         info["tried"] = tried[:6]
         return info
     from ocarina_forge.errors import BancError
 
     try:
-        blob, _dict_id = dump.read_file(path)
+        blob = _read_tex(dump, path)
     except (BancError, OSError, ValueError) as exc:
         info["path"] = path
         info["note"] = getattr(exc, "message", None) or str(exc)
