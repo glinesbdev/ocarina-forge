@@ -336,10 +336,10 @@ def _world_heights(report: dict, tiles: list[dict]) -> dict | None:
     return {"minY": min(lows), "maxY": max(highs)}
 
 
-def query_ground(dump, banc: str, points: list[tuple[float, float]], *, mesh_cache=None, tile_report=None, pad: float = 80.0) -> dict:
+def query_ground(dump, banc: str, points: list[tuple[float, float]], *, mesh_cache=None, tile_report=None, pad: float = 80.0, exclude_ids=None) -> dict:
     """Composed world height at each XZ: finest height tile plus Land_* floors."""
     report = tile_report if tile_report is not None else _load(dump, banc)
-    surfaces = collect_terrain_surfaces(dump, banc, cache=mesh_cache, bounds=query_bounds(points, pad=pad))
+    surfaces = collect_terrain_surfaces(dump, banc, cache=mesh_cache, bounds=query_bounds(points, pad=pad), exclude_ids=exclude_ids)
     samples = []
     for x, z in points:
         tile_y = None

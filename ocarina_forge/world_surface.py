@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 import re
 
-from ocarina_forge.actors import ROLLING_ROCK_LAND, read_vec
+from ocarina_forge.actors import ROLLING_ROCK_LAND, format_hash, parse_hash, read_vec
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats import bfres as fres
 from ocarina_forge.formats.phive import read_mesh_shape
@@ -316,12 +316,37 @@ def actor_translate_overlaps(translate, bounds, reach: float = 300.0) -> bool:
     return not (tx < bounds[0] - reach or tx > bounds[2] + reach or tz < bounds[1] - reach or tz > bounds[3] + reach)
 
 
-def collect_terrain_surfaces(dump, banc: str, cache: dict | None = None, bounds=None) -> MeshIndex:
+def actor_ident(actor) -> str:
+    """Canonical 0x-prefixed hash for a banc actor, or empty if it has no Hash."""
+    if not isinstance(actor, dict) or actor.get("Hash") is None:
+        return ""
+    try:
+        return format_hash(parse_hash(actor.get("Hash")))
+    except (BancError, TypeError, ValueError):
+        return ""
+
+
+def canonical_actor_ids(values) -> frozenset[str]:
+    ids = set()
+    for value in values or []:
+        if value in (None, ""):
+            continue
+        try:
+            ids.add(format_hash(parse_hash(value)))
+        except (BancError, TypeError, ValueError):
+            ids.add(str(value))
+    return frozenset(ids)
+
+
+def collect_terrain_surfaces(dump, banc: str, cache: dict | None = None, bounds=None, exclude_ids=None) -> MeshIndex:
     """Phive-or-visual triangles for classified Land_* floors that overlap bounds."""
     cache = cache if cache is not None else {}
+    excluded = canonical_actor_ids(exclude_ids)
     index = MeshIndex()
     for relative, actor_index, actor in _iter_actors(dump, banc):
         gyaml = str(actor.get("Gyaml") or "")
+        if excluded and actor_ident(actor) in excluded:
+            continue
         verified = rolling_rock_map(relative) and gyaml.startswith(ROLLING_ROCK_LAND)
         if not verified and not terrain_actor(gyaml):
             continue

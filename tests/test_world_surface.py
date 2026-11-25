@@ -7,7 +7,10 @@ from ocarina_forge.formats.terrain import SIZE, _as_floats, read_height_file
 from ocarina_forge.world_surface import (
     MeshIndex,
     _keep_visual_part,
+    actor_ident,
     actor_translate_overlaps,
+    canonical_actor_ids,
+    collect_terrain_surfaces,
     compose_height,
     local_to_world,
     terrain_actor,
@@ -119,4 +122,36 @@ def test_actor_translate_overlaps_rejects_far_pivots():
     assert actor_translate_overlaps((250.0, 0.0, 0.0), bounds)
     assert not actor_translate_overlaps((400.0, 0.0, 0.0), bounds)
     assert not actor_translate_overlaps((0.0, 0.0, -400.0), bounds)
+
+def test_canonical_actor_ids_match_frontend_hashes():
+    assert actor_ident({"Hash": 2}) == "0x0000000000000002"
+    assert "0x0000000000000002" in canonical_actor_ids(["0x2", 2])
+    assert actor_ident({"Gyaml": "Land_LakeHrl_CliffEdge_A_02"}) == ""
+
+
+def test_collect_terrain_surfaces_skips_the_excluded_land_actor(monkeypatch):
+    island = {
+        "Gyaml": "Land_LakeHrl_Island_E_05",
+        "Hash": 1,
+        "Translate": [0.0, 131.0, 0.0],
+        "Rotate": [0.0, 0.0, 0.0],
+        "Scale": [1.0, 1.0, 1.0],
+    }
+    cliff = {
+        "Gyaml": "Land_LakeHrl_CliffEdge_A_02",
+        "Hash": 2,
+        "Translate": [0.0, 200.0, 0.0],
+        "Rotate": [0.0, 0.0, 0.0],
+        "Scale": [1.0, 1.0, 1.0],
+    }
+
+    def floors(_dump, gyaml, _cache):
+        return [[-1.0, 0.0, -1.0, 1.0, 0.0, -1.0, 0.0, 0.0, 1.0]], "phive"
+
+    monkeypatch.setattr("ocarina_forge.world_surface._iter_actors", lambda *_: [("Banc/A", 0, island), ("Banc/A", 1, cliff)])
+    monkeypatch.setattr("ocarina_forge.world_surface.local_floor_triangles", floors)
+    both = collect_terrain_surfaces(None, "Banc/A.bcett.byml.zs")
+    assert both.sample(0.0, 0.0)["worldY"] == 200.0
+    without_self = collect_terrain_surfaces(None, "Banc/A.bcett.byml.zs", exclude_ids=["0x2"])
+    assert without_self.sample(0.0, 0.0)["worldY"] == 131.0
 

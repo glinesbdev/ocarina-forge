@@ -260,7 +260,7 @@ def test_ground_api_returns_the_composed_surface(tmp_path, monkeypatch):
     dump = SimpleNamespace(root=tmp_path / "dump")
     monkeypatch.setattr(server, "_open_dump", lambda: dump)
 
-    def fake_query(_dump, banc, points):
+    def fake_query(_dump, banc, points, exclude_ids=None):
         x, z = points[0]
         return [{
             "x": x,
@@ -280,4 +280,31 @@ def test_ground_api_returns_the_composed_surface(tmp_path, monkeypatch):
     assert data["worldY"] == 131.3531
     assert data["source"] == "mesh"
     assert data["mesh"]["gyaml"] == "Land_LakeHrl_Island_E_05"
+
+def test_ground_api_excludes_the_moved_land_actor(tmp_path, monkeypatch):
+    dump = SimpleNamespace(root=tmp_path / "dump")
+    monkeypatch.setattr(server, "_open_dump", lambda: dump)
+    seen = {}
+
+    def fake_query(_dump, banc, points, exclude_ids=None):
+        seen["ids"] = list(exclude_ids or [])
+        x, z = points[0]
+        return [{
+            "x": x,
+            "z": z,
+            "worldY": 102.6,
+            "source": "heightmap",
+            "mesh": None,
+        }]
+
+    monkeypatch.setattr(server, "query_ground_cached", fake_query)
+    client = TestClient(server.app)
+    data = client.get("/api/ground", params={
+        "banc": "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs",
+        "x": -195.2242,
+        "z": 519.2956,
+        "exclude": "0x2",
+    }).json()
+    assert data["worldY"] == 102.6
+    assert seen["ids"] == ["0x2"]
 

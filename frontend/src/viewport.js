@@ -26,7 +26,7 @@ import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick,
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
-import { chooseSnap, groundReplyApplies, GROUND_SNAP_RADIUS, nearestGroundSample } from "./snap.js";
+import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
 import { resolveTextureIndex } from "./problems.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -285,7 +285,8 @@ let convertSlots = 8;
   let snapOn = false;
   let terrainBanc = null;
   const groundHits = [];
-  let groundInflight = null;
+  let groundWanted = null;
+  let groundPump = null;
   const subTerrainMaterial = new THREE.MeshBasicMaterial({
     color: 0xa5c9bd, wireframe: true, transparent: true, opacity: 0.28, depthWrite: false,
   });
@@ -339,7 +340,7 @@ let convertSlots = 8;
     recentTerrain.clear();
     terrainBanc = null;
     groundHits.length = 0;
-    groundInflight = null;
+    groundWanted = null;
   }
 
   function clearGround() {
@@ -2998,28 +2999,42 @@ uniform float terrainLayerMissing;`
     return nearestGroundSample(groundHits, x, z, GROUND_SNAP_RADIUS);
   }
 
-  function requestGround(x, z) {
+  function excludeGroundActor(entry) {
+    return entry && isMovedTerrainActor(entry.gyaml) ? entry.id : "";
+  }
+
+  function requestGround(x, z, entry) {
     if (!hooks.fetchGround || !terrainBanc) return null;
-    const banc = terrainBanc;
-    const requestX = x;
-    const requestZ = z;
-    const key = `${banc}:${x.toFixed(3)},${z.toFixed(3)}`;
-    if (groundInflight && groundInflight.key === key) return groundInflight.promise;
-    const promise = hooks.fetchGround(banc, x, z).then((data) => {
-      if (terrainBanc !== banc) return data;
-      if (Number.isFinite(data.worldY)) {
-        groundHits.push({ x: requestX, z: requestZ, y: data.worldY });
-        if (groundHits.length > 200) groundHits.splice(0, groundHits.length - 200);
+    groundWanted = { x, z, banc: terrainBanc, exclude: excludeGroundActor(entry), entry };
+    if (!groundPump) groundPump = pumpGround();
+    return groundPump;
+  }
+
+  async function pumpGround() {
+    try {
+      while (groundWanted) {
+        const job = groundWanted;
+        groundWanted = null;
+        try {
+          const data = await hooks.fetchGround(job.banc, job.x, job.z, job.exclude);
+          if (terrainBanc !== job.banc) continue;
+          if (Number.isFinite(data && data.worldY)) {
+            groundHits.push({ x: job.x, z: job.z, y: data.worldY });
+            if (groundHits.length > 200) groundHits.splice(0, groundHits.length - 200);
+            if (job.entry) {
+              const latest = groundWanted;
+              applyComposedSnap(job.entry, job.x, job.z, data.worldY, latest);
+            }
+          }
+        } catch (error) {
+          console.warn("Could not sample the composed ground", error);
+        }
       }
-      return data;
-    }).catch((error) => {
-      console.warn("Could not sample the composed ground", error);
-      return null;
-    }).finally(() => {
-      if (groundInflight && groundInflight.promise === promise) groundInflight = null;
-    });
-    groundInflight = { key, promise };
-    return promise;
+    } finally {
+      const leftover = groundWanted;
+      groundPump = null;
+      if (leftover) groundPump = pumpGround();
+    }
   }
 
   function surfaceAt(x, y, z, ignoreId) {
@@ -3052,10 +3067,10 @@ uniform float terrainLayerMissing;`
     return chooseSnap(y, hits);
   }
 
-  function applyComposedSnap(entry, requestX, requestZ, worldY) {
+  function applyComposedSnap(entry, requestX, requestZ, worldY, latest) {
     if (!snapOn || !entries.get(entry.id) || !Number.isFinite(worldY)) return false;
     const cur = entry.pivot.position;
-    if (!groundReplyApplies(requestX, requestZ, cur.x, cur.z)) return false;
+    if (!shouldApplyGroundReply(requestX, requestZ, cur.x, cur.z, latest && latest.x, latest && latest.z)) return false;
     const next = surfaceAt(cur.x, worldY, cur.z, entry.id);
     cur.y = next == null ? worldY : next;
     syncPreviewPlacement(entry);
@@ -3070,20 +3085,13 @@ uniform float terrainLayerMissing;`
     const p = entry.pivot.position;
     const y = surfaceAt(p.x, p.y, p.z, entry.id);
     if (y != null) p.y = y;
-    const requestX = p.x;
-    const requestZ = p.z;
-    const pending = requestGround(requestX, requestZ);
-    if (!pending) return;
-    return pending.then((data) => {
-      if (!data || !Number.isFinite(data.worldY)) return;
-      applyComposedSnap(entry, requestX, requestZ, data.worldY);
-    });
+    return requestGround(p.x, p.z, entry);
   }
 
   function spawnPoint() {
     const point = [round(orbit.target.x), round(orbit.target.y), round(orbit.target.z)];
     if (!snapOn) return point;
-    void requestGround(point[0], point[2]);
+    void requestGround(point[0], point[2], null);
     const y = surfaceAt(point[0], point[1], point[2], null);
     if (y == null) return point;
     return [point[0], round(y), point[2]];
@@ -3337,7 +3345,13 @@ uniform float terrainLayerMissing;`
       hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
     };
     const pending = maybeSnap(entry);
-    if (pending && typeof pending.then === "function") void pending.then(finish, finish);
+    const wait = pending && typeof pending.then === "function"
+      ? pending.then(() => {
+        // A leftover request may have started as the pump finished.
+        return groundPump || maybeSnap(entry);
+      })
+      : maybeSnap(entry);
+    if (wait && typeof wait.then === "function") void wait.then(finish, finish);
     else finish();
   });
 

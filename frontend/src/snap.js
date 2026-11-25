@@ -37,3 +37,16 @@ export function nearestGroundSample(samples, x, z, maxDistance = GROUND_SNAP_RAD
 export function groundReplyApplies(requestX, requestZ, currentX, currentZ, maxDistance = GROUND_SNAP_RADIUS) {
   return Math.hypot(currentX - requestX, currentZ - requestZ) <= maxDistance;
 }
+
+export function isMovedTerrainActor(gyaml) {
+  return /^Land_/i.test(gyaml || "");
+}
+
+export function shouldApplyGroundReply(requestX, requestZ, currentX, currentZ, latestX, latestZ, maxDistance = GROUND_SNAP_RADIUS) {
+  // A reply applies if the pivot is still in that column, or if this is the
+  // latest requested column and the pivot has only moved a short way.
+  if (groundReplyApplies(requestX, requestZ, currentX, currentZ, maxDistance)) return true;
+  if (latestX == null || latestZ == null) return false;
+  if (!groundReplyApplies(requestX, requestZ, latestX, latestZ, 1e-6)) return false;
+  return groundReplyApplies(requestX, requestZ, currentX, currentZ, maxDistance);
+}

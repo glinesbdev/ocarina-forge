@@ -93,6 +93,7 @@ _PREFETCH: set[asyncio.Task] = set()
 _TERRAIN_FIT_LOCK = asyncio.Lock()
 _GROUND = {}
 _GROUND_LOCK = threading.Lock()
+_GROUND_QUERY = threading.Lock()
 
 
 def _configured_workers() -> tuple[int, int, str]:
@@ -476,19 +477,22 @@ def _clear_ground_cache() -> None:
         _GROUND.clear()
 
 
-def query_ground_cached(dump, banc: str, points: list[tuple[float, float]]) -> list[dict]:
+def query_ground_cached(dump, banc: str, points: list[tuple[float, float]], exclude_ids=None) -> list[dict]:
     """Reuse height tiles and floor meshes across snap queries for one dump+scene."""
     key = (str(dump.root), banc)
-    with _GROUND_LOCK:
-        state = _GROUND.setdefault(key, {"report": None, "mesh_cache": {}})
-        report = state["report"]
-        mesh_cache = state["mesh_cache"]
-    result = query_ground(dump, banc, points, mesh_cache=mesh_cache, tile_report=report)
-    with _GROUND_LOCK:
-        state = _GROUND.setdefault(key, {"report": None, "mesh_cache": mesh_cache})
-        state["report"] = result["report"]
-        state["mesh_cache"] = mesh_cache
-    return result["samples"]
+    with _GROUND_QUERY:
+        with _GROUND_LOCK:
+            state = _GROUND.setdefault(key, {"report": None, "mesh_cache": {}})
+            report = state["report"]
+            mesh_cache = state["mesh_cache"]
+        result = query_ground(
+            dump, banc, points, mesh_cache=mesh_cache, tile_report=report, exclude_ids=exclude_ids,
+        )
+        with _GROUND_LOCK:
+            state = _GROUND.setdefault(key, {"report": None, "mesh_cache": mesh_cache})
+            state["report"] = result["report"]
+            state["mesh_cache"] = mesh_cache
+        return result["samples"]
 
 
 def _open_dump() -> Dump:
@@ -1072,13 +1076,21 @@ def shared_texture_file(name: str):
 
 
 
+def _exclude_ids(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value if item not in (None, "")]
+    return [item for item in str(value).split(",") if item.strip()]
+
+
 @app.get("/api/ground")
-async def ground_at(banc: str, x: float, z: float):
+async def ground_at(banc: str, x: float, z: float, exclude: str = ""):
     """Composed walkable height at one XZ: height tile plus Land_* island/cliff/hill meshes."""
     if not banc or ".." in banc or banc.startswith("/"):
         raise BancError("That scene path is not in the dump.", "not_found")
     dump = _open_dump()
-    samples = await asyncio.to_thread(query_ground_cached, dump, banc, [(x, z)])
+    samples = await asyncio.to_thread(query_ground_cached, dump, banc, [(x, z)], _exclude_ids(exclude))
     return samples[0]
 
 
@@ -1098,7 +1110,7 @@ async def ground_batch(body: dict):
     if not points:
         raise BancError("Pass at least one x,z point.", "edit")
     dump = _open_dump()
-    samples = await asyncio.to_thread(query_ground_cached, dump, banc, points)
+    samples = await asyncio.to_thread(query_ground_cached, dump, banc, points, _exclude_ids(body.get("exclude")))
     return {"samples": samples}
 
 
