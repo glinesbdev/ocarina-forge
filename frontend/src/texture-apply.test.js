@@ -37,9 +37,54 @@ function material() {
   };
 }
 
+function texture(url) {
+  return { url, isTexture: true, disposed: false, dispose() { this.disposed = true; } };
+}
+
 test("a manifest keys the glTF node without its lod prefix", () => {
   assert.equal(materialKey("lod0:Body:0"), "Body:0");
   assert.equal(materialKey("lod1:Body:0"), "Body:0");
+  assert.equal(materialKey("lod0Body0"), "lod0Body0");
+  assert.equal(materialKey({ name: "lod0Body0", materialKey: "Body:0" }), "Body:0");
+});
+
+test("textures on from the first load assign maps on a sanitized glTF name", async () => {
+  const mesh = material();
+  const parts = [{
+    name: "lod0Body0",
+    materialKey: "Body:0",
+    material: mesh,
+    geometry: { id: "geom" },
+  }];
+  const geometry = parts[0].geometry;
+  await applyTextureManifest(parts, {
+    materials: {
+      "Body:0": {
+        map: "/api/model-textures/albedo.ktx2",
+        orm: "/api/model-textures/orm.ktx2",
+        color: [1, 1, 1, 1],
+      },
+    },
+  }, async (url) => texture(url));
+  assert.equal(parts[0].geometry, geometry);
+  assert.equal(mesh.map.isTexture, true);
+  assert.equal(mesh.map.url, "/api/model-textures/albedo.ktx2");
+  assert.equal(mesh.map.colorSpace, "srgb");
+  assert.equal(mesh.map.needsUpdate, true);
+  assert.equal(mesh.roughnessMap, mesh.metalnessMap);
+  assert.equal(mesh.roughnessMap.colorSpace, "srgb-linear");
+  assert.equal(mesh.needsUpdate, true);
+});
+
+test("a value that is not a three.js texture is left off the material", async () => {
+  const mesh = material();
+  const parts = [{ name: "lod0:Body:0", material: mesh }];
+  await applyTextureManifest(parts, {
+    materials: { "Body:0": { map: "/api/model-textures/albedo.ktx2", orm: "/api/model-textures/orm.ktx2" } },
+  }, async (url) => ({ url }));
+  assert.equal(mesh.map, null);
+  assert.equal(mesh.roughnessMap, null);
+  assert.equal(mesh.needsUpdate, true);
 });
 
 test("applying textures does not rebuild geometry and clearing drops them", async () => {
@@ -59,7 +104,7 @@ test("applying textures does not rebuild geometry and clearing drops them", asyn
     },
   }, async (url) => {
     loads.push(url);
-    return { url, disposed: false, dispose() { this.disposed = true; } };
+    return texture(url);
   });
   assert.deepEqual(loads, ["/api/model-textures/albedo.ktx2", "/api/model-textures/orm.ktx2"]);
   assert.equal(parts[0].geometry, geometry);
@@ -97,6 +142,8 @@ test("the texture toggle does not ask the model loader to run", () => {
   assert.doesNotMatch(change, /invalidateModels/);
   assert.doesNotMatch(change, /forceSceneLoad/);
   assert.match(viewport, /planAssetFetches/);
+  assert.match(viewport, /materialKey: identity\.family/);
+  assert.match(viewport, /if \(texturesWanted && template\) void paintActorTextures/);
   assert.match(viewport, /function setTextures/);
   assert.doesNotMatch(viewport, /function invalidateModels/);
   assert.doesNotMatch(viewport, /formatStats/);

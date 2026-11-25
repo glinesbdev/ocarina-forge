@@ -715,24 +715,33 @@ let convertSlots = 8;
 
   function refreshTextureMaterial(material) {
     if (!material) return;
-    if (material.map) {
-      material.map.wrapS = THREE.RepeatWrapping;
-      material.map.wrapT = THREE.RepeatWrapping;
+    const map = material.map && material.map.isTexture === true ? material.map : null;
+    if (material.map && !map) material.map = null;
+    if (map) {
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.wrapS = THREE.RepeatWrapping;
+      map.wrapT = THREE.RepeatWrapping;
       const maxAniso = renderer.capabilities && renderer.capabilities.getMaxAnisotropy
         ? renderer.capabilities.getMaxAnisotropy()
         : 4;
-      material.map.anisotropy = Math.min(4, maxAniso);
-      if (material.map.isCompressedTexture) repairCompressedTexture(material.map);
-      else material.map.generateMipmaps = true;
-      material.map.needsUpdate = true;
+      map.anisotropy = Math.min(4, maxAniso);
+      if (map.isCompressedTexture) repairCompressedTexture(map);
+      else map.generateMipmaps = true;
+      map.needsUpdate = true;
+    }
+    for (const key of ["normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap"]) {
+      const tex = material[key];
+      if (tex && tex.isTexture === true) asDataMap(tex);
+      else if (tex) material[key] = null;
     }
     // The cutout node captures the map it saw. A later assign has to build it
-    // again. That recompiles the material. The mesh stays.
+    // again, and only from a real three.js texture. That recompiles the
+    // material. The mesh stays.
     if (mapNodes) {
       material.colorNode = null;
       material.alphaTestNode = null;
       if (material.userData) material.userData.cutoutNode = false;
-      if (material.alphaTest > 0 && material.map) mapNodes.attachCutout(material);
+      if (material.alphaTest > 0 && map) mapNodes.attachCutout(material);
     }
     material.needsUpdate = true;
   }
@@ -748,8 +757,17 @@ let convertSlots = 8;
 
   function loadOwnedTexture(url) {
     return sharedImage(url, () => new Promise((resolve, reject) => {
-      gpuTextureLoader.load(url, resolve, undefined, reject);
-    })).then((texture) => (texture && typeof texture.clone === "function" ? texture.clone() : texture));
+      gpuTextureLoader.load(url, (texture) => {
+        if (texture && texture.isTexture === true) resolve(texture);
+        else reject(new Error("decoded image is not a three.js texture"));
+      }, undefined, reject);
+    })).then((texture) => {
+      if (!texture || texture.isTexture !== true || typeof texture.clone !== "function") return null;
+      const copy = texture.clone();
+      if (!copy || copy.isTexture !== true) return null;
+      copy.needsUpdate = true;
+      return copy;
+    });
   }
 
   function textureManifest(gyaml) {
@@ -2135,7 +2153,11 @@ let convertSlots = 8;
       parts.push({
         lod: identity.lod,
         family: identity.family,
+        // child.name has had ':' stripped. The manifest key is the family
+        // from the original node name (`Body:0`), which modelLod reads off
+        // userData.name.
         name: child.name || "",
+        materialKey: identity.family,
         geometry,
         material,
         keepCpu,

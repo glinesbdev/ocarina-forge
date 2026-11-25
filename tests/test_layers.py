@@ -309,6 +309,16 @@ def test_texture_manifest_does_not_rewrite_geometry(tmp_path, monkeypatch):
     assert decoded >= 1
     maps = [slot.get("map") for slot in first["materials"].values()]
     assert maps and all(url and url.startswith("/api/model-textures/") for url in maps)
+    json_len = int.from_bytes(before[12:16], "little")
+    assert before[16:20] == b"JSON"
+    document = json.loads(before[20:20 + json_len])
+    families = []
+    for node in document["nodes"]:
+        prefix, colon, rest = node["name"].partition(":")
+        assert colon == ":" and prefix.startswith("lod") and rest
+        families.append(rest)
+    assert set(first["materials"]) <= set(families)
+    assert set(first["materials"])
     assert glb_path.read_bytes() == before
     second = models.describe_actor_textures(dump, gyaml)
     assert len(calls) == decoded

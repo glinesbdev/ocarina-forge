@@ -1,10 +1,26 @@
 /**
  * Put a texture manifest onto materials that are already on a mesh, and take
  * those maps back off. Neither path builds geometry or asks for a glb.
+ *
+ * The manifest key is the glTF node name with the `lodN:` prefix removed
+ * (`Body:0`). Three.js strips `:` from Object3D.name, so `lod0:Body:0`
+ * becomes `lod0Body0` and no longer matches. The original stays on
+ * `userData.name`; parts store that family as `materialKey`.
  */
 
-export function materialKey(name) {
-  return String(name || "").replace(/^lod\d+:/, "");
+const SRGB = "srgb";
+const LINEAR = "srgb-linear";
+
+export function materialKey(part) {
+  if (part && typeof part === "object") {
+    if (part.materialKey) return String(part.materialKey);
+    return String(part.name || "").replace(/^lod\d+:/, "");
+  }
+  return String(part || "").replace(/^lod\d+:/, "");
+}
+
+function asTexture(value) {
+  return value && value.isTexture === true ? value : null;
 }
 
 const MAP_KEYS = ["map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap"];
@@ -22,9 +38,14 @@ function rememberPlain(material) {
   return userData;
 }
 
-function replaceMap(material, key, texture, plain) {
-  material[key] = texture || null;
-  return texture && texture !== plain[key] ? texture : null;
+function replaceMap(material, key, texture, plain, colorSpace) {
+  const image = asTexture(texture);
+  if (image) {
+    if (colorSpace) image.colorSpace = colorSpace;
+    image.needsUpdate = true;
+  }
+  material[key] = image || null;
+  return image && image !== plain[key] ? image : null;
 }
 
 /**
@@ -36,7 +57,7 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
   const materials = (manifest && manifest.materials) || {};
   const jobs = [];
   for (const part of parts || []) {
-    const slot = materials[materialKey(part && part.name)];
+    const slot = materials[materialKey(part)];
     if (!slot || !part.material) continue;
     if (![slot.map, slot.normalMap, slot.orm, slot.emissiveMap, slot.moss].some(Boolean)) continue;
     jobs.push(assignSlot(part.material, slot, loadTexture));
@@ -46,7 +67,7 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
 
 async function assignSlot(material, slot, loadTexture) {
   const userData = rememberPlain(material);
-  if (userData.forgeMapUrl === (slot.map || "") && material.map) return;
+  if (userData.forgeMapUrl === (slot.map || "") && material.map && material.map.isTexture === true) return;
   const pending = new Map();
   const take = (url) => {
     if (!url) return null;
@@ -61,18 +82,23 @@ async function assignSlot(material, slot, loadTexture) {
     take(slot.moss),
   ]);
   const plain = userData.forgePlain;
-  replaceMap(material, "map", map, plain);
-  replaceMap(material, "normalMap", normalMap, plain);
-  replaceMap(material, "roughnessMap", orm, plain);
-  replaceMap(material, "metalnessMap", orm, plain);
-  replaceMap(material, "aoMap", orm, plain);
-  replaceMap(material, "emissiveMap", emissive, plain);
-  if (moss) userData.blendMap = moss;
+  replaceMap(material, "map", map, plain, SRGB);
+  replaceMap(material, "normalMap", normalMap, plain, LINEAR);
+  replaceMap(material, "roughnessMap", orm, plain, LINEAR);
+  replaceMap(material, "metalnessMap", orm, plain, LINEAR);
+  replaceMap(material, "aoMap", orm, plain, LINEAR);
+  replaceMap(material, "emissiveMap", emissive, plain, LINEAR);
+  const mossTex = asTexture(moss);
+  if (mossTex) {
+    mossTex.colorSpace = LINEAR;
+    mossTex.needsUpdate = true;
+    userData.blendMap = mossTex;
+  }
   if (slot.color && material.color && typeof material.color.setRGB === "function") {
     const color = slot.color;
     material.color.setRGB(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
   }
-  if (orm) {
+  if (asTexture(orm)) {
     material.roughness = 1;
     material.metalness = 1;
   }

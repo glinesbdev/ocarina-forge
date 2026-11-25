@@ -10,7 +10,7 @@ import { Fn, float, materialReference, texture, uv, vec4 } from "three/tsl";
 const reported = new Set();
 
 export function attachCutout(material) {
-  if (!material || material.colorNode || !(material.alphaTest > 0) || !material.map) return material;
+  if (!material || material.colorNode || !(material.alphaTest > 0) || !material.map || material.map.isTexture !== true) return material;
   const tag = material.userData && material.userData.banc;
   if (tag === "terrain" || material.userData.terrainNode || material.userData.terrainShader) return material;
   const map = material.map;
