@@ -1095,26 +1095,6 @@ async def ground_at(banc: str, x: float, z: float, exclude: str = ""):
     return samples[0]
 
 
-@app.post("/api/ground")
-async def ground_batch(body: dict):
-    banc = str(body.get("banc") or "")
-    if not banc or ".." in banc or banc.startswith("/"):
-        raise BancError("That scene path is not in the dump.", "not_found")
-    points = []
-    for item in body.get("points") or []:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
-            raise BancError("Each ground point needs x,z metres.", "edit")
-        try:
-            points.append((float(item[0]), float(item[1])))
-        except (TypeError, ValueError) as exc:
-            raise BancError("Each ground point needs x,z metres.", "edit") from exc
-    if not points:
-        raise BancError("Pass at least one x,z point.", "edit")
-    dump = _open_dump()
-    samples = await asyncio.to_thread(query_ground_cached, dump, banc, points, _exclude_ids(body.get("exclude")))
-    return {"samples": samples}
-
-
 @app.get("/api/ground/surface")
 async def ground_surface(banc: str):
     """Gzipped walkable-surface pack for local Snap in the viewer."""

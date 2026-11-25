@@ -68,7 +68,7 @@ def _json(blob: bytes) -> dict:
     return json.loads(blob[20 : 20 + chunk])
 
 
-def test_the_glb_stores_orm_as_png_and_shares_it_with_occlusion():
+def test_the_glb_stores_orm_as_ktx2_and_shares_it_with_occlusion():
     packed = _image(4, 4, lambda x, y: (80 if (x + y) % 2 == 0 else 180, 210, int(x * 255 / 3)))
     slate = Texture("slate", 1, 1, bytes([180, 160, 140, 255]), 0)
     material = Material("roof", binds=[("_a0", "slate"), ("_rah0", "rah")], albedo=[("_a0", "slate")])
@@ -97,7 +97,7 @@ def test_the_glb_stores_orm_as_png_and_shares_it_with_occlusion():
     assert pbr.get("roughnessFactor", 1) == 1
     index = pbr["metallicRoughnessTexture"]["index"]
     assert body["occlusionTexture"]["index"] == index
-    assert document["images"][index]["mimeType"] == "image/png"
+    assert document["images"][index]["mimeType"] == "image/ktx2"
 
 
 def test_layer_one_maps_are_named_in_the_extras():

@@ -42,7 +42,7 @@ function basisTranscoder() {
 
 const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js").replaceAll("\\", "/");
 
-const apiPort = process.env.BANCWRIGHT_PORT || "47232";
+const apiPort = process.env.OCARINA_FORGE_PORT || process.env.BANCWRIGHT_PORT || "47232";
 
 export default defineConfig(({ mode }) => ({
   plugins: [

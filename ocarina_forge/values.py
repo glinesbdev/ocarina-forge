@@ -207,16 +207,6 @@ def parse_path(path: str) -> list:
     return parts
 
 
-def path_string(parts: list) -> str:
-    text = ""
-    for part in parts:
-        if isinstance(part, int):
-            text += f"[{part}]"
-        else:
-            text = f"{text}.{part}" if text else str(part)
-    return text
-
-
 def get_path(root, path: str):
     current = root
     for part in parse_path(path):
