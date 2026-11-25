@@ -109,3 +109,15 @@ python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 ## Not in this version
 
 This build still does not write a Modding API mod folder, and it does not talk to `longshot mod run`. Skeletal animation, a dialog editor, desktop packaging, blueprint phase B (connecting and adding nodes), baked lighting, and an asset browser are later milestones, not this slice. See [docs/design/mod-editor.md](docs/design/mod-editor.md) and [docs/roadmap.md](docs/roadmap.md). Panels dock, and a field on an existing behavior node can be edited. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Credits
+
+Thanks to Hyblitze and Zirem for the OoT remake research and tooling this project builds on.

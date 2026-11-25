@@ -6,6 +6,7 @@ build-backend = "maturin"
 name = "ocarina-forge-native"
 version = "0.1.0"
 description = "BC7 encode and BNTX decode for Ocarina Forge."
+license = "MIT"
 requires-python = ">=3.11"
 
 [tool.maturin]
