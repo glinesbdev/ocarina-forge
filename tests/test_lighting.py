@@ -192,6 +192,13 @@ def test_gfx_probe_installs_the_static_import(tmp_path):
     assert "gfx.world" in manifest["permissions"]
 
 
+def test_actor_list_stays_off_the_storage_write():
+    text = (capture_root() / "capture.js").read_text(encoding="utf-8")
+    assert "EFFECT_FRAMES = 600" in text
+    assert "effects: effectRows" in text
+    assert "effects: activeEffects" not in text
+
+
 def test_windows_steps_name_the_commands_bradyn_runs():
     text = windows_steps(Path(r"C:\Games\Longshot\mod-test"))
     assert "lighting-mod --install" in text

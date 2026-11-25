@@ -19,12 +19,18 @@ const KNOWN_GAME = ["frame", "mode", "map", "age", "timeOfDay"];
 const KNOWN_PLAYER = ["position", "velocity", "life", "maxLife", "rupees", "maxRupees"];
 const MAX_SAMPLES = 48;
 const MOVE_METRES = 8;
+// Spec 7.5 warns at 2 ms of script in one frame. On the 2026-11-25 build,
+// actors.list was about 0.9 ms, and calling it on the same frame as the
+// storage write tripped that warning. Refresh the list on a quiet frame.
+const EFFECT_FRAMES = 600;
 
 const maps = {};
 let last = null;
 let framesSince = 120;
 let actorNote = null;
 let gfxNote = null;
+let effectRows = [];
+let effectFrames = EFFECT_FRAMES;
 
 function num(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -196,8 +202,14 @@ function sample() {
   const moved = !last || last.map !== mapName
     || Math.hypot(at.x - last.x, at.y - last.y, at.z - last.z) >= MOVE_METRES;
   framesSince += 1;
-  if (bucket.samples.length >= MAX_SAMPLES) return;
-  if (!moved && framesSince < 120) return;
+  effectFrames += 1;
+  const taking = bucket.samples.length < MAX_SAMPLES && (moved || framesSince >= 120);
+  if (!taking && effectFrames >= EFFECT_FRAMES) {
+    effectFrames = 0;
+    effectRows = activeEffects(at);
+    return;
+  }
+  if (!taking) return;
   framesSince = 0;
   last = { map: mapName, x: at.x, y: at.y, z: at.z };
 
@@ -225,7 +237,7 @@ function sample() {
     tonemap: null,
     env: null,
     camera: view,
-    effects: activeEffects(at),
+    effects: effectRows,
     observed: {
       game: extras(game, KNOWN_GAME),
       player: extras(who, KNOWN_PLAYER),

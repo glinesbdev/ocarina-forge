@@ -84,7 +84,17 @@ Open the Child Hyrule Field (or Kokiri) scene and toggle **Snap**. Drag the isla
 
 ## Lighting capture
 
-The capture mod is `ocarina_forge/lighting_capture/` (`mod.json` and `main.js` only). It follows height-check: a Longshot mod writes `storage.global`, and Forge imports that JSON. It does not copy game files. From the modding spec, `game.state()` returns time of day and not sun, fog, sky, or exposure, so those fields stay null. Extra fields a build actually returns are kept under `observed`. When `has("gfx.world")` is true the mod dynamic-imports `longshot/gfx` and logs the export names. The published API for that module is drawing, so the names are not copied into the light fields.
+The capture mod is `ocarina_forge/lighting_capture/` (`mod.json`, `main.js`, and `capture.js`). It follows height-check: a Longshot mod writes `storage.global`, and Forge imports that JSON. It does not copy game files. From the modding spec, `game.state()` returns time of day and not sun, fog, sky, or exposure, so those fields stay null. Extra fields a build actually returns are kept under `observed`.
+
+On 2026-11-25 the static probe on the `modding-with-editor` build logged this `longshot/gfx` surface. Names and types only. Nothing was called:
+
+```json
+{"present":true,"staticImport":true,"moduleKeys":["world","effect"],"types":{"world":"object","effect":"function"},"worldType":"object","worldKeys":["line","box","circle","billboard"],"world":{"line":"function","box":"function","circle":"function","billboard":"function"}}
+```
+
+Spec revision 4, section 10.1, also names `world.quad`, `world.model`, and a `model` import. Those were not exported here. Section 10.3 describes `effect` as `effect({ fragment, stage, uniforms })`, a screen-effect handle (`set`, `setEnabled`) whose output is drawn and not read back (section 10.4). This build exports `effect` as a function. An earlier run the same day had `has("gfx.shader")` false, and section 7.2 says that function would throw `NotAvailableError` if called. It was not called. The module is overlay drawing plus that function. It has no lighting getters, so the capture does not fill sun, fog, ambient, exposure, sky, or env from it.
+
+The capture sampler on that run tripped the spec's 2 ms/frame script warning (section 7.5). `actors.list` was about 0.9 ms a call. The mod now refreshes that list on a frame that does not write storage, at most once every 600 frames. Reinstall the mod to pick that up. The Forge server does not need a restart for it. The gfx surface above is already recorded, so another probe run is not required for these docs.
 
 On Windows, from the repo, with the game folder you actually run:
 
