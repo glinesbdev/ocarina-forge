@@ -622,13 +622,23 @@ def _terrain_types(dump, banc: str) -> dict:
     }
 
 
-def install_mod(game: Path) -> Path:
-    """Copy the capture mod into ``<game>/mods/local/lighting-capture``."""
+def install_mod(game: Path, *, gfx_probe: bool = False) -> Path:
+    """Copy the capture mod into ``<game>/mods/local/lighting-capture``.
+
+    The default entry does not static-import ``longshot/gfx``. ``gfx_probe``
+    installs the static-import entry for a build that already reports
+    ``has("gfx.world")``.
+    """
     source = capture_root()
     dest = Path(game).expanduser() / "mods" / "local" / "lighting-capture"
     dest.mkdir(parents=True, exist_ok=True)
-    for name in ("mod.json", "main.js"):
-        shutil.copyfile(source / name, dest / name)
+    shutil.copyfile(source / "mod.json", dest / "mod.json")
+    shutil.copyfile(source / "capture.js", dest / "capture.js")
+    entry = source / ("probe.js" if gfx_probe else "main.js")
+    shutil.copyfile(entry, dest / "main.js")
+    stale = dest / "probe.js"
+    if stale.is_file():
+        stale.unlink()
     return dest
 
 
@@ -663,7 +673,7 @@ def render_report(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def windows_steps(game: Path | None = None) -> str:
+def windows_steps(game: Path | None = None, *, gfx_probe: bool = False) -> str:
     """What Bradyn runs on Windows. The game is not started from here."""
     folder = game or Path.home() / "Games" / "Longshot" / "mod-test"
     mod = folder / "mods" / "local" / "lighting-capture"
@@ -671,20 +681,24 @@ def windows_steps(game: Path | None = None) -> str:
     return "\n".join([
         "Lighting capture (Windows). Forge cannot start the game.",
         "",
-        "1. From the repo, with the venv active:",
-        "   python -m ocarina_forge lighting-mod --install",
-        f"   That copies mod.json and main.js to {mod}",
+        "1. From the repo, with the venv active. Quit Longshot first.",
+        "   python -m ocarina_forge lighting-mod --install --gfx-probe --game <game>",
+        "   --gfx-probe static-imports longshot/gfx. The spec (section 7.2) has no",
+        "   import(), which is why the dynamic import logged TypeError. The default",
+        "   install, without --gfx-probe, still links on a build that lacks the module.",
+        f"   Files land in {mod}",
         "   The default game is %USERPROFILE%\\Games\\Longshot\\mod-test.",
-        "   Pass --game if your Longshot folder is somewhere else.",
         "",
-        "2. Quit Longshot if it is running. Start it again so it reads the new mod.",
-        "   Enable local/lighting-capture. It asks for state.read, actors.read, and storage.",
+        "2. Start Longshot. Re-enable local/lighting-capture. The manifest now asks",
+        "   for state.read, actors.read, storage, and gfx.world. A permission change",
+        "   is read at the next start, and the mod stays off until that grant.",
         "",
         "3. Load a map and walk. The mod records a sample when Link moves about 8 m,",
         "   and at most 48 samples per map. It does not change the picture.",
         "   The log is <game>\\logs\\mod-run.txt. A capture line contains FORGE_LIGHTING.",
-        "   When has(\"gfx.world\") is true, a second line FORGE_LIGHTING gfx lists",
-        "   the live longshot/gfx export names. Send that line. It is not a light reading.",
+        "   The gfx line lists export names from the static import. Send that line.",
+        "   It is not a light reading. The probe build is "
+        + ("the one just described." if gfx_probe else "selected with --gfx-probe."),
         "",
         "4. Quit the game so storage flushes. The store file reported from a",
         "   Longshot run is:",
@@ -700,10 +714,11 @@ def windows_steps(game: Path | None = None) -> str:
         "   python -m ocarina_forge lighting-import <game>",
         f"   Files land in {data} (OCARINA_FORGE_LIGHTING overrides the folder).",
         "",
-        "6. Restart the Forge server after pulling this change, then reload the page.",
-        "   A later import does not need another server restart: /api/lighting reads",
-        "   the file on each request. Reload the page, because the editor keeps the",
-        "   lighting it already fetched for that scene.",
+        "6. The Forge server does not need a restart to pick up the new mod.",
+        "   The gfx line in the game log is the dump. Re-import the game folder",
+        "   only when that dump should also land in the reference JSON, then reload",
+        "   the page. /api/lighting reads the file on each request, and the open",
+        "   scene keeps the lighting it already fetched.",
         "   The line under the stage bar names the reference file, the sample count,",
         "   and which fields came from the file. Editor defaults draws the editor",
         "   lights so the two can be compared. The published API does not return",

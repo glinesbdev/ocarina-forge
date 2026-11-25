@@ -151,17 +151,37 @@ def test_install_copies_the_script_only(tmp_path):
     dest = install_mod(tmp_path / "game")
     assert (dest / "mod.json").is_file()
     assert (dest / "main.js").is_file()
+    assert (dest / "capture.js").is_file()
     text = (dest / "main.js").read_text(encoding="utf-8")
+    shared = (dest / "capture.js").read_text(encoding="utf-8")
     for banned in ("longshot/world", "longshot/gfx", "longshot/capture", "longshot/memory"):
         assert f'from "{banned}"' not in text
         assert f'import "{banned}"' not in text
+        assert f'from "{banned}"' not in shared
+        assert f'import "{banned}"' not in shared
     assert 'import("longshot/gfx")' in text
-    assert 'has("gfx.world")' in text
-    assert "sun: null" in text
+    assert "error.message" in shared
+    assert "has(\"gfx.world\")" in text
+    assert "sun: null" in shared
     manifest = json.loads((dest / "mod.json").read_text(encoding="utf-8"))
     assert manifest["id"] == "local/lighting-capture"
     assert manifest["entry"] == "main.js"
+    assert manifest["permissions"] == ["state.read", "actors.read", "storage", "gfx.world"]
     assert (capture_root() / "main.js").read_text(encoding="utf-8") == text
+
+
+def test_gfx_probe_installs_the_static_import(tmp_path):
+    dest = install_mod(tmp_path / "game", gfx_probe=True)
+    text = (dest / "main.js").read_text(encoding="utf-8")
+    assert text == (capture_root() / "probe.js").read_text(encoding="utf-8")
+    assert 'import gfx from "longshot/gfx"' in text
+    assert 'import("longshot/gfx")' not in text
+    shared = (dest / "capture.js").read_text(encoding="utf-8")
+    assert 'from "longshot/gfx"' not in shared
+    assert 'import gfx from "longshot/gfx"' not in shared
+    assert not (dest / "probe.js").exists()
+    manifest = json.loads((dest / "mod.json").read_text(encoding="utf-8"))
+    assert "gfx.world" in manifest["permissions"]
 
 
 def test_windows_steps_name_the_commands_bradyn_runs():
@@ -174,6 +194,8 @@ def test_windows_steps_name_the_commands_bradyn_runs():
     assert "logs\\mod-run.txt" in text
     assert "local~lighting-capture.json" in text
     assert "Select-String" not in text
+    assert "--gfx-probe" in text
+    assert "gfx.world" in text
 
 
 def test_collect_emitters_lists_dynamic_key_names_only():

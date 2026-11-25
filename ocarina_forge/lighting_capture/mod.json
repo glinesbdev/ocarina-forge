@@ -6,5 +6,5 @@
   "runtime": "js",
   "entry": "main.js",
   "game": { "builds": ["*"] },
-  "permissions": ["state.read", "actors.read", "storage"]
+  "permissions": ["state.read", "actors.read", "storage", "gfx.world"]
 }

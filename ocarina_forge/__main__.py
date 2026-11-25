@@ -101,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rotate", default="", help="x,y,z radians for edit.")
     parser.add_argument("--scale", default="", help="x,y,z for edit.")
     parser.add_argument("--install", action="store_true", help="mod-export copies the mod into the game's mods/local folder.")
+    parser.add_argument("--gfx-probe", action="store_true", help="lighting-mod --install copies the entry that static-imports longshot/gfx. Use it on a build that already reports has(\"gfx.world\").")
     parser.add_argument("--game", default="", help="Game install. Default ~/Games/Longshot/mod-test, or config game, or OCARINA_FORGE_GAME.")
     parser.add_argument("--all", action="store_true", help="Prepare every scene with warm or scene-preview.")
     parser.add_argument("--scene-only", action="store_true", help="warm converts the named scene and does not walk neighboring scenes.")
@@ -154,7 +155,7 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("lighting-survey needs a banc path")
         raise SystemExit(print_lighting_survey(args.banc, dump=args.dump, as_json=args.json, out=args.out))
     if args.command == "lighting-mod":
-        raise SystemExit(print_lighting_mod(install=args.install, game=args.game))
+        raise SystemExit(print_lighting_mod(install=args.install, game=args.game, gfx_probe=args.gfx_probe))
     if args.command == "material-debug":
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
@@ -521,7 +522,7 @@ def print_lighting_survey(banc: str, *, dump: str | None = None, as_json: bool =
     return 0
 
 
-def print_lighting_mod(*, install: bool = False, game: str = "") -> int:
+def print_lighting_mod(*, install: bool = False, game: str = "", gfx_probe: bool = False) -> int:
     """Print the Windows capture steps. --install copies the mod into the game folder."""
     from ocarina_forge.config import load_config
     from ocarina_forge.lighting import install_mod, windows_steps
@@ -529,15 +530,16 @@ def print_lighting_mod(*, install: bool = False, game: str = "") -> int:
 
     config = load_config()
     root = Path(game).expanduser() if game else game_root(config)
-    print(windows_steps(root), end="")
+    print(windows_steps(root, gfx_probe=gfx_probe), end="")
     if not install:
         return 0
     try:
-        dest = install_mod(root)
+        dest = install_mod(root, gfx_probe=gfx_probe)
     except OSError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    print(f"Installed {dest}")
+    kind = "gfx probe" if gfx_probe else "default"
+    print(f"Installed {dest} ({kind})")
     return 0
 
 

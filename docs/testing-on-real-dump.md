@@ -88,11 +88,13 @@ The capture mod is `ocarina_forge/lighting_capture/` (`mod.json` and `main.js` o
 
 On Windows, from the repo, with the game folder you actually run:
 
+Quit Longshot first. The spec's section 7.2 does not provide `import()`, and a run of that call logged `TypeError`. `--gfx-probe` installs the entry that static-imports `longshot/gfx` (its default export is the frozen namespace). The manifest asks for `gfx.world` as well as `state.read`, `actors.read`, and `storage`. Re-enable the mod after starting the game so the new permission is granted. A build without the module should omit `--gfx-probe`; that install does not static-import it.
+
 ```bat
-.venv\Scripts\python.exe -m ocarina_forge lighting-mod --install --game E:\sw2\oot\stable\modding-with-editor
+.venv\Scripts\python.exe -m ocarina_forge lighting-mod --install --gfx-probe --game E:\sw2\oot\stable\modding-with-editor
 ```
 
-`--game` overrides the default `%USERPROFILE%\Games\Longshot\mod-test`. The command copies the mod to `<game>\mods\local\lighting-capture\`. Quit Longshot completely, start it, and enable `local/lighting-capture` (permissions `state.read`, `actors.read`, `storage`). Walk the map. The log is `<game>\logs\mod-run.txt`. A line containing `FORGE_LIGHTING` counts samples. A line `FORGE_LIGHTING gfx` lists the live `longshot/gfx` exports when that feature is present. Quit so storage flushes. A run on 2026-11-25 wrote:
+`--game` overrides the default `%USERPROFILE%\Games\Longshot\mod-test`. The command copies the mod to `<game>\mods\local\lighting-capture\`. Start Longshot, re-enable `local/lighting-capture`, and walk the map. The log is `<game>\logs\mod-run.txt`. A line containing `FORGE_LIGHTING` counts samples. A line `FORGE_LIGHTING gfx` lists the live export names. Quit so storage flushes. A run on 2026-11-25 wrote:
 
 ```text
 <game>\dev\user\modstore\global\local~lighting-capture.json
