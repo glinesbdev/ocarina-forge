@@ -3503,8 +3503,14 @@ uniform float terrainLayerMissing;`
     if (subTerrain !== undefined) showSub = Boolean(subTerrain);
     if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
     if (distance !== undefined) drawDistance = Number(distance) || 0;
-    if (shadows !== undefined) showShadows = Boolean(shadows);
-    if (ao !== undefined) showAo = Boolean(ao);
+    if (shadows !== undefined) {
+      showShadows = Boolean(shadows);
+      uvDirty = true;
+    }
+    if (ao !== undefined) {
+      showAo = Boolean(ao);
+      uvDirty = true;
+    }
     if (effectGizmos !== undefined) showEffectGizmos = Boolean(effectGizmos);
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);

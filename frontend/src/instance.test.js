@@ -228,6 +228,59 @@ test("a mapped geometry without uv loses only its own map", () => {
   assert.equal(shared.map.id, 1);
 });
 
+test("AO and light maps without their uv set are dropped and a mapped neighbour keeps them", () => {
+  const shared = {
+    map: { id: 1, channel: 0 },
+    aoMap: { id: 2, channel: 0 },
+    lightMap: { id: 3, channel: 1 },
+    normalMap: { id: 4, channel: 0 },
+    aoMapIntensity: 1,
+    lightMapIntensity: 1,
+    clone() {
+      return {
+        map: this.map,
+        aoMap: this.aoMap,
+        lightMap: this.lightMap,
+        normalMap: this.normalMap,
+        aoMapIntensity: this.aoMapIntensity,
+        lightMapIntensity: this.lightMapIntensity,
+        needsUpdate: false,
+        userData: {},
+      };
+    },
+  };
+  const bare = { name: "card", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+  const textured = {
+    name: "trunk",
+    geometry: { hasAttribute: (name) => name === "uv" || name === "uv1" },
+    material: shared,
+    children: [],
+  };
+  dropMapWithoutUv({ children: [bare, textured] });
+  assert.equal(bare.material.map, null);
+  assert.equal(bare.material.aoMap, null);
+  assert.equal(bare.material.lightMap, null);
+  assert.equal(bare.material.normalMap, null);
+  assert.equal(bare.material.aoMapIntensity, 0);
+  assert.equal(textured.material, shared);
+  assert.equal(shared.aoMap.id, 2);
+});
+
+test("an AO map on uv1 stays when that set exists and a channel-0 map still needs uv", () => {
+  const ao = { channel: 1 };
+  const albedo = { channel: 0 };
+  const material = { aoMap: ao, map: albedo, aoMapIntensity: 1 };
+  const mesh = {
+    geometry: { hasAttribute: (name) => name === "uv1" },
+    material,
+    children: [],
+  };
+  const names = dropMapWithoutUv(mesh);
+  assert.deepEqual(names, ["mesh"]);
+  assert.equal(mesh.material.aoMap, ao);
+  assert.equal(mesh.material.map, null);
+});
+
 test("a map can use an authored UV channel other than uv", () => {
   const map = { channel: 1 };
   const material = { map };

@@ -23,15 +23,38 @@ export function attachBlend(material) {
     return smoothstep(float(0.35), float(0.65), component);
   }
 
-  function mossUv() {
-    const base = useUv1 ? attribute("blendUv", "vec2") : uv();
+  function geometryHas(builder, name) {
+    const geometry = builder && builder.geometry;
+    if (geometry && typeof geometry.hasAttribute === "function") return geometry.hasAttribute(name);
+    return Boolean(geometry && geometry.attributes && geometry.attributes[name]);
+  }
+
+  function texCoord(builder, texture) {
+    const channel = texture && Number.isInteger(texture.channel) ? texture.channel : 0;
+    const name = channel > 0 ? `uv${channel}` : "uv";
+    if (!geometryHas(builder, name)) return null;
+    return channel > 0 ? uv(channel) : uv();
+  }
+
+  function aoCoord(builder, texture) {
+    const primary = texCoord(builder, texture);
+    if (primary) return primary;
+    if (geometryHas(builder, "uv1")) return uv(1);
+    return null;
+  }
+
+  function mossUv(builder) {
+    const base = useUv1 ? attribute("blendUv", "vec2") : texCoord(builder, map);
+    if (!base) return null;
     return base.mul(scale).add(translate);
   }
 
-  material.colorNode = Fn(() => {
-    const baseUv = uv();
+  material.colorNode = Fn((builder) => {
+    const baseUv = texCoord(builder, map);
+    const mossAt = mossUv(builder);
+    if (!baseUv || !mossAt) return vec4(materialReference("color", "color", material), 1);
     const base = texture(map, baseUv);
-    const moss = texture(mossMap, mossUv());
+    const moss = texture(mossMap, mossAt);
     const weight = maskWeight();
     const mixed = mix(base.rgb, moss.rgb, weight);
     const shown = mix(mixed, vec3(weight), step(float(0.5), debug));
@@ -40,28 +63,37 @@ export function attachBlend(material) {
 
   const orm1Map = material.userData.orm1Map || material.roughnessMap;
   if (material.roughnessMap || orm1Map) {
-    material.roughnessNode = Fn(() => {
-      const rough0 = material.roughnessMap ? texture(material.roughnessMap, uv()).g : float(material.roughness);
-      const rough1 = orm1Map ? texture(orm1Map, mossUv()).g : rough0;
+    material.roughnessNode = Fn((builder) => {
+      const at = texCoord(builder, material.roughnessMap);
+      const mossAt = mossUv(builder);
+      const rough0 = material.roughnessMap && at ? texture(material.roughnessMap, at).g : float(material.roughness);
+      const rough1 = orm1Map && mossAt ? texture(orm1Map, mossAt).g : rough0;
       return mix(rough0, rough1, maskWeight());
     })();
-    material.metalnessNode = Fn(() => {
-      const metal0 = material.roughnessMap ? texture(material.roughnessMap, uv()).b : float(material.metalness);
-      const metal1 = orm1Map ? texture(orm1Map, mossUv()).b : metal0;
+    material.metalnessNode = Fn((builder) => {
+      const at = texCoord(builder, material.roughnessMap);
+      const mossAt = mossUv(builder);
+      const metal0 = material.roughnessMap && at ? texture(material.roughnessMap, at).b : float(material.metalness);
+      const metal1 = orm1Map && mossAt ? texture(orm1Map, mossAt).b : metal0;
       return mix(metal0, metal1, maskWeight());
     })();
-    material.aoNode = Fn(() => {
-      const ao0 = material.aoMap ? texture(material.aoMap, uv()).r : float(1);
-      const ao1 = orm1Map ? texture(orm1Map, mossUv()).r : ao0;
+    material.aoNode = Fn((builder) => {
+      const at = aoCoord(builder, material.aoMap);
+      const mossAt = mossUv(builder);
+      const ao0 = material.aoMap && at ? texture(material.aoMap, at).r : float(1);
+      const ao1 = orm1Map && mossAt ? texture(orm1Map, mossAt).r : ao0;
       return mix(ao0, ao1, maskWeight());
     })();
   }
 
   const normal1 = material.userData.normal1Map || material.normalMap;
   if (material.normalMap || normal1) {
-    material.normalNode = Fn(() => {
-      const baseN = material.normalMap ? normalMap(texture(material.normalMap, uv())) : normalMap(texture(normal1, uv()));
-      const overN = normal1 ? normalMap(texture(normal1, mossUv())) : baseN;
+    material.normalNode = Fn((builder) => {
+      const at = texCoord(builder, material.normalMap || normal1);
+      const mossAt = mossUv(builder);
+      if (!at) return vec3(0, 0, 1);
+      const baseN = material.normalMap ? normalMap(texture(material.normalMap, at)) : normalMap(texture(normal1, at));
+      const overN = normal1 && mossAt ? normalMap(texture(normal1, mossAt)) : baseN;
       return mix(baseN, overN, maskWeight()).normalize();
     })();
   }

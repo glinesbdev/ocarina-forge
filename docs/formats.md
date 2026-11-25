@@ -212,7 +212,7 @@ Effect actors are the `Eft` prefix (`Eft_Firefly` is in the synthetic fixture). 
 
 The TSCB index declares `bake_ao.extm` (`0x5100`) and `bake_gi.extm` (`0x5200`). `bake_ao.extm` is the ground occlusion grid described above. `bake_gi.extm` is only a declared extension. Its payload is not decoded. `custom.extm` is not decoded either.
 
-BFRES `bake0` and `bake1` bind `CmnTex_BakeLightDefault` or a `Dummy*` texture. Those are shared placeholders, not a per-scene lightmap, and the viewer does not sample them. The `bake` vertex attribute is a second UV. It is not written into the glTF.
+BFRES `bake0` and `bake1` bind `CmnTex_BakeLightDefault` or a `Dummy*` texture. Those are shared placeholders, not a per-scene lightmap, and the viewer does not sample them. The `bake` vertex attribute is a second UV. It is not written into the glTF. The glTF writer stores occlusion as `occlusionTexture` on the ORM image and does not set `texCoord`, so the loader samples `TEXCOORD_0` (attribute `uv`). A channel of 1 samples `TEXCOORD_1` (`uv1`). A mesh that lacks that attribute is drawn without the sample.
 
 ### What Longshot has said, not re-checked on a dump here
 

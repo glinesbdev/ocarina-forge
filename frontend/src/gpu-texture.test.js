@@ -164,17 +164,29 @@ test("parse settles without handing non-basis bytes to the Basis loader", async 
   });
   const originalBitmap = globalThis.createImageBitmap;
   delete globalThis.createImageBitmap;
+  const warns = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warns.push(String(message));
   try {
     const result = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("bitmap fallback parse did not settle")), 1000);
-      fallbackLoader.parse(rawBuffer, resolve, (error) => {
+      fallbackLoader.parse(rawBuffer, (texture) => {
         clearTimeout(timer);
-        resolve(error);
+        resolve(texture);
+      }, (error) => {
+        clearTimeout(timer);
+        reject(error);
       });
     });
-    assert.equal(result instanceof Error, true);
-    assert.match(String(result.message), /bitmap fallback|no texture/);
+    assert.equal(result.userData.forgePlainFallback, true);
+    assert.equal(warns.length, 1);
+    assert.match(warns[0], /no bitmap fallback/);
+    await new Promise((resolve, reject) => {
+      fallbackLoader.parse(rawBuffer, resolve, reject);
+    });
+    assert.equal(warns.length, 1);
   } finally {
+    console.warn = originalWarn;
     if (originalBitmap) globalThis.createImageBitmap = originalBitmap;
   }
   assert.equal(basisCalls, 0);
