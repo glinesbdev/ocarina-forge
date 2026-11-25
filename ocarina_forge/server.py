@@ -1416,6 +1416,54 @@ def actors(q: str = ""):
     return {"names": names[:400], "total": len(dump.actor_names()), "matched": len(names)}
 
 
+@app.get("/api/permissions")
+def get_permissions():
+    from ocarina_forge.permissions import catalog
+
+    return catalog()
+
+
+@app.get("/api/project/permissions")
+def get_project_permissions():
+    from ocarina_forge.permissions import project_declaration
+
+    config = load_config()
+    view = project_declaration(_open_project())
+    # Only a game folder the user already configured. The default path is not filled in.
+    view["suggestedGame"] = str(config.get("game") or "")
+    return view
+
+
+@app.put("/api/project/permissions")
+def put_project_permissions(body: dict):
+    from ocarina_forge.permissions import save_project_permissions
+
+    return save_project_permissions(_open_project(), body or {})
+
+
+@app.post("/api/project/permissions/grant")
+def grant_project_permissions(body: dict | None = None):
+    from ocarina_forge.modexport import mod_id
+    from ocarina_forge.permissions import grant_in_mods_json, project_declaration
+
+    body = body or {}
+    game = body.get("game")
+    if not isinstance(game, str) or not game.strip():
+        raise BancError("Point at the game folder. Forge does not grant permissions anywhere else.", "permissions")
+    project = _open_project()
+    view = project_declaration(project)
+    if view["errors"]:
+        raise BancError("Fix the permission errors before writing mods.json. " + " ".join(view["errors"]), "permissions")
+    declared = list(view["declaration"]["permissions"]) + [
+        name for name in view["declaration"]["optionalPermissions"] if name not in view["declaration"]["permissions"]
+    ]
+    for origin in view["declaration"]["net"]:
+        permission = "net:*" if origin == "*" else f"net:{origin}"
+        if permission not in declared:
+            declared.append(permission)
+    return grant_in_mods_json(Path(game), mod_id(project.manifest["name"]), declared)
+
+
 @app.post("/api/mod-export")
 def export_longshot_mod(body: dict | None = None):
     from ocarina_forge.modexport import export_mod as export_longshot

@@ -158,6 +158,16 @@ class Project:
             (root / domain).mkdir(exist_ok=True)
         return Project(root)
 
+    def save_manifest_data(self, data: dict) -> None:
+        """Write ``manifest.yaml`` and reload it.
+
+        ``data`` is the file's mapping, not the loaded view with defaults filled in.
+        """
+        if not isinstance(data, dict):
+            raise BancError("The project manifest has to be a mapping.", "project")
+        atomic_write(self.root / "manifest.yaml", dump_yaml(data))
+        self.manifest = self._load_manifest()
+
     def scene_path(self, banc: str) -> Path:
         return self.root / scene_filename(banc)
 

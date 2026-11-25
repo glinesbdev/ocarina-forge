@@ -33,6 +33,7 @@
           <button id="palette-open" type="button" class="ghost" title="Search actors, scenes, and commands (Ctrl+K)">Search</button>
           <button id="undo" type="button" class="ghost" title="Undo the last edit (Ctrl+Z)" disabled>Undo</button>
           <button id="redo" type="button" class="ghost" title="Redo (Ctrl+Shift+Z or Ctrl+Y)" disabled>Redo</button>
+          <button id="permissions-open" type="button" class="ghost" hidden>Mod permissions</button>
           <button id="build-open" type="button" class="primary" hidden>Build mod</button>
           <button id="open-scenes" type="button" class="ghost mobile-only">Scenes</button>
           <button id="open-side" type="button" class="ghost mobile-only">Actors</button>
@@ -236,6 +237,7 @@
         <div class="dialog-actions">
           <button id="build-run" type="button" class="primary">Build romfs</button>
           <button id="mod-export" type="button">Save Longshot mod</button>
+          <button id="build-permissions" type="button">Mod permissions</button>
           <a id="build-download" class="ghost linkish" href="/api/export/download" hidden>Download zip</a>
         </div>
         <ol id="build-log" class="log"></ol>
@@ -261,6 +263,7 @@
             <label>Description<input id="new-description" placeholder="Stays in the project" /></label>
             <label>Version<input id="new-version" value="0.1.0" /></label>
             <button id="create-project" type="button" class="primary">Create project</button>
+            <button id="project-permissions" type="button">Mod permissions</button>
           </fieldset>
           <fieldset>
             <legend>Open</legend>
@@ -295,6 +298,41 @@
             <button id="use-sample" type="button" class="ghost">Use the sample dump</button>
           </div>
         </details>
+      </form>
+    </dialog>
+
+    <dialog id="permissions-dialog">
+      <form method="dialog" class="dialog-card wide">
+        <header>
+          <h2>Mod permissions</h2>
+          <button type="button" class="ghost" data-close>Close</button>
+        </header>
+        <p id="permissions-mod" class="muted"></p>
+        <p id="permissions-restart" class="muted"></p>
+        <div id="permissions-errors" class="perm-errors"></div>
+        <div id="permissions-scan" class="perm-scan"></div>
+        <label>Who shares the changes
+          <select id="permissions-multiplayer">
+            <option value="local">This player only (local)</option>
+            <option value="all">Everyone in the room (all)</option>
+            <option value="host">The host's copy (host)</option>
+          </select>
+        </label>
+        <label for="permissions-net">Network origins
+          <textarea id="permissions-net" rows="3" spellcheck="false" placeholder="https://tracker.example.org"></textarea>
+        </label>
+        <p class="muted tight">One origin per line: https://host, wss://host:port, or *.</p>
+        <div id="permissions-list" class="perm-list scroll"></div>
+        <fieldset>
+          <legend>Pre-grant for a local test</legend>
+          <p class="muted tight">Writes the declared permissions into that game folder's mods.json and copies the old file to a .bak beside it. Forge does not write a game folder you have not named here.</p>
+          <label>Game folder<input id="permissions-game" placeholder="Folder with mods/ or longshot_options.ini" /></label>
+          <button id="permissions-grant" type="button">Pre-grant in mods.json</button>
+          <p id="permissions-grant-note" class="muted tight"></p>
+        </fieldset>
+        <div class="dialog-actions">
+          <button id="permissions-save" type="button" class="primary">Save permissions</button>
+        </div>
       </form>
     </dialog>
 

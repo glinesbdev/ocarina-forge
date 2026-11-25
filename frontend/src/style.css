@@ -259,6 +259,23 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .badge.added { color: var(--ok); border-color: #3d5a32; }
 .badge.removed { color: var(--danger); border-color: #6a332b; }
 .badge.recipe { color: #d7c9ff; border-color: #5c4d86; }
+.badge.low { color: var(--ok); border-color: #3d5a32; }
+.badge.medium { color: var(--warn); border-color: #6a5428; }
+.badge.high { color: #f0a070; border-color: #6a4328; }
+.badge.unsafe { color: var(--danger); border-color: #6a332b; }
+#permissions-dialog label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; margin: 8px 0; }
+#permissions-dialog textarea { width: 100%; font: 13px var(--mono); color: var(--text); background: var(--bg-inset); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.perm-list { max-height: 360px; border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.perm-group { margin: 0 0 12px; }
+.perm-group h3 { margin: 0 0 6px; font-size: 15px; }
+.perm-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: start; padding: 6px 0; border-top: 1px solid var(--line); }
+.perm-row button.mode { min-width: 92px; }
+.perm-row .player { display: block; }
+.perm-row .features { display: block; color: var(--faint); font-size: 12px; }
+.perm-row.disabled { opacity: 0.55; }
+.perm-errors p, .perm-scan p { margin: 4px 0; }
+.perm-errors { color: var(--danger); }
+.perm-scan .warn { color: var(--warn); }
 
 #stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: #101612; }
 #viewport { position: relative; flex: 1; min-height: 0; isolation: isolate; overflow: hidden; }

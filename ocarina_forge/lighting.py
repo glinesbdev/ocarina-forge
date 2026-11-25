@@ -23,6 +23,9 @@ from ocarina_forge.locate import setting
 
 SCHEMA = 1
 MOD_ID = "local/lighting-capture"
+# What capture.js calls, plus gfx.world for the static longshot/gfx probe.
+# Checked against the permission table in ocarina_forge/permissions.py.
+CAPTURE_PERMISSIONS = ("state.read", "actors.read", "storage", "gfx.world")
 UNAVAILABLE = (
     "sun",
     "ambient",
@@ -631,6 +634,19 @@ def _entry_ok(text: str, gfx_probe: bool) -> bool:
     return not static
 
 
+def capture_manifest_text() -> str:
+    """``mod.json`` with permissions taken from the Longshot permission table.
+
+    The names are the calls in ``capture.js`` (``state.read``, ``actors.read``,
+    ``storage``) plus ``gfx.world``, which the gfx-probe entry imports.
+    """
+    from ocarina_forge.permissions import assert_player_permissions
+
+    manifest = json.loads((capture_root() / "mod.json").read_text(encoding="utf-8"))
+    manifest["permissions"] = assert_player_permissions(list(CAPTURE_PERMISSIONS))
+    return json.dumps(manifest, indent=2) + "\n"
+
+
 def install_mod(game: Path, *, gfx_probe: bool = False) -> Path:
     """Copy the capture mod into ``<game>/mods/local/lighting-capture``.
 
@@ -649,7 +665,7 @@ def install_mod(game: Path, *, gfx_probe: bool = False) -> Path:
         raise RuntimeError(f"{entry_path} is not the {'gfx probe' if gfx_probe else 'default'} entry")
     dest = Path(game).expanduser() / "mods" / "local" / "lighting-capture"
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / "mod.json").write_text((source / "mod.json").read_text(encoding="utf-8"), encoding="utf-8")
+    (dest / "mod.json").write_text(capture_manifest_text(), encoding="utf-8")
     shutil.copyfile(source / "capture.js", dest / "capture.js")
     main_path = dest / "main.js"
     if main_path.exists():

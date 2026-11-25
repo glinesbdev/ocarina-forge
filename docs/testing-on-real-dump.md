@@ -106,7 +106,7 @@ The game keeps grants in `<game>\dev\mods.json`, on the mod entry's `"granted"` 
 { "id": "local/lighting-capture", "enabled": true, "granted": ["state.read", "actors.read", "storage", "gfx.world"] }
 ```
 
-That array is the game's record of what the player allowed. It is not `mod.json`. Changing `mod.json` permissions still needs a restart so the game reads the manifest again.
+That array is the game's record of what the player allowed. It is not `mod.json`. The same grant can be written from the editor's **Mod permissions** panel: name this game folder and choose **Pre-grant in mods.json**. Forge copies the file to `mods.json.bak` first and does not write a folder you did not name. Changing `mod.json` permissions may need the mod turned off and on again, or the game restarted, before the new manifest is read.
 
 ```bat
 .venv\Scripts\python.exe -m ocarina_forge lighting-mod --install --gfx-probe --game E:\sw2\oot\stable\modding-with-editor

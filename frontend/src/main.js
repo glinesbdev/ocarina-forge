@@ -18,6 +18,16 @@ import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { modelLine } from "./inspector.js";
 import { paletteRows } from "./palette.js";
+import {
+  addPermission,
+  catalogRows,
+  declarationFromSelection,
+  isNetOrigin,
+  nextMode,
+  parseNetLines,
+  selectionFromDeclaration,
+  validateClient,
+} from "./permissions.js";
 import { sceneEntries } from "./scene-list.js";
 import { groupModelErrors, isMarker } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
@@ -331,6 +341,18 @@ $("settings-open").addEventListener("click", () => openSettings());
 $("undo").addEventListener("click", () => undo());
 $("redo").addEventListener("click", () => redo());
 $("build-open").addEventListener("click", () => $("build-dialog").showModal());
+$("permissions-open").addEventListener("click", () => openPermissions());
+$("build-permissions").addEventListener("click", () => openPermissions());
+$("project-permissions").addEventListener("click", () => openPermissions());
+$("permissions-save").addEventListener("click", () => savePermissions());
+$("permissions-grant").addEventListener("click", () => grantPermissions());
+function refreshPermissionDraft() {
+  if (!$("permissions-dialog").open || !permissionsUi.view) return;
+  permissionsUi.view = { ...permissionsUi.view, errors: [] };
+  renderPermissions({ keepFields: true });
+}
+$("permissions-net").addEventListener("input", refreshPermissionDraft);
+$("permissions-multiplayer").addEventListener("change", refreshPermissionDraft);
 $("project-chip").addEventListener("click", openProjectDialog);
 $("open-scenes").addEventListener("click", () => showTab("scenes"));
 $("open-side").addEventListener("click", () => showTab("outliner"));
@@ -653,10 +675,12 @@ function renderChrome() {
     $("project-title").textContent = project.manifest.title || project.manifest.name;
     $("project-name").textContent = project.manifest.name;
     $("build-open").hidden = false;
+    $("permissions-open").hidden = false;
   } else {
     $("project-title").textContent = dumpReady() ? "No project" : "Set up Ocarina Forge";
     $("project-name").textContent = dump && dump.root ? dump.root : "";
     $("build-open").hidden = true;
+    $("permissions-open").hidden = true;
   }
   renderProjectContents();
 }
@@ -2686,6 +2710,249 @@ function chooseActor(name) {
   edit({ command: "add", actor: name, translate: viewport.spawnPoint() });
 }
 
+const permissionsUi = {
+  catalog: null,
+  rows: [],
+  selection: new Map(),
+  view: null,
+};
+
+function closeOpenDialogs() {
+  for (const dialog of document.querySelectorAll("dialog")) {
+    if (dialog.open) dialog.close();
+  }
+}
+
+function currentPermissionDeclaration() {
+  return declarationFromSelection(permissionsUi.selection, {
+    net: parseNetLines($("permissions-net").value),
+    multiplayer: $("permissions-multiplayer").value,
+  });
+}
+
+function renderPermissions({ keepFields = false } = {}) {
+  const view = permissionsUi.view || {};
+  const declaration = view.declaration || {};
+  $("permissions-mod").textContent = view.modId ? `Mod id ${view.modId}` : "";
+  $("permissions-restart").textContent = (permissionsUi.catalog && permissionsUi.catalog.restartNote) || view.restartNote || "";
+  if (!keepFields) {
+    $("permissions-multiplayer").value = declaration.multiplayer || "local";
+    $("permissions-net").value = (declaration.net || []).join("\n");
+  }
+  if (!$("permissions-game").value && view.suggestedGame) $("permissions-game").value = view.suggestedGame;
+
+  const draft = currentPermissionDeclaration();
+  const local = validateClient(draft, {
+    content: view.content || "",
+    runtime: view.runtime || "",
+    system: Boolean(declaration.system),
+    rows: permissionsUi.rows,
+  });
+  const errors = $("permissions-errors");
+  errors.replaceChildren();
+  for (const message of [...(view.errors || []), ...local.errors.filter((item) => !(view.errors || []).includes(item))]) {
+    const line = document.createElement("p");
+    line.textContent = message;
+    errors.append(line);
+  }
+  for (const message of local.warnings || []) {
+    const line = document.createElement("p");
+    line.className = "warn";
+    line.textContent = message;
+    errors.append(line);
+  }
+
+  const scan = $("permissions-scan");
+  scan.replaceChildren();
+  const report = view.scan || {};
+  for (const item of report.dynamicImports || []) {
+    const line = document.createElement("p");
+    line.className = "warn";
+    line.textContent = `${item.file}:${item.line} uses import(${item.specifier ? `"${item.specifier}"` : ""}). A mod's modules are its static imports. import() is not available.`;
+    scan.append(line);
+  }
+  for (const origin of draft.net) {
+    if (!isNetOrigin(origin)) continue;
+    const id = origin === "*" ? "net:*" : `net:${origin}`;
+    if (permissionsUi.selection.has(id)) continue;
+    const line = document.createElement("p");
+    const text = document.createElement("span");
+    text.textContent = `${origin} needs ${id}. `;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Add";
+    button.addEventListener("click", () => {
+      permissionsUi.selection.set(id, "required");
+      permissionsUi.view = { ...permissionsUi.view, errors: [] };
+      renderPermissions({ keepFields: true });
+    });
+    line.append(text, button);
+    scan.append(line);
+  }
+  for (const name of report.missing || []) {
+    const line = document.createElement("p");
+    const text = document.createElement("span");
+    text.textContent = `${name} is used by the scripts and is not declared. `;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Add";
+    button.addEventListener("click", () => {
+      const next = addPermission(currentPermissionDeclaration(), name);
+      permissionsUi.selection = selectionFromDeclaration(next);
+      permissionsUi.view = { ...view, declaration: { ...declaration, ...next }, errors: [] };
+      $("permissions-net").value = next.net.join("\n");
+      renderPermissions({ keepFields: true });
+    });
+    line.append(text, button);
+    scan.append(line);
+  }
+  if ((report.unused || []).length) {
+    const line = document.createElement("p");
+    line.className = "warn";
+    line.textContent = `Declared and not seen in a call: ${report.unused.join(", ")}.`;
+    scan.append(line);
+  }
+  for (const hint of (report.hints || []).slice(0, 6)) {
+    const line = document.createElement("p");
+    line.className = "warn";
+    line.textContent = `${hint.file}:${hint.line} ${hint.message}`;
+    scan.append(line);
+  }
+
+  const list = $("permissions-list");
+  list.replaceChildren();
+  let lastGroup = "";
+  for (const row of permissionsUi.rows) {
+    if (row.group !== lastGroup) {
+      lastGroup = row.group;
+      const heading = document.createElement("h3");
+      heading.textContent = row.groupLabel;
+      const section = document.createElement("section");
+      section.className = "perm-group";
+      section.append(heading);
+      list.append(section);
+    }
+    const section = list.lastElementChild;
+    const item = document.createElement("div");
+    item.className = "perm-row";
+    const mode = permissionsUi.selection.get(row.id) || "off";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mode";
+    button.textContent = mode === "required" ? "Required" : mode === "optional" ? "Optional" : "Off";
+    button.disabled = Boolean(row.systemOnly);
+    button.title = row.systemOnly ? "Only a Longshot system mod can ask for this." : "Required, optional, or off";
+    button.addEventListener("click", () => {
+      const next = nextMode(mode);
+      if (next === "off") permissionsUi.selection.delete(row.id);
+      else permissionsUi.selection.set(row.id, next);
+      permissionsUi.view = { ...permissionsUi.view, errors: [] };
+      renderPermissions({ keepFields: true });
+    });
+    const copy = document.createElement("div");
+    const player = document.createElement("span");
+    player.className = "player";
+    player.textContent = row.player;
+    const features = document.createElement("span");
+    features.className = "features";
+    features.textContent = row.systemOnly ? `${row.features} Only a Longshot system mod can ask for this.` : row.features;
+    copy.append(player, features);
+    const badge = document.createElement("span");
+    badge.className = `badge ${row.risk}`;
+    badge.textContent = row.risk;
+    if (row.systemOnly) item.classList.add("disabled");
+    item.append(button, copy, badge);
+    section.append(item);
+  }
+  const extras = [...permissionsUi.selection.keys()].filter((id) => !permissionsUi.rows.some((row) => row.id === id));
+  if (extras.length) {
+    const section = document.createElement("section");
+    section.className = "perm-group";
+    const heading = document.createElement("h3");
+    heading.textContent = "Named origins";
+    section.append(heading);
+    for (const id of extras) {
+      const mode = permissionsUi.selection.get(id);
+      const item = document.createElement("div");
+      item.className = "perm-row";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "mode";
+      button.textContent = mode === "optional" ? "Optional" : "Required";
+      button.addEventListener("click", () => {
+        const next = nextMode(mode);
+        if (next === "off") permissionsUi.selection.delete(id);
+        else permissionsUi.selection.set(id, next);
+        renderPermissions({ keepFields: true });
+      });
+      const copy = document.createElement("div");
+      copy.textContent = id.startsWith("net:") ? `Can talk to ${id.slice(4)}` : id;
+      const badge = document.createElement("span");
+      badge.className = "badge medium";
+      badge.textContent = id === "net:*" ? "high" : "medium";
+      item.append(button, copy, badge);
+      section.append(item);
+    }
+    list.append(section);
+  }
+}
+
+async function openPermissions() {
+  if (!projectReady()) {
+    toast("Open a project first.");
+    return;
+  }
+  closeOpenDialogs();
+  try {
+    const [catalog, view] = await Promise.all([api.permissions(), api.projectPermissions()]);
+    permissionsUi.catalog = catalog;
+    permissionsUi.rows = catalogRows(catalog);
+    permissionsUi.view = view;
+    permissionsUi.selection = selectionFromDeclaration(view.declaration || {});
+    renderPermissions();
+    $("permissions-dialog").showModal();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function savePermissions({ quiet = false } = {}) {
+  const body = currentPermissionDeclaration();
+  try {
+    const view = await api.savePermissions(body);
+    permissionsUi.view = { ...permissionsUi.view, ...view };
+    permissionsUi.selection = selectionFromDeclaration(view.declaration || {});
+    renderPermissions();
+    if (!quiet) toast(view.errors && view.errors.length ? "Saved. The manifest still has errors." : "Permissions saved.");
+    return view;
+  } catch (error) {
+    toast(error.message);
+    throw error;
+  }
+}
+
+async function grantPermissions() {
+  const game = $("permissions-game").value.trim();
+  const note = $("permissions-grant-note");
+  if (!game) {
+    note.textContent = "Point at the game folder first. Nothing was written.";
+    return;
+  }
+  note.textContent = "Writing mods.json…";
+  try {
+    const view = await savePermissions({ quiet: true });
+    if (view.errors && view.errors.length) {
+      note.textContent = "Fix the permission errors before writing mods.json. The game folder was not changed.";
+      return;
+    }
+    const result = await api.grantPermissions({ game });
+    const backup = result.backup ? ` Backup: ${result.backup}.` : " A new file was created, so there was nothing to back up.";
+    note.textContent = `Granted ${result.granted.join(", ") || "nothing"} in ${result.path}.${backup} ${result.restartNote || ""} ${(result.warnings || []).join(" ")}`;
+  } catch (error) {
+    note.textContent = error.message;
+  }
+}
+
 async function runModExport() {
   const log = $("build-log");
   log.replaceChildren();
@@ -3542,6 +3809,7 @@ function runCommand(id) {
   else if (id === "details") showTab("details");
   else if (id === "project") openProjectDialog();
   else if (id === "build") $("build-dialog").showModal();
+  else if (id === "permissions") openPermissions();
   else if (id === "ground") {
     const box = $("show-ground");
     box.checked = !box.checked;

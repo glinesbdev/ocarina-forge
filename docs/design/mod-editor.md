@@ -109,6 +109,8 @@ Forge's typed records stay the source. The exporter writes the mod. [longshot-ma
 
 `id`, `name`, and `version` are the fields the loader requires (`host/mod_manifest.c`). `author` and `license` are written only when the project sets them. `description` is not a `mod.json` field on `editor-mod`; it stays in `manifest.yaml`. `runtime` and `entry` are omitted, so no `src/main.ts` is written. A later milestone that emits `content.change` or `content.place` adds `runtime`, `entry`, `api`, and `content.add` at that point, and only then.
 
+A patch-only export omits `permissions`. When the project has a runtime, or you set them in **Mod permissions**, `manifest.yaml` holds `permissions`, `optionalPermissions`, and `net`, and export writes those into `mod.json`. The player-facing table, the manifest rules, and the `mods.json` `"granted"` array are in [formats.md](../formats.md).
+
 ## Projects
 
 One project is one mod. The source is the Forge folder: `manifest.yaml`, `scenes/`, and the other domain files in [project-format.md](../project-format.md). Selection, camera, panel layout, undo, and caches stay there. They are not copied into the mod.
