@@ -20,6 +20,30 @@ export const TERRAIN_PICK_LAYER = 3;
 /** WebGPU copyTextureToBuffer aligns rows to 256 bytes (64 RGBA8 pixels). */
 export const WEBGPU_PICK_SPAN = 64;
 
+/**
+ * A three.js texture, or the color texture of a render target.
+ * TextureNode rejects anything else (`Need a three.js texture`).
+ */
+export function resolvePickTexture(value) {
+  if (!value) return null;
+  if (value.isTexture === true) return value;
+  if (value.texture && value.texture.isTexture === true) return value.texture;
+  return null;
+}
+
+/**
+ * The mask the id shader should discard against.
+ * Albedo alpha is the usual cutout. An alphaMap is sampled from green, matching three.js.
+ */
+export function pickMask(source) {
+  if (!source || !(source.alphaTest > 0)) return { alphaTest: 0, map: null, channel: "a" };
+  const map = resolvePickTexture(source.map);
+  if (map) return { alphaTest: source.alphaTest, map, channel: "a" };
+  const alphaMap = resolvePickTexture(source.alphaMap);
+  if (alphaMap) return { alphaTest: source.alphaTest, map: alphaMap, channel: "g" };
+  return { alphaTest: source.alphaTest, map: null, channel: "a" };
+}
+
 /** Readback width. WebGPU copies a whole aligned row; WebGL can read one pixel. */
 export function paddedPickWidth(span, webgpu) {
   const wanted = Math.max(1, span | 0);
@@ -322,14 +346,17 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     const object = activeObject;
     // WebGL shares one instanced program and updates the id texture uniform.
     // WebGPU's instance node captures the mesh, so each preview mesh stays unique.
-    if (object?.isInstancedMesh) return webgpu ? `forge-pick-inst-${object.uuid}` : "forge-pick-inst";
+    if (object?.isInstancedMesh) return nodeRenderer ? `forge-pick-inst-${object.uuid}` : "forge-pick-inst";
     if (object?.isBatchedMesh) return "forge-pick-batch";
     return "forge-pick-mesh";
   };
   material.onBeforeCompile = (shader) => installPickShader(shader, uniforms);
   let nodeMaterial = null;
-  const webgpu = Boolean(renderer?.isWebGPURenderer && renderer.backend?.isWebGPUBackend);
-  const spanFor = () => (webgpu ? WEBGPU_PICK_SPAN : 1);
+  // Native WebGPU's copy aligns rows to 256 bytes. The WebGL2 backend of
+  // WebGPURenderer does not, but both backends compile node materials.
+  const nativeWebgpu = Boolean(renderer?.isWebGPURenderer && renderer.backend?.isWebGPUBackend);
+  const nodeRenderer = Boolean(renderer?.isWebGPURenderer);
+  const spanFor = () => (nativeWebgpu ? WEBGPU_PICK_SPAN : 1);
   const Target = THREE.WebGLRenderTarget || THREE.RenderTarget;
   let target = null;
   let targetWidth = 0;
@@ -433,16 +460,23 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     const src = sourceMaterial || object?.material;
     uniforms.forgePickBase.value = object?.userData?.forgePickId || 0;
     uniforms.forgeDepthOnly.value = object?.userData?.forgePickDepthOnly ? 1 : 0;
-    uniforms.forgePickIds.value = object?.userData?.forgePickTexture || zero;
-    const nextTest = src && src.alphaTest > 0 ? src.alphaTest : 0;
-    const nextMap = nextTest > 0 && src.map ? src.map : null;
-    const defineChange = (material.alphaTest > 0) !== (nextTest > 0) || Boolean(material.map) !== Boolean(nextMap);
-    material.alphaTest = nextTest;
+    uniforms.forgePickIds.value = resolvePickTexture(object?.userData?.forgePickTexture) || zero;
+    const mask = pickMask(src);
+    const nextMap = mask.channel === "a" ? mask.map : null;
+    const nextAlpha = mask.channel === "g" ? mask.map : null;
+    const defineChange = (material.alphaTest > 0) !== (mask.alphaTest > 0)
+      || Boolean(material.map) !== Boolean(nextMap)
+      || Boolean(material.alphaMap) !== Boolean(nextAlpha);
+    material.alphaTest = mask.alphaTest;
     material.map = nextMap;
+    material.alphaMap = nextAlpha;
     if (defineChange) material.needsUpdate = true;
     if (nodeMaterial) {
-      nodeMaterial.alphaTest = nextTest;
+      nodeMaterial.alphaTest = mask.alphaTest;
       nodeMaterial.map = nextMap;
+      nodeMaterial.alphaMap = nextAlpha;
+      nodeMaterial.userData.forgePickMask = mask.map;
+      nodeMaterial.userData.forgePickMaskChannel = mask.channel;
     }
   }
 
@@ -493,7 +527,7 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     applyLayers({ preview, terrain });
     setExcluded(output === 0 ? excluded : []);
     uniforms.forgeOutput.value = output;
-    const rt = ensureTarget(paddedPickWidth(strip.span, webgpu));
+    const rt = ensureTarget(paddedPickWidth(strip.span, nativeWebgpu));
     const previousTarget = renderer.getRenderTarget?.() ?? null;
     const previousOverride = scene.overrideMaterial;
     const previousBackground = scene.background;
@@ -570,7 +604,7 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
   }
 
   async function attachNodeMaterial() {
-    if (!webgpu || nodeMaterial || typeof createNodeMaterial !== "function") return false;
+    if (!nodeRenderer || nodeMaterial || typeof createNodeMaterial !== "function") return false;
     nodeMaterial = await createNodeMaterial({ THREE, uniforms, getActiveObject: () => activeObject });
     if (nodeMaterial) {
       nodeMaterial.userData.forgePick = true;
