@@ -12,6 +12,9 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
 ``behavior-export`` writes saved set-field ops into the project build folder.
 ``height-diff <results.json>`` compares a height-check scan to Forge terrain and water.
+``lighting-import <results.json>`` splits a lighting-capture storage JSON into per-scene files in the user data directory.
+``lighting-survey <banc>`` lists effect actors and GameBancParam key names. It does not invent light values.
+``lighting-mod`` prints how to run the capture mod. ``--install`` copies it into the game's mods/local folder.
 With no subcommand, the server starts, which is what dev.sh runs.
 """
 
@@ -54,10 +57,13 @@ def main(argv: list[str] | None = None) -> None:
             "mod-export",
             "profile",
             "height-diff",
+            "lighting-import",
+            "lighting-survey",
+            "lighting-mod",
         ],
         help="Commands for auditing, editing, and preparing scenes. The default is the editor server.",
     )
-    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action, actor class, or height-diff results JSON.")
+    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action, actor class, a height-diff JSON, a lighting-capture JSON, or a Longshot game folder.")
     parser.add_argument("extra", nargs="?", help="Project name for 'project create' and 'project open'.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
     parser.add_argument("--trace", action="store_true", help="behavior prints the pack, each component, and every path it tried.")
@@ -95,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rotate", default="", help="x,y,z radians for edit.")
     parser.add_argument("--scale", default="", help="x,y,z for edit.")
     parser.add_argument("--install", action="store_true", help="mod-export copies the mod into the game's mods/local folder.")
+    parser.add_argument("--gfx-probe", action="store_true", help="lighting-mod --install copies the entry that static-imports longshot/gfx. Use it on a build that already reports has(\"gfx.world\").")
     parser.add_argument("--game", default="", help="Game install. Default ~/Games/Longshot/mod-test, or config game, or OCARINA_FORGE_GAME.")
     parser.add_argument("--all", action="store_true", help="Prepare every scene with warm or scene-preview.")
     parser.add_argument("--scene-only", action="store_true", help="warm converts the named scene and does not walk neighboring scenes.")
@@ -139,6 +146,20 @@ def main(argv: list[str] | None = None) -> None:
         if not args.banc:
             parser.error("height-diff needs a height-check results JSON")
         raise SystemExit(print_height_diff(args.banc, dump=args.dump, as_json=args.json, out=args.out))
+    if args.command == "lighting-import":
+        if not args.banc:
+            parser.error("lighting-import needs a lighting-capture JSON")
+        raise SystemExit(print_lighting_import(args.banc, out=args.out))
+    if args.command == "lighting-survey":
+        if not args.banc:
+            parser.error("lighting-survey needs a banc path")
+        raise SystemExit(print_lighting_survey(args.banc, dump=args.dump, as_json=args.json, out=args.out))
+    if args.command == "lighting-mod":
+        # The flag is also read from argv. A probe install must not depend on
+        # the store_true attribute alone: the 6409840 run left the dynamic entry.
+        requested = list(argv if argv is not None else sys.argv[1:])
+        gfx_probe = bool(args.gfx_probe) or "--gfx-probe" in requested
+        raise SystemExit(print_lighting_mod(install=args.install, game=args.game, gfx_probe=gfx_probe))
     if args.command == "material-debug":
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
@@ -457,6 +478,78 @@ def print_height_diff(results_path: str, *, dump: str | None = None, as_json: bo
         print(json.dumps(ready, indent=2))
     else:
         print(render_text(report), end="")
+    return 0
+
+
+def print_lighting_import(results_path: str, *, out: str | None = None) -> int:
+    """Split a lighting-capture JSON, or a game folder, into per-scene files."""
+    from ocarina_forge.lighting import find_store, import_capture, references_dir
+
+    try:
+        source = find_store(results_path)
+        written = import_capture(source, out)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    folder = written[0].parent if written else references_dir()
+    print(f"Read {source}")
+    print(f"Wrote {len(written)} scene file(s) to {folder}")
+    for item in written:
+        print(f"{item.stem}  {item}")
+    return 0
+
+
+def print_lighting_survey(banc: str, *, dump: str | None = None, as_json: bool = False, out: str | None = None) -> int:
+    """List lighting-related actors and parameter key names. 2 when the dump is missing."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.lighting import lighting_report, render_report
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+        report = lighting_report(opened, banc, survey=True)
+    except (BancError, OSError, ValueError) as exc:
+        print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
+        return 2
+    if out:
+        Path(out).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_report(report), end="")
+    return 0
+
+
+def print_lighting_mod(*, install: bool = False, game: str = "", gfx_probe: bool = False) -> int:
+    """Print the Windows capture steps. --install copies the mod into the game folder."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.lighting import install_mod, windows_steps
+    from ocarina_forge.projects import game_root
+
+    config = load_config()
+    root = Path(game).expanduser() if game else game_root(config)
+    print(windows_steps(root, gfx_probe=gfx_probe), end="")
+    if not install:
+        return 0
+    try:
+        dest = install_mod(root, gfx_probe=gfx_probe)
+    except (OSError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    main_js = dest / "main.js"
+    text = main_js.read_text(encoding="utf-8")
+    kind = "static import of longshot/gfx" if gfx_probe else "dynamic entry"
+    print(f"Installed {dest}")
+    print(f"main.js {main_js.stat().st_size} bytes, {kind}")
+    if gfx_probe and ("import(" in text or 'from "longshot/gfx"' not in text):
+        print(f"{main_js} is not the static gfx entry.", file=sys.stderr)
+        return 2
     return 0
 
 
