@@ -241,7 +241,7 @@ A field change is still a `set field` op in `behaviors/<gyaml>.yaml`, with the n
 
 Change one existing label through `content.text`. `check` passes. After a process start, the line is visible in the game (a shot is not enough if the line is inside a conversation; the check is then the game's text plus the mod log). Control tags are out of scope. Event flows and schedules stay typed ops in the project and are not exported as whole files. A quests browser and live dialog preview wait until that export is real.
 
-The Rust port below is part of this direction. It is not one of the ten, and it is not waiting until they finish. Baked lighting (`bake0` / `bake1`), an asset browser, a new level, and blueprint phase B (add and connect, still on `glinesbdev/blueprint-nodes-a68c`) stay later than the ten. The WebGPU trial stays shelved on three r170. [performance.md](../performance.md) has the measurements already taken. It does not have retail Kokiri or Hyrule Castle load times. This checkout does not contain those dumps.
+The Rust port below is part of this direction. It is not one of the ten, and it is not waiting until they finish. Baked lighting (`bake0` / `bake1`), an asset browser, a new level, and blueprint phase B (add and connect, still on `glinesbdev/blueprint-nodes-a68c`) stay later than the ten. WebGPU is the default renderer on three r170. `?renderer=webgl` keeps WebGL. The earlier Kokiri comparison, when that WebGPU path was several times slower, is in [performance.md](../performance.md). It does not have retail Kokiri or Hyrule Castle load times. This checkout does not contain those dumps.
 
 ### R1. Profile a cold load before any port
 

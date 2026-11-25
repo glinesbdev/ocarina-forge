@@ -299,16 +299,16 @@ python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0
 
 Without the extension, the same commands run the Python fallback and the house stays near 233 s. An extension from `4afe3f7` prints `native pixels: python` and stays near 32.6 s. An extension from `ba00e7f` prints `native mesh: python` and stays on the Python vertex loops. The current glb prefix is `models-54`. Decoded `bntx-6` files are reused. Mode 6 blocks match. PNG pixels stay the same. Vertex floats match the Python reader. Face normals match the Python loop, so a rebuilt mesh is the same geometry. The prefix still moves because `gltf.py` and `models.py` are in the cache stamp.
 
-## WebGPU trial (shelved)
+## WebGPU
 
-Forge now tries WebGPU before opening the workspace. If no usable adapter starts, Forge opens its WebGL2 renderer. `?renderer=webgl` selects WebGL2 directly. The measurements below describe the earlier opt-in trial on Three.js r170 (`0.170.0`).
+WebGPU is the default renderer. Forge tries it before opening the workspace. If no usable adapter starts, Forge opens its WebGL2 renderer. `?renderer=webgl` (or `?webgpu=0`) selects WebGL2 directly. The measurements below are the earlier Kokiri comparison on Three.js r170 (`0.170.0`), from when this path was still an opt-in trial. Field-scale numbers for the current default are in [rendering-performance.md](rendering-performance.md).
 
 Bradyn's Kokiri pass on `515cd10`, real WebGPU, same spot the earlier passes used:
 
 | backend | frame | draws | notes |
 | --- | --- | --- | --- |
 | WebGPU | 247.9 ms | 338 | console showed up to 80 `render()` calls in one frame; some grass cards were still solid |
-| WebGL | under 30 ms | the editor's usual count (192 on the previous pass) | the one to keep using |
+| WebGL | under 30 ms | the editor's usual count (192 on the previous pass) | faster on this Kokiri pass |
 
 That is about 8× the WebGL frame, and the whole trial sat between 3× and 12× slower (32 ms, then 66.3 ms and 315 draws on `4bf5287`, then 247.9 ms and 338 draws). `separate` was already 0, so the copies were instances. The extra cost did not come from falling out of `BatchedMesh`.
 

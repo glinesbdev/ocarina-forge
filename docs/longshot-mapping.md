@@ -42,7 +42,7 @@ The project never stores the merged romfs. A whole-file replacement, when the ho
 
 ## Behavior editor
 
-The editor in [roadmap.md](roadmap.md) draws AINB, event flows, and schedule graphs. The file it writes follows these rules.
+The editor draws AINB, event flows, and schedule graphs; that work is listed in [ROADMAP.md](../ROADMAP.md). The file it writes follows these rules.
 
 - A graph edit is a typed op: `add node`, `connect`, or `set field`. This stage writes `set field` to `behaviors/<gyaml>.yaml`.
 - Every node, pin, and edge has a stable id. The project mints it once. Drawing the graph again does not renumber it.
