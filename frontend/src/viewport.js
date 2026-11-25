@@ -21,7 +21,7 @@ import {
   isWorsePriority,
 } from "./resident-budget.js";
 import { collectMemoryReport } from "./memory-report.js";
-import { geometryDecoder } from "./geometry-decoder.js";
+import { cancelGeometryDecodes, geometryDecoder } from "./geometry-decoder.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, MeshBVH } from "three-mesh-bvh";
 
@@ -33,7 +33,7 @@ import { shouldReloadTerrain } from "./terrain.js";
 import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
 import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { frontendBuild, shortRevision } from "./build-info.js";
-import { formatStatusLabel, keepRendering } from "./frame.js";
+import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { planAssetFetches, wantsMesh } from "./layers.js";
@@ -53,7 +53,8 @@ import {
 } from "./gpu-pick.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
 import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
-import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
+import { disposeGroundSurface, groundSurfaceMeta, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
+import { unloadSceneResources } from "./scene-unload.js";
 import { resolveTextureIndex } from "./problems.js";
 import { isEffectGizmo, resolveLighting, tonemapName } from "./lighting.js";
 
@@ -335,7 +336,9 @@ export async function createViewport(host, hooks) {
   let detailCandidates = new Map();
   let nextDetailScan = 0;
 
+  const sceneImageUris = new Set();
   function sharedImage(uri, load) {
+    if (uri) sceneImageUris.add(uri);
     return sharedImageCache.get(uri, load);
   }
 
@@ -447,6 +450,9 @@ let convertSlots = 8;
   let showTerrainDebug = false;
   let showBlendMask = false;
   let generation = 0;
+  let sceneAbort = new AbortController();
+  const terrainWorkers = new Set();
+  const sceneListeners = [];
   let rebuildTimer = 0;
   let loadQueue = null;
   let modelLoads = null;
@@ -472,6 +478,7 @@ let convertSlots = 8;
   const subTerrainMaterial = new THREE.MeshBasicMaterial({
     color: 0xa5c9bd, wireframe: true, transparent: true, opacity: 0.28, depthWrite: false,
   });
+  subTerrainMaterial.userData.forgeViewportShared = true;
   let terrainToken = 0;
   let groundGrid = null;
   let lastClick = null;
@@ -645,7 +652,7 @@ let convertSlots = 8;
   }
 
   function disposeMaterial(material, { textures = false, keepTextures = null } = {}) {
-    if (!material) return;
+    if (!material || material.userData?.forgeViewportShared) return;
     if (textures) {
       const maps = new Set();
       collectMaterialTextures(material, maps);
@@ -829,7 +836,7 @@ let convertSlots = 8;
     });
     if (!plan.textures) return textureDocs.get(gyaml);
     const pending = typeof hooks.fetchTextures === "function"
-      ? Promise.resolve(hooks.fetchTextures(gyaml)).catch(() => ({ materials: {} }))
+      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch(() => ({ materials: {} }))
       : Promise.resolve({ materials: {} });
     textureDocs.set(gyaml, pending);
     return pending;
@@ -985,6 +992,154 @@ let convertSlots = 8;
     if (!options.keepBatches) clearBatches();
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
+  }
+
+  function memoryNote() {
+    const gpu = renderer.info && renderer.info.memory;
+    const heapBytes = (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || null;
+    return formatMemoryNote({
+      geometries: gpu ? gpu.geometries : null,
+      textures: gpu ? gpu.textures : null,
+      heapBytes,
+    });
+  }
+
+  let memoryNotedFor = -1;
+  function noteMemory(reason) {
+    if (reason === "unload") memoryNotedFor = -1;
+    const surface = groundSurfaceMeta();
+    const wasm = surface && surface.memoryBytes ? ` · wasm ${Math.round(surface.memoryBytes / 1024)}KB` : "";
+    console.info(`forge memory ${reason}: ${memoryNote()}${wasm}`);
+  }
+
+  function noteLoadedMemory() {
+    if (memoryNotedFor === generation) return;
+    memoryNotedFor = generation;
+    noteMemory("load");
+  }
+
+  function unloadScene() {
+    generation += 1;
+    terrainToken += 1;
+    textureGeneration += 1;
+    const previousAbort = sceneAbort;
+    sceneAbort = new AbortController();
+    previousAbort.abort();
+    cancelGeometryDecodes();
+    for (const worker of terrainWorkers) worker.terminate();
+    terrainWorkers.clear();
+    loadQueue = null;
+    modelLoads?.dispose();
+    modelLoads = null;
+    const meshes = [];
+    if (modelStage) {
+      for (const batch of modelStage.previous || []) if (batch.mesh) meshes.push(batch.mesh);
+    }
+    cancelModelStage();
+    clearScenePreview();
+    if (rebuildTimer) {
+      clearTimeout(rebuildTimer);
+      rebuildTimer = 0;
+    }
+    transform.detach();
+    selected = null;
+    hovered = null;
+    foregroundModelNames.clear();
+    detailCandidates.clear();
+    detailParses.length = 0;
+
+    for (const batch of batches) if (batch.mesh) meshes.push(batch.mesh);
+    const geometries = [];
+    const materials = [];
+    const textures = [];
+    const linkedGeometries = [];
+    const objects = [];
+    for (const parsed of parsedTemplates.values()) {
+      for (const part of parsed.parts || []) {
+        if (part.geometry) {
+          geometries.push(part.geometry);
+          linkedGeometries.push(part.geometry);
+        }
+        if (part.material) materials.push(part.material);
+      }
+      if (parsed.source) objects.push(parsed.source);
+    }
+    for (const root of recentTerrain.values()) objects.push(root);
+    if (terrainRoot && ![...recentTerrain.values()].includes(terrainRoot)) objects.push(terrainRoot);
+    for (const texture of textureDetailReady.values()) textures.push(texture);
+    textureDetailReady.clear();
+    textureDetailPending.clear();
+    textureDetailFailed.clear();
+
+    const actors = new Map(entries);
+    for (const entry of entries.values()) disposeEntry(entry);
+    entries.clear();
+    batches.length = 0;
+    parsedTemplates.clear();
+    templateOrder.length = 0;
+    templateCache.clear();
+    recentSceneTemplates.clear();
+    recentTerrain.clear();
+    terrainRoot = null;
+    terrainBanc = null;
+    clearGround();
+    groundWanted = null;
+    linkPairs = [];
+    textureQueue.clear();
+    metaCache.clear();
+    modelRequests.clear();
+    textureDocs.clear();
+    sceneStreamStats = null;
+    serverLines = [];
+    serverHead = "";
+    const imageUris = new Set(sceneImageUris);
+    sceneImageUris.clear();
+    const evicted = sharedImageCache.evict((uri) => imageUris.has(uri));
+    for (const pending of evicted) {
+      Promise.resolve(pending).then((texture) => {
+        if (!texture || typeof texture.dispose !== "function") return;
+        try {
+          texture.dispose();
+        } catch {
+          /* already disposed */
+        }
+        if (texture.image && typeof texture.image.close === "function") {
+          try {
+            texture.image.close();
+          } catch {
+            /* already closed */
+          }
+        }
+      }).catch(() => {});
+    }
+
+    const surface = groundSurfaceReady() ? { free: disposeGroundSurface } : null;
+    unloadSceneResources({
+      generation,
+      controller: previousAbort,
+      keep: new Set([boxGeometry, edgesGeometry, effectGizmoGeometry, effectGizmoMaterial, subTerrainMaterial]),
+      meshes,
+      geometries,
+      materials,
+      textures,
+      objects,
+      linkedGeometries,
+      maps: [actors],
+      lists: [groundHits],
+      listeners: sceneListeners.splice(0),
+      workers: [],
+      surface,
+      picker: gpuPicker,
+      gizmo: { detach() { transform.detach(); } },
+      selection: { current: selected },
+    });
+    // The helper aborts `previousAbort` again and allocates its own controller.
+    // The live signal is the one created above, so a new load is not aborted.
+    disposeGroundSurface();
+    drawLinks();
+    noteMemory("unload");
+    if (hooks.onUnload) hooks.onUnload();
+    requestRender();
   }
 
   function helperVisible(entry) {
@@ -1741,7 +1896,7 @@ let convertSlots = 8;
     const existing = modelRequests.get(gyaml);
     if (existing) return existing;
     const pending = (
-      hooks.fetchModel ? hooks.fetchModel(gyaml, { priority }) : Promise.reject(new Error("Model loading is not connected."))
+      hooks.fetchModel ? hooks.fetchModel(gyaml, { priority, signal: sceneAbort.signal }) : Promise.reject(new Error("Model loading is not connected."))
     ).finally(() => {
       if (modelRequests.get(gyaml) === pending) modelRequests.delete(gyaml);
     });
@@ -1948,12 +2103,14 @@ let convertSlots = 8;
           return;
         }
         const template = needsModelGeometry(gyaml) ? await ensureTemplate(meta.url, meta, priority) : null;
-        if (token === generation) {
-          deliver(gyaml, meta, template);
-          if (textureAllow && template) enqueueTexture(gyaml, meta.url);
+        if (token !== generation) {
+          disposeObject3D(template, { textures: true });
+          return;
         }
+        deliver(gyaml, meta, template);
+        if (textureAllow && template) enqueueTexture(gyaml, meta.url);
       } catch (error) {
-        if (token !== generation) return;
+        if (token !== generation || (error && error.name === "AbortError")) return;
         const message = error.message || "The model did not load.";
         if (!isMarker(gyaml)) console.error(`${gyaml}: ${message}`);
         boxes.add(gyaml);
@@ -2085,10 +2242,12 @@ let convertSlots = 8;
       const missing = queue.filter((name) => !metaCache.has(name));
       if (missing.length && missing.length <= 128 && hooks.fetchModels) {
         retainLoad();
-        void hooks.fetchModels(missing, false).then((batch) => {
+        void hooks.fetchModels(missing, false, { signal: sceneAbort.signal }).then((batch) => {
           if (token !== generation) return;
           for (const [name, meta] of Object.entries(batch || {})) metaCache.set(name, meta);
-        }).catch(console.error).finally(() => {
+        }).catch((error) => {
+          if (!error || error.name !== "AbortError") console.error(error);
+        }).finally(() => {
           releaseLoad();
           if (token !== generation) return;
           started = true;
@@ -2117,7 +2276,7 @@ let convertSlots = 8;
       noteServerTiming(meta);
       pending = (async () => {
         const started = performance.now();
-        const response = await fetch(url, { priority });
+        const response = await fetch(url, { priority, signal: sceneAbort.signal });
         if (!response.ok) throw new Error(`The model download failed (${response.status}).`);
         const buffer = await response.arrayBuffer();
         const downloaded = performance.now();
@@ -2715,7 +2874,11 @@ let convertSlots = 8;
       }
       for (const [uuid, geometry] of group.geometries) {
         const geometryId = geomIds.get(uuid);
-        if (geometryId !== undefined) noteGeometryBatch(geometry, mesh, geometryId);
+        if (geometryId !== undefined) {
+          noteGeometryBatch(geometry, mesh, geometryId);
+          const linked = mesh.userData.forgeLinkedGeometries || (mesh.userData.forgeLinkedGeometries = []);
+          if (!linked.includes(geometry)) linked.push(geometry);
+        }
       }
       const ids = [];
       const geometries = [];
@@ -2924,6 +3087,7 @@ let convertSlots = 8;
         if (!stage.notified) {
           stage.notified = true;
           hooks.onModelsReady?.({ batchesBuilt: true });
+          noteLoadedMemory();
         }
       }
     });
@@ -2937,6 +3101,7 @@ let convertSlots = 8;
       const ready = rebuildBatches();
       requestRender();
       if (hooks.onModelsReady) hooks.onModelsReady({ batchesBuilt: ready });
+      if (ready) noteLoadedMemory();
     }, 100);
   }
 
@@ -3390,6 +3555,7 @@ uniform float terrainLayerMissing;`
     const geometries = root.children.filter((child) => !child.userData.subTerrain).map((child) => child.geometry);
     if (!geometries.length || typeof Worker === "undefined") return;
     const worker = new Worker(new URL("./terrain-index-worker.js", import.meta.url), { type: "module" });
+    terrainWorkers.add(worker);
     try {
       for (const geometry of geometries) {
         if (!terrainCurrent(token)) break;
@@ -3404,6 +3570,7 @@ uniform float terrainLayerMissing;`
         if (terrainCurrent(token)) geometry.boundsTree = MeshBVH.deserialize(result, geometry, { setIndex: false });
       }
     } finally {
+      terrainWorkers.delete(worker);
       worker.terminate();
     }
   }
@@ -3483,8 +3650,9 @@ uniform float terrainLayerMissing;`
   async function loadTerrainBody(token, banc) {
     let meta;
     try {
-      meta = await hooks.fetchTerrain(banc);
+      meta = await hooks.fetchTerrain(banc, false, sceneAbort.signal);
     } catch (error) {
+      if (error && error.name === "AbortError") return;
       meta = { status: "none", reason: error.message || "The map model request failed." };
     }
     if (!terrainCurrent(token)) return;
@@ -3504,7 +3672,7 @@ uniform float terrainLayerMissing;`
     const before = performance.memory ? performance.memory.usedJSHeapSize : 0;
     const started = performance.now();
     try {
-      const meta = await loadGroundSurface(hooks.fetchSurface(banc));
+      const meta = await loadGroundSurface(hooks.fetchSurface(banc), { signal: sceneAbort.signal });
       if (!terrainCurrent(token) || !meta) return;
       const after = performance.memory ? performance.memory.usedJSHeapSize : 0;
       console.info("Local ground surface ready", {
@@ -3514,17 +3682,19 @@ uniform float terrainLayerMissing;`
       });
       requestRender();
     } catch (error) {
+      if (error && error.name === "AbortError") return;
       console.warn("Could not load the local ground surface", error);
     }
   }
 
   async function refineTerrain(token, banc, previousUrl) {
     try {
-      const meta = await hooks.fetchTerrain(banc, true);
+      const meta = await hooks.fetchTerrain(banc, true, sceneAbort.signal);
       if (terrainCurrent(token) && meta.status === "mesh" && meta.url && meta.url !== previousUrl) {
         await installTerrainModel(token, meta);
       }
     } catch (error) {
+      if (error && error.name === "AbortError") return;
       if (terrainCurrent(token)) console.warn("Could not refine the scene terrain", error);
     }
   }
@@ -3999,7 +4169,7 @@ uniform float terrainLayerMissing;`
         const job = groundWanted;
         groundWanted = null;
         try {
-          const data = await hooks.fetchGround(job.banc, job.x, job.z, job.exclude);
+          const data = await hooks.fetchGround(job.banc, job.x, job.z, job.exclude, sceneAbort.signal);
           if (terrainBanc !== job.banc) continue;
           if (Number.isFinite(data && data.worldY)) {
             groundHits.push({ x: job.x, z: job.z, y: data.worldY });
@@ -4010,6 +4180,7 @@ uniform float terrainLayerMissing;`
             }
           }
         } catch (error) {
+          if (error && error.name === "AbortError") continue;
           console.warn("Could not sample the composed ground", error);
         }
       }
@@ -4797,6 +4968,11 @@ uniform float terrainLayerMissing;`
       texturesDone: statTexturesDone,
       texturesTotal: statTexturesTotal,
       layersOff: statLayersOff,
+      memory: {
+        geometries: renderer.info && renderer.info.memory ? renderer.info.memory.geometries : null,
+        textures: renderer.info && renderer.info.memory ? renderer.info.memory.textures : null,
+        heapBytes: (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || null,
+      },
     });
     if (showProfile) paintProfile();
     if (hooks.onFrame) hooks.onFrame();
@@ -4962,6 +5138,10 @@ uniform float terrainLayerMissing;`
         batchCount: profileWindow.latest() ? profileWindow.latest().batches : null,
         subDraws: profileWindow.latest() ? profileWindow.latest().subDraws : null,
         profile: profileSnapshot(),
+        wasmSurfaceMB: (() => {
+          const surface = groundSurfaceMeta();
+          return surface && surface.memoryBytes ? surface.memoryBytes / 1048576 : 0;
+        })(),
       },
     });
     report.load = {
@@ -5030,6 +5210,7 @@ uniform float terrainLayerMissing;`
       requestRender();
     },
     getMemoryReport,
+    unloadScene,
     setServerStatus(status) {
       serverHead = status && status.head ? String(status.head) : "";
       serverLines = status && Array.isArray(status.lines) ? status.lines.slice() : [];
@@ -5052,6 +5233,7 @@ uniform float terrainLayerMissing;`
     },
     destroy() {
       running = false;
+      unloadScene();
       hoverToken += 1;
       if (hoverFrame) cancelAnimationFrame(hoverFrame);
       if (rebuildTimer) clearTimeout(rebuildTimer);
@@ -5067,11 +5249,7 @@ uniform float terrainLayerMissing;`
       frameTimer.dispose();
       statusEl.remove();
       profileEl.remove();
-      generation += 1;
       observer.disconnect();
-      clearActors();
-      clearTerrain();
-      clearGround();
       pondProbe.material.dispose();
       clearGrid();
       boxGeometry.dispose();

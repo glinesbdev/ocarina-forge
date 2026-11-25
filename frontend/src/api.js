@@ -44,7 +44,7 @@ export const api = {
     const params = new URLSearchParams({ banc });
     if (load && load.query) params.set("load", load.query);
     if (load && load.textures != null && load.textures !== "") params.set("textures", String(load.textures));
-    return request(`/api/scene?${params}`);
+    return request(`/api/scene?${params}`, load && load.signal ? { signal: load.signal } : {});
   },
   sceneChanges: (banc) => request(`/api/scene/changes?banc=${encodeURIComponent(banc)}`),
   problems: (banc) => request(`/api/scene/problems?banc=${encodeURIComponent(banc)}`),
@@ -64,10 +64,10 @@ export const api = {
   loadFilters: () => request("/api/load-filters"),
   putLoadFilters: (body) => request("/api/load-filters", { method: "PUT", body: JSON.stringify(body) }),
   actors: (q) => request(`/api/actors?q=${encodeURIComponent(q)}`),
-  behavior: ({ banc = "", id = "", gyaml = "", load = "" } = {}) => {
+  behavior: ({ banc = "", id = "", gyaml = "", load = "", signal } = {}) => {
     const params = new URLSearchParams({ banc, id, gyaml });
     if (load) params.set("load", load);
-    return request(`/api/behavior?${params}`);
+    return request(`/api/behavior?${params}`, signal ? { signal } : {});
   },
   setBehaviorField: (body) => request("/api/behavior/field", { method: "POST", body: JSON.stringify(body) }),
   putBehaviorOps: (body) => request("/api/behavior/ops", { method: "PUT", body: JSON.stringify(body) }),
@@ -77,7 +77,7 @@ export const api = {
     const params = new URLSearchParams();
     if (options.load) params.set("load", options.load);
     const query = params.toString();
-    return request(`/api/models/${encodeURIComponent(gyaml)}/textures${query ? `?${query}` : ""}`);
+    return request(`/api/models/${encodeURIComponent(gyaml)}/textures${query ? `?${query}` : ""}`, options.signal ? { signal: options.signal } : {});
   },
   model: (gyaml, options = {}) => {
     const params = new URLSearchParams();
@@ -87,11 +87,13 @@ export const api = {
     const query = params.toString();
     const init = {};
     if (options.priority) init.priority = options.priority;
+    if (options.signal) init.signal = options.signal;
     return request(`/api/models/${encodeURIComponent(gyaml)}${query ? `?${query}` : ""}`, init);
   },
   models: (names, prefetch = true, options = {}) =>
     request("/api/models/batch", {
       method: "POST",
+      signal: options.signal,
       body: JSON.stringify({
         names,
         prefetch,
@@ -105,15 +107,15 @@ export const api = {
     if (refine) params.set("refine", "true");
     if (options.load) params.set("load", options.load);
     if (options.textures != null && options.textures !== "") params.set("textures", String(options.textures));
-    return request(`/api/terrain?${params}`);
+    return request(`/api/terrain?${params}`, options.signal ? { signal: options.signal } : {});
   },
   ground: (banc, x, z, exclude, options = {}) => {
     const params = new URLSearchParams({ banc, x: String(x), z: String(z) });
     if (exclude) params.set("exclude", exclude);
     if (options.load) params.set("load", options.load);
-    return request(`/api/ground?${params}`);
+    return request(`/api/ground?${params}`, options.signal ? { signal: options.signal } : {});
   },
-  lighting: (banc) => request(`/api/lighting?banc=${encodeURIComponent(banc)}`),
+  lighting: (banc, options = {}) => request(`/api/lighting?banc=${encodeURIComponent(banc)}`, options.signal ? { signal: options.signal } : {}),
   groundSurface: (banc, options = {}) => {
     const params = new URLSearchParams({ banc });
     if (options.load) params.set("load", options.load);

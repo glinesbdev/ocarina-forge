@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatProfileDetail, formatStatusLabel, keepRendering } from "./frame.js";
+import { formatMemoryNote, formatProfileDetail, formatStatusLabel, keepRendering } from "./frame.js";
 
 test("the view only redraws continuously during interaction", () => {
   assert.equal(keepRendering({}), false);
@@ -31,6 +31,15 @@ test("the status label keeps the backend, the revision, and the draw count", () 
     "WebGPU · 240 draws · 40 queued · 8 loading · 3 background",
   );
   assert.equal(formatStatusLabel({ draws: 0 }), "0 draws");
+  assert.equal(
+    formatStatusLabel({
+      backend: "WebGL",
+      draws: 30,
+      memory: { geometries: 10, textures: 9, heapBytes: 29.4 * 1048576 },
+    }),
+    "WebGL · 30 draws · gpu 10 geom / 9 tex · heap 29MB",
+  );
+  assert.equal(formatMemoryNote({}), "gpu ? geom / ? tex · heap n/a");
 });
 
 test("the profile detail keeps the counters that used to sit on the stats line", () => {
