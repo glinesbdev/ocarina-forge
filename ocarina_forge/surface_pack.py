@@ -20,6 +20,7 @@ from ocarina_forge.actors import parse_hash
 from ocarina_forge.dump import Dump
 from ocarina_forge.formats.terrain import SIZE
 from ocarina_forge.grounddebug import _load
+from ocarina_forge.cache_prune import note_access, note_written
 from ocarina_forge.locate import user_cache_root
 from ocarina_forge.modeldebug import scene_files
 from ocarina_forge.world_surface import (
@@ -261,6 +262,8 @@ def load_or_build_surface(dump: Dump, banc: str) -> tuple[Path, dict]:
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
             if meta.get("version") == PACK_VERSION and meta.get("digest") == digest:
+                note_access(path)
+                note_access(meta_path)
                 return path, meta
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
@@ -270,6 +273,7 @@ def load_or_build_surface(dump: Dump, banc: str) -> tuple[Path, dict]:
     tmp.write_bytes(compressed)
     tmp.replace(path)
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    note_written(path, meta_path)
     return path, meta
 
 

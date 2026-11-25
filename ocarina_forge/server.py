@@ -23,7 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from ocarina_forge import __version__
 from ocarina_forge.actors import is_marker
 from ocarina_forge.changes import project_report, scene_changes
-from ocarina_forge.config import load_config, save_config
+from ocarina_forge.cache_prune import cache_public, note_access, start_maintenance, stop_maintenance
+from ocarina_forge.config import load_config, parse_cache_limit, save_config
 from ocarina_forge.dump import Dump
 from ocarina_forge.errors import BancError
 from ocarina_forge.export import build
@@ -67,10 +68,14 @@ def _close_pool() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app):
-    yield
-    if _WARM_TASK is not None:
-        _WARM_TASK.cancel()
-    _close_pool()
+    start_maintenance()
+    try:
+        yield
+    finally:
+        stop_maintenance()
+        if _WARM_TASK is not None:
+            _WARM_TASK.cancel()
+        _close_pool()
 
 
 app = FastAPI(title="Ocarina Forge", version=__version__, lifespan=_lifespan)
@@ -362,6 +367,7 @@ def _publish(info: dict) -> dict:
 
 
 def _cached_file(request: Request, path: Path, filename: str, digest: str):
+    note_access(path)
     etag = f'"{digest}"'
     versioned = request.query_params.get("v") == digest
     headers = {
@@ -630,6 +636,7 @@ def status():
         "ready": ready,
         "repo": str(repo_root()),
         "workers": _worker_public(),
+        "cache": cache_public(),
     }
 
 
@@ -640,6 +647,8 @@ def put_config(body: dict):
     dump_to_save = None
     project_to_save = None
     workers = None
+    cache_limit = None
+    set_cache_limit = False
     if dump is not None:
         if str(dump).strip():
             dump_to_save = str(Dump(dump).root)
@@ -660,8 +669,27 @@ def put_config(body: dict):
         _cpus = os.cpu_count() or 1
         if workers < 1 or workers > _cpus:
             raise BancError(f"Converter cores must be from 1 to {_cpus}.", "config")
-    saved = save_config(dump=dump_to_save, project=project_to_save, workers=workers)
-    return {"config": saved, "dump": _dump_status(), "project": _project_status(), "workers": _worker_public()}
+    if "cacheLimit" in body:
+        cache_limit = parse_cache_limit(body.get("cacheLimit"))
+        if cache_limit is None:
+            raise BancError(
+                "Cache limit must be a byte count, 0 for unlimited, or a size such as 20G.",
+                "config",
+            )
+        set_cache_limit = True
+    saved = save_config(
+        dump=dump_to_save,
+        project=project_to_save,
+        workers=workers,
+        **({"cache_limit": cache_limit} if set_cache_limit else {}),
+    )
+    return {
+        "config": saved,
+        "dump": _dump_status(),
+        "project": _project_status(),
+        "workers": _worker_public(),
+        "cache": cache_public(),
+    }
 
 
 @app.get("/api/hot-reload")
@@ -1072,6 +1100,7 @@ def shared_texture_file(name: str):
     path = shared_texture_path(name)
     if path is None or not path.is_file():
         raise BancError("This shared model texture is not in the cache.", "not_found")
+    note_access(path)
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".ktx2": "image/ktx2"}[path.suffix]
     return FileResponse(path, media_type=mime, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 

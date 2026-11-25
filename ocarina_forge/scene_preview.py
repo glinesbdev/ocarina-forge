@@ -25,6 +25,10 @@ TERRAIN = "@terrain"
 FISHING_POND_WATER = "Obj_LakeHrl_WaterPlane_A_07"
 KOKIRI_CHILD = "Banc/KokiriForest/KokiriForest_Child_"
 WORKER = Path(__file__).resolve().parents[1] / "frontend" / "tools" / "scene-preview-worker.mjs"
+PREVIEW_VERSION = "scene-preview-v2"
+# Hyrule Field has its own terrain pack. Both folders are current.
+TERRAIN_VERSION = "scene-terrain-v10"
+TERRAIN_FIELD_VERSION = "scene-terrain-v11"
 
 
 def preview_bank(dump, banc: str, known: set[str] | None = None) -> str:
@@ -39,7 +43,7 @@ def preview_bank(dump, banc: str, known: set[str] | None = None) -> str:
 
 def preview_path(dump, banc: str) -> Path:
     key = hashlib.sha256(f"{dump.root}\0{preview_bank(dump, banc)}".encode()).hexdigest()
-    return cache_dir() / "scene-preview-v2" / f"{key}.glb"
+    return cache_dir() / PREVIEW_VERSION / f"{key}.glb"
 
 
 _rolling_rock_map = rolling_rock_map
@@ -50,7 +54,7 @@ def corrected_terrain_path(dump, banc: str, digest: str) -> Path | None:
         return None
     scene = re.sub(r"_(?:Static|Dynamic)(?=\.bcett\.byml(?:\.zs)?$)", "", banc)
     key = hashlib.sha256(f"{dump.root}\0{scene}\0{digest}".encode()).hexdigest()
-    version = "scene-terrain-v11" if scene.startswith("Banc/HyruleField/HyruleField_") else "scene-terrain-v10"
+    version = TERRAIN_FIELD_VERSION if scene.startswith("Banc/HyruleField/HyruleField_") else TERRAIN_VERSION
     return cache_dir() / version / f"{key}.glb"
 
 
@@ -344,6 +348,9 @@ def _write_prepared(destination: Path, data: bytes) -> None:
         os.replace(temp, destination)
     finally:
         temp.unlink(missing_ok=True)
+    from ocarina_forge.cache_prune import note_written
+
+    note_written(destination)
 
 
 def prepare_scene_shared_models(dump, banc: str) -> int:
