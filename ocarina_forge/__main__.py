@@ -11,6 +11,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``behavior <gyaml>`` prints the actor's AI graph, schedule, and event-flow hooks.
 ``behavior-audit`` counts undecoded node types across every Npc_ pack.
 ``behavior-export`` writes saved set-field ops into the project build folder.
+``height-diff <results.json>`` compares a height-check scan to Forge terrain and water.
 With no subcommand, the server starts, which is what dev.sh runs.
 """
 
@@ -52,10 +53,11 @@ def main(argv: list[str] | None = None) -> None:
             "edit",
             "mod-export",
             "profile",
+            "height-diff",
         ],
         help="Commands for auditing, editing, and preparing scenes. The default is the editor server.",
     )
-    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action (list, create, open), or actor class.")
+    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action, actor class, or height-diff results JSON.")
     parser.add_argument("extra", nargs="?", help="Project name for 'project create' and 'project open'.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
     parser.add_argument("--trace", action="store_true", help="behavior prints the pack, each component, and every path it tried.")
@@ -82,7 +84,7 @@ def main(argv: list[str] | None = None) -> None:
         help="material-debug also prints the whole BFRES string pool.",
     )
     parser.add_argument("--png", help="tex-debug writes the current decode to this PNG.")
-    parser.add_argument("--out", help="material-audit also writes the report to this file.")
+    parser.add_argument("--out", help="material-audit or height-diff also writes the report to this file.")
     parser.add_argument("--project", help="Project folder or library name. Defaults to the saved config.")
     parser.add_argument("--title", default="", help="Project title. Shown as the mod's name.")
     parser.add_argument("--author", default="", help="Stored on the project. Written to mod.json when set.")
@@ -133,6 +135,10 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("ground-debug needs a banc path")
         raise SystemExit(print_ground_debug(args.banc, points=args.at, as_json=args.json, dump=args.dump,
                                             resources_only=args.resources_only))
+    if args.command == "height-diff":
+        if not args.banc:
+            parser.error("height-diff needs a height-check results JSON")
+        raise SystemExit(print_height_diff(args.banc, dump=args.dump, as_json=args.json, out=args.out))
     if args.command == "material-debug":
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
@@ -412,6 +418,45 @@ def print_model_debug(
             print(render_near(point, radius, near_rows), end="")
         if report is not None:
             print(render_text(report, placed), end="")
+    return 0
+
+
+
+
+def print_height_diff(results_path: str, *, dump: str | None = None, as_json: bool = False, out: str | None = None) -> int:
+    """Compare a height-check JSON to Forge terrain and water. 2 on a missing dump or file."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.heightdiff import compare_results, json_ready, load_results, render_text
+
+    path = Path(results_path)
+    if not path.is_file():
+        print(f"No results file at {results_path}.", file=sys.stderr)
+        return 2
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    try:
+        results = load_results(path)
+        report = compare_results(opened, results)
+    except (BancError, OSError, ValueError) as exc:
+        print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
+        return 2
+    ready = json_ready(report)
+    if out:
+        Path(out).write_text(json.dumps(ready, indent=2) + "\n", encoding="utf-8")
+    if as_json:
+        print(json.dumps(ready, indent=2))
+    else:
+        print(render_text(report), end="")
     return 0
 
 
