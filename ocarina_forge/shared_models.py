@@ -14,6 +14,7 @@ from PIL import Image, UnidentifiedImageError
 
 from ocarina_forge.formats.gpu import ktx2, pack_texture, split_texture
 from ocarina_forge.formats.gltf import join_glb, split_glb
+from ocarina_forge.cache_prune import note_access, note_written
 from ocarina_forge.models import cache_dir
 
 
@@ -42,6 +43,7 @@ def _atomic_write(path: Path, data: bytes | bytearray | memoryview) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    note_written(path)
 
 
 def _view_references(document):
@@ -171,6 +173,7 @@ def externalize_images(glb: bytes, store_image) -> bytes | None:
 def prepare_shared_model(source: Path, seen_images: dict | None = None) -> Path | None:
     target = shared_model_path(source.stem)
     if target.is_file():
+        note_access(target)
         return target
 
     seen = {} if seen_images is None else seen_images
@@ -183,6 +186,8 @@ def prepare_shared_model(source: Path, seen_images: dict | None = None) -> Path 
         path = shared_texture_path(name)
         if not path.is_file():
             _atomic_write(path, data)
+        else:
+            note_access(path)
         low = f"{digest}-mip256.{suffix}"
         low_path = shared_texture_path(low)
         if not low_path.is_file():
@@ -191,6 +196,8 @@ def prepare_shared_model(source: Path, seen_images: dict | None = None) -> Path 
                 _atomic_write(low_path, reduced)
             else:
                 low = None
+        else:
+            note_access(low_path)
         result = (f"/api/model-textures/{name}", f"/api/model-textures/{low}" if low else None)
         seen[name] = result
         return result

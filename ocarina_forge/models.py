@@ -30,6 +30,16 @@ from pathlib import Path
 
 from ocarina_forge.errors import BancError
 from ocarina_forge.locate import setting, user_cache_root
+from ocarina_forge.cache_prune import (
+    atlas_version,
+    bntx_version,
+    dump_model_meta,
+    load_model_meta,
+    model_version,
+    note_access,
+    note_written,
+    write_version_sidecar,
+)
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
 from ocarina_forge.blend import color_span, overlay_plan
@@ -58,7 +68,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-54\0"
+_CACHE_VERSION = b"models-55\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -306,7 +316,10 @@ def _cached_glb(digest: str) -> Path | None:
     if not digest:
         return None
     path = cache_dir() / digest[:2] / f"{digest}.glb"
-    return path if path.is_file() else None
+    if not path.is_file():
+        return None
+    note_access(path)
+    return path
 
 
 def describe_actor_at(root: str, gyaml: str) -> dict:
@@ -379,7 +392,7 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
     meta_path = folder / f"{digest}.json"
     with _LOCK:
         if glb_path.is_file() and meta_path.is_file():
-            info = json.loads(meta_path.read_text(encoding="utf-8"))
+            info = load_model_meta(meta_path.read_text(encoding="utf-8"))
             _write_pointer(
                 pointer,
                 {"kind": "mesh", "digest": digest, "info": info, "files": files, "texDir": _tex_token(dump)},
@@ -387,12 +400,13 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
             return digest, _with_timing(info, "hit", clock)
     glb, info = _assemble(models, external, log)
     info = _with_timing(info, "miss", clock)
-    encoded = json.dumps(info)
+    encoded = dump_model_meta(info)
     with _LOCK:
         if not (glb_path.is_file() and meta_path.is_file()):
             folder.mkdir(parents=True, exist_ok=True)
             glb_path.write_bytes(glb)
             meta_path.write_text(encoded, encoding="utf-8")
+            note_written(glb_path, meta_path)
         _write_pointer(
             pointer,
             {"kind": "mesh", "digest": digest, "info": info, "files": files, "texDir": _tex_token(dump)},
@@ -418,10 +432,13 @@ def _tex_token(dump) -> dict:
 
 
 def _write_pointer(path: Path, payload: dict) -> None:
+    body = dict(payload)
+    body["cacheVersion"] = model_version()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.write_text(json.dumps(body), encoding="utf-8")
     os.replace(tmp, path)
+    note_written(path)
 
 
 def _read_pointer(path: Path, dump) -> dict | None:
@@ -432,6 +449,7 @@ def _read_pointer(path: Path, dump) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     if record.get("kind") == "box":
+        note_access(path)
         return record
     digest = record.get("digest") or ""
     if not digest or not (cache_dir() / digest[:2] / f"{digest}.glb").is_file():
@@ -444,6 +462,10 @@ def _read_pointer(path: Path, dump) -> dict | None:
         return None
     if not isinstance(record.get("info"), dict):
         return None
+    note_access(path)
+    glb = cache_dir() / digest[:2] / f"{digest}.glb"
+    if glb.is_file():
+        note_access(glb)
     return record
 
 
@@ -507,6 +529,7 @@ def _decode_bntx_cached(blob: bytes, tex_path: str = "") -> list:
     path = cache_dir() / "bntx" / key[:2] / f"{key}.bwtx"
     loaded = _read_bwtx(path)
     if loaded is not None:
+        note_access(path)
         _remember_bntx(key, loaded)
         return loaded
     clock = current_clock()
@@ -566,6 +589,7 @@ def _decode_layer_cached(blob: bytes, index: int, *, flatten_alpha: bool, tex_pa
     path = cache_dir() / "bntx" / token[:2] / f"{token}.bwtx"
     loaded = _read_bwtx(path)
     if loaded:
+        note_access(path)
         _remember_bntx(token, loaded)
         return loaded[0]
     clock = current_clock()
@@ -616,6 +640,8 @@ def _write_bwtx(path: Path, decoded: list) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(b"BWTX" + struct.pack("<H", 2) + zlib.compress(bytes(payload), 1))
     os.replace(tmp, path)
+    write_version_sidecar(path, bntx_version())
+    note_written(path)
 
 
 def _pack_str(text: str) -> bytes:
@@ -714,6 +740,7 @@ def _encode_cached(image, alpha: str, gpu: bool = False) -> bytes:
             stored = b""
         if stored[:4] == b"OCFG" or stored[:2] in (b"\xff\xd8", b"\x89P"):
             _remember_img(token, stored)
+            note_access(path)
             return stored
     encoded = gpu_image(image, alpha) if gpu else None
     if not encoded:
@@ -722,6 +749,8 @@ def _encode_cached(image, alpha: str, gpu: bool = False) -> bytes:
     tmp = path.with_suffix(".tmp")
     tmp.write_bytes(encoded)
     os.replace(tmp, path)
+    write_version_sidecar(path, bntx_version())
+    note_written(path)
     _remember_img(token, encoded)
     return encoded
 
@@ -3103,7 +3132,8 @@ def _describe_heightmap(dump, banc: str, located: dict, *, convert: bool) -> dic
         if not (glb_path.is_file() and meta_path.is_file()):
             folder.mkdir(parents=True, exist_ok=True)
             glb_path.write_bytes(glb)
-            meta_path.write_text(json.dumps(info), encoding="utf-8")
+            meta_path.write_text(dump_model_meta(info), encoding="utf-8")
+            note_written(glb_path, meta_path)
         _write_pointer(
             pointer,
             {
@@ -3170,6 +3200,7 @@ def _pack_atlas(cells: list[bytes]) -> tuple[bytes, int]:
         except OSError:
             cached = b""
     if _atlas_image(cached):
+        note_access(path)
         return cached, cols
     rows = max(1, math.ceil(count / cols))
     size = _ATLAS_CELL
@@ -3190,9 +3221,12 @@ def _pack_atlas(cells: list[bytes]) -> tuple[bytes, int]:
         except OSError:
             cached = b""
         if _atlas_image(cached):
+            note_access(path)
             return cached, cols
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(png)
+        write_version_sidecar(path, atlas_version())
+        note_written(path)
     return png, cols
 
 

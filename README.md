@@ -62,7 +62,7 @@ Mods are written to `~/Games/Longshot/rc/v3.0.0/mods/<project name>/romfs`. Long
 
 If you do not have a dump on this machine, choose **Use the bundled sample dump**. It builds a tiny synthetic Kokiri Forest (no Nintendo data) and opens the sample project.
 
-The dump path and the open project are stored in `./ocarina-forge.local.yaml` (gitignored), or in `~/.config/ocarina-forge/config.yaml` if that file already exists. A `bancwright.local.yaml` or `~/.config/bancwright/config.yaml` from the previous name is still read, and the home config is renamed on first use. `OCARINA_FORGE_CONFIG`, `OCARINA_FORGE_DUMP`, and `OCARINA_FORGE_PROJECT` override them. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` are still read so an existing shell keeps those paths. Converted models are written to `$OCARINA_FORGE_CACHE`, or `$XDG_CACHE_HOME/ocarina-forge/models`, or `~/.cache/ocarina-forge/models`. If `~/.cache/bancwright` is still there and the new folder is not, it is renamed across. `$BANCWRIGHT_CACHE` is still honored. That cache stays outside the repo. The command is `python -m ocarina_forge`.
+The dump path and the open project are stored in `./ocarina-forge.local.yaml` (gitignored), or in `~/.config/ocarina-forge/config.yaml` if that file already exists. A `bancwright.local.yaml` or `~/.config/bancwright/config.yaml` from the previous name is still read, and the home config is renamed on first use. `OCARINA_FORGE_CONFIG`, `OCARINA_FORGE_DUMP`, and `OCARINA_FORGE_PROJECT` override them. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` are still read so an existing shell keeps those paths. Converted models are written to `$OCARINA_FORGE_CACHE`, or `$XDG_CACHE_HOME/ocarina-forge/models`, or `~/.cache/ocarina-forge/models`. If `~/.cache/bancwright` is still there and the new folder is not, it is renamed across. `$BANCWRIGHT_CACHE` is still honored. That cache stays outside the repo. The server drops older versions of it and keeps the folder under a size cap; see [Cache](#cache). The command is `python -m ocarina_forge`.
 
 ## If the view stays on WebGL
 
@@ -79,6 +79,34 @@ The viewport **Stats** line names the renderer. `WebGPU` is a real WebGPU device
 - **Build mod** re-encodes changed placement files with the dump’s zstd dictionary and raises the resource size table. It can install the result under `mods/<name>` and write a zip. The build log is shown in the window. The dump’s own files are not modified.
 
 Edits are diffs in the project folder. See [docs/project-format.md](docs/project-format.md).
+
+## Cache
+
+Converted models, decoded textures, scene previews, terrain packs, and walkable-surface packs live under `~/.cache/ocarina-forge`. On Windows that is `C:\Users\<you>\.cache\ocarina-forge`. `$XDG_CACHE_HOME/ocarina-forge` is used when that variable is set. `$OCARINA_FORGE_CACHE` replaces the models directory only (`~/.cache/ocarina-forge/models` by default); surface packs stay next to it. Nothing in that folder is committed, and every file in it is rebuilt the next time the editor needs it.
+
+The folder is capped at 20 GiB. Set `cacheLimit` in the config file (`./ocarina-forge.local.yaml`, or `~/.config/ocarina-forge/config.yaml` when that file is the one in use) or set `OCARINA_FORGE_CACHE_LIMIT`. A bare number is a byte count. `20G`, `20GB`, and `20GiB` are binary sizes. `0` means unlimited. The environment variable wins over the file. `BANCWRIGHT_CACHE_LIMIT` is still read.
+
+```yaml
+cacheLimit: 20G
+```
+
+```bash
+export OCARINA_FORGE_CACHE_LIMIT=20G
+```
+
+On startup the server prunes in the background, without waiting to serve the API. It deletes cache folders from versions other than the ones this build writes (`scene-terrain-v10` and `scene-terrain-v11`, `scene-preview-v2`, `shared-v3`, and the `shared-v1` texture store are the ones kept today) and model files whose sidecar records a different prefix. Entries written before sidecars existed have no version; those stay until the size cap needs the room. When the folder is over the cap, the least recently used files are removed until it is under about 90% of the cap. The same check runs about every 15 minutes and again after a write that pushes the running estimate over the cap. Files still being written (a `.tmp` name, or modified in the last two minutes) are left alone. A file another process has open on Windows is left in place and logged.
+
+`GET /api/status` includes `cache.bytes`, `cache.limitBytes`, `cache.unlimited`, `cache.source` (`env`, `config`, or `default`), `cache.prunedBytes`, and `cache.path`. `cache.bytes` is null until the first walk finishes. The server log line starts with `cache prune removed`.
+
+To clear the cache yourself, quit the editor first, then delete the folder:
+
+```bash
+rm -rf ~/.cache/ocarina-forge
+```
+
+```bat
+rmdir /s /q %USERPROFILE%\.cache\ocarina-forge
+```
 
 ## Tests
 

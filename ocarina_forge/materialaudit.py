@@ -360,6 +360,9 @@ def _read_one(job: dict, dicts) -> dict:
         tmp = cache.with_suffix(".tmp")
         tmp.write_text(json.dumps(stored), encoding="utf-8")
         os.replace(tmp, cache)
+        from ocarina_forge.cache_prune import note_written
+
+        note_written(cache)
     except OSError:
         pass
     return stored
