@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chooseTexture, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
+import { chooseTexture, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
   releaseTextureCpu,
   repairCompressedTexture, VK_FORMAT } from "./gpu-texture.js";
 
@@ -114,4 +114,67 @@ test("repairCompressedTexture does not dirty a texture after CPU release", () =>
   };
   repairCompressedTexture(texture);
   assert.equal(texture.needsUpdate, false);
+});
+
+test("parse settles without handing non-basis bytes to the Basis loader", async () => {
+  const THREE = {
+    SRGBColorSpace: "srgb",
+    CompressedTexture: class {
+      constructor(mipmaps, width, height, format) {
+        this.isTexture = true;
+        this.isCompressedTexture = true;
+        this.mipmaps = mipmaps;
+        this.image = { width, height };
+        this.format = format;
+      }
+    },
+    Texture: class {
+      constructor(image) {
+        this.isTexture = true;
+        this.image = image;
+      }
+    },
+  };
+  const { file } = makePacked();
+  let basisCalls = 0;
+  const loader = createGpuTextureLoader({
+    THREE,
+    gl: null,
+    caps: { s3tc: true, bptc: true, astc: false },
+    enabled: () => true,
+    basisParse: () => { basisCalls += 1; },
+  });
+  const texture = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("parse did not settle")), 1000);
+    loader.parse(file.buffer, (value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+  });
+  assert.equal(texture.isCompressedTexture, true);
+  assert.equal(texture.format, 36492);
+  assert.equal(basisCalls, 0);
+
+  const raw = splitPacked(file).ktx;
+  const rawBuffer = raw.slice().buffer;
+  const fallbackLoader = createGpuTextureLoader({
+    THREE,
+    gl: null,
+    caps: {},
+    enabled: () => true,
+    basisParse: () => { basisCalls += 1; },
+  });
+  const originalBitmap = globalThis.createImageBitmap;
+  delete globalThis.createImageBitmap;
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("bitmap fallback parse did not settle")), 1000);
+      fallbackLoader.parse(rawBuffer, resolve, (error) => {
+        clearTimeout(timer);
+        resolve(error);
+      });
+    });
+    assert.equal(result instanceof Error, true);
+    assert.match(String(result.message), /bitmap fallback|no texture/);
+  } finally {
+    if (originalBitmap) globalThis.createImageBitmap = originalBitmap;
+  }
+  assert.equal(basisCalls, 0);
 });

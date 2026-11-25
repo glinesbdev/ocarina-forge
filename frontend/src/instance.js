@@ -127,7 +127,54 @@ export function patchBatchedDraw(backend) {
   return backend;
 }
 
-const reportedMissingUv = new Set();
+const reportedMissingUv = new WeakSet();
+
+function pullUserDataTextures(userData) {
+  const held = [];
+  const walk = (object, path) => {
+    if (!object || typeof object !== "object") return;
+    for (const key of Object.keys(object)) {
+      const value = object[key];
+      if (value && value.isTexture) {
+        held.push({ path: path.concat(key), texture: value });
+        delete object[key];
+      } else if (value && typeof value === "object" && value.constructor === Object) {
+        walk(value, path.concat(key));
+      }
+    }
+  };
+  walk(userData, []);
+  return held;
+}
+
+function restoreUserDataTextures(userData, held) {
+  if (!userData) return;
+  for (const { path, texture } of held) {
+    let object = userData;
+    for (let i = 0; i < path.length - 1; i += 1) {
+      const key = path[i];
+      if (!object[key] || typeof object[key] !== "object") object[key] = {};
+      object = object[key];
+    }
+    object[path[path.length - 1]] = texture;
+  }
+}
+
+/**
+ * three's Material.clone does JSON.parse(JSON.stringify(userData)), which
+ * calls Texture.toJSON. Compressed maps and CPU-released images have no
+ * serializable image.data, so three logs "Unable to serialize Texture."
+ * Pull live textures out first, clone, then put them back on both materials.
+ */
+export function cloneMaterialPreservingTextures(material) {
+  if (!material || typeof material.clone !== "function") return material;
+  const held = pullUserDataTextures(material.userData);
+  const copy = material.clone();
+  restoreUserDataTextures(material.userData, held);
+  copy.userData = copy.userData || {};
+  restoreUserDataTextures(copy.userData, held);
+  return copy;
+}
 
 /**
  * A mapped material on a geometry without its UV channel makes the node builder warn
@@ -147,7 +194,7 @@ export function dropMapWithoutUv(root) {
         const channel = material.map.channel || 0;
         if (geometry.hasAttribute(channel === 0 ? "uv" : `uv${channel}`)) return;
         if (material.colorNode || (material.userData && (material.userData.terrainNode || material.userData.cutoutNode))) return;
-        const copy = typeof material.clone === "function" ? material.clone() : material;
+        const copy = typeof material.clone === "function" ? cloneMaterialPreservingTextures(material) : material;
         copy.map = null;
         copy.needsUpdate = true;
         if (list.length === 1) node.material = copy;
@@ -155,10 +202,9 @@ export function dropMapWithoutUv(root) {
           next = next || list.slice();
           next[index] = copy;
         }
-        const name = node.name || node.type || "mesh";
-        if (!reportedMissingUv.has(name)) {
-          reportedMissingUv.add(name);
-          names.push(name);
+        if (!reportedMissingUv.has(material)) {
+          reportedMissingUv.add(material);
+          names.push(node.name || node.type || "mesh");
         }
       });
       if (next) node.material = next;
@@ -169,7 +215,7 @@ export function dropMapWithoutUv(root) {
   };
   visit(root);
   if (names.length) {
-    console.warn(`WebGPU: ${names.join(", ")} has a map and no uv. The map was dropped so the material does not sample attribute "uv".`);
+    console.debug(`WebGPU: ${names.join(", ")} has a map and no uv. The map was dropped so the material does not sample attribute "uv".`);
   }
   return names;
 }

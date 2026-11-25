@@ -11,6 +11,7 @@ import {
   repairCompressedTexture,
   textureSupport,
 } from "./gpu-texture.js";
+import { loadForgeImageSource } from "./gltf-image-source.js";
 import {
   overResidentHardCap,
   overResidentSoftCap,
@@ -31,7 +32,7 @@ import { shouldReloadTerrain } from "./terrain.js";
 import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
 import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { formatStats, keepRendering } from "./frame.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -205,29 +206,6 @@ export async function createViewport(host, hooks) {
     });
   }
 
-  loader.register((parser) => ({
-    name: "ForgeSharedModelImages",
-    beforeRoot() {
-      const load = parser.loadImageSource.bind(parser);
-      parser.loadImageSource = (index, imageLoader) => {
-        const image = parser.json.images?.[index];
-        const uri = image?.uri;
-        if (!uri?.startsWith("/api/model-textures/")) return load(index, imageLoader);
-        const firstMip = image.extras?.forgeLowTexture;
-        if (!firstMip?.startsWith("/api/model-textures/")) {
-          return sharedImage(uri, () => load(index, imageLoader)).then((texture) => texture.clone());
-        }
-        textureDetailLoaders.set(uri, imageLoader);
-        return sharedImage(firstMip, () => loadDetailImage(firstMip, imageLoader))
-          .then((texture) => {
-            const reduced = texture.clone();
-            reduced.userData.forgeFullTexture = uri;
-            return reduced;
-          })
-          .catch(() => sharedImage(uri, () => load(index, imageLoader)).then((texture) => texture.clone()));
-      };
-    },
-  }));
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
   ktx2Loader.detectSupport(renderer);
   const gpuCaps = textureSupport(renderer.getContext(), renderer);
@@ -237,7 +215,7 @@ export async function createViewport(host, hooks) {
     const name = loadingGyaml || "texture";
     if (hooks.onModelError) hooks.onModelError(name, `GPU texture fell back to the bitmap (${reason}).`);
   }
-  loader.setKTX2Loader(createGpuTextureLoader({
+  const gpuTextureLoader = createGpuTextureLoader({
     THREE,
     gl,
     caps: gpuCaps,
@@ -249,6 +227,36 @@ export async function createViewport(host, hooks) {
     },
     // vkFormat 0 is Basis. three's transcoder is the retry for that file.
     basisParse: (buffer, onLoad, onError) => ktx2Loader.parse(buffer, onLoad, onError),
+  });
+  loader.setKTX2Loader(gpuTextureLoader);
+  loader.register((parser) => ({
+    name: "ForgeSharedModelImages",
+    beforeRoot() {
+      const load = parser.loadImageSource.bind(parser);
+      parser.loadImageSource = (index, imageLoader) => loadForgeImageSource({
+        parser,
+        sourceIndex: index,
+        imageLoader,
+        gpuLoader: gpuTextureLoader,
+        original: load,
+        THREE,
+        loadExternal: (sourceIndex, externalLoader, image) => {
+          const uri = image.uri;
+          const firstMip = image.extras?.forgeLowTexture;
+          if (!firstMip?.startsWith("/api/model-textures/")) {
+            return sharedImage(uri, () => load(sourceIndex, externalLoader)).then((texture) => texture.clone());
+          }
+          textureDetailLoaders.set(uri, externalLoader);
+          return sharedImage(firstMip, () => loadDetailImage(firstMip, externalLoader))
+            .then((texture) => {
+              const reduced = texture.clone();
+              reduced.userData.forgeFullTexture = uri;
+              return reduced;
+            })
+            .catch(() => sharedImage(uri, () => load(sourceIndex, externalLoader)).then((texture) => texture.clone()));
+        },
+      });
+    },
   }));
   const templateCache = new Map();
   const modelRequests = new Map();
@@ -1809,10 +1817,7 @@ let convertSlots = 8;
         ensureWaterUv(geometry, material.map.channel);
       }
       if (material.userData && material.userData.blend && geometry.getAttribute("color")) {
-        const { mossMap, orm1Map, normal1Map } = material.userData;
-        material = material.clone();
-        // Three serializes userData on clone. Keep the live textures for the blend shader.
-        Object.assign(material.userData, { mossMap, orm1Map, normal1Map });
+        material = cloneMaterialPreservingTextures(material);
         geometry.setAttribute("blendMask", geometry.getAttribute("color"));
         geometry.deleteAttribute("color");
         const blendUv = material.userData.blend.uv;
@@ -2836,7 +2841,7 @@ uniform float terrainLayerMissing;`
         (((source.userData && source.userData.banc) === "terrain") || (child.name || "").includes("terrain"));
       let material = prepareMaterial(source, terrain ? "terrain" : "");
       if (geometry.getAttribute("color") || terrain) {
-        material = material.clone();
+        material = cloneMaterialPreservingTextures(material);
         if (geometry.getAttribute("color")) material.vertexColors = true;
         material.needsUpdate = true;
       }

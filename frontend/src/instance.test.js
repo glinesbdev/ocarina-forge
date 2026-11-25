@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -234,6 +234,60 @@ test("a map can use an authored UV channel other than uv", () => {
   const mesh = { geometry: { hasAttribute: (name) => name === "uv1" }, material };
   assert.deepEqual(dropMapWithoutUv(mesh), []);
   assert.equal(mesh.material.map, map);
+});
+
+test("cloneMaterialPreservingTextures keeps userData maps and does not serialize them", () => {
+  const moss = {
+    isTexture: true,
+    uuid: "moss",
+    toJSON() {
+      throw new Error("texture was serialized");
+    },
+  };
+  const material = {
+    userData: { mossMap: moss, orm1Uniform: { value: moss }, note: "keep" },
+    clone() {
+      return { userData: JSON.parse(JSON.stringify(this.userData)), cloned: true };
+    },
+  };
+  const copy = cloneMaterialPreservingTextures(material);
+  assert.equal(material.userData.mossMap, moss);
+  assert.equal(material.userData.orm1Uniform.value, moss);
+  assert.equal(material.userData.note, "keep");
+  assert.equal(copy.cloned, true);
+  assert.equal(copy.userData.mossMap, moss);
+  assert.equal(copy.userData.orm1Uniform.value, moss);
+  assert.equal(copy.userData.note, "keep");
+});
+
+test("dropMapWithoutUv logs once per material at debug level", () => {
+  const warns = [];
+  const debugs = [];
+  const originalWarn = console.warn;
+  const originalDebug = console.debug;
+  console.warn = (message) => warns.push(String(message));
+  console.debug = (message) => debugs.push(String(message));
+  try {
+    const shared = {
+      map: { id: 1 },
+      userData: {},
+      clone() {
+        return { map: this.map, needsUpdate: false, userData: {} };
+      },
+    };
+    const first = { name: "lod0Eye_Plane__Mt_Black0", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+    const second = { name: "lod0Eye_Plane__Mt_Black1", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+    const names = dropMapWithoutUv({ children: [first, second] });
+    assert.deepEqual(names, ["lod0Eye_Plane__Mt_Black0"]);
+    assert.equal(first.material.map, null);
+    assert.equal(second.material.map, null);
+    assert.equal(warns.length, 0);
+    assert.equal(debugs.length, 1);
+    assert.match(debugs[0], /has a map and no uv/);
+  } finally {
+    console.warn = originalWarn;
+    console.debug = originalDebug;
+  }
 });
 
 test("copies that share an albedo share a batch key", () => {

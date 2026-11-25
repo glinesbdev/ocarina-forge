@@ -189,6 +189,10 @@ export function createGpuTextureLoader(options) {
   const onFallback = options.onFallback;
   const enabled = options.enabled || (() => true);
 
+  function fail(onError, error) {
+    if (onError) onError(error instanceof Error ? error : new Error(String(error)));
+  }
+
   function parse(buffer, onLoad, onError) {
     try {
       const choice = chooseTexture(buffer, { enabled: enabled(), caps, gl });
@@ -216,19 +220,25 @@ export function createGpuTextureLoader(options) {
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.flipY = false;
             onLoad(texture);
-          }, onError);
+          }, (error) => fail(onError, error));
           return;
         }
+        fail(onError, new Error(choice.reason || "no bitmap fallback"));
+        return;
+      }
+      if (choice.kind === "basis" && basisParse) {
+        const view = choice.bytes && choice.bytes.length ? choice.bytes : new Uint8Array(buffer);
+        const basisBuffer = view.byteOffset === 0 && view.byteLength === view.buffer.byteLength
+          ? view.buffer
+          : view.slice().buffer;
+        basisParse(basisBuffer, onLoad, onError);
+        return;
       }
     } catch (error) {
-      if (onError) onError(error);
+      fail(onError, error);
       return;
     }
-    if (basisParse) {
-      basisParse(buffer, onLoad, onError);
-      return;
-    }
-    if (onError) onError(new Error("no texture"));
+    fail(onError, new Error("no texture"));
   }
 
   function download(url, onLoad, onError, deferred) {
