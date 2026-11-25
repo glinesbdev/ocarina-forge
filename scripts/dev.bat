@@ -40,17 +40,20 @@ if not exist "frontend\node_modules\" (
     popd
 )
 
-REM Set default environment variables if not already defined
-if not defined BANCWRIGHT_HOST set "BANCWRIGHT_HOST=127.0.0.1"
-if not defined BANCWRIGHT_PORT set "BANCWRIGHT_PORT=47232"
+REM OCARINA_FORGE_HOST and OCARINA_FORGE_PORT are the names to set.
+REM BANCWRIGHT_HOST and BANCWRIGHT_PORT are still read so an existing shell keeps its port.
+if not defined OCARINA_FORGE_HOST if defined BANCWRIGHT_HOST set "OCARINA_FORGE_HOST=%BANCWRIGHT_HOST%"
+if not defined OCARINA_FORGE_PORT if defined BANCWRIGHT_PORT set "OCARINA_FORGE_PORT=%BANCWRIGHT_PORT%"
+if not defined OCARINA_FORGE_HOST set "OCARINA_FORGE_HOST=127.0.0.1"
+if not defined OCARINA_FORGE_PORT set "OCARINA_FORGE_PORT=47232"
 
 REM Start the API in the background with a distinct window title for cleanup
-start "BancwrightAPI" /b ".venv\Scripts\python.exe" -m bancwright --host "%BANCWRIGHT_HOST%" --port "%BANCWRIGHT_PORT%"
+start "OcarinaForgeAPI" /b ".venv\Scripts\python.exe" -m ocarina_forge --host "%OCARINA_FORGE_HOST%" --port "%OCARINA_FORGE_PORT%"
 
 REM Start the frontend in the foreground
 pushd frontend
-call npm run dev -- --host "%BANCWRIGHT_HOST%" --port 47231 --strictPort
+call npm run dev -- --host "%OCARINA_FORGE_HOST%" --port 47231 --strictPort
 popd
 
 REM Clean up the background API process tree upon exit or Ctrl-C
-taskkill /FI "WINDOWTITLE eq BancwrightAPI*" /T /F >nul 2>&1
+taskkill /FI "WINDOWTITLE eq OcarinaForgeAPI*" /T /F >nul 2>&1

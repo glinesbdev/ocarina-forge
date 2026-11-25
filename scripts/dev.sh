@@ -17,7 +17,7 @@ fi
 .venv/bin/maturin develop --release --manifest-path native/Cargo.toml
 .venv/bin/python -c 'from ocarina_forge.extension import module; import sys; native = module(); print("Rust extension:", getattr(native, "__file__", None)); sys.exit(native is None)'
 
-# BANCWRIGHT_HOST and BANCWRIGHT_PORT still work for this release.
+# BANCWRIGHT_HOST and BANCWRIGHT_PORT are still read so an existing shell keeps its port.
 export OCARINA_FORGE_HOST="${OCARINA_FORGE_HOST:-${BANCWRIGHT_HOST:-127.0.0.1}}"
 export OCARINA_FORGE_PORT="${OCARINA_FORGE_PORT:-${BANCWRIGHT_PORT:-47232}}"
 

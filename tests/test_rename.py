@@ -1,8 +1,4 @@
-"""The rename from bancwright keeps the old paths working for one release."""
-
-import subprocess
-import sys
-import warnings
+"""Old cache, config, and project-state paths are still read."""
 
 
 def test_old_cache_directory_is_renamed(tmp_path, monkeypatch):
@@ -68,27 +64,3 @@ def test_legacy_project_state_dir_is_renamed(tmp_path):
     found = project_state_dir(tmp_path)
     assert found == tmp_path / ".ocarina-forge"
     assert (found / "recipe-baseline.json").is_file()
-
-
-def test_bancwright_import_warns_and_forwards():
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        import bancwright
-
-        assert bancwright.__version__
-        from bancwright.models import cache_dir
-
-        assert callable(cache_dir)
-    assert any(issubclass(item.category, DeprecationWarning) for item in caught)
-
-
-def test_python_m_bancwright_points_at_the_new_command():
-    proc = subprocess.run(
-        [sys.executable, "-m", "bancwright", "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode == 0
-    assert "renamed" in proc.stderr
-    assert "Ocarina Forge" in proc.stdout

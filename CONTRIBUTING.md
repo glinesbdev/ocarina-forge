@@ -2,6 +2,8 @@
 
 Thanks for helping with Ocarina Forge. This is enough to run a checkout and open a pull request.
 
+Upcoming work is [ROADMAP.md](ROADMAP.md). It is a plan, not a promise. Open issues labeled [`roadmap`](https://github.com/glinesbdev/ocarina-forge/issues?q=is%3Aissue+is%3Aopen+label%3Aroadmap) are the ones to pick up.
+
 ## Set up and run
 
 You need Python 3.11 or newer, Node 20 or newer, and a Rust toolchain with Cargo.
@@ -71,7 +73,7 @@ Contributions must never include game files, dumps, models, textures, or Nintend
 
 ## Docs
 
-When a change alters behavior, or what we know about a file format, update the matching note in [docs/](docs/). Format rules live in [docs/formats.md](docs/formats.md), textures in [docs/textures.md](docs/textures.md), models in [docs/models.md](docs/models.md), and the editor plan in [docs/design/mod-editor.md](docs/design/mod-editor.md).
+When a change alters behavior, or what we know about a file format, update the matching note in [docs/](docs/). Format rules live in [docs/formats.md](docs/formats.md), textures in [docs/textures.md](docs/textures.md), models in [docs/models.md](docs/models.md), and the editor plan in [docs/design/mod-editor.md](docs/design/mod-editor.md). The contributor roadmap is [ROADMAP.md](ROADMAP.md).
 
 ## Credits
 

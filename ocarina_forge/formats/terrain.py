@@ -124,19 +124,6 @@ class HeightPart:
     marks: list[tuple[float, float]] | None = None
 
 
-@dataclass
-class HeightScene:
-    scene: str
-    source: str
-    origin: tuple[float, float, float]
-    param_path: str
-    scale: float
-    height_scale: float
-    tiles: list[TileInfo]
-    parts: list[HeightPart]
-    notes: list[str]
-
-
 def _rel(data: bytes, at: int) -> int:
     if at < 0 or at + 4 > len(data):
         raise TerrainError(f"relative offset at {at:#x} is outside the file")

@@ -1,6 +1,6 @@
 # What Forge can learn from PlayCanvas
 
-This note reviews the PlayCanvas engine and editor for performance ideas that fit Ocarina Forge's Hyrule Field problem. It was written on 25 Nov 2026 (America/New_York) against `playcanvas/engine` at `06e233b` and `playcanvas/editor` at `dc6dc1b`, both shallow clones of `main`. File references are `repo/path:line` at those commits. Forge facts come from `docs/rendering-performance.md` and a read-only look at `frontend/src` on the `forge-wasm` branch. The three.js facts are from the published `three@0.170.0` package.
+This note reviews the PlayCanvas engine and editor for performance ideas that fit Ocarina Forge's Hyrule Field problem. It was written on 25 Nov 2026 (America/New_York) against `playcanvas/engine` at `06e233b` and `playcanvas/editor` at `dc6dc1b`, both shallow clones of `main`. File references are `repo/path:line` at those commits. Forge facts come from `docs/rendering-performance.md` and a read-only look at `frontend/src` in this repository. The three.js facts are from the published `three@0.170.0` package.
 
 ## Licenses
 

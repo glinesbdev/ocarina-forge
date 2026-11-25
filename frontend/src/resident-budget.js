@@ -16,11 +16,6 @@ export function uniqueResidentNames(entries) {
   return names;
 }
 
-export function heapBytesFrom(memory) {
-  const used = memory && Number(memory.usedJSHeapSize);
-  return Number.isFinite(used) && used > 0 ? used : 0;
-}
-
 export function overResidentSoftCap(count, heapBytes) {
   return count >= RESIDENT_MODEL_SOFT_CAP || heapBytes >= RESIDENT_HEAP_SOFT;
 }

@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-53\0"
+_CACHE_VERSION = b"models-54\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -152,10 +152,11 @@ def cache_dir() -> Path:
     """Per-user directory for converted models. Created on first use.
 
     `OCARINA_FORGE_CACHE` is read every call so a test can point at a temp folder.
-    `BANCWRIGHT_CACHE` still works for this release. The default path is
-    remembered after the first successful create. An existing
-    ``~/.cache/bancwright`` directory is renamed to ``~/.cache/ocarina-forge``
-    when the new one is absent, so the files are not rebuilt for the rename.
+    `BANCWRIGHT_CACHE` is still read so an existing shell keeps its cache.
+    The default path is remembered after the first successful create. An
+    existing ``~/.cache/bancwright`` directory is renamed to
+    ``~/.cache/ocarina-forge`` when the new one is absent, so the files are
+    not rebuilt for the rename.
     """
     global _cache_dir
     override = setting("CACHE")
@@ -189,13 +190,6 @@ def describe_actor(dump, gyaml: str, *, convert: bool = True) -> dict:
     return _first_mesh(gyaml, plan, f"/api/models/{gyaml}/model.glb", dump, tried, convert=convert)
 
 
-def actor_glb(dump, gyaml: str) -> Path | None:
-    info = describe_actor(dump, gyaml)
-    if info["status"] != "mesh":
-        return None
-    return _cached_glb(info["digest"])
-
-
 def describe_terrain(dump, banc: str, *, convert: bool = True) -> dict:
     if not banc or ".." in banc or banc.startswith("/"):
         return {"status": "none", "reason": "That scene path is not in the dump.", "source": "", "url": None}
@@ -225,13 +219,6 @@ def describe_terrain(dump, banc: str, *, convert: bool = True) -> dict:
     info = _first_mesh(banc, plan, f"/api/terrain/model.glb?banc={banc}", dump, tried, terrain=True, convert=convert)
     info["banc"] = banc
     return info
-
-
-def terrain_glb(dump, banc: str) -> Path | None:
-    info = describe_terrain(dump, banc)
-    if info.get("status") != "mesh":
-        return None
-    return _cached_glb(info["digest"])
 
 
 def _box(gyaml: str, reason: str, bounds: dict | None = None) -> dict:
@@ -2465,16 +2452,6 @@ def _tile_stem(name: str) -> str:
         if text.endswith(suffix):
             return text[: -len(suffix)]
     return text
-
-
-def _hght_candidates(scene: str, name: str) -> list[str]:
-    text = _tile_stem(name)
-    return [
-        f"TerrainArc/{scene}/{text}.hght",
-        f"TerrainArc/{scene}/{text}.hght.zs",
-        f"TerrainArc/{text}.hght",
-        f"TerrainArc/{text}.hght.zs",
-    ]
 
 
 def _files_in_dirs(dump, directories: list[str], name: str, extensions: tuple[str, ...]) -> list[tuple[str, str]]:

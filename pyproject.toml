@@ -21,4 +21,4 @@ pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
-include = ["ocarina_forge*", "bancwright*"]
+include = ["ocarina_forge*"]

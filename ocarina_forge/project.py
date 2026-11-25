@@ -158,9 +158,6 @@ class Project:
             (root / domain).mkdir(exist_ok=True)
         return Project(root)
 
-    def save_manifest(self) -> None:
-        atomic_write(self.root / "manifest.yaml", dump_yaml(self.manifest))
-
     def scene_path(self, banc: str) -> Path:
         return self.root / scene_filename(banc)
 

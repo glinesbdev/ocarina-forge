@@ -1,8 +1,9 @@
 """Paths and environment from the rename.
 
-``OCARINA_FORGE_*`` is the name to set. ``BANCWRIGHT_*`` is still read for
-this release. The old cache directory is renamed into place when the new one
-is not there yet, so a converted glb is not thrown away.
+``OCARINA_FORGE_*`` is the name to set. ``BANCWRIGHT_*`` is still read so an
+existing shell keeps pointing at the same dump, project, and cache. The old
+cache directory is renamed into place when the new one is not there yet, so a
+converted glb is not thrown away.
 """
 
 from __future__ import annotations
