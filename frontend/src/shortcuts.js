@@ -59,7 +59,12 @@ export const SHORTCUT_GROUPS = [
   {
     id: "snap",
     label: "Snap",
-    items: [{ keys: "V", action: "Toggle snap to ground and collision" }],
+    items: [
+      { keys: "V", action: "Toggle snap to ground and collision" },
+      { keys: "X, Z, or XZ drag", action: "With Snap on, put the actor on the ground or on a collision volume under the pivot. The gizmo, the visible model, and the saved transform all use that height. Releasing any translate handle except Y does the same" },
+      { keys: "Y drag", action: "With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up" },
+      { keys: "Dragged mesh", action: "Left out of the snap query, including a Land_ piece, so it does not snap to itself" },
+    ],
   },
   {
     id: "search",

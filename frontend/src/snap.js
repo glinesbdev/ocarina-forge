@@ -42,6 +42,61 @@ export function isMovedTerrainActor(gyaml) {
   return /^Land_/i.test(gyaml || "");
 }
 
+/** The green translate handle. Snap must not pull this drag back to the ground. */
+export function isExplicitLift(axis) {
+  return axis === "Y";
+}
+
+/**
+ * Whether this translate step should take its Y from the ground.
+ * X, Z, and the XZ plane snap while they move. Any translate that is not a
+ * pure Y lift also snaps when the pointer goes up, so a sideways drop still
+ * lands. An explicit Y lift keeps the height the user left, during the drag
+ * and after release.
+ */
+export function shouldSnapTranslate(axis, phase) {
+  if (!axis || isExplicitLift(axis)) return false;
+  if (phase === "move") return axis === "X" || axis === "Z" || axis === "XZ";
+  return phase === "release";
+}
+
+/**
+ * Actor id left out of the ground query and out of collision hits.
+ * Every dragged mesh is excluded. Land_ pieces are the ones that actually
+ * sit in the walkable surface, and they must not snap to themselves.
+ */
+export function snapExcludeId(actor) {
+  if (!actor || actor.id == null || actor.id === "") return "";
+  return String(actor.id);
+}
+
+/** True when this hit is the actor currently being dragged. */
+export function isSnapSelfHit(actorId, ignoreId) {
+  if (ignoreId == null || ignoreId === "" || actorId == null || actorId === "") return false;
+  return String(actorId) === String(ignoreId);
+}
+
+/**
+ * One translate for a snap step. `gizmo`, `visible`, and (on release) `stored`
+ * are the same array, so a ground hit cannot move the handle without the model.
+ * `surfaceY` null leaves the height alone. Snap off, or an explicit Y lift,
+ * also leaves it alone.
+ */
+export function translateAfterSnap(translate, surfaceY, options = {}) {
+  const next = [translate[0], translate[1], translate[2]];
+  const snap = Boolean(options.snapOn)
+    && shouldSnapTranslate(options.axis, options.phase)
+    && Number.isFinite(surfaceY);
+  if (snap) next[1] = surfaceY;
+  return {
+    translate: next,
+    snapped: snap,
+    gizmo: next,
+    visible: next,
+    stored: options.phase === "release" ? next : null,
+  };
+}
+
 export function shouldApplyGroundReply(requestX, requestZ, currentX, currentZ, latestX, latestZ, maxDistance = GROUND_SNAP_RADIUS) {
   // A reply applies if the pivot is still in that column, or if this is the
   // latest requested column and the pivot has only moved a short way.

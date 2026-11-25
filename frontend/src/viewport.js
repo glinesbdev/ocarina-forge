@@ -52,7 +52,7 @@ import {
   ndcFromClient,
 } from "./gpu-pick.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
-import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
+import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSnapSelfHit, nearestGroundSample, shouldApplyGroundReply, shouldSnapTranslate, snapExcludeId, translateAfterSnap } from "./snap.js";
 import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
 import { resolveTextureIndex } from "./problems.js";
 import { isEffectGizmo, resolveLighting, tonemapName } from "./lighting.js";
@@ -465,6 +465,14 @@ let convertSlots = 8;
   let streamInteractive = false;
   let sceneStreamStats = null;
   let snapOn = false;
+  // Axis captured for the current gizmo drag. pointerUp clears transform.axis
+  // after dragging-changed, and a ground reply can resolve even later.
+  let dragAxis = null;
+  // An explicit Y lift must ignore a ground reply for that same column.
+  let verticalHold = false;
+  // Collision (#10) and decorations (#11) register here. They receive the same
+  // pose the gizmo, the visible model, and the stored transform just used.
+  const actorTransformFollowers = [];
   let terrainBanc = null;
   const groundHits = [];
   let groundWanted = null;
@@ -3981,14 +3989,10 @@ uniform float terrainLayerMissing;`
     return nearestGroundSample(groundHits, x, z, GROUND_SNAP_RADIUS);
   }
 
-  function excludeGroundActor(entry) {
-    return entry && isMovedTerrainActor(entry.gyaml) ? entry.id : "";
-  }
-
   function requestGround(x, z, entry) {
     if (groundSurfaceReady()) return null;
     if (!hooks.fetchGround || !terrainBanc) return null;
-    groundWanted = { x, z, banc: terrainBanc, exclude: excludeGroundActor(entry), entry };
+    groundWanted = { x, z, banc: terrainBanc, exclude: snapExcludeId(entry), entry };
     if (!groundPump) groundPump = pumpGround();
     return groundPump;
   }
@@ -4024,8 +4028,10 @@ uniform float terrainLayerMissing;`
     const hits = [];
     snapRay.ray.origin.set(x, y + 80, z);
     snapRay.ray.direction.set(0, -1, 0);
-    const entry = ignoreId ? entries.get(ignoreId) : null;
-    const local = sampleGroundSurface(x, z, excludeGroundActor(entry));
+    const dragged = ignoreId ? entries.get(ignoreId) : null;
+    // The dragged mesh, including a Land_ piece in the walkable pack, is not a hit.
+    const exclude = snapExcludeId(dragged) || (ignoreId ? String(ignoreId) : "");
+    const local = sampleGroundSurface(x, z, exclude);
     if (local != null) hits.push({ y: local });
     // When Snap uses a composed sampler, do not raycast the visible heightmap.
     // That mesh misses island floors, and chooseSnap will then prefer the lower
@@ -4042,10 +4048,10 @@ uniform float terrainLayerMissing;`
         for (const hit of found) if (hit.point) hits.push({ y: hit.point.y });
       });
     }
-    for (const entry of entries.values()) {
-      if (!isCollisionEntry(entry) || !entry.pivot.visible) continue;
-      if (entry.key === ignoreId || entry.id === ignoreId) continue;
-      const top = volumeSurfaceY(entry, snapRay);
+    for (const candidate of entries.values()) {
+      if (!isCollisionEntry(candidate) || !candidate.pivot.visible) continue;
+      if (isSnapSelfHit(candidate.id, ignoreId) || isSnapSelfHit(candidate.key, ignoreId)) continue;
+      const top = volumeSurfaceY(candidate, snapRay);
       if (top != null) hits.push({ y: top });
     }
     if (local == null) {
@@ -4055,24 +4061,49 @@ uniform float terrainLayerMissing;`
     return chooseSnap(y, hits);
   }
 
+  function applySelectedActorTransform(entry, { commit = false } = {}) {
+    if (!entry || !entry.pivot) return null;
+    // The pivot is the source of truth. The gizmo is attached to it. The
+    // visible model is a batched instance (or a preview instance) and does not
+    // move with the pivot unless this copy runs. Collision (#10) and
+    // decorations (#11) should follow this same pose instead of reading the
+    // gizmo or the batch on their own.
+    syncPreviewPlacement(entry);
+    syncInstanceMatrix(entry);
+    const translate = [entry.pivot.position.x, entry.pivot.position.y, entry.pivot.position.z];
+    const rotate = fileRotate(entry.pivot);
+    const scale = pivotScale(entry.pivot);
+    const pose = { translate, rotate, scale, commit };
+    for (const follow of actorTransformFollowers) follow(entry, pose);
+    if (commit) hooks.onTransform(entry.id, translate, rotate, scale);
+    else hooks.onPreview(entry.id, translate, rotate, scale);
+    requestRender();
+    return pose;
+  }
+
   function applyComposedSnap(entry, requestX, requestZ, worldY, latest) {
-    if (!snapOn || !entries.get(entry.id) || !Number.isFinite(worldY)) return false;
+    if (!snapOn || verticalHold || !entries.get(entry.id) || !Number.isFinite(worldY)) return false;
     const cur = entry.pivot.position;
     if (!shouldApplyGroundReply(requestX, requestZ, cur.x, cur.z, latest && latest.x, latest && latest.z)) return false;
-    const next = surfaceAt(cur.x, worldY, cur.z, entry.id);
+    const next = surfaceAt(cur.x, worldY, cur.z, snapExcludeId(entry) || entry.id);
     cur.y = next == null ? worldY : next;
-    syncPreviewPlacement(entry);
-    hooks.onPreview(entry.id, [cur.x, cur.y, cur.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
-    syncInstanceMatrix(entry);
-    requestRender();
+    applySelectedActorTransform(entry, { commit: false });
     return true;
   }
 
-  function maybeSnap(entry) {
-    if (!snapOn || !entry || transform.mode !== "translate") return;
+  function maybeSnap(entry, phase, axis = null) {
+    if (!snapOn || !entry || transform.mode !== "translate") return null;
+    const used = axis || (phase === "release" ? dragAxis : null) || transform.axis;
+    if (isExplicitLift(used)) {
+      verticalHold = true;
+      return null;
+    }
+    if (!shouldSnapTranslate(used, phase)) return null;
+    verticalHold = false;
     const p = entry.pivot.position;
-    const y = surfaceAt(p.x, p.y, p.z, entry.id);
-    if (y != null) p.y = y;
+    const surfaceY = surfaceAt(p.x, p.y, p.z, snapExcludeId(entry));
+    const posed = translateAfterSnap([p.x, p.y, p.z], surfaceY, { axis: used, phase, snapOn: true });
+    p.y = posed.translate[1];
     return requestGround(p.x, p.z, entry);
   }
 
@@ -4313,6 +4344,7 @@ uniform float terrainLayerMissing;`
     if (event.button !== 0) return;
     lastPointer = { x: event.clientX, y: event.clientY, moved: false };
     gizmoUsed = Boolean(transform.axis);
+    if (transform.axis) dragAxis = transform.axis;
     if (gizmoUsed) orbit.enabled = false;
   });
 
@@ -4381,34 +4413,42 @@ uniform float terrainLayerMissing;`
     }
     const entry = selected ? entries.get(selected) : null;
     if (!entry) return;
-    const axis = transform.axis;
-    if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) maybeSnap(entry);
-    syncPreviewPlacement(entry);
-    const p = entry.pivot.position;
-    hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
-    syncInstanceMatrix(entry);
-    requestRender();
+    dragAxis = transform.axis || dragAxis;
+    maybeSnap(entry, "move");
+    applySelectedActorTransform(entry, { commit: false });
   });
 
+  let dragSerial = 0;
   transform.addEventListener("dragging-changed", (event) => {
     orbit.enabled = !event.value;
     if (event.value) {
       gizmoUsed = true;
+      dragSerial += 1;
+      dragAxis = transform.axis || dragAxis;
       return;
     }
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id) return;
+    const serial = dragSerial;
+    const axis = transform.axis || dragAxis;
+    if (!entry || !entry.id) {
+      dragAxis = null;
+      return;
+    }
+    dragAxis = axis;
+    const pending = maybeSnap(entry, "release", axis);
     const finish = () => {
-      const p = entry.pivot.position;
-      hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+      // A newer drag owns the pivot. Committing here would save that pose early.
+      if (serial !== dragSerial || transform.dragging) return;
+      dragAxis = null;
+      applySelectedActorTransform(entry, { commit: true });
     };
-    const pending = maybeSnap(entry);
     const wait = pending && typeof pending.then === "function"
       ? pending.then(() => {
+        if (serial !== dragSerial) return null;
         // A leftover request may have started as the pump finished.
-        return groundPump || maybeSnap(entry);
+        return groundPump || maybeSnap(entry, "release", axis);
       })
-      : maybeSnap(entry);
+      : null;
     if (wait && typeof wait.then === "function") void wait.then(finish, finish);
     else finish();
   });
@@ -5002,6 +5042,14 @@ uniform float terrainLayerMissing;`
     setTextureLoad,
     setSnap(on) {
       snapOn = Boolean(on);
+    },
+    followActorTransform(follow) {
+      if (typeof follow !== "function") return () => {};
+      actorTransformFollowers.push(follow);
+      return () => {
+        const index = actorTransformFollowers.indexOf(follow);
+        if (index >= 0) actorTransformFollowers.splice(index, 1);
+      };
     },
     select,
     setGizmo,

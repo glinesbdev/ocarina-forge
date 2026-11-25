@@ -45,6 +45,9 @@ The editor shows this same list with ? or the Shortcuts button.
 ## Snap
 
 - V: Toggle snap to ground and collision
+- X, Z, or XZ drag: With Snap on, put the actor on the ground or on a collision volume under the pivot. The gizmo, the visible model, and the saved transform all use that height. Releasing any translate handle except Y does the same
+- Y drag: With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up
+- Dragged mesh: Left out of the snap query, including a Land_ piece, so it does not snap to itself
 
 ## Search
 
