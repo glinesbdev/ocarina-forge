@@ -2,6 +2,54 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
+import {
+  createGpuTextureLoader,
+  gpuTexturesEnabled,
+  releaseTextureCpu,
+  repairCompressedTexture,
+  textureSupport,
+} from "./gpu-texture.js";
+import { loadForgeImageSource } from "./gltf-image-source.js";
+import { createSharedImageCache } from "./shared-image-cache.js";
+import {
+  overResidentHardCap,
+  overResidentSoftCap,
+  modelsToEvict,
+  uniqueResidentNames,
+  isWorsePriority,
+} from "./resident-budget.js";
+import { collectMemoryReport } from "./memory-report.js";
+import { geometryDecoder } from "./geometry-decoder.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, MeshBVH } from "three-mesh-bvh";
+
+import { boundsGap, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, transformSphere } from "./cull.js";
+import { isMarker } from "./problems.js";
+import { canHoverFocus } from "./focus.js";
+import { guardPointerCapture } from "./pointer-capture.js";
+import { shouldReloadTerrain } from "./terrain.js";
+import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
+import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
+import { formatStats, keepRendering } from "./frame.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
+import { observeWgsl } from "./wgsl-diagnostics.js";
+import { chooseHit } from "./pick.js";
+import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
+import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
+import { resolveTextureIndex } from "./problems.js";
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+let preparedRenderer = null;
+
+export async function prepareViewportRenderer(note = "") {
+  preparedRenderer = { ...await createBackendRenderer(THREE), note };
+}
 
 export const CATEGORY_COLOR = {
   npc: 0xe0b15a,
@@ -11,25 +59,75 @@ export const CATEGORY_COLOR = {
   effect: 0xc58be0,
   animal: 0xe08a3c,
   system: 0x8aa4c0,
+  area: 0x6f8f78,
   other: 0xd7dccf,
 };
 
 /**
- * Boxes stand in for actors. A later stage can swap `entry.visual` for a
- * cached glTF keyed by gyaml. TransformControls stays attached to `entry.pivot`.
+ * Actors are boxes until a converted glTF arrives. The gizmo stays on `pivot`.
+ * Volumes (areas, system actors, large land) are edge outlines. The fill is
+ * drawn only while that volume is selected, so overlapping areas cannot wash
+ * the scene. Picks prefer a solid mesh over a volume.
  */
-export function createViewport(host, hooks) {
+export async function createViewport(host, hooks) {
+  const prepared = preparedRenderer;
+  preparedRenderer = null;
+  const created = prepared ?? await createBackendRenderer(THREE);
+  const renderer = created.renderer;
+  const backendName = created.backend;
+  const backendNote = created.note;
+  let terrainNodes = null;
+  let mapNodes = null;
+  let blendNodes = null;
+  if (created.nodes) {
+    terrainNodes = await import("./terrain-node.js");
+    mapNodes = await import("./cutout-node.js");
+    blendNodes = await import("./blend-node.js");
+  }
+  if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
+  const shaderDiagnostics = observeWgsl(renderer.backend);
+  const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
+
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x141b16);
 
-  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 4000);
+  const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 8000);
   camera.position.set(12, 9, 14);
   camera.rotation.order = "YXZ";
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.shadowMap.enabled = false;
+  if (renderer.shadowMap && "autoUpdate" in renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
+  if (renderer.isWebGPURenderer && typeof renderer.onDeviceLost === "function") {
+    const previousLost = renderer.onDeviceLost.bind(renderer);
+    renderer.onDeviceLost = (info) => {
+      previousLost(info);
+      if (hooks.onDeviceLost) hooks.onDeviceLost("The WebGPU device was lost. Finish any pending edits, then open Forge with ?renderer=webgl to use WebGL2.");
+    };
+  }
   host.appendChild(renderer.domElement);
+  const canvas = renderer.domElement;
+  guardPointerCapture(canvas);
+  canvas.tabIndex = 0;
+  canvas.setAttribute("aria-label", "Scene view");
+  let hoverTookFocus = false;
+  host.addEventListener("pointerenter", () => {
+    const doc = host.ownerDocument;
+    if (!canHoverFocus(doc.activeElement, Boolean(doc.querySelector("dialog[open]")))) return;
+    if (doc.activeElement === canvas) return;
+    canvas.focus({ preventScroll: true });
+    hoverTookFocus = doc.activeElement === canvas;
+  });
+  host.addEventListener("pointerleave", () => {
+    if (!hoverTookFocus) return;
+    hoverTookFocus = false;
+    const doc = host.ownerDocument;
+    if (doc.activeElement === canvas) canvas.blur();
+  });
+  canvas.addEventListener("pointerdown", () => {
+    hoverTookFocus = false;
+  });
 
   const labels = new CSS2DRenderer();
   labels.domElement.className = "label-layer";
@@ -38,6 +136,7 @@ export function createViewport(host, hooks) {
   scene.add(new THREE.HemisphereLight(0xf3f6ea, 0x2c3a2e, 0.9));
   const sun = new THREE.DirectionalLight(0xfff6df, 1.2);
   sun.position.set(18, 36, 14);
+  sun.castShadow = false;
   scene.add(sun);
   scene.add(new THREE.AmbientLight(0x8ea090, 0.25));
 
@@ -46,10 +145,11 @@ export function createViewport(host, hooks) {
   orbit.dampingFactor = 0.08;
   orbit.target.set(0, 0, 0);
   orbit.maxPolarAngle = Math.PI * 0.49;
+  // Fly is the camera. Left-drag stays a click. Alt+left orbits, middle pans, the wheel zooms.
   orbit.mouseButtons = {
-    LEFT: THREE.MOUSE.ROTATE,
-    MIDDLE: THREE.MOUSE.DOLLY,
-    RIGHT: THREE.MOUSE.PAN,
+    LEFT: -1,
+    MIDDLE: THREE.MOUSE.PAN,
+    RIGHT: -1,
   };
 
   const transform = new TransformControls(camera, renderer.domElement);
@@ -60,13 +160,160 @@ export function createViewport(host, hooks) {
   const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
+  const batches = [];
+  const parsedTemplates = new Map();
+  const templateOrder = [];
+  const recentSceneTemplates = new Map();
+  const recentTerrain = new Map();
+  const statsEl = document.createElement("div");
+  statsEl.className = "view-stats";
+  host.appendChild(statsEl);
+  let showStats = true;
+  let naiveDraws = 0;
+  let running = true;
+  let frameHandle = 0;
+  const loader = new GLTFLoader();
+  loader.setMeshoptDecoder(geometryDecoder);
+  const sharedImageCache = createSharedImageCache({ limit: 128 });
+  const textureDetailLoaders = new Map();
+  const textureDetailFailed = new Set();
+  const textureDetailReady = new Map();
+  const textureDetailPending = new Set();
+  const detailParses = [];
+  let detailCandidates = new Map();
+  let nextDetailScan = 0;
+
+  function sharedImage(uri, load) {
+    return sharedImageCache.get(uri, load);
+  }
+
+  function loadDetailImage(uri, imageLoader, deferred = false) {
+    return new Promise((resolve, reject) => {
+      const load = deferred && imageLoader.loadDeferred ? imageLoader.loadDeferred : imageLoader.load;
+      load.call(imageLoader, uri, (image) => {
+        resolve(imageLoader.isImageBitmapLoader ? new THREE.Texture(image) : image);
+      }, undefined, reject);
+    });
+  }
+
+  const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
+  ktx2Loader.detectSupport(renderer);
+  const gpuCaps = textureSupport(renderer.getContext(), renderer);
+  const gl = renderer.getContext();
+  let loadingGyaml = "";
+  function reportGpuFallback(reason) {
+    const name = loadingGyaml || "texture";
+    if (hooks.onModelError) hooks.onModelError(name, `GPU texture fell back to the bitmap (${reason}).`);
+  }
+  const gpuTextureLoader = createGpuTextureLoader({
+    THREE,
+    gl,
+    caps: gpuCaps,
+    enabled: () => gpuTexturesEnabled(window.location.search, window.localStorage.getItem("ocarinaforge.gpuTextures")),
+    onFallback: reportGpuFallback,
+    scheduleDetailParse: (apply) => {
+      detailParses.push(apply);
+      requestRender();
+    },
+    // vkFormat 0 is Basis. three's transcoder is the retry for that file.
+    basisParse: (buffer, onLoad, onError) => ktx2Loader.parse(buffer, onLoad, onError),
+  });
+  loader.setKTX2Loader(gpuTextureLoader);
+  loader.register((parser) => ({
+    name: "ForgeSharedModelImages",
+    beforeRoot() {
+      const load = parser.loadImageSource.bind(parser);
+      parser.loadImageSource = (index, imageLoader) => loadForgeImageSource({
+        parser,
+        sourceIndex: index,
+        imageLoader,
+        gpuLoader: gpuTextureLoader,
+        original: load,
+        THREE,
+        loadExternal: (sourceIndex, externalLoader, image) => {
+          const uri = image.uri;
+          const firstMip = image.extras?.forgeLowTexture;
+          if (!firstMip?.startsWith("/api/model-textures/")) {
+            return sharedImage(uri, () => load(sourceIndex, externalLoader)).then((texture) => texture.clone());
+          }
+          textureDetailLoaders.set(uri, externalLoader);
+          return sharedImage(firstMip, () => loadDetailImage(firstMip, externalLoader))
+            .then((texture) => {
+              const reduced = texture.clone();
+              reduced.userData.forgeFullTexture = uri;
+              return reduced;
+            })
+            .catch(() => sharedImage(uri, () => load(sourceIndex, externalLoader)).then((texture) => texture.clone()));
+        },
+      });
+    },
+  }));
+  const templateCache = new Map();
+  const modelRequests = new Map();
+  // The server pool (one core left free) does the converts. The page only
+// parses this many glbs at once; GLTFLoader.parse is on the main thread.
+let convertSlots = 8;
+  const metaCache = new Map();
+  const categories = { area: "show", system: "show" };
+  const boxCategories = {
+    npc: true,
+    enemy: true,
+    object: true,
+    land: true,
+    effect: true,
+    animal: true,
+    area: false,
+    system: false,
+    other: true,
+  };
+  let hideVolumes = false;
+  let showGround = false;
+  let showWater = true;
+  let showSub = false;
+  let drawDistance = 0;
+  let showTerrainDebug = false;
+  let showBlendMask = false;
+  let generation = 0;
+  let rebuildTimer = 0;
+  let loadQueue = null;
+  let modelLoads = null;
+  let pendingLoads = 0;
+  const loadDelta = new THREE.Vector3();
+  const loadForward = new THREE.Vector3();
+  let terrainRoot = null;
+  let scenePreview = null;
+  let modelStage = null;
+  const foregroundModelNames = new Set();
+  let modelPriority = new Map();
+  const lastLoadDirection = new THREE.Vector3();
+  const modelFrustum = new THREE.Frustum();
+  const modelProjection = new THREE.Matrix4();
+  const modelBounds = new THREE.Sphere();
+  let streamInteractive = false;
+  let sceneStreamStats = null;
+  let snapOn = false;
+  let terrainBanc = null;
+  const groundHits = [];
+  let groundWanted = null;
+  let groundPump = null;
+  const subTerrainMaterial = new THREE.MeshBasicMaterial({
+    color: 0xa5c9bd, wireframe: true, transparent: true, opacity: 0.28, depthWrite: false,
+  });
+  let terrainToken = 0;
+  let groundGrid = null;
+  let lastClick = null;
   let grid = null;
   let selected = null;
   let hovered = null;
   let showLabels = false;
   let showHidden = false;
-  let nav = "orbit";
   let looking = false;
+  let orbitGesture = false;
+  let orbitArmed = false;
+  let orbitMoved = false;
+  let orbitSettle = 0;
+  const savedOrbitTarget = new THREE.Vector3();
+  let lookLocked = false;
   let lastPointer = null;
   let gizmoUsed = false;
   const keys = new Set();
@@ -87,19 +334,285 @@ export function createViewport(host, hooks) {
     if (entry.label) entry.label.element.remove();
   }
 
-  function clearActors() {
+  let textureCpuReleaseDirty = true;
+  let textureCpuReleaseInFlight = false;
+  const textureCpuReleaseFrames = new Map();
+
+  function collectLiveTextures() {
+    const textures = new Set();
+    for (const batch of batches) collectMaterialTextures(batch.mesh.material, textures);
+    for (const parsed of parsedTemplates.values()) {
+      for (const part of parsed.parts || []) collectMaterialTextures(part.material, textures);
+    }
+    if (terrainRoot) {
+      terrainRoot.traverse((child) => {
+        const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+        for (const material of materials) collectMaterialTextures(material, textures);
+      });
+    }
+    return textures;
+  }
+
+  function sourceKey(texture) {
+    return (texture.source && (texture.source.uuid || texture.source.id)) || texture.uuid || texture.id;
+  }
+
+  function flushTextureCpuRelease() {
+    if (!textureCpuReleaseDirty || textureCpuReleaseInFlight) return;
+    const live = [...collectLiveTextures()];
+    const groups = new Map();
+    for (const texture of live) {
+      if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
+      const key = sourceKey(texture);
+      const group = groups.get(key) || [];
+      group.push(texture);
+      groups.set(key, group);
+    }
+    const ready = [];
+    for (const [key, group] of groups) {
+      if (group.some((texture) => texture.needsUpdate || texture.source?.needsUpdate)) {
+        textureCpuReleaseFrames.delete(key);
+        continue;
+      }
+      const frames = (textureCpuReleaseFrames.get(key) || 0) + 1;
+      textureCpuReleaseFrames.set(key, frames);
+      if (frames >= 3) ready.push(group[0]);
+    }
+    for (const key of [...textureCpuReleaseFrames.keys()]) {
+      if (!groups.has(key)) textureCpuReleaseFrames.delete(key);
+    }
+    if (!ready.length) {
+      textureCpuReleaseDirty = groups.size > 0;
+      // Keep drawing a couple of extra frames so new uploads can retire.
+      if ([...textureCpuReleaseFrames.values()].some((frames) => frames > 0 && frames < 3)) requestRender();
+      return;
+    }
+    textureCpuReleaseInFlight = true;
+    const device = renderer.backend && renderer.backend.device;
+    const wait = device && device.queue && typeof device.queue.onSubmittedWorkDone === "function"
+      ? device.queue.onSubmittedWorkDone()
+      : Promise.resolve();
+    void Promise.resolve(wait).catch(() => {}).then(() => {
+      for (const texture of ready) {
+        if (texture.needsUpdate || texture.source?.needsUpdate) continue;
+        releaseTextureCpu(texture);
+        textureCpuReleaseFrames.delete(sourceKey(texture));
+      }
+    }).finally(() => {
+      textureCpuReleaseInFlight = false;
+      textureCpuReleaseDirty = collectLiveTextures().size > 0
+        && [...collectLiveTextures()].some((texture) => !texture.userData?.forgeCpuReleased && !texture.source?.userData?.forgeCpuReleased);
+      if (textureCpuReleaseDirty) requestRender();
+    });
+  }
+
+  const TEXTURE_KEYS = [
+    "map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap", "alphaMap",
+    "bumpMap", "displacementMap", "envMap", "lightMap", "specularMap", "anisotropyMap",
+    "clearcoatMap", "clearcoatNormalMap", "clearcoatRoughnessMap", "sheenRoughnessMap",
+    "sheenColorMap", "specularIntensityMap", "specularColorMap", "iridescenceMap",
+    "iridescenceThicknessMap", "transmissionMap", "thicknessMap",
+  ];
+
+  function disposeCachedTexture(texture) {
+    if (!texture || texture.userData?.forgeSharedLive) return;
+    const image = texture.image;
+    try {
+      texture.dispose();
+    } catch {
+      /* already disposed */
+    }
+    if (image && typeof image.close === "function") {
+      try {
+        image.close();
+      } catch {
+        /* ImageBitmap already closed */
+      }
+    }
+  }
+
+  function collectMaterialTextures(material, into) {
+    if (!material) return;
+    for (const key of TEXTURE_KEYS) {
+      if (material[key]) into.add(material[key]);
+    }
+    const extra = material.userData || {};
+    for (const key of ["mossMap", "orm1Map", "normal1Map"]) {
+      if (extra[key]) into.add(extra[key]);
+    }
+  }
+
+  function disposeExtractedTemplateGeometry(template) {
+    if (!template) return;
+    template.traverse((child) => {
+      if (!child.geometry) return;
+      disposeGeometry(child.geometry);
+      child.geometry = undefined;
+    });
+  }
+
+  function disposeGeometry(geometry) {
+    if (!geometry) return;
+    if (geometry.boundsTree) {
+      try {
+        if (typeof geometry.disposeBoundsTree === "function") geometry.disposeBoundsTree();
+        else disposeBoundsTree.call(geometry);
+      } catch {
+        geometry.boundsTree = undefined;
+      }
+    }
+    geometry.dispose();
+  }
+
+  function disposeMaterial(material, { textures = false, keepTextures = null } = {}) {
+    if (!material) return;
+    if (textures) {
+      const maps = new Set();
+      collectMaterialTextures(material, maps);
+      for (const texture of maps) {
+        if (keepTextures && keepTextures.has(texture)) continue;
+        disposeCachedTexture(texture);
+      }
+    }
+    material.dispose();
+  }
+
+  function disposeObject3D(root, { textures = false, keepTextures = null } = {}) {
+    if (!root) return;
+    root.traverse?.((child) => {
+      if (child.geometry) disposeGeometry(child.geometry);
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) disposeMaterial(material, { textures, keepTextures });
+    });
+    root.removeFromParent?.();
+  }
+
+  function liveTemplateTextures(urls) {
+    const textures = new Set();
+    for (const url of urls) {
+      const parsed = parsedTemplates.get(url);
+      if (!parsed?.parts) continue;
+      for (const part of parsed.parts) collectMaterialTextures(part.material, textures);
+      if (parsed.source) {
+        parsed.source.traverse?.((child) => {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          for (const material of materials) collectMaterialTextures(material, textures);
+        });
+      }
+    }
+    return textures;
+  }
+
+  function disposeParsedTemplate(parsed, keepTextures) {
+    if (!parsed) return;
+    const parts = parsed.parts || [];
+    for (const part of parts) {
+      disposeGeometry(part.geometry);
+      disposeMaterial(part.material, { textures: true, keepTextures });
+    }
+    if (parsed.source) {
+      parsed.source.traverse?.((child) => {
+        if (child.geometry) disposeGeometry(child.geometry);
+      });
+    }
+  }
+
+  function disposeTerrainObject(root) {
+    disposeObject3D(root, { textures: true });
+  }
+
+  function clearTerrain() {
+    terrainToken += 1;
+    showTerrain(null);
+    for (const root of recentTerrain.values()) disposeTerrainObject(root);
+    recentTerrain.clear();
+    terrainBanc = null;
+    groundHits.length = 0;
+    groundWanted = null;
+    disposeGroundSurface();
+  }
+
+  function clearGround() {
+    if (!groundGrid) return;
+    if (groundGrid.geometry) groundGrid.geometry.dispose();
+    const materials = Array.isArray(groundGrid.material) ? groundGrid.material : [groundGrid.material];
+    for (const material of materials) if (material) material.dispose();
+    groundGrid.removeFromParent();
+    groundGrid = null;
+  }
+
+  function applyGround() {
+    if (groundGrid) groundGrid.visible = showGround;
+    if (terrainRoot) terrainRoot.visible = showGround;
+  }
+
+  function applyWater() {
+    for (const batch of batches) {
+      if (batch.water) batch.mesh.visible = showWater && !scenePreview?.hidden.includes(batch.mesh);
+    }
+    for (const mesh of scenePreview?.waterMeshes ?? []) mesh.visible = showWater;
+  }
+
+  function clearActors(options = {}) {
+    loadQueue = null;
+    modelLoads?.dispose();
+    modelLoads = null;
+    cancelModelStage();
+    clearScenePreview();
+    foregroundModelNames.clear();
+    detailCandidates.clear();
+    for (const texture of textureDetailReady.values()) disposeCachedTexture(texture);
+    textureDetailReady.clear();
+    sceneStreamStats = null;
+    nextDetailScan = 0;
     transform.detach();
+    if (rebuildTimer) {
+      clearTimeout(rebuildTimer);
+      rebuildTimer = 0;
+    }
+    // Dropping the batches here is the blink after a save: every model leaves
+    // until the replacement BatchedMesh objects finish building. A scene change
+    // keeps them until rebuildBatches has the next set, unless the viewport is
+    // going away (keepBatches stays false).
+    if (!options.keepBatches) clearBatches();
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
   }
 
+  function helperVisible(entry) {
+    if (!entry.pivot.visible) return false;
+    if (entry.key === selected || entry.key === hovered) return true;
+    if (scenePreview?.root.parent) return false;
+    if (boxCategories[entry.category] === false) return false;
+    return !entry.parts || !entry.parts.length;
+  }
+
+  function syncGhost(entry) {
+    const show = helperVisible(entry);
+    const volume = Boolean(entry.volume);
+    const on = entry.key === selected;
+    if (volume) {
+      entry.material.opacity = on ? 0.08 : 0;
+      entry.material.depthWrite = false;
+      entry.edgeMaterial.color.set(on ? 0xf2d7a2 : 0xb7c0b4);
+      entry.edgeMaterial.opacity = on ? 1 : 0.66;
+    }
+    entry.mesh.visible = show && (!volume || on);
+    entry.edges.visible = show;
+  }
+
   function paint(entry) {
     const on = entry.key === selected;
-    entry.material.emissive.set(on ? entry.color : 0x000000);
-    entry.material.emissiveIntensity = on ? 0.45 : 0;
-    const marked = entry.status === "edited" || entry.status === "added";
-    entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : 0x101612);
-    entry.edges.visible = on || marked || entry.status === "hidden";
+    const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
+    const ghost = !entry.parts || !entry.parts.length;
+    entry.material.depthWrite = false;
+    if (!(ghost && entry.volume)) {
+      entry.material.opacity = on ? 0.1 : entry.status === "hidden" ? 0.02 : 0.04;
+      entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.color);
+      entry.edgeMaterial.opacity = on ? 1 : 0.82;
+    }
+    syncGhost(entry);
+    tintInstance(entry);
   }
 
   function ensureLabel(entry) {
@@ -115,8 +628,22 @@ export function createViewport(host, hooks) {
   }
 
   function syncLabels() {
+    const wanted = new Set();
+    if (selected) wanted.add(selected);
+    if (hovered) wanted.add(hovered);
+    if (showLabels) {
+      const ranked = [...entries.values()].filter(
+        (entry) =>
+          entry.pivot.visible &&
+          entry.key !== selected &&
+          entry.key !== hovered &&
+          boxCategories[entry.category] !== false
+      );
+      ranked.sort((a, b) => camera.position.distanceToSquared(a.pivot.position) - camera.position.distanceToSquared(b.pivot.position));
+      for (const entry of ranked.slice(0, 24)) wanted.add(entry.key);
+    }
     for (const entry of entries.values()) {
-      const show = entry.pivot.visible && (showLabels || entry.key === selected || entry.key === hovered);
+      const show = entry.pivot.visible && wanted.has(entry.key);
       if (!show) {
         if (entry.label) entry.label.visible = false;
         continue;
@@ -137,9 +664,10 @@ export function createViewport(host, hooks) {
     camera.position.copy(center).add(new THREE.Vector3(radius * 0.7, radius * 0.5, radius * 0.7));
     orbit.target.copy(center);
     camera.near = 0.05;
-    camera.far = Math.max(2000, radius * 40);
+    camera.far = Math.max(4000, radius * 80);
     camera.updateProjectionMatrix();
     orbit.update();
+    requestRender();
   }
 
   function rebuildGrid() {
@@ -157,63 +685,2413 @@ export function createViewport(host, hooks) {
     scene.add(grid);
   }
 
-  function setActors(actors, options = {}) {
-    clearActors();
-    actors.forEach((actor, index) => {
-      const key = actor.id || `locked-${index}`;
-      const color = CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
-      const material = new THREE.MeshStandardMaterial({
-        color,
-        roughness: 0.7,
-        metalness: 0.05,
-      });
-      if (actor.status === "hidden") {
-        material.transparent = true;
-        material.opacity = 0.3;
-        material.depthWrite = false;
-      }
-      const mesh = new THREE.Mesh(boxGeometry, material);
-      const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x101612 });
-      const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
-      const pivot = new THREE.Group();
-      pivot.add(mesh);
-      pivot.add(edges);
-      const [x, y, z] = actor.translate;
-      const [rx, ry, rz] = actor.rotate;
-      const [sx, sy, sz] = actor.scale;
-      pivot.position.set(x, y, z);
-      pivot.rotation.set(rx, ry, rz);
-      pivot.scale.set(sx || 1, sy || 1, sz || 1);
-      pivot.userData.actorId = actor.id;
-      pivot.visible = actor.status !== "hidden" || showHidden;
-      scene.add(pivot);
-      entries.set(key, {
-        key,
-        id: actor.id,
-        status: actor.status,
-        color,
-        pivot,
-        material,
-        edges,
-        edgeMaterial,
-        label: null,
-        labelText: actor.name || actor.gyaml,
-      });
+  function mountActor(actor, index) {
+    const key = actor.id || `locked-${index}`;
+    const recipe = actor.status === "recipe";
+    const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
+    const volume = Boolean(actor.volume);
+    const region = Boolean(actor.region);
+    const material = new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.04,
+      depthWrite: false,
+      depthTest: true,
+      side: THREE.DoubleSide,
     });
+    const mesh = new THREE.Mesh(boxGeometry, material);
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: false,
+    });
+    const edges = new THREE.LineSegments(edgesGeometry, edgeMaterial);
+    const pivot = new THREE.Group();
+    pivot.add(mesh);
+    pivot.add(edges);
+    const [x, y, z] = actor.translate;
+    const [rx, ry, rz] = actor.rotate;
+    const [sx, sy, sz] = actor.scale;
+    pivot.position.set(x, y, z);
+    placeRotate(pivot, [rx, ry, rz]);
+    pivot.scale.set(sx || 1, sy || 1, sz || 1);
+    pivot.userData.actorId = actor.id;
+    const gate = {
+      status: actor.status,
+      present: presentByDefault(actor.params),
+      category: actor.category,
+      volume,
+      showHidden,
+      categories,
+      hideVolumes,
+      companion: Boolean(actor.companion),
+      pickable: actor.pickable !== false,
+    };
+    pivot.visible = actorShown(gate);
+    scene.add(pivot);
+    const entry = {
+      key,
+      id: actor.id,
+      gyaml: actor.gyaml,
+      category: actor.category,
+      status: actor.status,
+      present: gate.present,
+      volume,
+      region,
+      companion: Boolean(actor.companion),
+      parts: null,
+      farNames: null,
+      slots: [],
+      pickable: actor.pickable !== false,
+      locked: actorLocked(gate),
+      color,
+      pivot,
+      mesh,
+      material,
+      edges,
+      edgeMaterial,
+      model: null,
+      modelMeta: metaCache.get(actor.gyaml) || null,
+      name: actor.name || "",
+      companionLabel: actor.companionLabel || "",
+      recipeNote: (actor.recipe && actor.recipe.note) || "",
+      label: null,
+      labelText: "",
+    };
+    paintLabel(entry);
+    entries.set(key, entry);
+    return entry;
+  }
+
+  function setActors(actors, options = {}) {
+    const reloadTerrain = shouldReloadTerrain(terrainBanc, options.banc);
+    if (reloadTerrain && terrainBanc) rememberSceneTemplates(terrainBanc);
+    clearActors({ keepBatches: !reloadTerrain });
+    // Actor edits keep the current terrain. On a map switch, detach the
+    // previous terrain before the camera and actor placements change.
+    if (reloadTerrain) {
+      showTerrain(null);
+      pruneTemplates();
+    }
+    const token = ++generation;
+    actors.forEach((actor, index) => mountActor(actor, index));
     if (selected && !entries.has(selected)) selected = null;
     for (const entry of entries.values()) paint(entry);
     attach();
     if (options.frame) {
-      const visible = [...entries.values()].filter((entry) => entry.pivot.visible).map((entry) => entry.pivot);
+      const solids = [...entries.values()].filter((entry) => entry.pivot.visible && !entry.volume);
+      const visible = (solids.length ? solids : [...entries.values()].filter((entry) => entry.pivot.visible)).map((entry) => entry.pivot);
       frameObjects(visible.length ? visible : [...entries.values()].map((entry) => entry.pivot));
       rebuildGrid();
     }
     syncLabels();
+    requestRender();
+    performance.setResourceTimingBufferSize?.(4096);
+    sceneStreamStats = { start: performance.now(), firstDetail: null, slowFrames: 0, editBytes: null };
+    modelStage = { previous: batches.slice(), pending: new Map(), timer: 0, done: false, failed: false };
+    const previewReady = options.previewUrl ? loadScenePreview(options.previewUrl, reloadTerrain) : null;
+    loadModels(token, actors, previewReady);
+    if (reloadTerrain) {
+      const banc = options.banc;
+      const next = ++terrainToken;
+      terrainBanc = banc;
+      void loadTerrain(next, banc);
+    }
+  }
+
+  function shadeScenePreview(asset) {
+    const originals = new Set();
+    const materials = new Map();
+    for (const group of asset.children) {
+      const name = group.userData.forgePreview || "";
+      group.traverse((part) => {
+        if (!part.isMesh) return;
+        const original = part.material;
+        originals.add(original);
+        const water = name !== "@terrain" && isPreviewWater(original, part.userData.name || part.name, name);
+        part.userData.previewWater = water;
+        const label = `${part.name} ${name}`;
+        let color = original.color.getHex();
+        if (color === 0xffffff) {
+          if (name === "@terrain" || /grass|leaf|leaves|bush|moss/i.test(label)) color = 0x677b48;
+          else if (/trunk|branch|tree|wood/i.test(label)) color = 0x866b50;
+          else if (/stone|rock|cliff/i.test(label)) color = 0x848275;
+          else if (/water|river|pond/i.test(label)) color = 0x527e84;
+          else color = 0xa79d83;
+        }
+        const key = `${color}:${original.side}:${original.opacity}:${original.transparent}:${name === "@terrain"}:${water}`;
+        if (!materials.has(key)) {
+          const properties = { color, opacity: original.opacity };
+          materials.set(key, water
+            ? new THREE.MeshBasicMaterial({ ...properties, transparent: true, depthWrite: false, side: THREE.DoubleSide })
+            : new THREE.MeshLambertMaterial({
+                ...properties, flatShading: true, side: original.side,
+                transparent: original.transparent, depthWrite: !original.transparent,
+              }));
+        }
+        part.material = materials.get(key);
+      });
+    }
+    for (const material of originals) material.dispose();
+  }
+
+  function disposeScenePreview(asset, root) {
+    root.removeFromParent();
+    for (const mesh of root.children) mesh.dispose?.();
+    const geometries = new Set();
+    const materials = new Set();
+    asset.traverse((node) => {
+      if (!node.isMesh) return;
+      geometries.add(node.geometry);
+      materials.add(node.material);
+    });
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+  }
+
+  function clearScenePreview() {
+    if (!scenePreview) return;
+    const { controller, asset, root, hidden } = scenePreview;
+    scenePreview = null;
+    controller.abort();
+    if (!asset) return;
+    disposeScenePreview(asset, root);
+    for (const object of hidden) object.visible = true;
+    applyWater();
+    for (const entry of entries.values()) syncGhost(entry);
+    requestRender();
+  }
+
+  async function loadScenePreview(url, terrainPending) {
+    const controller = new AbortController();
+    const preview = {
+      controller, terrainPending, terrain: null, asset: null, root: new THREE.Group(), hidden: [],
+      models: new Map(), placements: new Map(), bounds: new Map(), waterMeshes: new Set(),
+    };
+    scenePreview = preview;
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error(`Scene preview request failed (${response.status}).`);
+      const data = await response.arrayBuffer();
+      if (scenePreview !== preview) return;
+      const { scene: asset } = await loader.parseAsync(data, "");
+      const root = preview.root;
+      if (scenePreview !== preview) {
+        disposeScenePreview(asset, root);
+        return;
+      }
+      preview.asset = asset;
+      shadeScenePreview(asset);
+      asset.updateMatrixWorld(true);
+      const actorGroups = new Map();
+      for (const entry of entries.values()) {
+        if (entry.region || entry.slots.length) continue;
+        const group = actorGroups.get(entry.gyaml) || [];
+        group.push(entry);
+        actorGroups.set(entry.gyaml, group);
+      }
+      const matrix = new THREE.Matrix4();
+      let deadline = performance.now() + 8;
+      for (const group of asset.children) {
+        if (performance.now() >= deadline) {
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+          if (scenePreview !== preview) return;
+          deadline = performance.now() + 8;
+        }
+        const name = group.userData.forgePreview;
+        if (name === "@terrain") {
+          if (preview.terrainPending) {
+            preview.terrain = group.clone(true);
+            root.add(preview.terrain);
+            if (terrainRoot?.visible) {
+              terrainRoot.visible = false;
+              preview.hidden.push(terrainRoot);
+            }
+          }
+          continue;
+        }
+        const placements = actorGroups.get(name)?.filter((entry) =>
+          entries.get(entry.key) === entry && entry.gyaml === name && !entry.slots.length);
+        if (!placements?.length) continue;
+        preview.bounds.set(name, new THREE.Box3().setFromObject(group).getBoundingSphere(new THREE.Sphere()));
+        const cells = new Map();
+        for (const entry of placements) {
+          entry.pivot.updateWorldMatrix(true, false);
+          const { x, y, z } = entry.pivot.position;
+          const cell = [x, y, z].map((value) => Math.floor(value / 96)).join("/");
+          if (!cells.has(cell)) cells.set(cell, []);
+          cells.get(cell).push(entry);
+        }
+        const meshes = [];
+        preview.models.set(name, meshes);
+        group.traverse((part) => {
+          if (!part.isMesh) return;
+          const local = part.matrixWorld.clone();
+          for (const placements of cells.values()) {
+            // Spatial bounds let Three cull whole batches of distant copies.
+            const mesh = new THREE.InstancedMesh(part.geometry, part.material, placements.length);
+            const keys = placements.map((entry) => entry.key);
+            mesh.userData.previewIds = keys.slice();
+            mesh.userData.previewKeys = keys;
+            mesh.userData.previewName = name;
+            mesh.userData.previewSurface = part.userData.name || part.name;
+            if (part.userData.previewWater) {
+              mesh.renderOrder = 2;
+              mesh.visible = showWater;
+              preview.waterMeshes.add(mesh);
+            }
+            placements.forEach((entry, index) => {
+              displayedActorMatrix(entry, matrix).multiply(local);
+              if (!entry.pivot.visible) matrix.scale(hiddenPreviewScale);
+              mesh.setMatrixAt(index, matrix);
+              const slots = preview.placements.get(entry.key) || [];
+              slots.push({ mesh, index, local });
+              preview.placements.set(entry.key, slots);
+            });
+            meshes.push(mesh);
+            root.add(mesh);
+          }
+        });
+      }
+      if (!root.children.length) {
+        clearScenePreview();
+        return;
+      }
+      for (const { mesh, water } of modelStage?.previous || batches) {
+        if (!mesh.visible && !water) continue;
+        mesh.visible = false;
+        preview.hidden.push(mesh);
+      }
+      scene.add(root);
+      refreshPondFish();
+      for (const entry of entries.values()) syncGhost(entry);
+      requestRender();
+      return preview.models.size > 0;
+    } catch (error) {
+      if (scenePreview === preview) {
+        clearScenePreview();
+        console.warn(error);
+      }
+    }
+  }
+
+  const hiddenPreviewScale = new THREE.Vector3(0, 0, 0);
+
+  function syncPreviewPlacement(entry) {
+    const slots = scenePreview?.placements.get(entry.key);
+    if (!slots?.length || slots[0].mesh.userData.previewName !== entry.gyaml) return;
+    entry.pivot.updateWorldMatrix(true, false);
+    const matrix = new THREE.Matrix4();
+    for (const { mesh, index, local } of slots) {
+      displayedActorMatrix(entry, matrix).multiply(local);
+      if (!entry.pivot.visible) matrix.scale(hiddenPreviewScale);
+      mesh.userData.previewIds[index] = entry.key;
+      mesh.setMatrixAt(index, matrix);
+      mesh.boundingSphere = null;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  function removePreviewPlacement(entry) {
+    const slots = scenePreview?.placements.get(entry.key);
+    if (!slots) return;
+    const matrix = new THREE.Matrix4();
+    for (const { mesh, index } of slots) {
+      mesh.getMatrixAt(index, matrix);
+      mesh.setMatrixAt(index, matrix.scale(hiddenPreviewScale));
+      mesh.userData.previewIds[index] = null;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  function placeRotate(pivot, rotate) {
+    // Banc Rotate is extrinsic XYZ: R = Rz · Ry · Rx on a column vector.
+    // three.js order ZYX is that composition. Picking uses the pivot matrix,
+    // and the gizmo writes these same components back.
+    const [rx, ry, rz] = rotate || [0, 0, 0];
+    pivot.rotation.set(rx || 0, ry || 0, rz || 0, "ZYX");
+  }
+
+  function fileRotate(pivot) {
+    if (pivot.rotation.order !== "ZYX") pivot.rotation.order = "ZYX";
+    const r = pivot.rotation;
+    return [r.x, r.y, r.z];
+  }
+
+  function actorLabel(actor, recipe, source) {
+    let text;
+    if (actor.companion) text = `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`;
+    else if (recipe) text = `${actor.name || actor.gyaml} · ${(actor.recipe && actor.recipe.note) || "added by build"}`;
+    else if (actor.name && actor.name !== actor.gyaml) text = `${actor.name} · ${actor.gyaml}`;
+    else text = actor.name || actor.gyaml;
+    if (source) text += ` · ${source}`;
+    return text;
+  }
+
+  function paintLabel(entry) {
+    const source = entry.modelMeta && entry.modelMeta.source;
+    entry.labelText = actorLabel(
+      {
+        name: entry.name,
+        gyaml: entry.gyaml,
+        companion: entry.companion,
+        companionLabel: entry.companionLabel,
+        recipe: entry.recipeNote ? { note: entry.recipeNote } : null,
+      },
+      entry.status === "recipe",
+      source,
+    );
+    if (entry.label) entry.label.element.textContent = entry.labelText;
+  }
+
+  function applyActorRecord(entry, actor) {
+    const recipe = actor.status === "recipe";
+    const color = recipe ? 0xc9b6f2 : CATEGORY_COLOR[actor.category] || CATEGORY_COLOR.other;
+    const [x, y, z] = actor.translate;
+    const [rx, ry, rz] = actor.rotate;
+    const [sx, sy, sz] = actor.scale || [1, 1, 1];
+    entry.pivot.position.set(x, y, z);
+    placeRotate(entry.pivot, [rx, ry, rz]);
+    entry.pivot.scale.set(sx || 1, sy || 1, sz || 1);
+    entry.status = actor.status;
+    entry.present = presentByDefault(actor.params);
+    entry.category = actor.category;
+    entry.gyaml = actor.gyaml;
+    entry.name = actor.name || "";
+    entry.companionLabel = actor.companionLabel || "";
+    entry.recipeNote = (actor.recipe && actor.recipe.note) || "";
+    if (!entry.parts || !entry.parts.length) entry.volume = Boolean(actor.volume);
+    if (actor.region !== undefined) entry.region = Boolean(actor.region);
+    entry.companion = Boolean(actor.companion);
+    entry.pickable = actor.pickable !== false;
+    entry.color = color;
+    entry.material.color.setHex(color);
+    entry.locked = actorLocked({
+      category: actor.category,
+      categories,
+      companion: entry.companion,
+      pickable: entry.pickable,
+    });
+    entry.pivot.visible = actorShown({
+      status: actor.status,
+      present: entry.present,
+      category: actor.category,
+      volume: entry.volume,
+      showHidden,
+      categories,
+      hideVolumes,
+    });
+    paintLabel(entry);
+    paint(entry);
+    syncInstanceMatrix(entry);
+  }
+
+  function patchActors(actors) {
+    if (!Array.isArray(actors)) return false;
+    const rows = [];
+    for (const actor of actors) {
+      const entry = actor && actor.id ? entries.get(actor.id) : null;
+      if (!entry) return false;
+      rows.push([entry, actor]);
+    }
+    for (const [entry, actor] of rows) {
+      applyActorRecord(entry, actor);
+      syncPreviewPlacement(entry);
+    }
+    if (rows.some(([entry]) => fishingPondFish(entry.gyaml) || entry.gyaml === FISHING_POND_WATER)) refreshPondFish();
+    prioritizeLoad();
+    syncBatchVisibility();
+    syncLabels();
+    attach();
+    requestRender();
+    return true;
+  }
+
+  function fitBounds(entry, bounds) {
+    if (!entry || !bounds || !bounds.min || !bounds.max) return;
+    const size = [0, 1, 2].map((axis) => Math.max(Math.abs(bounds.max[axis] - bounds.min[axis]), 0.05));
+    const center = [0, 1, 2].map((axis) => (bounds.min[axis] + bounds.max[axis]) / 2);
+    entry.mesh.scale.set(size[0], size[1], size[2]);
+    entry.mesh.position.set(center[0], center[1], center[2]);
+    if (entry.edges) {
+      entry.edges.scale.copy(entry.mesh.scale);
+      entry.edges.position.copy(entry.mesh.position);
+    }
+  }
+
+  function hideSlots(entry) {
+    for (const slot of entry.slots || []) {
+      slot.shown = false;
+      if (slot.mesh && slot.mesh.setVisibleAt) slot.mesh.setVisibleAt(slot.index, false);
+      if (slot.mesh) slot.mesh._visibilityChanged = true;
+    }
+  }
+
+  function adoptModel(entry) {
+    if (entry.region) return false;
+    const sibling = [...entries.values()].find(
+      (other) => other !== entry && other.gyaml === entry.gyaml && other.parts && other.parts.length,
+    );
+    if (!sibling) return false;
+    entry.parts = sibling.parts;
+    entry.farNames = sibling.farNames;
+    entry.templateUrl = sibling.templateUrl;
+    entry.modelMeta = sibling.modelMeta;
+    entry.volume = false;
+    entry.mesh.visible = false;
+    if (modelStage) stageModel(entry);
+    else queueRebuild();
+    return true;
+  }
+
+  function reconcileActors(actors) {
+    if (!entries.size || !Array.isArray(actors)) return false;
+    const wanted = new Map();
+    actors.forEach((actor, index) => wanted.set(actor.id || `locked-${index}`, { actor, index }));
+    for (const [key, entry] of [...entries.entries()]) {
+      if (wanted.has(key)) continue;
+      hideSlots(entry);
+      removePreviewPlacement(entry);
+      disposeEntry(entry);
+      entries.delete(key);
+    }
+    const fresh = [];
+    for (const [key, item] of wanted) {
+      const entry = entries.get(key);
+      if (entry && entry.gyaml === item.actor.gyaml) {
+        applyActorRecord(entry, item.actor);
+        syncPreviewPlacement(entry);
+        continue;
+      }
+      if (entry) {
+        hideSlots(entry);
+        removePreviewPlacement(entry);
+        disposeEntry(entry);
+        entries.delete(key);
+      }
+      fresh.push({ entry: mountActor(item.actor, item.index), actor: item.actor });
+    }
+    const loading = [];
+    for (const item of fresh) {
+      paint(item.entry);
+      syncPreviewPlacement(item.entry);
+      if (!adoptModel(item.entry)) loading.push(item.actor);
+    }
+    modelLoads?.update(actors, loading);
+    refreshPondFish();
+    if (selected && !entries.has(selected)) selected = null;
+    syncBatchVisibility();
+    syncLabels();
+    attach();
+    requestRender();
+    return true;
+  }
+
+  function report(info, foregroundSettled) {
+    if (hooks.onProgress) hooks.onProgress(info);
+    if (foregroundSettled && hooks.onModels) hooks.onModels();
+  }
+
+  function sortModelNames(names, cachedFirst = false, updateForeground = true, backgroundName = null) {
+    if (updateForeground) foregroundModelNames.clear();
+    if (!names.length && !backgroundName) return;
+    camera.updateMatrixWorld();
+    modelProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    modelFrustum.setFromProjectionMatrix(modelProjection, camera.coordinateSystem);
+    const priority = new Map(names.map((name) => [name, { tier: 5, distance: Infinity }]));
+    if (backgroundName) priority.set(backgroundName, { tier: 5, distance: Infinity });
+    const selectedModel = entries.get(selected)?.gyaml;
+    for (const entry of entries.values()) {
+      const best = priority.get(entry.gyaml);
+      if (!best || !entry.pivot.visible || entry.region) continue;
+      loadDelta.subVectors(entry.pivot.position, camera.position);
+      const distance = loadDelta.length();
+      const bounds = metaCache.get(entry.gyaml)?.bounds;
+      const coarse = scenePreview?.bounds.get(entry.gyaml);
+      if (bounds?.min && bounds.max) {
+        const [minX, minY, minZ] = bounds.min;
+        const [maxX, maxY, maxZ] = bounds.max;
+        modelBounds.center.set((minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5);
+        modelBounds.radius = Math.max(2, Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) * 0.5);
+        entry.pivot.updateWorldMatrix(true, false);
+        modelBounds.applyMatrix4(entry.pivot.matrixWorld);
+      } else if (coarse && coarse.radius > 0) {
+        entry.pivot.updateWorldMatrix(true, false);
+        modelBounds.copy(coarse).applyMatrix4(entry.pivot.matrixWorld);
+      } else {
+        modelBounds.center.copy(entry.pivot.position);
+        modelBounds.radius = 4;
+      }
+      const gap = Math.max(0, modelBounds.center.distanceTo(camera.position) - modelBounds.radius);
+      const tier = modelLoadTier({
+        selected: entry.gyaml === selectedModel,
+        inFrustum: modelFrustum.intersectsSphere(modelBounds),
+        hasPreview: Boolean(scenePreview?.placements.has(entry.key)),
+        radius: modelBounds.radius,
+        gap,
+      });
+      const priorityDistance = tier <= 2 || tier === 4 ? gap : distance;
+      if (tier < best.tier || (tier === best.tier && priorityDistance < best.distance)) {
+        priority.set(entry.gyaml, { tier, distance: priorityDistance });
+      }
+      if (updateForeground && isForegroundModel(tier)) foregroundModelNames.add(entry.gyaml);
+    }
+    if (priority.has(selectedModel)) {
+      priority.set(selectedModel, { tier: 0, distance: 0 });
+      if (updateForeground) foregroundModelNames.add(selectedModel);
+    }
+    const needsConversion = new Set(cachedFirst
+      ? names.filter((name) => metaCache.get(name)?.status !== "mesh")
+      : []);
+    names.sort((a, b) => {
+      const left = priority.get(a);
+      const right = priority.get(b);
+      return left.tier - right.tier
+        || Number(needsConversion.has(a)) - Number(needsConversion.has(b))
+        || left.distance - right.distance;
+    });
+    if (updateForeground) modelPriority = priority;
+  }
+
+  function needsModelGeometry(gyaml) {
+    for (const entry of entries.values()) {
+      if (entry.gyaml === gyaml && !entry.region) return true;
+    }
+    return false;
+  }
+
+  function retainLoad() {
+    pendingLoads += 1;
+    requestRender();
+  }
+
+  function releaseLoad() {
+    pendingLoads = Math.max(0, pendingLoads - 1);
+    requestRender();
+  }
+
+  function prioritizeLoad() {
+    if (loadQueue) sortModelNames(loadQueue, true, true, modelLoads?.backgroundName);
+    modelLoads?.pump();
+  }
+
+  function fetchModelOnce(gyaml, priority) {
+    const existing = modelRequests.get(gyaml);
+    if (existing) return existing;
+    const pending = (
+      hooks.fetchModel ? hooks.fetchModel(gyaml, { priority }) : Promise.reject(new Error("Model loading is not connected."))
+    ).finally(() => {
+      if (modelRequests.get(gyaml) === pending) modelRequests.delete(gyaml);
+    });
+    modelRequests.set(gyaml, pending);
+    return pending;
+  }
+
+  function heapBytes() {
+    return (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || 0;
+  }
+
+  function residentMeshNames() {
+    return uniqueResidentNames(entries.values());
+  }
+
+  function templateStillInUse(url) {
+    if (!url) return false;
+    for (const entry of entries.values()) {
+      if (entry.templateUrl === url && entry.parts && entry.parts.length) return true;
+    }
+    return false;
+  }
+
+  function unloadResidentModel(gyaml) {
+    const urls = new Set();
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml) continue;
+      if (entry.templateUrl) urls.add(entry.templateUrl);
+      hideSlots(entry);
+      entry.slots = [];
+      entry.parts = null;
+      entry.farNames = null;
+    }
+    modelLoads?.requeue(gyaml);
+    const keepUrls = [...parsedTemplates.keys()].filter((url) => templateStillInUse(url));
+    const keepTextures = liveTemplateTextures(keepUrls);
+    for (const url of urls) {
+      if (templateStillInUse(url)) continue;
+      // A parse that has not produced parts yet still owns this url.
+      if (templateCache.has(url) && !parsedTemplates.has(url)) continue;
+      disposeParsedTemplate(parsedTemplates.get(url), keepTextures);
+      parsedTemplates.delete(url);
+      templateCache.delete(url);
+      const at = templateOrder.indexOf(url);
+      if (at >= 0) templateOrder.splice(at, 1);
+    }
+  }
+
+  function proposeEvictForIncoming(incoming) {
+    if (!incoming) return [];
+    const names = residentMeshNames();
+    const heap = heapBytes();
+    if (!overResidentSoftCap(names.size, heap)) return [];
+    const incomingPri = modelPriority.get(incoming) || { tier: 5, distance: Infinity };
+    const selectedModel = entries.get(selected)?.gyaml;
+    const candidates = [];
+    for (const entry of entries.values()) {
+      if (!entry.parts || !entry.parts.length || !entry.gyaml) continue;
+      if (entry.gyaml === incoming || entry.gyaml === selectedModel) continue;
+      const pri = modelPriority.get(entry.gyaml) || { tier: 0, distance: 0 };
+      if (!isWorsePriority(pri, incomingPri)) continue;
+      const distance = Number.isFinite(pri.distance) ? pri.distance : entry.pivot.position.distanceToSquared(camera.position);
+      candidates.push({ name: entry.gyaml, distance });
+    }
+    return modelsToEvict(candidates, {
+      keep: new Set(),
+      count: names.size,
+      heapBytes: heap,
+      targetCount: names.size - 1,
+      maxEvict: 1,
+    });
+  }
+
+  function evictFarResidentModels() {
+    const names = residentMeshNames();
+    const heap = heapBytes();
+    // Count is enforced when launching. This path is the heap emergency brake.
+    if (heap < 1 || !overResidentHardCap(names.size, heap)) return 0;
+    const keep = new Set(foregroundModelNames);
+    const selectedModel = entries.get(selected)?.gyaml;
+    if (selectedModel) keep.add(selectedModel);
+    const nearest = new Map();
+    for (const entry of entries.values()) {
+      if (!entry.parts || !entry.parts.length || !entry.gyaml) continue;
+      const distance = entry.pivot.position.distanceToSquared(camera.position);
+      const prev = nearest.get(entry.gyaml);
+      if (prev == null || distance < prev) nearest.set(entry.gyaml, distance);
+    }
+    const candidates = [...nearest.entries()].map(([name, distance]) => ({ name, distance }));
+    let evict = modelsToEvict(candidates, { keep, count: names.size, heapBytes: heap });
+    if (!evict.length && overResidentHardCap(names.size, heap)) {
+      const pinned = new Set();
+      if (selectedModel) pinned.add(selectedModel);
+      evict = modelsToEvict(candidates, { keep: pinned, count: names.size, heapBytes: heap });
+    }
+    for (const name of evict) unloadResidentModel(name);
+    if (evict.length) {
+      queueRebuild();
+      textureCpuReleaseDirty = true;
+      requestRender();
+    }
+    return evict.length;
+  }
+
+  function loadModels(token, actors, previewReady) {
+    let names = new Set(actors.map((actor) => actor.gyaml).filter(Boolean));
+    const queue = [...names];
+    let backgroundTimer = 0;
+    let backgroundName = null;
+    const resolved = new Set();
+    const boxes = new Set();
+    const active = new Set();
+    let started = false;
+    let previewPending = Boolean(previewReady);
+    let demand = previewPending;
+    let idle = false;
+    loadQueue = queue;
+    statQueued = 0;
+    statDeferred = 0;
+    statBackgroundLoading = 0;
+    statLoading = 0;
+    statLoaded = 0;
+    statConvert = 0;
+    statTexture = 0;
+    statDownload = 0;
+    statUpload = 0;
+    timedModels.clear();
+    const eligible = (name) => Boolean(name) && (!demand || foregroundModelNames.has(name));
+    const backgroundInFlight = () => Number(backgroundName !== null && !eligible(backgroundName));
+    const foregroundInFlight = () => active.size - backgroundInFlight();
+    const publish = (foregroundSettled) => {
+      const atCap = overResidentSoftCap(residentMeshNames().size, heapBytes());
+      let queued = 0;
+      for (const name of queue) {
+        if (!eligible(name)) continue;
+        if (atCap && !proposeEvictForIncoming(name).length) break;
+        queued += 1;
+      }
+      const loading = foregroundInFlight();
+      const deferred = queue.length - queued;
+      const backgroundLoading = backgroundInFlight();
+      if (!foregroundSettled && queued === statQueued && loading === statLoading
+          && deferred === statDeferred && backgroundLoading === statBackgroundLoading && resolved.size === statLoaded) return;
+      statQueued = queued;
+      statDeferred = deferred;
+      statLoading = loading;
+      statBackgroundLoading = backgroundLoading;
+      statLoaded = resolved.size;
+      report({
+        done: resolved.size,
+        total: names.size,
+        boxes: boxes.size,
+        deferred: statDeferred + statBackgroundLoading,
+        finished: idle,
+        label: names.size ? `Models ${resolved.size} of ${names.size}` : "No actors",
+        resident: residentMeshNames().size,
+        residentCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()) && queue.length > 0,
+      }, foregroundSettled);
+      requestRender();
+    };
+    const failEntry = (entry, meta, message) => {
+      entry.modelMeta = { ...(meta || entry.modelMeta || {}), status: "box", reason: message };
+      paintLabel(entry);
+      syncGhost(entry);
+      fitBounds(entry, entry.modelMeta.bounds);
+      if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
+    };
+    function deliver(gyaml, meta, template) {
+      for (const entry of entries.values()) {
+        if (entry.gyaml !== gyaml) continue;
+        entry.modelMeta = { ...meta, status: "mesh" };
+        paintLabel(entry);
+        // Areas, air walls, and other regions stay wireframes. Their packs
+        // often contain a solid cube, and one castle cube also carries a
+        // miniature of the courtyard. The Volumes and category toggles hide them.
+        if (entry.region) {
+          fitBounds(entry, meta.bounds);
+          continue;
+        }
+        if (template) attachModel(entry, template, meta.url);
+        else fitBounds(entry, meta.bounds);
+      }
+      if (gyaml === FISHING_POND_WATER || fishingPondFish(gyaml)) refreshPondFish();
+    }
+    async function loadOne(gyaml, priority) {
+      let meta = metaCache.get(gyaml);
+      try {
+        if (!meta || meta.status === "queued") {
+          meta = await fetchModelOnce(gyaml, priority);
+          if (token !== generation) return;
+          metaCache.set(gyaml, meta);
+        }
+        if (meta.status !== "mesh" || !meta.url) {
+          if (meta.status === "box") boxes.add(gyaml);
+          for (const entry of entries.values()) {
+            if (entry.gyaml !== gyaml) continue;
+            entry.modelMeta = meta;
+            paintLabel(entry);
+            fitBounds(entry, meta.bounds);
+          }
+          return;
+        }
+        const template = needsModelGeometry(gyaml) ? await ensureTemplate(meta.url, meta, priority) : null;
+        if (token === generation) deliver(gyaml, meta, template);
+      } catch (error) {
+        if (token !== generation) return;
+        const message = error.message || "The model did not load.";
+        if (!isMarker(gyaml)) console.error(`${gyaml}: ${message}`);
+        boxes.add(gyaml);
+        for (const entry of entries.values()) {
+          if (entry.gyaml === gyaml) failEntry(entry, meta, message);
+        }
+      }
+    }
+
+    function pauseBackground() {
+      window.clearTimeout(backgroundTimer);
+      backgroundTimer = 0;
+    }
+
+    function canFillMap() {
+      return token === generation && demand && !previewPending && queue.length > 0
+        && !streamInteractive && !scenePreview?.terrainPending && !active.size
+        && !eligible(queue[0]) && !modelStage?.pending.size
+        && !overResidentSoftCap(residentMeshNames().size, heapBytes());
+    }
+
+    function background() {
+      if (!canFillMap()) {
+        pauseBackground();
+        return;
+      }
+      if (backgroundTimer) return;
+      // Let the new detail render and wait out short pauses in camera movement.
+      backgroundTimer = window.setTimeout(() => {
+        backgroundTimer = 0;
+        if (!canFillMap()) return;
+        backgroundName = queue.shift();
+        launch(backgroundName, "low");
+        publish(false);
+      }, 125);
+    }
+
+    function launch(name, priority) {
+      active.add(name);
+      retainLoad();
+      void loadOne(name, priority).finally(() => {
+        releaseLoad();
+        if (token !== generation) return;
+        active.delete(name);
+        if (name === backgroundName) backgroundName = null;
+        if (names.has(name)) resolved.add(name);
+        else boxes.delete(name);
+        pump();
+      });
+    }
+
+    function pump() {
+      if (!started || token !== generation) return;
+      const limit = Math.min(2, convertSlots);
+      while (foregroundInFlight() < limit && eligible(queue[0])) {
+        const incoming = queue[0];
+        if (overResidentSoftCap(residentMeshNames().size, heapBytes())) {
+          const evict = proposeEvictForIncoming(incoming);
+          if (!evict.length) break;
+          for (const name of evict) unloadResidentModel(name);
+          queueRebuild();
+        }
+        if (overResidentSoftCap(residentMeshNames().size, heapBytes())) break;
+        launch(queue.shift());
+      }
+      const cannotLaunchMore = !eligible(queue[0])
+        || (overResidentSoftCap(residentMeshNames().size, heapBytes()) && !proposeEvictForIncoming(queue[0]).length);
+      const settled = !foregroundInFlight() && cannotLaunchMore;
+      const foregroundSettled = settled && !idle;
+      idle = settled;
+      publish(foregroundSettled);
+      background();
+      evictFarResidentModels();
+      if (modelStage) {
+        const keepPreview = previewPending || (demand && (!cannotLaunchMore || active.size > 0));
+        if (settled && (!modelStage.done || modelStage.keepPreview !== keepPreview)) scheduleModelStage();
+        modelStage.done = settled;
+        modelStage.keepPreview = keepPreview;
+      } else if (foregroundSettled) {
+        queueRebuild();
+      }
+    }
+
+    modelLoads = {
+      pump,
+      background,
+      get backgroundName() { return backgroundName; },
+      dispose: pauseBackground,
+      requeue(gyaml) {
+        if (!gyaml) return;
+        resolved.delete(gyaml);
+        boxes.delete(gyaml);
+        if (names.has(gyaml) && !active.has(gyaml) && !queue.includes(gyaml)) queue.push(gyaml);
+        idle = false;
+      },
+      update(nextActors, loading) {
+        names = new Set(nextActors.map((actor) => actor.gyaml).filter(Boolean));
+        for (let i = queue.length - 1; i >= 0; i -= 1) {
+          if (!names.has(queue[i])) queue.splice(i, 1);
+        }
+        for (const name of resolved) {
+          if (names.has(name)) continue;
+          resolved.delete(name);
+          boxes.delete(name);
+        }
+        for (const { gyaml } of loading) {
+          if (!gyaml || active.has(gyaml) || queue.includes(gyaml)) continue;
+          queue.push(gyaml);
+        }
+        idle = false;
+        prioritizeLoad();
+      },
+    };
+
+    if (previewPending) {
+      // Let the coarse scene and nearby detail race. Until the preview is
+      // ready, request only models useful to the current camera or selection.
+      started = true;
+      prioritizeLoad();
+      retainLoad();
+      void previewReady.then((ready) => {
+        if (token !== generation) return;
+        previewPending = false;
+        demand = Boolean(ready);
+        idle = false;
+        prioritizeLoad();
+      }).finally(releaseLoad);
+    } else {
+      const missing = queue.filter((name) => !metaCache.has(name));
+      if (missing.length && missing.length <= 128 && hooks.fetchModels) {
+        retainLoad();
+        void hooks.fetchModels(missing, false).then((batch) => {
+          if (token !== generation) return;
+          for (const [name, meta] of Object.entries(batch || {})) metaCache.set(name, meta);
+        }).catch(console.error).finally(() => {
+          releaseLoad();
+          if (token !== generation) return;
+          started = true;
+          prioritizeLoad();
+        });
+      } else {
+        started = true;
+        prioritizeLoad();
+      }
+    }
+  }
+
+  function noteServerTiming(meta) {
+    const key = (meta && meta.url) || (meta && meta.gyaml) || "";
+    if (!key || timedModels.has(key)) return;
+    const timing = meta && meta.timing;
+    if (!timing) return;
+    timedModels.add(key);
+    statConvert += Number(timing.convertMs) || 0;
+    statTexture += Number(timing.textureMs) || 0;
+  }
+
+  function ensureTemplate(url, meta, priority) {
+    let pending = templateCache.get(url);
+    if (!pending) {
+      noteServerTiming(meta);
+      pending = (async () => {
+        const started = performance.now();
+        const response = await fetch(url, { priority });
+        if (!response.ok) throw new Error(`The model download failed (${response.status}).`);
+        const buffer = await response.arrayBuffer();
+        const downloaded = performance.now();
+        loadingGyaml = (meta && (meta.gyaml || meta.source)) || "";
+        const gltf = await new Promise((resolve, reject) => {
+          loader.parse(buffer, "", resolve, reject);
+        });
+        loadingGyaml = "";
+        gltf.scene.traverse((child) => {
+          const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+          for (const material of materials) {
+            repairCompressedTexture(material.map);
+            repairCompressedTexture(material.emissiveMap);
+          }
+        });
+        await bindSurfaceMaps(gltf);
+        const uploaded = performance.now();
+        statDownload += downloaded - started;
+        statUpload += uploaded - downloaded;
+        requestRender();
+        return gltf.scene;
+      })();
+      templateCache.set(url, pending);
+    }
+    return pending;
+  }
+
+  function asDataMap(map) {
+    if (!map) return;
+    if (map.userData?.forgeCpuReleased || map.source?.userData?.forgeCpuReleased) return;
+    map.colorSpace = THREE.LinearSRGBColorSpace;
+    map.wrapS = THREE.RepeatWrapping;
+    map.wrapT = THREE.RepeatWrapping;
+    if (map.isCompressedTexture) repairCompressedTexture(map);
+    else map.generateMipmaps = true;
+    map.needsUpdate = true;
+  }
+
+  function bindNamedTexture(parser, index, imageName) {
+    const slot = resolveTextureIndex(parser.json, index, imageName);
+    if (slot < 0) return Promise.resolve(null);
+    return parser.getDependency("texture", slot).catch(() => null);
+  }
+
+  async function bindSurfaceMaps(gltf) {
+    const parser = gltf.parser;
+    const surface = [];
+    if (!parser) return;
+    gltf.scene.traverse((child) => {
+      if (!child.material) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        const extra = (material.userData && material.userData.surface) || {};
+        const blend = (material.userData && material.userData.blend) || {};
+        const want = [
+          [extra.orm1, extra.orm1Image, (texture) => {
+            asDataMap(texture);
+            material.userData.orm1Map = texture;
+          }],
+          [extra.normal1, extra.normal1Image, (texture) => {
+            asDataMap(texture);
+            material.userData.normal1Map = texture;
+          }],
+          [blend.moss, blend.mossImage, (texture) => {
+            texture.colorSpace = THREE.SRGBColorSpace;
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            material.userData.mossMap = texture;
+          }],
+        ];
+        for (const [index, imageName, apply] of want) {
+          if (!Number.isInteger(index) && !imageName) continue;
+          surface.push(bindNamedTexture(parser, index, imageName).then((texture) => {
+            if (texture) apply(texture);
+          }));
+        }
+      }
+    });
+    await Promise.all(surface);
+  }
+
+  function prepareMaterial(material, role) {
+    if (!material || material.userData.bancPrepared) return material;
+    const hasSurface = Boolean(material.roughnessMap || material.metalnessMap || material.aoMap);
+    material.metalness = hasSurface ? 1 : 0;
+    material.roughness = hasSurface ? 1 : 0.85;
+    material.aoMapIntensity = 1;
+    asDataMap(material.roughnessMap);
+    asDataMap(material.metalnessMap);
+    asDataMap(material.aoMap);
+    asDataMap(material.normalMap);
+    if (material.map) {
+      material.map.wrapS = THREE.RepeatWrapping;
+      material.map.wrapT = THREE.RepeatWrapping;
+      const maxAniso = renderer.capabilities && renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 4;
+      material.map.anisotropy = Math.min(4, maxAniso);
+      // A compressed albedo already has its chain. generateMipmaps asks WebGL
+      // to build mips, which compressed formats reject, and GLTFLoader has
+      // already overwritten minFilter from the sampler.
+      if (material.map.isCompressedTexture) repairCompressedTexture(material.map);
+      else material.map.generateMipmaps = true;
+      material.map.needsUpdate = true;
+    }
+    const tag = (material.userData && material.userData.banc) || material.name || "";
+    if (material.alphaTest > 0) {
+      material.alphaToCoverage = true;
+      material.transparent = false;
+      material.depthWrite = true;
+    } else if (material.transparent || tag === "water") {
+      material.transparent = true;
+      material.depthWrite = false;
+      if (tag === "water") material.side = THREE.DoubleSide;
+    }
+    material.userData.bancPrepared = true;
+    if (
+      mapNodes
+      && role !== "terrain"
+      && !(material.userData && (material.userData.banc === "terrain" || material.userData.terrainShader))
+    ) {
+      mapNodes.attachCutout(material);
+    }
+    return material;
+  }
+
+  function isIdentityMatrix(matrix) {
+    const got = matrix.elements;
+    for (let i = 0; i < 16; i += 1) {
+      const expected = i % 5 === 0 ? 1 : 0;
+      if (Math.abs(got[i] - expected) > 1e-5) return false;
+    }
+    return true;
+  }
+
+  function partsFromTemplate(template, url) {
+    const parts = [];
+    let index = 0;
+    template.updateWorldMatrix(true, true);
+    const rootInverse = new THREE.Matrix4().copy(template.matrixWorld).invert();
+    const local = new THREE.Matrix4();
+    template.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      const identity = modelLod(child);
+      // The glTF node transform belongs to the mesh, not to one placed actor.
+      // Bake it into a clone so a later change to the template cannot slide
+      // every copy, and so the instance matrix stays the actor matrix alone.
+      local.multiplyMatrices(rootInverse, child.matrixWorld);
+      const geometry = child.geometry.clone();
+      if (!isIdentityMatrix(local)) geometry.applyMatrix4(local);
+      geometry.computeBoundingSphere();
+      const source = Array.isArray(child.material) ? child.material[0] : child.material;
+      if (!source) return;
+      let material = prepareMaterial(source);
+      if (material.map && (material.userData.banc || material.name) === "water") {
+        ensureWaterUv(geometry, material.map.channel);
+      }
+      if (material.userData && material.userData.blend && geometry.getAttribute("color")) {
+        material = cloneMaterialPreservingTextures(material);
+        geometry.setAttribute("blendMask", geometry.getAttribute("color"));
+        geometry.deleteAttribute("color");
+        const blendUv = material.userData.blend.uv;
+        if ((blendUv === "_u1" || blendUv === "u1") && geometry.getAttribute("uv1")) {
+          geometry.setAttribute("blendUv", geometry.getAttribute("uv1"));
+        }
+        material.vertexColors = false;
+        installBlendShader(material);
+        if (blendNodes) blendNodes.attachBlend(material);
+      }
+      const sphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : new THREE.Sphere(new THREE.Vector3(), 1);
+      parts.push({
+        lod: identity.lod,
+        family: identity.family,
+        name: child.name || "",
+        geometry,
+        material,
+        sphere,
+        radius: sphere.radius,
+        key: `${url}|${identity.lod}|${identity.family}|${index}`,
+        // Same material key as WebGL. WebGPU groups copies of one geometry into
+        // one instanced draw inside that mesh instead of a mesh per geometry.
+        batchKey: batchKeyFor(material, geometry),
+      });
+      index += 1;
+    });
+    return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
+  }
+
+  function rememberTemplate(url, parsed) {
+    parsedTemplates.set(url, parsed);
+    const existing = templateOrder.indexOf(url);
+    if (existing >= 0) templateOrder.splice(existing, 1);
+    templateOrder.push(url);
+  }
+
+  function rememberSceneTemplates(banc) {
+    const distances = new Map();
+    for (const entry of entries.values()) {
+      const url = entry.templateUrl;
+      if (!url || !entry.pivot.visible) continue;
+      const distance = entry.key === selected ? -1 : entry.pivot.position.distanceToSquared(camera.position);
+      if (distance < (distances.get(url) ?? Infinity)) distances.set(url, distance);
+    }
+    if (!distances.size) return;
+    const nearby = [...distances].sort((a, b) => a[1] - b[1]).slice(0, 64).map(([url]) => url);
+    recentSceneTemplates.delete(banc);
+    recentSceneTemplates.set(banc, nearby);
+    if (recentSceneTemplates.size > 2) recentSceneTemplates.delete(recentSceneTemplates.keys().next().value);
+  }
+
+  function pruneTemplates() {
+    const pinned = new Set([...recentSceneTemplates.values()].flat());
+    const spare = new Set(templateOrder.filter((url) => !pinned.has(url)).slice(-48));
+    const keep = [];
+    const evicted = [];
+    for (const url of templateOrder) {
+      if (pinned.has(url) || spare.has(url)) keep.push(url);
+      else evicted.push(url);
+    }
+    const keepTextures = liveTemplateTextures(keep);
+    for (const url of evicted) {
+      disposeParsedTemplate(parsedTemplates.get(url), keepTextures);
+      parsedTemplates.delete(url);
+      templateCache.delete(url);
+    }
+    templateOrder.length = 0;
+    for (const url of keep) templateOrder.push(url);
+  }
+
+  function clearBatches() {
+    for (const batch of batches) {
+      batch.mesh.removeFromParent();
+      batch.mesh.dispose();
+    }
+    batches.length = 0;
+    for (const entry of entries.values()) entry.slots = [];
+  }
+
+  const tint = new THREE.Color();
+
+  function instanceTint(entry, target) {
+    if (entry.status === "recipe") target.setHex(0xc9b6f2);
+    else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
+    else target.setRGB(1, 1, 1);
+    if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
+    return target;
+  }
+
+  function tintInstance(entry) {
+    if (!entry.slots) return;
+    for (const slot of entry.slots) {
+      slot.mesh.setColorAt(slot.index, instanceTint(entry, tint));
+      if (slot.mesh.instanceColor) slot.mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  function syncInstanceMatrix(entry) {
+    if (!entry.slots || !entry.slots.length) return;
+    entry.pivot.updateWorldMatrix(true, false);
+    // Copy first. The live matrixWorld is reused by the next object update, and
+    // the write below must be this actor's 16 floats only.
+    displayedActorMatrix(entry, actorMatrix);
+    applyActorMatrix(entry.slots, entry.key, actorMatrix);
+  }
+
+  function displayedActorMatrix(entry, target) {
+    target.copy(entry.pivot.matrixWorld);
+    target.elements[13] += entry.fishPreviewOffset || 0;
+    return target;
+  }
+
+  function refreshPondFish() {
+    const pond = [...entries.values()].find((entry) => entry.gyaml === FISHING_POND_WATER);
+    if (!pond && !pondFishShown) return;
+    pondFishShown = Boolean(pond);
+    const surfaces = [];
+    if (pond) {
+      pond.pivot.updateWorldMatrix(true, false);
+      for (const part of pond.parts || []) {
+        if (part.lod || !isPreviewWater(part.material, part.name, pond.gyaml)) continue;
+        surfaces.push({ geometry: part.geometry, matrix: pond.pivot.matrixWorld });
+      }
+      if (!surfaces.length) {
+        for (const { mesh, index } of scenePreview?.placements.get(pond.key) || []) {
+          if (!scenePreview.waterMeshes.has(mesh)) continue;
+          const matrix = new THREE.Matrix4();
+          mesh.getMatrixAt(index, matrix);
+          surfaces.push({ geometry: mesh.geometry, matrix });
+        }
+      }
+    }
+    for (const entry of entries.values()) {
+      if (!fishingPondFish(entry.gyaml)) continue;
+      const { x, y, z } = entry.pivot.position;
+      const hits = [];
+      pondRay.ray.origin.set(x, y + 20, z);
+      for (const { geometry, matrix } of surfaces) {
+        pondProbe.geometry = geometry;
+        pondProbe.matrixWorld.copy(matrix);
+        pondProbe.raycast(pondRay, hits);
+      }
+      const height = Math.max(-Infinity, ...hits.map(({ point }) => point.y));
+      const top = (entry.modelMeta?.bounds?.max?.[1] || 0) * Math.abs(entry.pivot.scale.y);
+      const offset = fishingPondPreviewOffset(y, height, top);
+      if (offset === (entry.fishPreviewOffset || 0)) continue;
+      entry.fishPreviewOffset = offset;
+      syncPreviewPlacement(entry);
+      syncInstanceMatrix(entry);
+    }
+  }
+
+  function projectedPixels(radius, distance) {
+    const fov = (camera.fov * Math.PI) / 180;
+    const height = renderer.domElement.height || 1;
+    return (radius / Math.max(distance, 0.25)) * (height / (2 * Math.tan(fov / 2)));
+  }
+
+  const imageKeys = new WeakMap();
+
+  function imageSignature(image) {
+    if (!image) return "none";
+    const cached = imageKeys.get(image);
+    if (cached) return cached;
+    const width = image.width || image.videoWidth || 0;
+    const height = image.height || image.videoHeight || 0;
+    if (!width || !height) return `unready:${image.src || image.uuid || ""}`;
+    let key = `${width}x${height}`;
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = 16;
+      canvas.height = 16;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      context.drawImage(image, 0, 0, 16, 16);
+      const data = context.getImageData(0, 0, 16, 16).data;
+      let hash = 2166136261;
+      for (let i = 0; i < data.length; i += 1) {
+        hash ^= data[i];
+        hash = Math.imul(hash, 16777619);
+      }
+      key = `${key}:${hash >>> 0}`;
+    } catch {
+      key = `${key}:${image.src || "bitmap"}`;
+    }
+    imageKeys.set(image, key);
+    return key;
+  }
+
+  function batchKeyFor(material, geometry) {
+    const image = material.map && material.map.image
+      ? imageSignature(material.map.image)
+      : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
+    const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
+    const blend = material.userData && material.userData.blend;
+    const blendImage = material.userData && material.userData.blendMap && material.userData.blendMap.image;
+    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage) : "flat"}` : "";
+    const roughImage = material.roughnessMap && material.roughnessMap.image;
+    const normalImage = material.normalMap && material.normalMap.image;
+    const orm1Image = material.userData && material.userData.orm1Map && material.userData.orm1Map.image;
+    const normal1Image = material.userData && material.userData.normal1Map && material.userData.normal1Map.image;
+    const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
+      ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
+      : "";
+    return batchKey({
+      image: image + blendKey + surfaceKey,
+      alpha,
+      side: material.side,
+      tint: material.color ? material.color.getHexString() : "fff",
+      indexed: geometry.getIndex() ? "idx" : "no",
+      attributes: Object.keys(geometry.attributes).sort().join(","),
+    });
+  }
+
+  function actorScale(entry) {
+    return Math.max(entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z, 0.001);
+  }
+
+  function screenPixels(radius, distance) {
+    const height = renderer.domElement.height || 0;
+    if (height < 2) return 999;
+    return projectedPixels(radius, distance);
+  }
+
+  const cullFrustum = new THREE.Frustum();
+  const cullMatrix = new THREE.Matrix4();
+  const cullSphere = new THREE.Sphere();
+
+  const worldSphere = { center: [0, 0, 0], radius: 0 };
+
+  function slotProbe(entry, slot, elements) {
+    const scale = actorScale(entry);
+    if (!slot.sphere) {
+      const pivotDistance = camera.position.distanceTo(entry.pivot.position);
+      return { inFrustum: true, distance: pivotDistance, radius: (slot.radius || 1) * scale };
+    }
+    transformSphere(
+      [slot.sphere.center.x, slot.sphere.center.y, slot.sphere.center.z],
+      slot.sphere.radius,
+      elements,
+      worldSphere,
+    );
+    cullSphere.center.set(worldSphere.center[0], worldSphere.center[1], worldSphere.center[2]);
+    cullSphere.radius = worldSphere.radius;
+    return {
+      inFrustum: cullFrustum.intersectsSphere(cullSphere),
+      distance: boundsGap(camera.position.distanceTo(cullSphere.center), cullSphere.radius),
+      radius: cullSphere.radius,
+    };
+  }
+
+  function syncBatchVisibility() {
+    camera.updateMatrixWorld();
+    // Flying out must not clip the field on a far plane framed for the village.
+    const farNeed = Math.max(8000, camera.position.distanceTo(orbit.target) * 6);
+    if (camera.far < farNeed) {
+      camera.far = farNeed;
+      camera.updateProjectionMatrix();
+    }
+    cullMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    cullFrustum.setFromProjectionMatrix(cullMatrix, camera.coordinateSystem);
+    let instances = 0;
+    let visible = 0;
+    for (const entry of entries.values()) {
+      if (!entry.slots || !entry.slots.length) continue;
+      entry.pivot.updateWorldMatrix(true, false);
+      const elements = displayedActorMatrix(entry, actorMatrix).elements;
+      const probes = [];
+      const closest = new Map();
+      for (const slot of entry.slots) {
+        instances += 1;
+        const probe = slotProbe(entry, slot, elements);
+        probes.push(probe);
+        const previous = closest.get(slot.family);
+        if (!previous || probe.distance < previous.distance) closest.set(slot.family, probe);
+      }
+      const wanted = new Map();
+      for (const [family, probe] of closest) {
+        const lod = entry.pivot.visible
+          ? instanceLod({
+              distance: probe.distance,
+              radius: probe.radius,
+              pixels: screenPixels(probe.radius, probe.distance),
+              hasFar: Boolean(entry.farNames && entry.farNames.has(family)),
+              selected: entry.key === selected,
+              inFrustum: true,
+              maxDistance: drawDistance,
+            })
+          : null;
+        wanted.set(family, lod);
+      }
+      const levels = new Map();
+      for (const slot of entry.slots) {
+        const list = levels.get(slot.family);
+        if (list) list.push(slot.lod);
+        else levels.set(slot.family, [slot.lod]);
+      }
+      for (let i = 0; i < entry.slots.length; i += 1) {
+        const slot = entry.slots[i];
+        const probe = probes[i];
+        const lod = resolveLod(wanted.get(slot.family), levels.get(slot.family));
+        const show = probe.inFrustum && lod === slot.lod;
+        if (slot.shown !== show) {
+          const wasHidden = slot.shown === false;
+          slot.shown = show;
+          if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
+          slot.mesh.setVisibleAt(slot.index, show);
+        }
+        if (show) visible += 1;
+      }
+    }
+    statInstances = instances;
+    statCulled = instances - visible;
+  }
+
+  function looseParts() {
+    let loose = 0;
+    for (const entry of entries.values()) {
+      if (!entry.pivot.visible || !entry.parts || !entry.parts.length) continue;
+      const covered = new Set();
+      for (const slot of entry.slots || []) covered.add(`${slot.family}|${slot.lod}`);
+      for (const part of entry.parts) {
+        if (part.lod !== 0) continue;
+        if (!covered.has(`${part.family}|${part.lod}`)) loose += 1;
+      }
+    }
+    return loose;
+  }
+
+  function rebuildBatches(stagedEntries = null) {
+    uvDirty = true;
+    const previous = stagedEntries ? [] : batches.slice();
+    const nextBatches = [];
+    const actors = stagedEntries || [...entries.values()];
+    for (const entry of actors) entry.slots = [];
+    const groups = new Map();
+    for (const entry of actors) {
+      syncGhost(entry);
+      if (!entry.parts || !entry.parts.length) continue;
+      entry.pivot.updateWorldMatrix(true, false);
+      for (const part of entry.parts) {
+        let group = groups.get(part.batchKey);
+        if (!group) {
+          group = { material: part.material, records: [], geometries: new Map() };
+          groups.set(part.batchKey, group);
+        }
+        group.records.push({ entry, part });
+        if (!group.geometries.has(part.geometry.uuid)) group.geometries.set(part.geometry.uuid, part.geometry);
+      }
+    }
+    for (const group of groups.values()) {
+      let verts = 0;
+      let indices = 0;
+      for (const geometry of group.geometries.values()) {
+        const position = geometry.getAttribute("position");
+        verts += position ? position.count : 0;
+        indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
+      }
+      if (!verts || !group.records.length) continue;
+      let mesh;
+      try {
+        mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
+      } catch (error) {
+        console.error(error);
+        continue;
+      }
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.frustumCulled = false;
+      // Instance matrices are world matrices. The batch object has to stay at
+      // the origin, or dragging one pivot would slide every copy parented to it.
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.identity();
+      mesh.matrixWorld.identity();
+      mesh.matrixWorldAutoUpdate = false;
+      // The view culls each instance from its own world sphere. The mesh-level
+      // sphere is the untransformed geometry and would hide the whole forest
+      // once the camera looks away from the origin.
+      mesh.perObjectFrustumCulled = false;
+      mesh.sortObjects = Boolean(group.material.transparent);
+      const label = group.records.map((record) => record.part.name).find(Boolean);
+      if (label) mesh.name = label;
+      if (renderer.backend && renderer.backend.isWebGPUBackend === true) {
+        const previous = mesh.onBeforeRender.bind(mesh);
+        mesh.onBeforeRender = function groupDraws(...args) {
+          // A quiet frame leaves the grouped ranges in place. Grouping them
+          // again would treat each run as one instance and restart the next
+          // geometry at slot 1.
+          const dirty = mesh._visibilityChanged || mesh.perObjectFrustumCulled || mesh.sortObjects;
+          previous(...args);
+          if (dirty) groupGeometryDraws(mesh);
+        };
+      }
+      mesh.renderOrder = 1;
+      const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
+      const water = tag === "water";
+      if (water) {
+        mesh.renderOrder = 2;
+        mesh.visible = showWater;
+      }
+      const geomIds = new Map();
+      let built = true;
+      for (const [uuid, geometry] of group.geometries) {
+        try {
+          geomIds.set(uuid, mesh.addGeometry(geometry));
+        } catch (error) {
+          console.error(error);
+          built = false;
+          break;
+        }
+      }
+      if (!built) {
+        mesh.dispose();
+        continue;
+      }
+      const ids = [];
+      const geometries = [];
+      const spheres = [];
+      let count = 0;
+      group.records.sort((a, b) => {
+        const left = a.part.geometry.uuid;
+        const right = b.part.geometry.uuid;
+        if (left < right) return -1;
+        if (left > right) return 1;
+        return 0;
+      });
+      for (const record of group.records) {
+        const geometryId = geomIds.get(record.part.geometry.uuid);
+        if (geometryId === undefined) continue;
+        const instanceId = mesh.addInstance(geometryId);
+        const placed = displayedActorMatrix(record.entry, new THREE.Matrix4());
+        mesh.setMatrixAt(instanceId, placed);
+        mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
+        ids[instanceId] = record.entry.key;
+        geometries[instanceId] = record.part.geometry;
+        spheres[instanceId] = record.part.sphere;
+        count = Math.max(count, instanceId + 1);
+        record.entry.slots.push({
+          actor: record.entry.key,
+          mesh,
+          index: instanceId,
+          lod: record.part.lod,
+          family: record.part.family,
+          radius: record.part.radius,
+          sphere: record.part.sphere,
+          matrix: placed,
+          shown: true,
+        });
+      }
+      mesh.userData.pick = { ids, geometries, spheres, count };
+      mesh.raycast = raycastBatch;
+      mesh.computeBoundingSphere();
+      scene.add(mesh);
+      nextBatches.push({ mesh, ids, water });
+    }
+    if (stagedEntries) {
+      for (const batch of nextBatches) batches.push(batch);
+      return actors.every((entry) => !entry.parts?.length || entry.slots.length);
+    }
+    const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
+    if (!nextBatches.length && expectMeshes && previous.length) {
+      for (const entry of entries.values()) entry.slots = [];
+      console.error("Actor batches failed to build; the meshes already on screen stay up.");
+      return false;
+    }
+    batches.length = 0;
+    for (const batch of nextBatches) batches.push(batch);
+    naiveDraws = looseParts();
+    disposeBatches(previous);
+    syncBatchVisibility();
+    guardMissingUv();
+    return true;
+  }
+
+  function disposeBatches(oldBatches) {
+    for (const { mesh } of oldBatches) {
+      mesh.removeFromParent();
+      mesh.dispose();
+    }
+  }
+
+  function cancelModelStage() {
+    if (!modelStage) return;
+    window.cancelAnimationFrame(modelStage.timer);
+    modelStage = null;
+  }
+
+  function scheduleModelStage() {
+    const stage = modelStage;
+    if (!stage || stage.timer) return;
+    stage.timer = window.requestAnimationFrame(() => {
+      stage.timer = 0;
+      const ready = [];
+      const names = [];
+      const deadline = performance.now() + (streamInteractive ? 2 : 4);
+      const order = [...stage.pending.keys()];
+      sortModelNames(order, false, false);
+      for (const name of order) {
+        const actors = [...stage.pending.get(name)].filter((entry) => entries.get(entry.key) === entry);
+        stage.pending.delete(name);
+        names.push(name);
+        for (const actor of actors) ready.push(actor);
+        stage.failed = !rebuildBatches(actors) || stage.failed;
+        if (names.length >= (streamInteractive ? 1 : 3) || performance.now() >= deadline) break;
+      }
+      if (ready.length) {
+        if (ready.some((entry) => entry.slots.length) && stage.previous.length) {
+          const previous = new Set(stage.previous);
+          const kept = batches.filter((batch) => !previous.has(batch));
+          batches.length = 0;
+          for (const batch of kept) batches.push(batch);
+          disposeBatches(stage.previous);
+          stage.previous = [];
+        }
+        for (const name of names) {
+          if (ready.some((entry) => entry.gyaml === name && !entry.slots.length)) continue;
+          const meshes = scenePreview?.models.get(name) || [];
+          for (const mesh of meshes) {
+            mesh.removeFromParent();
+            mesh.dispose();
+            scenePreview.waterMeshes.delete(mesh);
+            for (const key of mesh.userData.previewKeys) scenePreview.placements.delete(key);
+          }
+          scenePreview?.models.delete(name);
+        }
+        syncBatchVisibility();
+        if (sceneStreamStats?.firstDetail === null && ready.some((entry) =>
+          entry.pivot.position.distanceToSquared(camera.position) < 80 * 80 && entry.slots.some((slot) => slot.shown))) {
+          sceneStreamStats.firstDetail = performance.now() - sceneStreamStats.start;
+        }
+        nextDetailScan = 0;
+        requestRender();
+      }
+      if (stage.pending.size) {
+        scheduleModelStage();
+      } else if (stage.done) {
+        modelLoads?.background();
+        if (stage.keepPreview) {
+          if (stage.previous.length) {
+            const previous = new Set(stage.previous);
+            const kept = batches.filter((batch) => !previous.has(batch));
+            batches.length = 0;
+            for (const batch of kept) batches.push(batch);
+            disposeBatches(stage.previous);
+            stage.previous = [];
+          }
+        } else {
+          modelStage = null;
+          if (stage.failed || stage.previous.length) {
+            queueRebuild();
+            return;
+          }
+          if (!scenePreview?.models.size) clearScenePreview();
+        }
+        naiveDraws = looseParts();
+        requestRender();
+        if (!stage.notified) {
+          stage.notified = true;
+          hooks.onModelsReady?.({ batchesBuilt: true });
+        }
+      }
+    });
+  }
+
+  function queueRebuild() {
+    if (rebuildTimer) clearTimeout(rebuildTimer);
+    rebuildTimer = window.setTimeout(() => {
+      rebuildTimer = 0;
+      clearScenePreview();
+      const ready = rebuildBatches();
+      requestRender();
+      if (hooks.onModelsReady) hooks.onModelsReady({ batchesBuilt: ready });
+    }, 100);
+  }
+
+  function attachModel(entry, template, url) {
+    if (entry.parts) return;
+    let parsed = parsedTemplates.get(url);
+    if (!parsed) {
+      parsed = partsFromTemplate(template, url);
+      parsed.source = template;
+      rememberTemplate(url, parsed);
+      disposeExtractedTemplateGeometry(template);
+    }
+    entry.parts = parsed.parts;
+    entry.farNames = parsed.farNames;
+    entry.templateUrl = url;
+    entry.volume = false;
+    textureCpuReleaseDirty = true;
+    stageModel(entry);
+  }
+
+  function stageModel(entry) {
+    if (modelStage && entry.parts.length) {
+      let actors = modelStage.pending.get(entry.gyaml);
+      if (!actors) {
+        actors = new Set();
+        modelStage.pending.set(entry.gyaml, actors);
+      }
+      actors.add(entry);
+      scheduleModelStage();
+    }
+  }
+
+  const scratchMatrix = new THREE.Matrix4();
+  const actorMatrix = new THREE.Matrix4();
+  const scratchSphere = new THREE.Sphere();
+  const scratchMesh = new THREE.Mesh();
+  const scratchHits = [];
+  scratchMesh.matrixAutoUpdate = false;
+  const pondRay = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+  const pondProbe = new THREE.Mesh(undefined, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+  let pondFishShown = false;
+
+  function raycastBatch(raycaster, intersects) {
+    const pick = this.userData.pick;
+    if (!pick) return;
+    for (let i = 0; i < pick.count; i += 1) {
+      if (!pick.ids[i] || !this.getVisibleAt(i)) continue;
+      this.getMatrixAt(i, scratchMatrix);
+      const source = pick.spheres[i];
+      if (!source) continue;
+      scratchSphere.copy(source).applyMatrix4(scratchMatrix);
+      if (!raycaster.ray.intersectsSphere(scratchSphere)) continue;
+      const geometry = pick.geometries[i];
+      // Only meshes hit by a picking ray need an acceleration structure.
+      // Keep index order intact because the batch already owns a copy.
+      const count = geometry.index?.count ?? geometry.attributes.position.count;
+      if (!geometry.boundsTree && count >= 1024) geometry.computeBoundsTree({ indirect: true });
+      scratchMesh.geometry = geometry;
+      scratchMesh.material = this.material;
+      scratchMesh.matrix.copy(scratchMatrix);
+      scratchMesh.matrixWorld.copy(scratchMatrix);
+      scratchHits.length = 0;
+      scratchMesh.raycast(raycaster, scratchHits);
+      for (let j = 0; j < scratchHits.length; j += 1) {
+        const hit = scratchHits[j];
+        hit.object = this;
+        hit.batchId = i;
+        intersects.push(hit);
+      }
+    }
+  }
+
+  function measureTemplate(template) {
+    const box = new THREE.Box3();
+    template.updateWorldMatrix(true, true);
+    template.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+      const childBox = child.geometry.boundingBox;
+      if (!childBox) return;
+      box.union(childBox.clone().applyMatrix4(child.matrixWorld));
+    });
+    return box;
+  }
+
+  function placeGround(box) {
+    clearGround();
+    const size = box.getSize(new THREE.Vector3());
+    const center = box.getCenter(new THREE.Vector3());
+    const span = Math.max(10, Math.ceil(Math.max(size.x, size.z)));
+    const divisions = Math.min(120, Math.max(12, Math.round(span / 8)));
+    const gridLines = new THREE.GridHelper(span, divisions, 0x9aa394, 0x3c4740);
+    // y = 0 is the terrain origin. The proxy mesh median sits above the walkable floor.
+    gridLines.position.set(center.x, 0, center.z);
+    gridLines.visible = showGround;
+    gridLines.raycast = () => {};
+    gridLines.traverse((child) => {
+      child.raycast = () => {};
+    });
+    scene.add(gridLines);
+    groundGrid = gridLines;
+  }
+
+  // These three are GLSL functions. They have to live outside main(). #include <map_fragment>
+  // is inside main(), so the atlas lookup stays in TERRAIN_MAP and the helpers are
+  // injected just before void main(), after the uniform declarations.
+  const TERRAIN_FUNCS = `
+    vec2 terrainCell(vec2 worldUv, float slot) {
+      float columns = max(terrainCols, 1.0);
+      float column = mod(floor(slot + 0.5), columns);
+      float row = floor(floor(slot + 0.5) / columns);
+      vec2 repeated = fract(worldUv);
+      vec2 inside = repeated * 0.96 + 0.02;
+      return (vec2(column, row) + inside) / columns;
+    }
+    vec4 terrainSample(vec2 worldUv, float slot) {
+      return texture2D(map, terrainCell(worldUv, slot));
+    }
+    vec4 terrainTri(float slot) {
+      vec3 blend = abs(normalize(vTerrainNormal));
+      blend = pow(max(blend, vec3(0.0001)), vec3(4.0));
+      blend /= (blend.x + blend.y + blend.z);
+      vec4 alongX = terrainSample(vTerrainWorld.zy / terrainRepeat, slot);
+      vec4 alongY = terrainSample(vTerrainWorld.xz / terrainRepeat, slot);
+      vec4 alongZ = terrainSample(vTerrainWorld.xy / terrainRepeat, slot);
+      return alongX * blend.x + alongY * blend.y + alongZ * blend.z;
+    }
+  `;
+
+  const TERRAIN_MAP = `
+    vec4 sampledDiffuseColor = mix(
+      terrainTri(vTerrainLayer.x),
+      terrainTri(vTerrainLayer.y),
+      clamp(vTerrainShade.x, 0.0, 1.0)
+    );
+    if (terrainDebug > 0.5) {
+      if (terrainLayerMissing > 0.5) {
+        float stripe = step(0.5, fract((vTerrainWorld.x + vTerrainWorld.z) * 0.15));
+        sampledDiffuseColor = vec4(mix(vec3(0.75, 0.2, 0.55), vec3(0.25, 0.12, 0.18), stripe), 1.0);
+      } else {
+        float hue = vTerrainMark.x * 6.2831853;
+        vec3 ink = clamp(vec3(
+          0.55 + 0.45 * cos(hue),
+          0.55 + 0.45 * cos(hue + 2.094395),
+          0.55 + 0.45 * cos(hue + 4.188790)
+        ), 0.0, 1.0);
+        sampledDiffuseColor = vec4(ink, 1.0);
+      }
+    }
+    diffuseColor *= sampledDiffuseColor;
+  `;
+
+  let sharedOrm = null;
+  let sharedFlatNormal = null;
+
+  function sharedOrmMap() {
+    if (sharedOrm) return sharedOrm;
+    const data = new Uint8Array([255, 217, 0, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1);
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    sharedOrm = tex;
+    return tex;
+  }
+
+  function sharedNormalMap() {
+    if (sharedFlatNormal) return sharedFlatNormal;
+    const data = new Uint8Array([128, 128, 255, 255]);
+    const tex = new THREE.DataTexture(data, 1, 1);
+    tex.colorSpace = THREE.LinearSRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.magFilter = THREE.LinearFilter;
+    tex.minFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    sharedFlatNormal = tex;
+    return tex;
+  }
+
+  const BLEND_MIX = `
+{
+  float mask = blendChannel < 0.5 ? vBlendMask.r : blendChannel < 1.5 ? vBlendMask.g : blendChannel < 2.5 ? vBlendMask.b : vBlendMask.a;
+  blendWeight = smoothstep(0.35, 0.65, mask);
+  blendMossUv = vMossUv * blendScale + blendTranslate;
+  vec4 moss = texture2D(blendMap, blendMossUv);
+  diffuseColor.rgb = mix(diffuseColor.rgb, moss.rgb, blendWeight);
+  if (blendDebug > 0.5) diffuseColor.rgb = vec3(blendWeight);
+}`;
+
+  const BLEND_SURFACE = `
+{
+  vec4 surface1 = texture2D(orm1Map, blendMossUv);
+  roughnessFactor = mix(roughnessFactor, surface1.g, blendWeight);
+  metalnessFactor = mix(metalnessFactor, surface1.b, blendWeight);
+}`;
+
+  const BLEND_NORMAL = `
+{
+  vec3 overlayN = texture2D(normal1Map, blendMossUv).xyz * 2.0 - 1.0;
+  overlayN.xy *= normalScale;
+  normal = normalize(mix(normal, normalize(tbn * overlayN), blendWeight));
+}`;
+
+  const BLEND_AO = `
+{
+  float overlayAo = texture2D(orm1Map, blendMossUv).r;
+  float mixedAo = mix(ambientOcclusion, overlayAo, blendWeight);
+  float aoScale = mixedAo / max(ambientOcclusion, 0.001);
+  reflectedLight.indirectDiffuse *= aoScale;
+#if defined( USE_ENVMAP ) && defined( STANDARD )
+  reflectedLight.indirectSpecular *= aoScale;
+#endif
+}`;
+
+  function installBlendShader(material) {
+    const blend = material.userData && material.userData.blend;
+    if (!blend || material.userData.blendShader) return material;
+    const scale = blend.scale || [1, 1];
+    const translate = blend.translate || [0, 0];
+    material.userData.blendShader = true;
+    material.userData.blendDebugUniform = { value: showBlendMask ? 1 : 0 };
+    material.userData.blendScaleUniform = { value: new THREE.Vector2(Number(scale[0]) || 1, Number(scale[1]) || 1) };
+    material.userData.blendTranslateUniform = { value: new THREE.Vector2(Number(translate[0]) || 0, Number(translate[1]) || 0) };
+    material.userData.blendChannelUniform = { value: { r: 0, g: 1, b: 2, a: 3 }[blend.channel] ?? 0 };
+    material.userData.blendUv1Uniform = { value: blend.uv === "_u1" || blend.uv === "u1" ? 1 : 0 };
+    if (material.userData.mossMap && !material.userData.blendMap) {
+      material.userData.blendMap = material.userData.mossMap;
+      material.userData.blendMap.wrapS = THREE.RepeatWrapping;
+      material.userData.blendMap.wrapT = THREE.RepeatWrapping;
+    } else if (material.emissiveMap && !material.userData.blendMap) {
+      material.userData.blendMap = material.emissiveMap;
+      material.userData.blendMap.wrapS = THREE.RepeatWrapping;
+      material.userData.blendMap.wrapT = THREE.RepeatWrapping;
+      material.emissive.setRGB(0, 0, 0);
+      material.emissiveMap = null;
+    }
+    if (!material.roughnessMap) {
+      const orm = sharedOrmMap();
+      material.roughnessMap = orm;
+      material.metalnessMap = orm;
+      material.aoMap = orm;
+    } else {
+      if (!material.metalnessMap) material.metalnessMap = material.roughnessMap;
+      if (!material.aoMap) material.aoMap = material.roughnessMap;
+    }
+    material.metalness = 1;
+    material.roughness = 1;
+    material.aoMapIntensity = 1;
+    asDataMap(material.roughnessMap);
+    if (!material.normalMap) material.normalMap = sharedNormalMap();
+    asDataMap(material.normalMap);
+    if (!material.userData.orm1Map) material.userData.orm1Map = material.roughnessMap;
+    if (!material.userData.normal1Map) material.userData.normal1Map = material.normalMap;
+    material.userData.orm1Uniform = { value: material.userData.orm1Map };
+    material.userData.normal1Uniform = { value: material.userData.normal1Map };
+    const useUv1 = material.userData.blendUv1Uniform.value > 0.5;
+    const vertexPars = useUv1
+      ? `attribute vec4 blendMask;\nattribute vec2 blendUv;\nvarying vec4 vBlendMask;\nvarying vec2 vMossUv;`
+      : `attribute vec4 blendMask;\nvarying vec4 vBlendMask;\nvarying vec2 vMossUv;`;
+    const vertexBody = useUv1 ? "vBlendMask = blendMask;\nvMossUv = blendUv;" : "vBlendMask = blendMask;\nvMossUv = uv;";
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.blendDebug = material.userData.blendDebugUniform;
+      shader.uniforms.blendScale = material.userData.blendScaleUniform;
+      shader.uniforms.blendTranslate = material.userData.blendTranslateUniform;
+      shader.uniforms.blendChannel = material.userData.blendChannelUniform;
+      shader.uniforms.blendMap = { value: material.userData.blendMap };
+      shader.uniforms.orm1Map = material.userData.orm1Uniform;
+      shader.uniforms.normal1Map = material.userData.normal1Uniform;
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <uv_pars_vertex>", `#include <uv_pars_vertex>\n${vertexPars}`)
+        .replace("#include <uv_vertex>", `#include <uv_vertex>\n${vertexBody}`);
+      const fragPars = `#include <uv_pars_fragment>
+varying vec4 vBlendMask;
+varying vec2 vMossUv;
+uniform sampler2D blendMap;
+uniform sampler2D orm1Map;
+uniform sampler2D normal1Map;
+uniform float blendDebug;
+uniform float blendChannel;
+uniform vec2 blendScale;
+uniform vec2 blendTranslate;
+float blendWeight;
+vec2 blendMossUv;`;
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <uv_pars_fragment>", fragPars)
+        .replace("#include <map_fragment>", `#include <map_fragment>\n${BLEND_MIX}`)
+        .replace("#include <metalnessmap_fragment>", `#include <metalnessmap_fragment>\n${BLEND_SURFACE}`)
+        .replace("#include <normal_fragment_maps>", `#include <normal_fragment_maps>\n${BLEND_NORMAL}`)
+        .replace("#include <aomap_fragment>", `#include <aomap_fragment>\n${BLEND_AO}`);
+    };
+    material.customProgramCacheKey = () => (useUv1 ? "blend|uv1" : "blend");
+    material.needsUpdate = true;
+    return material;
+  }
+
+  function applyBlendUniforms() {
+    const value = showBlendMask ? 1 : 0;
+    for (const entry of entries.values()) {
+      for (const part of entry.parts || []) {
+        const uniform = part.material && part.material.userData && part.material.userData.blendDebugUniform;
+        if (uniform) uniform.value = value;
+      }
+    }
+  }
+
+  function installTerrainShader(material) {
+    if (!material || material.userData.terrainShader) return material;
+    const columns = Number(material.userData.atlas) || 1;
+    const repeat = Number(material.userData.repeat) || 8;
+    material.userData.terrainShader = true;
+    material.userData.terrainColsUniform = { value: columns };
+    material.userData.terrainRepeatUniform = { value: repeat };
+    if (!material.userData.terrainDebugUniform) {
+      material.userData.terrainDebugUniform = { value: showTerrainDebug ? 1 : 0 };
+    }
+    if (!material.userData.terrainLayerUniform) {
+      material.userData.terrainLayerUniform = { value: 0 };
+    }
+    if (material.map) {
+      material.map.wrapS = THREE.ClampToEdgeWrapping;
+      material.map.wrapT = THREE.ClampToEdgeWrapping;
+      material.map.needsUpdate = true;
+      material.userData.terrainMap = material.map;
+    }
+    const previous = material.onBeforeCompile;
+    material.onBeforeCompile = (shader) => {
+      if (previous && previous !== material.onBeforeCompile) previous(shader);
+      material.userData.terrainShaderRef = shader;
+      shader.uniforms.terrainCols = material.userData.terrainColsUniform;
+      shader.uniforms.terrainRepeat = material.userData.terrainRepeatUniform;
+      shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
+      shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
+      // A second compile (gizmo interaction can rebuild programs) must not
+      // inject the helpers twice, and must not leave the stock map chunk in
+      // place. The stock chunk samples uv, which is not the atlas.
+      if (shader.fragmentShader.includes("terrainCell(")) return;
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "#include <uv_pars_vertex>",
+          `#include <uv_pars_vertex>
+attribute vec2 uv1;
+attribute vec2 uv2;
+attribute vec2 uv3;
+varying vec3 vTerrainWorld;
+varying vec3 vTerrainNormal;
+varying vec2 vTerrainLayer;
+varying vec2 vTerrainShade;
+varying vec2 vTerrainMark;`
+        )
+        .replace(
+          "#include <uv_vertex>",
+          `#include <uv_vertex>
+vTerrainLayer = uv1;
+vTerrainShade = uv2;
+vTerrainMark = uv3;
+vTerrainWorld = (modelMatrix * vec4(position, 1.0)).xyz;
+vTerrainNormal = normalize(mat3(modelMatrix) * normal);`
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <uv_pars_fragment>",
+          `#include <uv_pars_fragment>
+varying vec3 vTerrainWorld;
+varying vec3 vTerrainNormal;
+varying vec2 vTerrainLayer;
+varying vec2 vTerrainShade;
+varying vec2 vTerrainMark;
+uniform float terrainCols;
+uniform float terrainRepeat;
+uniform float terrainDebug;
+uniform float terrainLayerMissing;`
+        )
+        .replace("void main() {", `${TERRAIN_FUNCS}\nvoid main() {`)
+        .replace("#include <map_fragment>", TERRAIN_MAP);
+    };
+    // Stable key. The default key is the onBeforeCompile source, which changes
+    // identity if the callback is wrapped again and would swap in a program
+    // that never received the atlas uniforms.
+    material.customProgramCacheKey = () => `terrain|${columns}|${repeat}`;
+    material.needsUpdate = true;
+    // WebGPU does not run onBeforeCompile. The node graph reads the same
+    // uniform objects the GLSL path writes.
+    if (terrainNodes) terrainNodes.attachTerrainColor(material);
+    return material;
+  }
+
+  function bindTerrainMesh(mesh) {
+    mesh.frustumCulled = false;
+    mesh.onBeforeRender = () => {
+      const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      if (!material || !material.userData) return;
+      const atlas = material.userData.terrainMap;
+      // The node colour samples terrainMap. Putting map back asks the standard
+      // node for attribute "uv", which terrain tiles do not have.
+      if (atlas && material.map !== atlas && !material.userData.terrainNode) material.map = atlas;
+      const shader = material.userData.terrainShaderRef;
+      if (!shader || !shader.uniforms) return;
+      shader.uniforms.terrainCols = material.userData.terrainColsUniform;
+      shader.uniforms.terrainRepeat = material.userData.terrainRepeatUniform;
+      shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
+      shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
+    };
+  }
+
+  function addTerrainPart(root, geometry, material) {
+    const marks = geometry.getAttribute("uv3");
+    const indices = geometry.index?.array;
+    if (material.userData.terrainShader && marks && indices) {
+      const ground = [], sub = [];
+      for (let i = 0; i < indices.length; i += 3) {
+        const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+        const isSub = marks.getY(a) > 0.5 || marks.getY(b) > 0.5 || marks.getY(c) > 0.5;
+        (isSub ? sub : ground).push(a, b, c);
+      }
+      if (sub.length) {
+        const outline = new THREE.BufferGeometry();
+        outline.setAttribute("position", geometry.getAttribute("position"));
+        outline.setIndex(new THREE.BufferAttribute(indices.constructor.from(sub), 1));
+        const mesh = new THREE.Mesh(outline, subTerrainMaterial);
+        mesh.userData.subTerrain = true;
+        mesh.visible = showSub;
+        root.add(mesh);
+        if (!ground.length) {
+          geometry.dispose();
+          return;
+        }
+        geometry.setIndex(new THREE.BufferAttribute(indices.constructor.from(ground), 1));
+      }
+    }
+    const mesh = new THREE.Mesh(geometry, material);
+    if (material.userData.terrainShader) bindTerrainMesh(mesh);
+    root.add(mesh);
+  }
+
+  function mergeStatic(template) {
+    const byMaterial = new Map();
+    template.traverse((child) => {
+      if (!child.isMesh || !child.geometry) return;
+      const source = Array.isArray(child.material) ? child.material[0] : child.material;
+      if (!source) return;
+      const geometry = child.geometry.clone();
+      const terrain =
+        geometry.getAttribute("uv1") &&
+        (((source.userData && source.userData.banc) === "terrain") || (child.name || "").includes("terrain"));
+      let material = prepareMaterial(source, terrain ? "terrain" : "");
+      if (geometry.getAttribute("color") || terrain) {
+        material = cloneMaterialPreservingTextures(material);
+        if (geometry.getAttribute("color")) material.vertexColors = true;
+        material.needsUpdate = true;
+      }
+      if (terrain) installTerrainShader(material);
+      child.updateWorldMatrix(true, false);
+      geometry.applyMatrix4(child.matrixWorld);
+      const list = byMaterial.get(material) || { material, geometries: [] };
+      list.geometries.push(geometry);
+      byMaterial.set(material, list);
+    });
+    const root = new THREE.Group();
+    for (const group of byMaterial.values()) {
+      let geometry = group.geometries[0];
+      if (group.geometries.length > 1) {
+        try {
+          geometry = mergeGeometries(group.geometries, false);
+          group.geometries.forEach((item) => item.dispose());
+        } catch {
+          for (const item of group.geometries) addTerrainPart(root, item, group.material);
+          continue;
+        }
+      }
+      if (geometry) addTerrainPart(root, geometry, group.material);
+    }
+    return root;
+  }
+
+  function terrainCurrent(token) {
+    return token === terrainToken;
+  }
+
+  async function indexTerrain(root, token) {
+    const geometries = root.children.filter((child) => !child.userData.subTerrain).map((child) => child.geometry);
+    if (!geometries.length || typeof Worker === "undefined") return;
+    const worker = new Worker(new URL("./terrain-index-worker.js", import.meta.url), { type: "module" });
+    try {
+      for (const geometry of geometries) {
+        if (!terrainCurrent(token)) break;
+        const position = geometry.getAttribute("position");
+        const index = geometry.index;
+        if (position.isInterleavedBufferAttribute || index?.isInterleavedBufferAttribute) continue;
+        const result = await new Promise((resolve, reject) => {
+          worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data);
+          worker.onerror = (event) => reject(new Error(event.message));
+          worker.postMessage({ position: position.array, index: index?.array });
+        });
+        if (terrainCurrent(token)) geometry.boundsTree = MeshBVH.deserialize(result, geometry, { setIndex: false });
+      }
+    } finally {
+      worker.terminate();
+    }
+  }
+
+  async function warmTerrain(root) {
+    await warmWebGLPrograms(renderer, root, camera, scene);
+    const maps = new Set();
+    root.traverse((child) => {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        const atlas = material && (material.map || (material.userData && material.userData.terrainMap));
+        if (atlas) maps.add(atlas);
+      }
+    });
+    for (const map of maps) {
+      const image = map.image;
+      if (image && image.complete === false && typeof image.decode === "function") {
+        try {
+          await image.decode();
+        } catch {
+          /* the loader already decoded it, or the browser will upload on draw */
+        }
+      }
+      if (typeof renderer.initTexture === "function") renderer.initTexture(map);
+    }
+  }
+
+  function showTerrain(nextRoot) {
+    uvDirty = true;
+    const previous = terrainRoot;
+    terrainRoot = nextRoot;
+    if (previous && previous !== nextRoot) {
+      previous.removeFromParent();
+      if (![...recentTerrain.values()].includes(previous)) disposeTerrainObject(previous);
+    }
+    if (nextRoot) {
+      scene.add(nextRoot);
+      applyTerrainUniforms();
+      textureCpuReleaseDirty = true;
+    }
+    clearGround();
+    applyGround();
+    requestRender();
+  }
+
+  function rememberTerrain(url, root) {
+    recentTerrain.delete(url);
+    recentTerrain.set(url, root);
+    if (recentTerrain.size > 2) {
+      const oldest = recentTerrain.keys().next().value;
+      const evicted = recentTerrain.get(oldest);
+      recentTerrain.delete(oldest);
+      templateCache.delete(oldest);
+      if (evicted !== terrainRoot) disposeTerrainObject(evicted);
+    }
+  }
+
+  async function loadTerrain(token, banc) {
+    if (!banc || !hooks.fetchTerrain) return;
+    retainLoad();
+    try {
+      await loadTerrainBody(token, banc);
+    } finally {
+      releaseLoad();
+      if (terrainCurrent(token)) {
+        if (scenePreview) {
+          scenePreview.terrainPending = false;
+          scenePreview.terrain?.removeFromParent();
+        }
+        if (hooks.onTerrainReady) hooks.onTerrainReady();
+        modelLoads?.background();
+      }
+    }
+  }
+
+  async function loadTerrainBody(token, banc) {
+    let meta;
+    try {
+      meta = await hooks.fetchTerrain(banc);
+    } catch (error) {
+      meta = { status: "none", reason: error.message || "The map model request failed." };
+    }
+    if (!terrainCurrent(token)) return;
+    if (hooks.onTerrain) hooks.onTerrain(meta);
+    if (meta.status !== "mesh" || !meta.url) {
+      showTerrain(null);
+      return;
+    }
+    await installTerrainModel(token, meta);
+    if (terrainCurrent(token) && meta.fitPending) void refineTerrain(token, banc, meta.url);
+    if (hooks.fetchSurface) void loadLocalGround(token, banc);
+    if (terrainCurrent(token)) void requestGround(orbit.target.x, orbit.target.z);
+  }
+
+  async function loadLocalGround(token, banc) {
+    if (!hooks.fetchSurface || !banc) return;
+    const before = performance.memory ? performance.memory.usedJSHeapSize : 0;
+    const started = performance.now();
+    try {
+      const meta = await loadGroundSurface(hooks.fetchSurface(banc));
+      if (!terrainCurrent(token) || !meta) return;
+      const after = performance.memory ? performance.memory.usedJSHeapSize : 0;
+      console.info("Local ground surface ready", {
+        ...meta,
+        loadMs: performance.now() - started,
+        jsHeapDeltaMB: (after - before) / 1048576,
+      });
+      requestRender();
+    } catch (error) {
+      console.warn("Could not load the local ground surface", error);
+    }
+  }
+
+  async function refineTerrain(token, banc, previousUrl) {
+    try {
+      const meta = await hooks.fetchTerrain(banc, true);
+      if (terrainCurrent(token) && meta.status === "mesh" && meta.url && meta.url !== previousUrl) {
+        await installTerrainModel(token, meta);
+      }
+    } catch (error) {
+      if (terrainCurrent(token)) console.warn("Could not refine the scene terrain", error);
+    }
+  }
+
+  async function installTerrainModel(token, meta) {
+    const cachedTerrain = recentTerrain.get(meta.url);
+    if (cachedTerrain) {
+      rememberTerrain(meta.url, cachedTerrain);
+      showTerrain(cachedTerrain);
+      return;
+    }
+    try {
+      const template = await ensureTemplate(meta.url, meta);
+      if (!terrainCurrent(token)) return;
+      await new Promise((resolve) => {
+        if (typeof requestIdleCallback === "function") requestIdleCallback(() => resolve(), { timeout: 800 });
+        else setTimeout(resolve, 0);
+      });
+      if (!terrainCurrent(token)) return;
+      if (isTerrainProxy(meta)) {
+        const box = measureTemplate(template);
+        if (!terrainCurrent(token)) return;
+        if (!box.isEmpty()) placeGround(box);
+        uvDirty = true;
+        const previous = terrainRoot;
+        terrainRoot = null;
+        disposeTerrainObject(previous);
+        requestRender();
+        return;
+      }
+      // A heightmap mesh is the ground. Leave the proxy grid off so it cannot sit above the field.
+      const nextRoot = mergeStatic(template);
+      nextRoot.name = "terrain";
+      nextRoot.visible = showGround;
+      // Draw the field before batched actors. A gizmo drag re-uploads the
+      // float matrix texture; drawing the field first keeps that upload from
+      // being the texture the atlas sampler sees.
+      nextRoot.renderOrder = -1;
+      nextRoot.frustumCulled = false;
+      nextRoot.raycast = () => {};
+      let missingLayer = false;
+      nextRoot.traverse((child) => {
+        child.raycast = () => {};
+        child.castShadow = false;
+        child.receiveShadow = false;
+        child.frustumCulled = false;
+        child.renderOrder = -1;
+        if (child.userData.subTerrain) return;
+        if (child.isMesh && child.material?.userData.terrainShader) bindTerrainMesh(child);
+        const layered = Boolean(child.geometry && child.geometry.getAttribute("uv3"));
+        if (child.isMesh && child.geometry && !layered) missingLayer = true;
+        const materials = Array.isArray(child.material) ? child.material : [child.material];
+        for (const material of materials) {
+          if (!material) continue;
+          material.transparent = false;
+          material.depthWrite = true;
+          material.side = THREE.FrontSide;
+          if (material.userData && material.userData.terrainLayerUniform) {
+            material.userData.terrainLayerUniform.value = layered ? 0 : 1;
+          }
+          material.needsUpdate = true;
+        }
+      });
+      if (missingLayer) {
+        const message = "Terrain mesh has no per-vertex layer attribute (TEXCOORD_3). Tile colors and Sub terrain need a models-22 rebuild; this glb is from an older cache. Tile colors draws warning stripes until then.";
+        console.warn(message);
+        if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
+      }
+      try {
+        await Promise.allSettled([indexTerrain(nextRoot, token), warmTerrain(nextRoot)]).then((results) => {
+          for (const result of results) if (result.status === "rejected") console.warn(result.reason);
+        });
+      } catch (error) {
+        console.warn(error);
+      }
+      if (!terrainCurrent(token)) {
+        disposeTerrainObject(nextRoot);
+        return;
+      }
+      rememberTerrain(meta.url, nextRoot);
+      showTerrain(nextRoot);
+    } catch (error) {
+      if (terrainCurrent(token) && hooks.onTerrain) {
+        hooks.onTerrain({ status: "box", reason: error.message || "The map glTF did not load.", source: meta.source || "" });
+      }
+    }
   }
 
   function attach() {
     const entry = selected ? entries.get(selected) : null;
-    if (!entry || !entry.id || !entry.pivot.visible) {
+    if (!entry || !canGizmo({ id: entry.id, shown: entry.pivot.visible, locked: entry.locked })) {
       transform.detach();
       return;
     }
@@ -222,30 +3100,231 @@ export function createViewport(host, hooks) {
 
   function select(id) {
     selected = id;
+    nextDetailScan = 0;
+    prioritizeLoad();
     for (const entry of entries.values()) paint(entry);
+    syncBatchVisibility();
     attach();
     syncLabels();
+    requestRender();
   }
 
-  function setNav(mode) {
-    nav = mode;
-    orbit.enabled = mode === "orbit";
+  function aimOrbit(event) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    const roots = [];
+    if (terrainRoot) roots.push(terrainRoot);
+    for (const batch of batches) roots.push(batch.mesh);
+    for (const entry of entries.values()) {
+      if (entry.pivot.visible) roots.push(entry.pivot);
+    }
+    const hits = roots.length ? raycaster.intersectObjects(roots, true) : [];
+    const hit = hits.find((item) => item.point);
+    if (hit) {
+      orbit.target.copy(hit.point);
+      return;
+    }
+    const entry = selected ? entries.get(selected) : null;
+    if (entry) {
+      entry.pivot.getWorldPosition(orbit.target);
+      return;
+    }
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+  }
+
+  function requestLookLock() {
+    const canvas = renderer.domElement;
+    if (!canvas.requestPointerLock || document.pointerLockElement === canvas) return;
+    const pending = canvas.requestPointerLock();
+    if (pending && typeof pending.catch === "function") pending.catch(() => {});
+  }
+
+  function releaseLook() {
     looking = false;
+    lookLocked = false;
+    const canvas = renderer.domElement;
+    if (document.pointerLockElement === canvas && document.exitPointerLock) document.exitPointerLock();
+  }
+
+  function applyLook(dx, dy) {
+    if (!dx && !dy) return;
+    camera.rotation.order = "YXZ";
+    camera.rotation.y -= dx * 0.003;
+    camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x - dy * 0.003));
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+    requestRender();
   }
 
   function setGizmo(mode) {
     transform.setMode(mode);
-    transform.setSpace(mode === "rotate" ? "local" : "world");
+    transform.setSpace(mode === "translate" ? "world" : "local");
   }
 
-  function setFlags({ hidden, labels }) {
+  function pivotScale(pivot) {
+    return [pivot.scale.x, pivot.scale.y, pivot.scale.z];
+  }
+
+  function applyTerrainUniforms() {
+    if (!terrainRoot) return;
+    const debug = showTerrainDebug ? 1 : 0;
+    terrainRoot.traverse((child) => {
+      if (child.userData.subTerrain) child.visible = showSub;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        if (!material || !material.userData) continue;
+        if (material.userData.terrainDebugUniform) material.userData.terrainDebugUniform.value = debug;
+      }
+    });
+  }
+
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
+    if (volumes !== undefined) hideVolumes = volumes;
+    if (ground !== undefined) showGround = Boolean(ground);
+    if (water !== undefined) showWater = Boolean(water);
+    if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
+    if (subTerrain !== undefined) showSub = Boolean(subTerrain);
+    if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
+    if (distance !== undefined) drawDistance = Number(distance) || 0;
+    if (next) Object.assign(categories, next);
+    if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
-      if (entry.status === "hidden") entry.pivot.visible = showHidden;
+      const gate = {
+        status: entry.status,
+        present: entry.present,
+        category: entry.category,
+        volume: entry.volume,
+        showHidden,
+        categories,
+        hideVolumes,
+        companion: entry.companion,
+        pickable: entry.pickable,
+      };
+      entry.locked = actorLocked(gate);
+      entry.pivot.visible = actorShown(gate);
+      syncPreviewPlacement(entry);
+      syncGhost(entry);
     }
+    syncBatchVisibility();
+    applyGround();
+    applyWater();
+    applyTerrainUniforms();
+    applyBlendUniforms();
     attach();
     syncLabels();
+    prioritizeLoad();
+    requestRender();
+  }
+
+  function modelInfo(id) {
+    const entry = entries.get(id);
+    if (!entry) return null;
+    return entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
+  }
+
+  function auditPlacements() {
+    const actual = new THREE.Matrix4();
+    const expected = new THREE.Matrix4();
+    const differed = () => actual.elements.some((value, i) => Math.abs(value - expected.elements[i]) > 0.01);
+    const placements = [];
+    for (const entry of entries.values()) {
+      if (!entry.id || entry.region || isMarker(entry.gyaml)) continue;
+      const preview = scenePreview?.placements.get(entry.key) || [];
+      const lods = [...new Set(entry.slots.filter((slot) => slot.shown).map((slot) => slot.lod))].sort((a, b) => a - b);
+      let mismatched = false;
+      if (entry.pivot.visible) {
+        entry.pivot.updateWorldMatrix(true, false);
+        displayedActorMatrix(entry, expected);
+        for (const slot of entry.slots) {
+          if (!slot.shown) continue;
+          slot.mesh.getMatrixAt(slot.index, actual);
+          mismatched ||= differed();
+        }
+        for (const slot of preview) {
+          if (slot.mesh.userData.previewIds[slot.index] !== entry.key) continue;
+          slot.mesh.getMatrixAt(slot.index, actual);
+          displayedActorMatrix(entry, expected).multiply(slot.local);
+          mismatched ||= differed();
+        }
+      }
+      const status = !entry.pivot.visible ? "hidden" : entry.slots.length ? "detail"
+        : preview.length ? "preview" : entry.modelMeta?.status === "box" ? "box" : "deferred";
+      placements.push({ id: entry.id, gyaml: entry.gyaml, source: entry.modelMeta?.source || "",
+        position: entry.pivot.position.toArray(), rotation: fileRotate(entry.pivot), scale: pivotScale(entry.pivot),
+        status, visibleLods: lods, mismatched,
+        ...(entry.fishPreviewOffset ? { previewY: entry.pivot.position.y + entry.fishPreviewOffset } : {}) });
+    }
+    return placements;
+  }
+
+  function auditView() {
+    camera.updateMatrixWorld();
+    const surface = (name, geometry, material, visible, lod) => ({
+      name,
+      lod,
+      indices: geometry.index?.count ?? null,
+      attributes: Object.fromEntries(Object.entries(geometry.attributes).map(([key, attribute]) =>
+        [key, { components: attribute.itemSize, count: attribute.count, normalized: attribute.normalized }])),
+      material: {
+        name: material.name || material.type, textured: Boolean(material.map),
+        alphaTest: material.alphaTest, transparent: material.transparent, side: material.side,
+      },
+      visible,
+    });
+    const entry = entries.get(selected);
+    const detail = (entry?.slots || []).map((slot) => surface(slot.family,
+      slot.mesh.userData.pick.geometries[slot.index], slot.mesh.material, slot.shown && slot.mesh.visible, slot.lod));
+    const preview = (scenePreview?.placements.get(selected) || []).map(({ mesh, index }) =>
+      surface(mesh.userData.previewSurface, mesh.geometry, mesh.material,
+        mesh.userData.previewIds[index] === selected && mesh.visible && Boolean(scenePreview.root.parent),
+        Number(/^lod(\d+):/.exec(mesh.userData.previewSurface)?.[1] ?? 0)));
+    return {
+      camera: {
+        position: camera.position.toArray(), target: orbit.target.toArray(),
+        viewMatrix: camera.matrixWorldInverse.toArray(), projectionMatrix: camera.projectionMatrix.toArray(),
+        viewport: [renderer.domElement.width, renderer.domElement.height],
+        fov: camera.fov, aspect: camera.aspect, near: camera.near, far: camera.far,
+      },
+      selected: entry ? { id: entry.id, gyaml: entry.gyaml, detail, preview } : null,
+      centerSurface: auditCenterSurface(),
+      streaming: { queued: statQueued, loading: statLoading, deferred: statDeferred, backgroundLoading: statBackgroundLoading },
+    };
+  }
+
+  function auditCenterSurface() {
+    const roots = batches.map(({ mesh }) => mesh).filter((mesh) => mesh.visible && mesh.parent);
+    if (scenePreview?.root.parent && scenePreview.root.visible) {
+      for (const meshes of scenePreview.models.values()) roots.push(...meshes.filter((mesh) => mesh.visible));
+    }
+    const centerRay = new THREE.Raycaster(undefined, undefined, camera.near, camera.far);
+    centerRay.firstHitOnly = true;
+    centerRay.setFromCamera(new THREE.Vector2(), camera);
+    for (const hit of centerRay.intersectObjects(roots, false)) {
+      const entry = entries.get(idOfHit(hit));
+      if (!entry?.pivot.visible) continue;
+      const preview = hit.object.userData.previewSurface;
+      const slot = entry.slots.find(({ mesh, index }) => mesh === hit.object && index === hit.batchId);
+      return {
+        id: entry.id,
+        gyaml: entry.gyaml,
+        source: entry.modelMeta?.source || "",
+        modelState: entry.modelMeta?.status || "pending",
+        reason: entry.modelMeta?.reason || "",
+        stage: preview !== undefined ? "preview" : "detail",
+        surface: preview ?? slot?.family ?? hit.object.name,
+        lod: preview !== undefined ? Number(/^lod(\d+):/.exec(preview)?.[1] ?? 0) : slot?.lod,
+        distance: hit.distance,
+        point: hit.point.toArray(),
+      };
+    }
+    return null;
   }
 
   function frame(id) {
@@ -253,8 +3332,117 @@ export function createViewport(host, hooks) {
     else frameObjects([...entries.values()].filter((entry) => entry.pivot.visible).map((entry) => entry.pivot));
   }
 
+  function isCollisionEntry(entry) {
+    const name = String(entry.gyaml || "").toLowerCase();
+    return name.includes("collision") || name.includes("collider");
+  }
+
+  function rememberedGround(x, z) {
+    return nearestGroundSample(groundHits, x, z, GROUND_SNAP_RADIUS);
+  }
+
+  function excludeGroundActor(entry) {
+    return entry && isMovedTerrainActor(entry.gyaml) ? entry.id : "";
+  }
+
+  function requestGround(x, z, entry) {
+    if (groundSurfaceReady()) return null;
+    if (!hooks.fetchGround || !terrainBanc) return null;
+    groundWanted = { x, z, banc: terrainBanc, exclude: excludeGroundActor(entry), entry };
+    if (!groundPump) groundPump = pumpGround();
+    return groundPump;
+  }
+
+  async function pumpGround() {
+    try {
+      while (groundWanted) {
+        const job = groundWanted;
+        groundWanted = null;
+        try {
+          const data = await hooks.fetchGround(job.banc, job.x, job.z, job.exclude);
+          if (terrainBanc !== job.banc) continue;
+          if (Number.isFinite(data && data.worldY)) {
+            groundHits.push({ x: job.x, z: job.z, y: data.worldY });
+            if (groundHits.length > 200) groundHits.splice(0, groundHits.length - 200);
+            if (job.entry) {
+              const latest = groundWanted;
+              applyComposedSnap(job.entry, job.x, job.z, data.worldY, latest);
+            }
+          }
+        } catch (error) {
+          console.warn("Could not sample the composed ground", error);
+        }
+      }
+    } finally {
+      const leftover = groundWanted;
+      groundPump = null;
+      if (leftover) groundPump = pumpGround();
+    }
+  }
+
+  function surfaceAt(x, y, z, ignoreId) {
+    const hits = [];
+    snapRay.ray.origin.set(x, y + 80, z);
+    snapRay.ray.direction.set(0, -1, 0);
+    const entry = ignoreId ? entries.get(ignoreId) : null;
+    const local = sampleGroundSurface(x, z, excludeGroundActor(entry));
+    if (local != null) hits.push({ y: local });
+    // When Snap uses a composed sampler, do not raycast the visible heightmap.
+    // That mesh misses island floors, and chooseSnap will then prefer the lower
+    // slope once Y has dropped, which also shifts the gizmo XZ plane.
+    if (local == null && terrainRoot && !hooks.fetchGround) {
+      terrainRoot.traverse((child) => {
+        if (!child.isMesh || !child.visible || !child.geometry || child.userData.subTerrain) return;
+        const found = [];
+        try {
+          acceleratedRaycast.call(child, snapRay, found);
+        } catch {
+          return;
+        }
+        for (const hit of found) if (hit.point) hits.push({ y: hit.point.y });
+      });
+    }
+    for (const entry of entries.values()) {
+      if (!isCollisionEntry(entry) || !entry.pivot.visible) continue;
+      if (entry.key === ignoreId || entry.id === ignoreId) continue;
+      const top = volumeSurfaceY(entry, snapRay);
+      if (top != null) hits.push({ y: top });
+    }
+    if (local == null) {
+      const remembered = rememberedGround(x, z);
+      if (remembered) hits.push({ y: remembered.y });
+    }
+    return chooseSnap(y, hits);
+  }
+
+  function applyComposedSnap(entry, requestX, requestZ, worldY, latest) {
+    if (!snapOn || !entries.get(entry.id) || !Number.isFinite(worldY)) return false;
+    const cur = entry.pivot.position;
+    if (!shouldApplyGroundReply(requestX, requestZ, cur.x, cur.z, latest && latest.x, latest && latest.z)) return false;
+    const next = surfaceAt(cur.x, worldY, cur.z, entry.id);
+    cur.y = next == null ? worldY : next;
+    syncPreviewPlacement(entry);
+    hooks.onPreview(entry.id, [cur.x, cur.y, cur.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+    syncInstanceMatrix(entry);
+    requestRender();
+    return true;
+  }
+
+  function maybeSnap(entry) {
+    if (!snapOn || !entry || transform.mode !== "translate") return;
+    const p = entry.pivot.position;
+    const y = surfaceAt(p.x, p.y, p.z, entry.id);
+    if (y != null) p.y = y;
+    return requestGround(p.x, p.z, entry);
+  }
+
   function spawnPoint() {
-    return [round(orbit.target.x), round(orbit.target.y), round(orbit.target.z)];
+    const point = [round(orbit.target.x), round(orbit.target.y), round(orbit.target.z)];
+    if (!snapOn) return point;
+    void requestGround(point[0], point[2], null);
+    const y = surfaceAt(point[0], point[1], point[2], null);
+    if (y == null) return point;
+    return [point[0], round(y), point[2]];
   }
 
   function round(value) {
@@ -271,22 +3459,131 @@ export function createViewport(host, hooks) {
   }
 
   const raycaster = new THREE.Raycaster();
+  const snapRay = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
 
-  function pick(event) {
+  function aimed(event, includePreview = false) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects([...entries.values()].map((entry) => entry.pivot), true);
-    const hit = hits.find((item) => item.object.visible);
-    hooks.onSelect(hit ? idOf(hit.object) : null);
+    const roots = [];
+    for (const batch of batches) roots.push(batch.mesh);
+    if (includePreview && scenePreview?.root.parent) {
+      for (const meshes of scenePreview.models.values()) roots.push(...meshes);
+    }
+    for (const entry of entries.values()) {
+      if (canPick({ shown: entry.pivot.visible, locked: entry.locked }) && (!entry.parts || !entry.parts.length)) roots.push(entry.pivot);
+    }
+    const groups = classify(roots.length ? raycaster.intersectObjects(roots, true) : []);
+    for (const found of volumeRayHits(raycaster)) {
+      if (!groups.volumes.includes(found.id)) groups.volumes.push(found.id);
+      if (found.edge && !groups.edges.includes(found.id)) groups.edges.push(found.id);
+    }
+    return groups;
   }
 
+  const unitBox = new THREE.Box3(new THREE.Vector3(-0.5, -0.5, -0.5), new THREE.Vector3(0.5, 0.5, 0.5));
+  const localRay = new THREE.Ray();
+  const localInverse = new THREE.Matrix4();
+  const localPoint = new THREE.Vector3();
+
+  function volumeRayHits(raycaster) {
+    const found = [];
+    for (const entry of entries.values()) {
+      if (!entry.volume || !canPick({ shown: entry.pivot.visible, locked: entry.locked })) continue;
+      if (entry.parts && entry.parts.length) continue;
+      entry.mesh.updateWorldMatrix(true, false);
+      localInverse.copy(entry.mesh.matrixWorld).invert();
+      localRay.copy(raycaster.ray).applyMatrix4(localInverse);
+      if (!localRay.intersectBox(unitBox, localPoint)) continue;
+      const edge = ["x", "y", "z"].filter((axis) => Math.abs(Math.abs(localPoint[axis]) - 0.5) < 0.08).length >= 2;
+      const worldPoint = localPoint.clone().applyMatrix4(entry.mesh.matrixWorld);
+      found.push({ id: entry.key, edge, distance: raycaster.ray.origin.distanceTo(worldPoint) });
+    }
+    found.sort((a, b) => a.distance - b.distance);
+    return found;
+  }
+
+  function volumeSurfaceY(entry, ray) {
+    if (!entry.mesh) return null;
+    entry.mesh.updateWorldMatrix(true, false);
+    localInverse.copy(entry.mesh.matrixWorld).invert();
+    localRay.copy(ray.ray).applyMatrix4(localInverse);
+    if (!localRay.intersectBox(unitBox, localPoint)) return null;
+    return localPoint.clone().applyMatrix4(entry.mesh.matrixWorld).y;
+  }
+
+  function idOfHit(hit) {
+    const index = hit.batchId !== undefined ? hit.batchId : hit.instanceId;
+    if (index !== undefined) {
+      const batch = batches.find((item) => item.mesh === hit.object);
+      if (batch) return batch.ids[index] || null;
+      return hit.object.userData.previewIds?.[index] || null;
+    }
+    return idOf(hit.object);
+  }
+
+  function classify(hits) {
+    const solids = [];
+    const volumes = [];
+    const edges = [];
+    for (const hit of hits) {
+      if (!hit.object.visible) continue;
+      const id = idOfHit(hit);
+      const entry = id ? entries.get(id) : null;
+      if (!entry || !canPick({ shown: entry.pivot.visible, locked: entry.locked })) continue;
+      if (entry.volume && (!entry.parts || !entry.parts.length)) {
+        if (!volumes.includes(id)) volumes.push(id);
+        if (nearEdge(hit, entry) && !edges.includes(id)) edges.push(id);
+      } else if (!solids.includes(id)) {
+        solids.push(id);
+      }
+    }
+    return { solids, volumes, edges };
+  }
+
+  function nearEdge(hit, entry) {
+    const local = entry.mesh.worldToLocal(hit.point.clone());
+    const close = ["x", "y", "z"].filter((axis) => Math.abs(Math.abs(local[axis]) - 0.5) < 0.08);
+    return close.length >= 2;
+  }
+
+  function signature(groups) {
+    return [...groups.solids, "|", ...groups.edges, "|", ...groups.volumes].join(",");
+  }
+
+  function pick(event) {
+    const groups = aimed(event, true);
+    const repeat = Boolean(
+      lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
+    );
+    const id = chooseHit({ ...groups, selected, alt: event.altKey, repeat });
+    lastClick = { x: event.clientX, y: event.clientY, signature: signature(groups) };
+    hooks.onSelect(id);
+  }
+
+  renderer.domElement.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0 || !event.altKey || transform.dragging) return;
+      savedOrbitTarget.copy(orbit.target);
+      aimOrbit(event);
+      orbit.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+      orbitArmed = true;
+      orbitMoved = false;
+      orbitSettle = 0;
+      requestRender();
+    },
+    true,
+  );
+
   renderer.domElement.addEventListener("pointerdown", (event) => {
-    if (event.button === 2 && nav === "fly") {
+    if (event.button === 2) {
       looking = true;
       lastPointer = { x: event.clientX, y: event.clientY };
+      renderer.domElement.setPointerCapture(event.pointerId);
+      requestLookLock();
       event.preventDefault();
       return;
     }
@@ -297,82 +3594,241 @@ export function createViewport(host, hooks) {
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
-    if (looking && lastPointer) {
-      const dx = event.clientX - lastPointer.x;
-      const dy = event.clientY - lastPointer.y;
-      lastPointer = { x: event.clientX, y: event.clientY };
-      camera.rotation.order = "YXZ";
-      camera.rotation.y -= dx * 0.003;
-      camera.rotation.x = Math.max(-1.4, Math.min(1.4, camera.rotation.x - dy * 0.003));
-      const forward = new THREE.Vector3();
-      camera.getWorldDirection(forward);
-      orbit.target.copy(camera.position).add(forward.multiplyScalar(8));
+    if (looking) {
+      applyLook(event.movementX || 0, event.movementY || 0);
       return;
     }
+    if ((event.buttons & 2) !== 0) orbitMoved = true;
     if (lastPointer && event.buttons === 1) {
       const dx = event.clientX - lastPointer.x;
       const dy = event.clientY - lastPointer.y;
+      if (event.altKey && (dx !== 0 || dy !== 0)) orbitMoved = true;
       if (Math.hypot(dx, dy) > 4) lastPointer.moved = true;
     }
     if (transform.dragging) return;
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-    raycaster.setFromCamera(pointer, camera);
-    const hits = raycaster.intersectObjects([...entries.values()].map((entry) => entry.pivot), true);
-    const next = hits.length ? idOf(hits[0].object) : null;
+    const next = chooseHit(aimed(event));
     const key = next || null;
     if (key !== hovered) {
+      const previous = hovered ? entries.get(hovered) : null;
       hovered = key;
+      if (previous) syncGhost(previous);
+      const nextEntry = hovered ? entries.get(hovered) : null;
+      if (nextEntry) syncGhost(nextEntry);
       syncLabels();
+      requestRender();
     }
   });
 
   function endPointer(event) {
-    if (event.button === 2) looking = false;
-    if (event.button === 0 && lastPointer && !lastPointer.moved && !gizmoUsed && !transform.dragging) pick(event);
-    if (nav === "orbit") orbit.enabled = true;
+    if (event.button === 2) {
+      releaseLook();
+      event.preventDefault();
+    }
+    if (event.button === 0 && lastPointer && !lastPointer.moved && !orbitMoved && !gizmoUsed && !transform.dragging) pick(event);
+    const didOrbit = orbitMoved;
+    if (event.button === 0 && orbitArmed && !didOrbit) orbit.target.copy(savedOrbitTarget);
+    orbitArmed = false;
+    orbitMoved = false;
+    orbit.mouseButtons.LEFT = -1;
+    orbit.enabled = true;
+    if (orbitGesture) {
+      orbitGesture = false;
+      if (didOrbit || event.button === 1) orbitSettle = 24;
+    }
     gizmoUsed = false;
     lastPointer = null;
   }
 
   renderer.domElement.addEventListener("pointerup", endPointer);
-  renderer.domElement.addEventListener("pointerleave", () => {
-    looking = false;
+  window.addEventListener("pointerup", (event) => {
+    if (event.button === 2 && looking) releaseLook();
+  });
+  document.addEventListener("pointerlockchange", () => {
+    const locked = document.pointerLockElement === renderer.domElement;
+    if (locked) {
+      lookLocked = true;
+      return;
+    }
+    // Esc, or the browser dropping the lock. A refused request never locked,
+    // so a drag that is still held keeps turning through pointer capture.
+    if (lookLocked) {
+      lookLocked = false;
+      looking = false;
+    }
   });
   renderer.domElement.addEventListener("contextmenu", (event) => event.preventDefault());
 
   transform.addEventListener("objectChange", () => {
+    if (sceneStreamStats?.editBytes === null) {
+      sceneStreamStats.editBytes = performance.getEntriesByType("resource").reduce((bytes, resource) => {
+        const path = new URL(resource.name, location.href).pathname;
+        return bytes + (resource.startTime >= sceneStreamStats.start
+          && (path.startsWith("/api/models/") || path.startsWith("/api/model-textures/")) ? resource.transferSize : 0);
+      }, 0);
+    }
     const entry = selected ? entries.get(selected) : null;
     if (!entry) return;
+    const axis = transform.axis;
+    if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) maybeSnap(entry);
+    syncPreviewPlacement(entry);
     const p = entry.pivot.position;
-    const r = entry.pivot.rotation;
-    hooks.onPreview(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
+    hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+    syncInstanceMatrix(entry);
+    requestRender();
   });
 
   transform.addEventListener("dragging-changed", (event) => {
-    orbit.enabled = !event.value && nav === "orbit";
+    orbit.enabled = !event.value;
     if (event.value) {
       gizmoUsed = true;
       return;
     }
     const entry = selected ? entries.get(selected) : null;
     if (!entry || !entry.id) return;
-    const p = entry.pivot.position;
-    const r = entry.pivot.rotation;
-    hooks.onTransform(entry.id, [p.x, p.y, p.z], [r.x, r.y, r.z]);
+    const finish = () => {
+      const p = entry.pivot.position;
+      hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+    };
+    const pending = maybeSnap(entry);
+    const wait = pending && typeof pending.then === "function"
+      ? pending.then(() => {
+        // A leftover request may have started as the pump finished.
+        return groundPump || maybeSnap(entry);
+      })
+      : maybeSnap(entry);
+    if (wait && typeof wait.then === "function") void wait.then(finish, finish);
+    else finish();
   });
 
-  window.addEventListener("keydown", (event) => {
-    if (isTyping(event)) return;
+  let keyWindow = null;
+  function onFlyKey(event) {
+    const docs = [document];
+    if (event.view && event.view.document && event.view.document !== document) docs.push(event.view.document);
+    if (isTyping(event) || docs.some((doc) => doc.querySelector("dialog[open]"))) return;
     keys.add(event.key.toLowerCase());
-  });
-  window.addEventListener("keyup", (event) => keys.delete(event.key.toLowerCase()));
-  window.addEventListener("blur", () => keys.clear());
+    requestRender();
+  }
+  function onFlyUp(event) {
+    keys.delete(event.key.toLowerCase());
+  }
+  function onFlyBlur() {
+    keys.clear();
+  }
+  function bindFlyKeys() {
+    const next = host.ownerDocument.defaultView || window;
+    if (next === keyWindow) return;
+    if (keyWindow) {
+      keyWindow.removeEventListener("keydown", onFlyKey);
+      keyWindow.removeEventListener("keyup", onFlyUp);
+      keyWindow.removeEventListener("blur", onFlyBlur);
+    }
+    keyWindow = next;
+    keyWindow.addEventListener("keydown", onFlyKey);
+    keyWindow.addEventListener("keyup", onFlyUp);
+    keyWindow.addEventListener("blur", onFlyBlur);
+  }
+  bindFlyKeys();
+
+  function scanTextureDetail() {
+    const candidates = new Map();
+    const ordered = [];
+    for (const entry of entries.values()) {
+      if (!entry.parts?.length || !entry.slots.length || !entry.pivot.visible) continue;
+      const chosen = entry.key === selected;
+      const distance = entry.pivot.position.distanceToSquared(camera.position);
+      if (!chosen && (distance > 45 * 45 || !entry.slots.some((slot) => slot.shown))) continue;
+      ordered.push({ entry, distance: chosen ? -1 : distance });
+    }
+    ordered.sort((a, b) => a.distance - b.distance);
+    const seen = new Set();
+    const inspected = new Set();
+    for (const { entry } of ordered) {
+      if (inspected.has(entry.parts)) continue;
+      if (inspected.size >= 48) break;
+      inspected.add(entry.parts);
+      for (const { material } of entry.parts) {
+        if (seen.has(material)) continue;
+        seen.add(material);
+        for (const texture of [...Object.values(material), ...Object.values(material.userData)]) {
+          const uri = texture?.isTexture && texture.userData.forgeFullTexture;
+          if (!uri || textureDetailFailed.has(uri)) continue;
+          const targets = candidates.get(uri) || new Set();
+          targets.add(texture);
+          candidates.set(uri, targets);
+        }
+      }
+    }
+    detailCandidates = candidates;
+  }
+
+  function installTextureDetail(texture, full) {
+    // WebGL tracks allocations by Source. Release the low allocation first so
+    // replacing it with a larger Source cannot reuse a texture of the old size.
+    texture.dispose();
+    texture.source = full.source;
+    texture.mipmaps = full.mipmaps;
+    texture.format = full.format;
+    texture.type = full.type;
+    texture.isCompressedTexture = Boolean(full.isCompressedTexture);
+    if (texture.isCompressedTexture) {
+      repairCompressedTexture(texture);
+    } else {
+      texture.generateMipmaps = true;
+      texture.needsUpdate = true;
+    }
+    delete texture.userData.forgeFullTexture;
+    textureCpuReleaseDirty = true;
+  }
+
+  function updateTextureDetail(now, parsedDetail) {
+    // Keep the bandwidth and decode slots available to nearby geometry and
+    // its first texture tier. Sharpen the textures once that work drains.
+    const geometryBusy = Boolean(statQueued || statLoading || modelStage?.pending.size);
+    if (geometryBusy && !textureDetailReady.size) return;
+    if (now >= nextDetailScan) {
+      nextDetailScan = now + 160;
+      scanTextureDetail();
+    }
+    let applied = parsedDetail;
+    for (const [uri, textures] of detailCandidates) {
+      const ready = textureDetailReady.get(uri);
+      if (ready) {
+        if (applied) {
+          requestRender();
+          continue;
+        }
+        applied = true;
+        detailCandidates.delete(uri);
+        textureDetailReady.delete(uri);
+        for (const texture of textures) installTextureDetail(texture, ready);
+        continue;
+      }
+      if (geometryBusy || textureDetailPending.size >= 2 || textureDetailPending.has(uri) || textureDetailFailed.has(uri)) continue;
+      const imageLoader = textureDetailLoaders.get(uri);
+      if (!imageLoader) continue;
+      textureDetailPending.add(uri);
+      sharedImage(uri, () => loadDetailImage(uri, imageLoader, true)).then((texture) => {
+        textureDetailReady.set(uri, texture);
+        if (textureDetailReady.size > 64) {
+          const first = textureDetailReady.keys().next().value;
+          const evicted = textureDetailReady.get(first);
+          textureDetailReady.delete(first);
+          if (first !== uri) disposeCachedTexture(evicted);
+        }
+      }).catch(() => {
+        textureDetailFailed.add(uri);
+      }).finally(() => {
+        textureDetailPending.delete(uri);
+        requestRender();
+      });
+    }
+  }
 
   function updateFly(dt) {
-    if (nav !== "fly") return;
-    const speed = (keys.has("shift") ? 32 : 10) * dt;
+    const speed = (keys.has("shift") || keys.has("x") ? 32 : 10) * dt;
     const forward = new THREE.Vector3();
     camera.getWorldDirection(forward);
     const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
@@ -383,66 +3839,311 @@ export function createViewport(host, hooks) {
     if (keys.has("a")) move.sub(right);
     if (keys.has("e")) move.y += 1;
     if (keys.has("q")) move.y -= 1;
-    if (move.lengthSq() === 0) return;
+    if (move.lengthSq() === 0) return false;
     move.normalize().multiplyScalar(speed);
     camera.position.add(move);
     orbit.target.add(move);
+    return true;
   }
 
+  let observedDoc = host.ownerDocument;
   function resize() {
+    bindFlyKeys();
+    if (host.ownerDocument !== observedDoc) {
+      observedDoc = host.ownerDocument;
+      observer.disconnect();
+      observer.observe(host);
+    }
     const width = host.clientWidth || 1;
     const height = host.clientHeight || 1;
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
     renderer.setSize(width, height, false);
     labels.setSize(width, height);
+    requestRender();
   }
 
   const observer = new ResizeObserver(resize);
   observer.observe(host);
   resize();
 
-  let running = true;
+  const lastCull = new THREE.Vector3(1e9, 1e9, 1e9);
+  let lastCullAt = 0;
+  const frameTimes = [];
+  let fps = 0;
+  let frameMs = null;
+  let lastTickAt = 0;
+  let statInstances = 0;
+  let statCulled = 0;
+  let statQueued = 0;
+  let statDeferred = 0;
+  let statBackgroundLoading = 0;
+  let statLoading = 0;
+  let statLoaded = 0;
+  let statConvert = 0;
+  let statTexture = 0;
+  let statDownload = 0;
+  let statUpload = 0;
+  let statWarmDone = null;
+  let statWarmTotal = null;
+  const timedModels = new Set();
+  let uvDirty = true;
+
+  function guardMissingUv() {
+    if (!renderer.isWebGPURenderer || !uvDirty) return;
+    uvDirty = false;
+    dropMapWithoutUv(scene);
+  }
+
+  function requestRender() {
+    if (!running || frameHandle) return;
+    frameHandle = requestAnimationFrame(tick);
+  }
+
+  function writeStats(rendering) {
+    const now = performance.now();
+    frameTimes.push(now);
+    while (frameTimes.length && now - frameTimes[0] > 500) frameTimes.shift();
+    if (frameTimes.length >= 4) {
+      fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
+    }
+    const info = renderer.info && renderer.info.render;
+    const text = formatStats({
+      backend: backendName,
+      rendering,
+      fps,
+      frameMs,
+      draws: drawTotal(
+        info,
+        Boolean(renderer.isWebGPURenderer),
+        renderer.backend && renderer.backend.isWebGPUBackend === true
+          ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+          : 0,
+      ),
+      instances: statInstances,
+      culled: statCulled,
+      separate: naiveDraws,
+      tris: info.triangles,
+      queued: statQueued,
+      loading: statLoading,
+      loaded: statLoaded,
+      deferred: statDeferred,
+      backgroundLoading: statBackgroundLoading,
+      convertMs: statConvert,
+      textureMs: statTexture,
+      downloadMs: statDownload,
+      uploadMs: statUpload,
+      warmDone: statWarmDone,
+      warmTotal: statWarmTotal,
+      sceneStream: sceneStreamStats,
+    });
+    if (showStats) statsEl.textContent = text;
+    if (hooks.onStats) hooks.onStats(text);
+  }
+
   function tick() {
+    frameHandle = 0;
     if (!running) return;
+    const tickAt = performance.now();
+    const gap = lastTickAt ? tickAt - lastTickAt : 0;
+    lastTickAt = tickAt;
     const dt = Math.min(clock.getDelta(), 0.05);
-    updateFly(dt);
-    if (nav === "orbit") orbit.update();
+    const flying = updateFly(dt);
+    const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
+    if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
+    const now = performance.now();
+    const wasInteractive = streamInteractive;
+    streamInteractive = Boolean(flying || damped || looking || orbitGesture || transform.dragging);
+    if (wasInteractive !== streamInteractive) modelLoads?.background();
+    if (sceneStreamStats && wasInteractive && streamInteractive && (statLoading || modelStage?.pending.size || textureDetailPending.size) && gap > 25) {
+      sceneStreamStats.slowFrames += 1;
+    }
+    camera.getWorldDirection(loadForward);
+    if (now - lastCullAt > 100
+        && (camera.position.distanceToSquared(lastCull) > 1 || lastLoadDirection.dot(loadForward) < 0.998)) {
+      lastCullAt = now;
+      lastCull.copy(camera.position);
+      lastLoadDirection.copy(loadForward);
+      prioritizeLoad();
+      syncLabels();
+    }
+    syncBatchVisibility();
+    const parseDetail = detailParses.shift();
+    if (parseDetail) parseDetail();
+    if (detailParses.length) requestRender();
+    updateTextureDetail(now, Boolean(parseDetail));
+    guardMissingUv();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
       const distance = camera.position.distanceTo(entry.pivot.position);
       transform.size = THREE.MathUtils.clamp(distance / 14, 0.55, 2.4);
     }
+    if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
     renderer.render(scene, camera);
+    flushTextureCpuRelease();
+    if (gpuProfile) {
+      const materials = [];
+      for (const batch of batches) materials.push(batch.mesh.material);
+      if (terrainRoot) {
+        terrainRoot.traverse((child) => {
+          if (!child.material) return;
+          materials.push(Array.isArray(child.material) ? child.material[0] : child.material);
+        });
+      }
+      const info = renderer.info && renderer.info.render;
+      sampleGpuFrame(gpuProfile, {
+        calls: info ? info.calls : 0,
+        materials,
+        loading: pendingLoads > 0,
+      });
+    }
     labels.render(scene, camera);
-    requestAnimationFrame(tick);
+    const again = keepRendering({
+      flying,
+      damped,
+      looking,
+      dragging: transform.dragging,
+    });
+    if (again && gap > 0 && gap < 250) frameMs = Math.round(gap * 10) / 10;
+    writeStats(again);
+    if (again) requestRender();
   }
-  tick();
+  renderer.domElement.addEventListener(
+    "wheel",
+    () => {
+      orbitSettle = 24;
+      requestRender();
+    },
+    { passive: true },
+  );
+  orbit.addEventListener("start", () => {
+    orbitGesture = true;
+    requestRender();
+  });
+  orbit.addEventListener("end", () => {
+    orbitGesture = false;
+    orbit.mouseButtons.LEFT = -1;
+    orbitSettle = 24;
+    requestRender();
+  });
+  orbit.addEventListener("change", () => requestRender());
+  requestRender();
+
+
+  function currentDraws() {
+    const info = renderer.info && renderer.info.render;
+    return drawTotal(
+      info,
+      Boolean(renderer.isWebGPURenderer),
+      renderer.backend && renderer.backend.isWebGPUBackend === true
+        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        : 0,
+    );
+  }
+
+  function getMemoryReport() {
+    const report = collectMemoryReport({
+      renderer,
+      entries,
+      batches,
+      parsedTemplates,
+      terrainRoot,
+      stats: {
+        fps,
+        frameMs,
+        draws: currentDraws(),
+        instances: statInstances,
+        culled: statCulled,
+      },
+    });
+    report.load = {
+      queued: statQueued,
+      loading: statLoading,
+      loaded: statLoaded,
+      deferred: statDeferred,
+      backgroundLoading: statBackgroundLoading,
+    };
+    report.backend = backendName;
+    report.gpuCaps = gpuCaps;
+    report.resident = {
+      uniqueMeshes: residentMeshNames().size,
+      heapBytes: heapBytes(),
+      softCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()),
+      hardCapped: overResidentHardCap(residentMeshNames().size, heapBytes()),
+    };
+    return report;
+  }
+
+  if (import.meta.env && import.meta.env.DEV) {
+    globalThis.__forgeMemory = getMemoryReport;
+  }
 
   return {
+    backend: backendName,
+    backendNote,
     setActors,
+    patchActors,
+    reconcileActors,
+    setSnap(on) {
+      snapOn = Boolean(on);
+    },
     select,
-    setNav,
     setGizmo,
     setFlags,
+    modelInfo,
+    auditPlacements,
+    auditView,
+    shaderDiagnostics,
     frame,
     spawnPoint,
     resize,
+    setConvertSlots(count) {
+      const parsed = Number(count);
+      const cores = typeof navigator !== "undefined" && navigator.hardwareConcurrency ? navigator.hardwareConcurrency - 1 : 8;
+      const wanted = Number.isFinite(parsed) && parsed > 0 ? parsed : cores;
+      convertSlots = Math.max(1, Math.min(16, wanted));
+    },
+    setWarm(status) {
+      const total = status && Number(status.total);
+      statWarmDone = total ? Number(status.done) || 0 : null;
+      statWarmTotal = total || null;
+      requestRender();
+    },
+    getMemoryReport,
+    setShowStats(on) {
+      showStats = Boolean(on);
+      statsEl.hidden = !showStats;
+      requestRender();
+    },
     destroy() {
       running = false;
+      if (rebuildTimer) clearTimeout(rebuildTimer);
+      if (frameHandle) cancelAnimationFrame(frameHandle);
+      if (keyWindow) {
+        keyWindow.removeEventListener("keydown", onFlyKey);
+        keyWindow.removeEventListener("keyup", onFlyUp);
+        keyWindow.removeEventListener("blur", onFlyBlur);
+      }
+      observer.disconnect();
+      statsEl.remove();
+      generation += 1;
       observer.disconnect();
       clearActors();
+      clearTerrain();
+      clearGround();
+      pondProbe.material.dispose();
       clearGrid();
       boxGeometry.dispose();
       edgesGeometry.dispose();
       renderer.dispose();
       renderer.domElement.remove();
       labels.domElement.remove();
+      if (globalThis.__forgeMemory === getMemoryReport) delete globalThis.__forgeMemory;
     },
   };
 }
 
 function isTyping(event) {
   const tag = event.target && event.target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || (event.target && event.target.isContentEditable);
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (event.target && event.target.isContentEditable);
 }

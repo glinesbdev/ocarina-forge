@@ -5,11 +5,11 @@ import struct
 import pytest
 import zstandard
 
-from bancwright.errors import BancError
-from bancwright.formats.byml import F64, Hash32, Hash64, S64, U32, U64, dumps, loads, same
-from bancwright.formats.restbl import ResourceSizeTable, entry_for_byml, load_table, save_table
-from bancwright.formats.sarc import Sarc, pack
-from bancwright.formats.zsio import DictSet, compress, decompress
+from ocarina_forge.errors import BancError
+from ocarina_forge.formats.byml import F64, Hash32, Hash64, S64, U32, U64, dumps, loads, same
+from ocarina_forge.formats.restbl import ResourceSizeTable, entry_for_byml, load_table, save_table
+from ocarina_forge.formats.sarc import Sarc, pack
+from ocarina_forge.formats.zsio import DictSet, compress, decompress
 
 
 def test_byml_roundtrip_keeps_types():
@@ -110,10 +110,22 @@ def test_restbl_raises_inserts_and_keeps_order():
 
 
 def test_byml_entry_grows_by_the_longshot_rule_and_never_shrinks():
-    # File grew by 10 bytes. Old entry 8000. New budget is at least 8000 + 80 + 4096.
+    # File grew by 10 bytes. Old entry 8000. Verified rule: align8(8000 + 10 + 1024).
     grown = entry_for_byml(8000, 1000, 1010)
-    assert grown == (8000 + 8 * 10 + 4096 + 7) & ~7
-    assert entry_for_byml(8000, 1000, 900) == 8000
-    fresh = entry_for_byml(0, None, 100)
-    assert fresh == (100 + 512 + 7) & ~7
-    assert fresh % 8 == 0
+    assert grown == (8000 + 10 + 1024 + 7) & ~7
+    # A smaller file still raises by the 1024 margin. The entry is never left alone
+    # once the bytes differ, and it is never shrunk.
+    shrunk = entry_for_byml(8000, 1000, 900)
+    assert shrunk == (8000 + 1024 + 7) & ~7
+    assert shrunk > 8000
+    try:
+        entry_for_byml(0, None, 100)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a missing entry must not be invented")
+    # Saria's schedule, from the in-game notes: 3316 -> 3384, entry 14448 -> 15544.
+    assert entry_for_byml(14448, 3316, 3384) == 15544
+    # Logic module: 12598 -> 13189, entry 12984 -> 14600.
+    assert entry_for_byml(12984, 12598, 13189) == 14600
+    assert grown % 8 == 0 and shrunk % 8 == 0

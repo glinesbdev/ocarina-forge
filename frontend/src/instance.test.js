@@ -1,0 +1,297 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+
+test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
+  const params = (flag, negate) => ["dict", { Presence: ["dict", {
+    FlagName: ["str", flag], IsNegation: ["bool", negate],
+  }] }];
+  const gate = (negate) => ({ present: presentByDefault(params("IsHyruleFieldBridgeClose", negate)) });
+  assert.equal(actorShown(gate(true)), true);
+  assert.equal(actorShown(gate(false)), false);
+  assert.equal(actorShown({ ...gate(false), showHidden: true }), true);
+  assert.equal(presentByDefault(params("UnknownGameplayFlag", false)), true);
+  assert.equal(presentByDefault(undefined), true);
+});
+
+const open = { area: "show", system: "show", object: "show" };
+
+test("a repeated model stays pickable until its category is hidden or locked", () => {
+  const shown = actorShown({
+    status: "same",
+    category: "object",
+    volume: false,
+    showHidden: false,
+    categories: open,
+    hideVolumes: false,
+  });
+  assert.equal(shown, true);
+  assert.equal(canPick({ shown, locked: false }), true);
+  assert.equal(canGizmo({ id: "house", shown, locked: false }), true);
+
+  const hidden = actorShown({
+    status: "same",
+    category: "object",
+    volume: false,
+    showHidden: false,
+    categories: { ...open, object: "hide" },
+    hideVolumes: false,
+  });
+  assert.equal(hidden, false);
+  assert.equal(canPick({ shown: hidden, locked: false }), false);
+  assert.equal(canGizmo({ id: "house", shown: hidden, locked: false }), false);
+
+  const locked = actorLocked({ category: "object", categories: { ...open, object: "lock" }, companion: false, pickable: true });
+  assert.equal(actorShown({
+    status: "same",
+    category: "object",
+    volume: false,
+    showHidden: false,
+    categories: { ...open, object: "lock" },
+    hideVolumes: false,
+  }), true);
+  assert.equal(canPick({ shown: true, locked }), false);
+  assert.equal(canGizmo({ id: "house", shown: true, locked }), false);
+});
+
+test("hidden actors and volumes follow the stage-bar switches", () => {
+  assert.equal(actorShown({
+    status: "hidden",
+    category: "npc",
+    volume: false,
+    showHidden: false,
+    categories: open,
+    hideVolumes: false,
+  }), false);
+  assert.equal(actorShown({
+    status: "hidden",
+    category: "npc",
+    volume: false,
+    showHidden: true,
+    categories: open,
+    hideVolumes: false,
+  }), true);
+  assert.equal(actorShown({
+    status: "same",
+    category: "area",
+    volume: true,
+    showHidden: false,
+    categories: open,
+    hideVolumes: true,
+  }), false);
+});
+
+test("a companion that cannot be picked is locked, and a locked actor has no gizmo", () => {
+  assert.equal(actorLocked({ category: "object", categories: open, companion: true, pickable: false }), true);
+  assert.equal(actorLocked({ category: "object", categories: open, companion: true, pickable: true }), false);
+  assert.equal(canGizmo({ id: "", shown: true, locked: false }), false);
+});
+
+test("dragging one copy writes that actor's matrix only", () => {
+  const writes = [];
+  const mesh = {
+    setMatrixAt(index, matrix) {
+      writes.push([index, matrix.slice()]);
+    },
+  };
+  const other = {
+    setMatrixAt(index, matrix) {
+      writes.push(["other", index, matrix.slice()]);
+    },
+  };
+  const moved = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 0, 2, 1];
+  const kept = [9];
+  const slots = [
+    { actor: "grass-a", index: 0, mesh, matrix: { copy(next) { this.value = next.slice(); } } },
+    { actor: "grass-b", index: 1, mesh, matrix: { copy() { throw new Error("the other copy was written"); }, value: kept } },
+    { actor: "grass-a", index: 3, mesh: other },
+  ];
+  assert.equal(applyActorMatrix(slots, "grass-a", moved), 2);
+  assert.deepEqual(writes, [[0, moved], ["other", 3, moved]]);
+  assert.deepEqual(slots[0].matrix.value, moved);
+  assert.deepEqual(slots[1].matrix.value, kept);
+  assert.equal(applyActorMatrix(slots, "grass-a", moved.concat(0).slice(0, 16).map((value, index) => index === 12 ? 8 : value)), 2);
+  assert.equal(writes[2][0], 0);
+  assert.equal(writes[2][1][12], 8);
+  assert.equal(writes.some((write) => write[0] === 1), false);
+});
+
+test("a batched mesh has no instanceMatrix and the drag must not touch it", () => {
+  const mesh = {
+    setMatrixAt() {},
+  };
+  assert.equal(mesh.instanceMatrix, undefined);
+  assert.doesNotThrow(() => applyActorMatrix([{ actor: "grass-a", index: 2, mesh }], "grass-a", [1]));
+  mesh.instanceMatrix = { needsUpdate: false };
+  applyActorMatrix([{ actor: "grass-a", index: 2, mesh }], "grass-a", [1]);
+  assert.equal(mesh.instanceMatrix.needsUpdate, true);
+});
+
+test("consecutive geometries become one instanced draw each", () => {
+  const mesh = {
+    userData: {},
+    _multiDrawCount: 400,
+    _multiDrawStarts: new Int32Array(400).fill(0),
+    _multiDrawCounts: new Int32Array(400).fill(36),
+    _multiDrawInstances: null,
+  };
+  assert.equal(groupGeometryDraws(mesh), 1);
+  assert.equal(mesh._multiDrawCount, 1);
+  assert.equal(mesh._multiDrawInstances[0], 400);
+  assert.equal(mesh.userData.batchFirst[0], 0);
+  const mixed = {
+    userData: {},
+    _multiDrawCount: 5,
+    _multiDrawStarts: Int32Array.from([0, 0, 0, 90, 90]),
+    _multiDrawCounts: Int32Array.from([36, 36, 36, 12, 12]),
+  };
+  assert.equal(groupGeometryDraws(mixed), 2);
+  assert.equal(mixed._multiDrawInstances[0], 3);
+  assert.equal(mixed._multiDrawInstances[1], 2);
+  assert.equal(mixed.userData.batchFirst[0], 0);
+  assert.equal(mixed.userData.batchFirst[1], 3);
+  const interleaved = {
+    userData: {},
+    _multiDrawCount: 4,
+    _multiDrawStarts: Int32Array.from([0, 90, 0, 90]),
+    _multiDrawCounts: Int32Array.from([36, 12, 36, 12]),
+  };
+  assert.equal(groupGeometryDraws(interleaved), 4);
+});
+
+test("culling a grouped draw down to one clears the discarded instances", () => {
+  const mesh = {
+    userData: {}, _multiDrawCount: 3,
+    _multiDrawStarts: new Int32Array([0, 0, 0]),
+    _multiDrawCounts: new Int32Array([6, 6, 6]),
+  };
+  assert.equal(groupGeometryDraws(mesh), 1);
+  assert.equal(mesh._multiDrawInstances[0], 3);
+  // Three rebuilt the ungrouped ranges after two copies were culled.
+  mesh._multiDrawCount = 1;
+  assert.equal(groupGeometryDraws(mesh), 1);
+  assert.equal(mesh._multiDrawInstances, null);
+  assert.equal(mesh.userData.batchFirst, null);
+});
+
+test("a later geometry run keeps its own first instance", () => {
+  const calls = [];
+  const pass = {
+    drawIndexed(...args) {
+      calls.push(args);
+    },
+  };
+  const backend = {
+    get() {
+      return { currentPass: pass };
+    },
+    draw(renderObject) {
+      const object = renderObject.object;
+      for (let i = 0; i < object._multiDrawCount; i += 1) {
+        const count = object._multiDrawInstances[i];
+        const first = count > 1 ? 0 : i;
+        this.get().currentPass.drawIndexed(object._multiDrawCounts[i], count, object._multiDrawStarts[i], 0, first);
+      }
+    },
+  };
+  patchBatchedDraw(backend);
+  backend.draw({
+    context: {},
+    object: {
+      _multiDrawCount: 2,
+      _multiDrawStarts: [0, 100],
+      _multiDrawCounts: [6, 6],
+      _multiDrawInstances: [3, 2],
+      userData: { batchFirst: [0, 3] },
+    },
+  });
+  assert.deepEqual(calls, [
+    [6, 3, 0, 0, 0],
+    [6, 2, 100, 0, 3],
+  ]);
+});
+
+test("a mapped geometry without uv loses only its own map", () => {
+  const shared = {
+    map: { id: 1 },
+    clone() {
+      return { map: this.map, needsUpdate: false, userData: {} };
+    },
+  };
+  const bare = { name: "grass-card", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+  const textured = { name: "trunk", geometry: { hasAttribute: () => true }, material: shared, children: [] };
+  const names = dropMapWithoutUv({ children: [bare, textured] });
+  assert.deepEqual(names, ["grass-card"]);
+  assert.equal(bare.material.map, null);
+  assert.equal(textured.material.map.id, 1);
+  assert.equal(shared.map.id, 1);
+});
+
+test("a map can use an authored UV channel other than uv", () => {
+  const map = { channel: 1 };
+  const material = { map };
+  const mesh = { geometry: { hasAttribute: (name) => name === "uv1" }, material };
+  assert.deepEqual(dropMapWithoutUv(mesh), []);
+  assert.equal(mesh.material.map, map);
+});
+
+test("cloneMaterialPreservingTextures keeps userData maps and does not serialize them", () => {
+  const moss = {
+    isTexture: true,
+    uuid: "moss",
+    toJSON() {
+      throw new Error("texture was serialized");
+    },
+  };
+  const material = {
+    userData: { mossMap: moss, orm1Uniform: { value: moss }, note: "keep" },
+    clone() {
+      return { userData: JSON.parse(JSON.stringify(this.userData)), cloned: true };
+    },
+  };
+  const copy = cloneMaterialPreservingTextures(material);
+  assert.equal(material.userData.mossMap, moss);
+  assert.equal(material.userData.orm1Uniform.value, moss);
+  assert.equal(material.userData.note, "keep");
+  assert.equal(copy.cloned, true);
+  assert.equal(copy.userData.mossMap, moss);
+  assert.equal(copy.userData.orm1Uniform.value, moss);
+  assert.equal(copy.userData.note, "keep");
+});
+
+test("dropMapWithoutUv logs once per material at debug level", () => {
+  const warns = [];
+  const debugs = [];
+  const originalWarn = console.warn;
+  const originalDebug = console.debug;
+  console.warn = (message) => warns.push(String(message));
+  console.debug = (message) => debugs.push(String(message));
+  try {
+    const shared = {
+      map: { id: 1 },
+      userData: {},
+      clone() {
+        return { map: this.map, needsUpdate: false, userData: {} };
+      },
+    };
+    const first = { name: "lod0Eye_Plane__Mt_Black0", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+    const second = { name: "lod0Eye_Plane__Mt_Black1", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+    const names = dropMapWithoutUv({ children: [first, second] });
+    assert.deepEqual(names, ["lod0Eye_Plane__Mt_Black0"]);
+    assert.equal(first.material.map, null);
+    assert.equal(second.material.map, null);
+    assert.equal(warns.length, 0);
+    assert.equal(debugs.length, 1);
+    assert.match(debugs[0], /has a map and no uv/);
+  } finally {
+    console.warn = originalWarn;
+    console.debug = originalDebug;
+  }
+});
+
+test("copies that share an albedo share a batch key", () => {
+  const house = { image: "roof", alpha: "opaque", side: 0, tint: "ffffff", indexed: "idx", attributes: "position,uv" };
+  assert.equal(batchKey(house), batchKey({ ...house }));
+  assert.notEqual(batchKey(house), batchKey({ ...house, image: "wall" }));
+});

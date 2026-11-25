@@ -5,25 +5,27 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 
-from bancwright.actors import actor_id, format_hash
-from bancwright.dump import Dump
-from bancwright.export import build
-from bancwright.fixtures import (
+from ocarina_forge.actors import actor_id, format_hash, read_vec
+from ocarina_forge.dump import Dump
+from ocarina_forge.export import build
+from ocarina_forge.fixtures import (
     CUCCO,
     FADO,
     FIELD_STATIC,
     GUARD,
     KOKIRI_STATIC,
     STAL,
+    TREE,
+    TREE2,
     build_fixture,
     kokiri_static,
 )
-from bancwright.formats.byml import loads, same
-from bancwright.formats.restbl import load_table
-from bancwright.formats.zsio import decompress
-from bancwright.importers.ato import import_scenes
-from bancwright.project import Project
-from bancwright.scene import apply_command, export_document, scene_view
+from ocarina_forge.formats.byml import loads, same
+from ocarina_forge.formats.restbl import load_table
+from ocarina_forge.formats.zsio import decompress
+from ocarina_forge.importers.ato import import_scenes
+from ocarina_forge.project import Project
+from ocarina_forge.scene import apply_command, export_document, scene_view
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -78,6 +80,39 @@ def test_move_hide_add_and_undo_roundtrip(tmp_path):
     assert format_hash(FADO) not in reverted["actors"]
 
 
+def test_transform_one_copy_leaves_the_other_and_undo_restores_it(tmp_path):
+    dump = _dump(tmp_path)
+    document, _dict_id, _raw = dump.read_byml(KOKIRI_STATIC)
+    empty = {"format": 1, "banc": KOKIRI_STATIC, "actors": {}}
+    before = {actor["id"]: actor for actor in scene_view(document, empty)["actors"]}
+    tree = format_hash(TREE)
+    twin = format_hash(TREE2)
+    assert before[tree]["gyaml"] == before[twin]["gyaml"] == "Obj_Tree"
+    original_tree = list(before[tree]["translate"])
+    original_twin = list(before[twin]["translate"])
+    diff, focus = apply_command(
+        document,
+        empty,
+        {"command": "transform", "id": tree, "translate": [9, 2, 1], "rotate": [0, 0.4, 0]},
+    )
+    assert focus == tree
+    assert set(diff["actors"]) == {tree}
+    moved = {actor["id"]: actor for actor in scene_view(document, diff)["actors"]}
+    assert moved[tree]["status"] == "edited"
+    assert moved[tree]["translate"] == [9.0, 2.0, 1.0]
+    assert moved[tree]["rotate"][1] == 0.4
+    assert moved[twin]["status"] == "vanilla"
+    assert moved[twin]["translate"] == original_twin
+    assert moved[twin]["rotate"] == before[twin]["rotate"]
+    exported, _warnings = export_document(document, diff)
+    saved = {actor_id(actor): actor for actor in exported["Actors"]}
+    assert saved[tree]["Translate"] == [9.0, 2.0, 1.0]
+    assert read_vec(saved[twin], "Translate", [0, 0, 0]) == original_twin
+    restored = {actor["id"]: actor for actor in scene_view(document, empty)["actors"]}
+    assert restored[tree]["translate"] == original_tree
+    assert restored[twin]["translate"] == original_twin
+
+
 def test_set_param_keeps_the_byml_type(tmp_path):
     dump = _dump(tmp_path)
     document, _dict_id, _raw = dump.read_byml(KOKIRI_STATIC)
@@ -89,7 +124,7 @@ def test_set_param_keeps_the_byml_type(tmp_path):
     )
     exported, _warnings = export_document(document, diff)
     fado = next(actor for actor in exported["Actors"] if actor_id(actor) == format_hash(FADO))
-    from bancwright.formats.byml import U32
+    from ocarina_forge.formats.byml import U32
 
     assert type(fado["Dynamic"]["DefaultDungeonRoomIndex"]) is U32
     assert int(fado["Dynamic"]["DefaultDungeonRoomIndex"]) == 4
@@ -153,7 +188,7 @@ def test_export_installs_and_zips_without_touching_other_files(tmp_path):
 
 
 def test_mod_name_cannot_be_disabled(tmp_path):
-    from bancwright.errors import BancError
+    from ocarina_forge.errors import BancError
     import pytest
 
     with pytest.raises(BancError, match="disabled"):
@@ -161,7 +196,7 @@ def test_mod_name_cannot_be_disabled(tmp_path):
 
 
 def test_missing_dump_is_explicit(tmp_path):
-    from bancwright.errors import BancError
+    from ocarina_forge.errors import BancError
     import pytest
 
     with pytest.raises(BancError, match="romfs") as caught:
@@ -186,9 +221,9 @@ def test_import_ato_yaml(tmp_path):
 
 
 def test_api_sample_edit_and_export(tmp_path, monkeypatch):
-    monkeypatch.setenv("BANCWRIGHT_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.chdir(tmp_path)
-    from bancwright.server import app
+    from ocarina_forge.server import app
 
     client = TestClient(app)
     missing = client.get("/api/scenes")
@@ -208,7 +243,11 @@ def test_api_sample_edit_and_export(tmp_path, monkeypatch):
     scene = client.get("/api/scene", params={"banc": KOKIRI_STATIC})
     assert scene.status_code == 200
     body = scene.json()
-    assert len([actor for actor in body["actors"] if actor["status"] != "hidden"]) == 10
+    assert len([actor for actor in body["actors"] if actor["status"] != "hidden"]) == 12
+    companions = body["companions"]
+    assert companions[0]["banc"] == "Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs"
+    assert any(actor["gyaml"] == "Land_Kokiri_House_01" for actor in companions[0]["actors"])
+    assert all(actor["gyaml"] != "Land_Kokiri_House_01" for actor in body["actors"])
     fado = next(actor for actor in body["actors"] if actor["gyaml"] == "Npc_Kokiri_F_01")
     assert fado["category"] == "npc"
     assert fado["name"] == "Fado"
@@ -261,3 +300,70 @@ def test_sample_project_ids_exist_in_the_fixture(tmp_path):
     for ident, record in sample["actors"].items():
         if record["state"] != "added":
             assert ident in present
+
+
+def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("OCARINA_FORGE_WORKERS", "1")
+    monkeypatch.chdir(tmp_path)
+    from ocarina_forge.server import app, describe_actor
+
+    dump = _dump(tmp_path)
+    client = TestClient(app)
+    client.put("/api/config", json={"dump": str(dump.root), "project": ""})
+    listed = client.post("/api/models/batch", json={"names": ["Npc_Kokiri_F_01", "Npc_Kokiri_F_01", "Not_An_Actor"]})
+    assert listed.status_code == 200, listed.text
+    models = listed.json()["models"]
+    assert set(models) == {"Npc_Kokiri_F_01", "Not_An_Actor"}
+    assert models["Not_An_Actor"]["status"] == "box"
+    assert models["Npc_Kokiri_F_01"]["status"] == "queued"
+    assert models["Npc_Kokiri_F_01"]["url"].endswith("/model.glb")
+
+    calls = {"n": 0}
+    real = describe_actor
+
+    def counting(dump, gyaml, convert=True):
+        if convert:
+            calls["n"] += 1
+        return real(dump, gyaml, convert=convert)
+
+    monkeypatch.setattr("ocarina_forge.server.describe_actor", counting)
+    import asyncio
+    from httpx import ASGITransport, AsyncClient
+
+    async def both():
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as http:
+            return await asyncio.gather(
+                http.get("/api/models/Npc_Kokiri_F_01/model.glb"),
+                http.get("/api/models/Npc_Kokiri_F_01/model.glb"),
+            )
+
+    first, second = asyncio.run(both())
+    assert first.status_code == 200 and second.status_code == 200
+    assert first.headers["etag"] == second.headers["etag"]
+    assert calls["n"] == 1
+    digest = first.headers["etag"].strip('"')
+    cached = client.get(f"/api/models/Npc_Kokiri_F_01/model.glb?v={digest}")
+    assert cached.status_code == 200
+    assert cached.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert cached.headers["etag"] == f'"{digest}"'
+    again = client.get(
+        f"/api/models/Npc_Kokiri_F_01/model.glb?v={digest}",
+        headers={"If-None-Match": f'"{digest}"'},
+    )
+    assert again.status_code == 304
+    warm = client.post("/api/models/batch", json={"names": ["Npc_Kokiri_F_01"]})
+    assert warm.json()["models"]["Npc_Kokiri_F_01"]["url"].endswith(f"v={digest}")
+
+
+def test_sibling_bancs_swap_static_and_dynamic():
+    from ocarina_forge.scene import sibling_bancs
+
+    static = "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs"
+    dynamic = "Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs"
+    known = {static, dynamic, "Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs"}
+    assert sibling_bancs(static, known) == [dynamic]
+    assert sibling_bancs(dynamic, known) == [static]
+    assert sibling_bancs("Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs", known) == []

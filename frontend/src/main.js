@@ -1,34 +1,172 @@
+import "dockview-core/dist/styles/dockview.css";
+
 import { api } from "./api.js";
+import { planActorRefresh } from "./actors.js";
+import { graphHistory, historyStep, renderBehavior } from "./behavior.js";
+import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
+import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
+import { modelLine } from "./inspector.js";
+import { paletteRows } from "./palette.js";
+import { sceneEntries } from "./scene-list.js";
+import { groupModelErrors, isMarker } from "./problems.js";
+import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
 
-const $ = (id) => document.getElementById(id);
+function $(id) {
+  const local = document.getElementById(id);
+  if (local) return local;
+  if (typeof globalThis.__ocarinaFind === "function") {
+    const parked = globalThis.__ocarinaFind(id);
+    if (parked) return parked;
+  }
+  const dockApi = globalThis.__ocarinaDock;
+  if (!dockApi || !dockApi.groups) return null;
+  for (const group of dockApi.groups) {
+    const popup = group.api.getWindow();
+    if (!popup || popup === window) continue;
+    const found = popup.document.getElementById(id);
+    if (found) return found;
+  }
+  return null;
+}
+
+let onShortcut = () => {};
+let viewport = null;
+let sceneOpenToken = 0;
+let sceneVisualLoad = 0;
+let sceneVisualBoxes = 0;
+let sceneVisualDeferred = 0;
+let sceneVisualResidentCapped = false;
+let sceneActorsReady = false;
+let sceneTerrainReady = true;
+const dock = createDock(document.getElementById("dock"), {
+  onWindow(popup) {
+    popup.addEventListener("keydown", (event) => onShortcut(event));
+    if (viewport) viewport.resize();
+  },
+  onChange() {
+    renderWindowMenu();
+    if (viewport) viewport.resize();
+  },
+});
 
 const state = {
   status: null,
   scenes: [],
   modified: new Set(),
+  recipes: new Set(),
   projectOnly: [],
+  changeCounts: {},
+  changes: null,
+  changeToken: 0,
+  problems: null,
+  problemToken: 0,
+  meshAudit: null,
+  modelErrors: [],
+  terrainNotes: [],
+  behavior: null,
+  behaviorKey: "",
+  behaviorLayer: "curated",
+  behaviorNode: "",
+  behaviorFile: "",
+  behaviorEntry: "",
+  behaviorQuery: "",
+  behaviorError: "",
+  behaviorLoading: false,
+  behaviorTrail: [],
+  behaviorAhead: [],
+  behaviorFrame: "",
+  showProblemNotes: false,
+  hot: null,
+  hotToken: 0,
   banc: null,
   view: null,
   selected: null,
-  history: { undo: [], redo: [] },
+  history: blankHistory(null),
   showHidden: false,
   showLabels: true,
-  nav: "orbit",
+  showCompanions: true,
+  companionPick: true,
+  categories: { area: "show", system: "show" },
+  hideVolumes: false,
+  showGround: false,
+  showWater: true,
+  showSub: false,
+  terrainDebug: false,
+  helperBoxes: null,
+  terrain: null,
   gizmo: "translate",
   tab: "outliner",
   addMode: "add",
 };
 
-const viewport = createViewport($("viewport"), {
+viewport = await createViewport($("viewport"), {
+  fetchModel: api.model,
+  fetchModels: (names, prefetch) => api.models(names, prefetch),
+  fetchTerrain: api.terrain,
+  fetchGround: (banc, x, z, exclude) => api.ground(banc, x, z, exclude),
+  fetchSurface: (banc) => api.groundSurface(banc),
+  onProgress: (info) => {
+    const box = $("model-progress");
+    if (!box) return;
+    if (sceneVisualLoad) {
+      updateSceneViewerProgress(info);
+      box.hidden = true;
+      return;
+    }
+    if (!info || !info.total) {
+      box.hidden = true;
+      return;
+    }
+    const extra = info.boxes ? ` · ${info.boxes} still boxes` : "";
+    $("model-progress-text").textContent = `${info.label}${extra}`;
+    $("model-progress-bar").style.width = `${Math.round((100 * info.done) / Math.max(info.total, 1))}%`;
+    box.hidden = Boolean(info.finished);
+  },
+  onModelsReady: (result) => finishSceneViewerLoad(result),
+  onModels: () => renderProps(),
+  onModelError: (gyaml, message) => {
+    noteModelError(gyaml, message);
+  },
+  onTerrainWarn: (message) => {
+    noteTerrain(message);
+  },
+  onTerrain: (meta) => {
+    state.terrain = meta;
+    const proxy = Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));
+    const heightmap = Boolean(meta && typeof meta.reason === "string" && /terrain heightmap/i.test(meta.reason));
+    const sparse = Boolean(meta && meta.sparse);
+    const show = Boolean(meta && meta.status === "mesh" && !proxy && !sparse);
+    state.showGround = show;
+    const box = $("show-ground");
+    if (box) {
+      box.checked = show;
+      const title = proxy
+        ? "The static map has no albedo. On draws a neutral grid on y = 0 instead of the green stand-in."
+        : sparse
+          ? "Sparse heightmap: most in-clip tiles have no file, so Ground starts off. Turn it on to see the sheet."
+          : heightmap
+            ? "Show the terrain heightmap. The untextured stand-in stays off."
+            : "Show the static ground mesh";
+      box.title = title;
+      if (box.parentElement) box.parentElement.title = title;
+    }
+    viewport.setFlags({ ground: show });
+  },
+  onTerrainReady: () => {
+    if (!sceneVisualLoad) return;
+    sceneTerrainReady = true;
+    if (sceneActorsReady) finishSceneViewerLoad();
+  },
   onSelect: (id) => {
     state.selected = id;
     viewport.select(id);
     renderOutliner();
     renderProps();
+    noteCompanion();
     if (id && window.matchMedia("(max-width: 980px)").matches) showTab("props");
   },
-  onPreview: (id, translate, rotate) => {
+  onPreview: (id, translate, rotate, scale) => {
     if (id !== state.selected) return;
     fillNumber("tx", translate[0]);
     fillNumber("ty", translate[1]);
@@ -36,18 +174,133 @@ const viewport = createViewport($("viewport"), {
     fillNumber("rx", deg(rotate[0]));
     fillNumber("ry", deg(rotate[1]));
     fillNumber("rz", deg(rotate[2]));
+    if (scale) {
+      fillNumber("sx", scale[0]);
+      fillNumber("sy", scale[1]);
+      fillNumber("sz", scale[2]);
+    }
   },
-  onTransform: (id, translate, rotate) => {
-    edit({ command: "transform", id, translate: translate.map(round4), rotate: rotate.map(round4) });
+  onDeviceLost: (message) => toast(message, { persistent: true }),
+  onStats(text) {
+    const readout = $("stats-readout");
+    if (readout && readout.textContent !== text) readout.textContent = text;
+    refreshStreamLog();
+  },
+  onTransform: (id, translate, rotate, scale) => {
+    edit({
+      command: "transform",
+      id,
+      translate: translate.map(round4),
+      rotate: rotate.map(round4),
+      scale: (scale || [1, 1, 1]).map(round4),
+    });
   },
 });
 
+async function openSettings() {
+  try {
+    const status = await api.status();
+    const workers = status.workers || { count: 1, max: 1, source: "default" };
+    const range = $("worker-range");
+    const number = $("worker-count");
+    const max = String(workers.max || 1);
+    range.max = max;
+    number.max = max;
+    range.min = "1";
+    number.min = "1";
+    range.value = String(workers.count || 1);
+    number.value = range.value;
+    const locked = workers.source === "env";
+    range.disabled = locked;
+    number.disabled = locked;
+    $("worker-note").textContent = locked
+      ? `OCARINA_FORGE_WORKERS is ${workers.count}, so this slider is saved but not used until that variable is unset. This machine has ${workers.max} cores.`
+      : `Using ${workers.count} of ${workers.max}. The default leaves one core free. The pool is rebuilt between converts.`;
+    const textures = $("gpu-textures");
+    const forced = new URLSearchParams(window.location.search).has("textures") || new URLSearchParams(window.location.search).has("gpuTextures");
+    textures.checked = gpuTexturesOn();
+    textures.disabled = forced;
+    $("worker-save").disabled = locked && forced;
+    $("gpu-texture-note").textContent = forced
+      ? "This page's URL chooses the texture path. Take ?textures= off the address to use the checkbox."
+      : "Albedo uploads as BC blocks. Turn this off, or open ?textures=bitmap, to use the JPEG and PNG instead. Saving reloads the view.";
+    $("settings-dialog").showModal();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function syncWorkerCount(value) {
+  const range = $("worker-range");
+  const number = $("worker-count");
+  const max = Number(range.max) || 1;
+  const next = Math.min(max, Math.max(1, Number(value) || 1));
+  range.value = String(next);
+  number.value = String(next);
+}
+
+$("worker-range").addEventListener("input", () => syncWorkerCount($("worker-range").value));
+$("worker-count").addEventListener("input", () => syncWorkerCount($("worker-count").value));
+function gpuTexturesOn() {
+  const params = new URLSearchParams(window.location.search);
+  const flag = params.get("textures") || params.get("gpuTextures");
+  if (flag === "bitmap" || flag === "0") return false;
+  if (flag === "gpu" || flag === "1") return true;
+  return localStorage.getItem("ocarinaforge.gpuTextures") !== "0";
+}
+
+$("settings-form").addEventListener("submit", async (event) => {
+  if (event.submitter && event.submitter.value !== "save") return;
+  event.preventDefault();
+  try {
+    const previous = localStorage.getItem("ocarinaforge.gpuTextures") === "0" ? "0" : "1";
+    const next = $("gpu-textures").checked ? "1" : "0";
+    localStorage.setItem("ocarinaforge.gpuTextures", next);
+    const workers = Number($("worker-count").value);
+    await api.saveConfig({ workers });
+    viewport.setConvertSlots(workers);
+    if (previous !== next && !$("gpu-textures").disabled) {
+      window.location.reload();
+      return;
+    }
+    $("settings-dialog").close();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+let streamAt = 0;
+function refreshStreamLog() {
+  const box = $("stream-readout");
+  if (!box) return;
+  const now = performance.now();
+  if (now - streamAt < 1000) return;
+  streamAt = now;
+  api.stream()
+    .then((data) => {
+      if (data.warm) viewport.setWarm(data.warm);
+      const warm = data.warm && data.warm.total
+        ? ` · warm ${data.warm.phase} ${data.warm.done || 0}/${data.warm.total}${data.warm.failed ? ` · ${data.warm.failed} failed` : ""}${data.warm.paused ? " paused" : ""}`
+        : "";
+      const head = `server ${data.misses || 0} converted · ${data.hits || 0} cache hits · conv ${data.convertMs || 0} ms · tex ${data.textureMs || 0} ms${warm}`;
+      const lines = (data.lines || []).slice(-8);
+      box.textContent = lines.length ? `${head}\n${lines.join("\n")}` : head;
+    })
+    .catch(() => {});
+}
+
+$("settings-open").addEventListener("click", () => openSettings());
 $("undo").addEventListener("click", () => undo());
 $("redo").addEventListener("click", () => redo());
 $("build-open").addEventListener("click", () => $("build-dialog").showModal());
 $("project-chip").addEventListener("click", openProjectDialog);
-$("open-scenes").addEventListener("click", () => togglePane("scene-pane"));
-$("open-side").addEventListener("click", () => togglePane("side-pane"));
+$("open-scenes").addEventListener("click", () => showTab("scenes"));
+$("open-side").addEventListener("click", () => showTab("outliner"));
+document.addEventListener("click", (event) => {
+  const root = $("window-menu-root");
+  if (!root || !root.open || root.contains(event.target)) return;
+  root.open = false;
+});
 $("scene-search").addEventListener("input", renderScenes);
 $("actor-search").addEventListener("input", renderOutliner);
 $("add-actor").addEventListener("click", () => openAdd("add"));
@@ -60,12 +313,76 @@ $("show-labels").addEventListener("change", (event) => {
   state.showLabels = event.target.checked;
   viewport.setFlags({ labels: state.showLabels });
 });
-$("frame").addEventListener("click", () => viewport.frame(state.selected));
-$("tab-outliner").addEventListener("click", () => showTab("outliner"));
-$("tab-props").addEventListener("click", () => showTab("props"));
-document.querySelectorAll("[data-nav]").forEach((button) => {
-  button.addEventListener("click", () => setNav(button.dataset.nav));
+$("active-bank").addEventListener("change", (event) => {
+  const active = event.target;
+  const other = (state.raw?.companions || []).find((item) => bancKind(item.banc) === active.value);
+  active.value = bancKind(state.banc);
+  if (other) openScene(other.banc);
 });
+$("show-companions").addEventListener("change", (event) => {
+  state.showCompanions = event.target.checked;
+  if (state.raw) applyView(state.raw, { select: state.selected });
+});
+$("companion-pick").addEventListener("change", (event) => {
+  state.companionPick = event.target.checked;
+  if (state.raw) applyView(state.raw, { select: state.selected });
+});
+const statsBox = $("show-stats");
+if (statsBox) {
+  const statsOn = storedFlag("ocarinaforge.stats", true);
+  statsBox.checked = statsOn;
+  viewport.setShowStats(statsOn);
+  statsBox.addEventListener("change", () => {
+    viewport.setShowStats(statsBox.checked);
+    try {
+      localStorage.setItem("ocarinaforge.stats", statsBox.checked ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+  });
+}
+if (viewport.backendNote) toast(viewport.backendNote);
+$("draw-distance").addEventListener("change", (event) => {
+  viewport.setFlags({ distance: Number(event.target.value) || 0 });
+});
+$("show-ground").addEventListener("change", (event) => {
+  state.showGround = event.target.checked;
+  viewport.setFlags({ ground: state.showGround });
+});
+$("show-water").addEventListener("change", (event) => {
+  state.showWater = event.target.checked;
+  viewport.setFlags({ water: state.showWater });
+});
+$("show-sub").addEventListener("change", (event) => {
+  state.showSub = event.target.checked;
+  viewport.setFlags({ subTerrain: state.showSub });
+});
+$("terrain-debug").addEventListener("change", (event) => {
+  state.terrainDebug = event.target.checked;
+  viewport.setFlags({ terrainDebug: state.terrainDebug });
+});
+$("blend-mask").addEventListener("change", (event) => {
+  viewport.setFlags({ blendMask: event.target.checked });
+});
+$("frame").addEventListener("click", () => viewport.frame(state.selected));
+const snapBox = $("snap-surface");
+if (snapBox) {
+  snapBox.addEventListener("change", () => viewport.setSnap(snapBox.checked));
+}
+document.querySelectorAll("[data-cat]").forEach((button) => {
+  button.addEventListener("click", () => {
+    setCategory(button.dataset.cat, button.dataset.mode);
+    renderOutliner();
+  });
+});
+renderWindowMenu();
+$("shortcuts-open").addEventListener("click", () => openShortcuts());
+const shortcutsDialog = $("shortcuts-dialog");
+if (shortcutsDialog) {
+  shortcutsDialog.addEventListener("click", (event) => {
+    if (event.target === shortcutsDialog) shortcutsDialog.close();
+  });
+}
 document.querySelectorAll("[data-gizmo]").forEach((button) => {
   button.addEventListener("click", () => setGizmo(button.dataset.gizmo));
 });
@@ -73,9 +390,16 @@ document.querySelectorAll("[data-close]").forEach((button) => {
   button.addEventListener("click", () => button.closest("dialog").close());
 });
 $("build-run").addEventListener("click", runBuild);
+$("mod-export").addEventListener("click", runModExport);
 $("add-search").addEventListener("input", () => loadActorNames($("add-search").value));
 $("create-project").addEventListener("click", createProject);
 $("open-project").addEventListener("click", openProject);
+$("open-ato").addEventListener("click", () => {
+  const root = state.status && state.status.repo;
+  if (!root) return;
+  $("open-dir").value = `${root}/examples/after-the-ocarina`;
+  openProject();
+});
 $("import-run").addEventListener("click", () => importAto($("import-path").value));
 $("import-example").addEventListener("click", () => {
   const root = state.status && state.status.repo;
@@ -83,55 +407,117 @@ $("import-example").addEventListener("click", () => {
   importAto(`${root}/examples/ato-scenes`);
 });
 $("save-dump").addEventListener("click", saveDump);
+$("hot-save").addEventListener("click", saveHotReload);
 $("use-sample").addEventListener("click", useSample);
+$("palette-open").addEventListener("click", () => openPalette());
+$("palette-search").addEventListener("input", () => {
+  paletteIndex = 0;
+  renderPalette();
+});
+$("palette-search").addEventListener("keydown", onPaletteKey);
+$("palette-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  runPalette(paletteCache[paletteIndex]);
+});
 
-window.addEventListener("keydown", (event) => {
-  if (isTyping(event)) return;
+onShortcut = (event) => {
   const meta = event.metaKey || event.ctrlKey;
+  if (meta && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openPalette();
+    return;
+  }
+  if (isTyping(event)) return;
+  if (event.altKey && !meta && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    const behavior = document.getElementById("behavior-panel");
+    if (behavior && (behavior.matches(":hover") || behavior.contains(document.activeElement))) {
+      event.preventDefault();
+      stepBehavior(event.key === "ArrowLeft" ? -1 : 1);
+      return;
+    }
+  }
+  if (event.key === "?") {
+    event.preventDefault();
+    openShortcuts();
+    return;
+  }
   if (meta && event.key.toLowerCase() === "z" && !event.shiftKey) {
     event.preventDefault();
     undo();
   } else if (meta && (event.key.toLowerCase() === "y" || (event.shiftKey && event.key.toLowerCase() === "z"))) {
     event.preventDefault();
     redo();
-  } else if (event.key === "f") {
-    viewport.frame(state.selected);
+  } else if (event.key === "f" || event.key === "F") {
+    const behavior = document.getElementById("behavior-panel");
+    if (behavior && behavior.__fitGraph && behavior.matches(":hover")) {
+      event.preventDefault();
+      behavior.__fitGraph();
+    } else viewport.frame(state.selected);
   } else if (event.key === "g") {
     setGizmo("translate");
   } else if (event.key === "r") {
     setGizmo("rotate");
+  } else if (event.key === "b" && state.selected) {
+    showTab("behavior");
   } else if (event.key === "h" && state.selected) {
     const actor = selectedActor();
-    edit({ command: actor && actor.status === "hidden" ? "unhide" : "hide", id: state.selected });
+    if (!actor) return;
+    if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: state.selected });
   } else if (event.key === "Delete" && state.selected) {
-    edit({ command: "remove", id: state.selected });
+    const actor = selectedActor();
+    if (!actor) return;
+    if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: "remove", id: state.selected });
+  } else if (event.key.toLowerCase() === "v" && !meta) {
+    toggleSnap();
   } else if (event.key === "Escape") {
+    if (document.querySelector("dialog[open]")) return;
     state.selected = null;
     viewport.select(null);
     renderOutliner();
     renderProps();
   }
-});
+};
+window.addEventListener("keydown", (event) => onShortcut(event));
 
 boot();
 
 async function boot() {
+  let startupError = "";
   try {
     state.status = await api.status();
   } catch (error) {
     $("gate").hidden = false;
-    $("gate").replaceChildren(gateMessage("Bancwright could not reach its server.", error.message));
+    $("gate").replaceChildren(gateMessage("Ocarina Forge could not reach its server.", error.message));
     return;
   }
+  const selectedMod = new URLSearchParams(window.location.search).get("mod");
+  if (selectedMod) {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+    try {
+      await api.openLocalMod(selectedMod);
+      state.status = await api.status();
+    } catch (error) {
+      startupError = error.code === "mod_import"
+        ? `Not editable in Forge: ${error.message}`
+        : error.message;
+    }
+  }
   renderChrome();
+  viewport.setConvertSlots(state.status.workers && state.status.workers.count);
+  refreshHotReload();
   if (!dumpReady()) {
     showGate();
+    if (startupError) toast(startupError);
     return;
   }
   $("gate").hidden = true;
   $("workspace").hidden = false;
+  dock.fit();
   viewport.resize();
   syncPanes();
+  if (startupError) toast(startupError);
   await refreshScenes();
 }
 
@@ -139,19 +525,7 @@ const mobileQuery = window.matchMedia("(max-width: 980px)");
 mobileQuery.addEventListener("change", syncPanes);
 
 function syncPanes() {
-  const mobile = mobileQuery.matches;
-  $("scene-pane").classList.toggle("shut", mobile);
-  $("side-pane").classList.toggle("shut", mobile);
-  viewport.resize();
-}
-
-function togglePane(id) {
-  const pane = $(id);
-  const other = $(id === "scene-pane" ? "side-pane" : "scene-pane");
-  const willOpen = pane.classList.contains("shut");
-  pane.classList.toggle("shut", !willOpen);
-  if (willOpen) other.classList.add("shut");
-  viewport.resize();
+  if (viewport) viewport.resize();
 }
 
 function dumpReady() {
@@ -194,10 +568,11 @@ function renderChrome() {
     $("project-name").textContent = project.manifest.name;
     $("build-open").hidden = false;
   } else {
-    $("project-title").textContent = dumpReady() ? "No project" : "Set up Bancwright";
+    $("project-title").textContent = dumpReady() ? "No project" : "Set up Ocarina Forge";
     $("project-name").textContent = dump && dump.root ? dump.root : "";
     $("build-open").hidden = true;
   }
+  renderProjectContents();
 }
 
 function showGate() {
@@ -206,10 +581,10 @@ function showGate() {
   const card = document.createElement("div");
   card.className = "gate-card";
   const title = document.createElement("h1");
-  title.textContent = "Point Bancwright at your dump";
+  title.textContent = "Point Ocarina Forge at your dump";
   const lede = document.createElement("p");
   lede.className = "lede";
-  lede.textContent = "The dump is the Longshot folder that contains romfs. Bancwright only reads it. Edits go into a project folder, and Build writes a mod Longshot can load.";
+  lede.textContent = "The dump is the Longshot folder that contains romfs. Ocarina Forge only reads it. Edits go into a project folder, and Build writes a mod Longshot can load.";
   const path = document.createElement("input");
   path.placeholder = "~/Games/Longshot/rc/v3.0.0";
   path.value = (state.status.config && state.status.config.dump) || "";
@@ -282,6 +657,72 @@ async function useSample() {
   }
 }
 
+async function refreshHotReload() {
+  try {
+    state.hot = await api.hotReload();
+  } catch (error) {
+    const missing = /404/.test(error.message || "");
+    state.hot = {
+      enabled: false,
+      status: "error",
+      message: missing ? "Restart the editor (./scripts/dev.sh) so hot reload can run." : error.message,
+    };
+  }
+  renderHotStatus();
+  fillHotReload();
+}
+
+function fillHotReload() {
+  const hot = state.hot;
+  const path = $("hot-path");
+  const enabled = $("hot-enabled");
+  if (!hot || !path || !enabled) return;
+  enabled.checked = Boolean(hot.enabled);
+  if (document.activeElement !== path) path.value = hot.path || "";
+}
+
+function renderHotStatus() {
+  const node = $("hot-status");
+  if (!node) return;
+  const hot = state.hot;
+  const show = Boolean(hot && (hot.enabled || hot.status === "error"));
+  node.hidden = !show;
+  node.textContent = show ? hot.message || "" : "";
+  node.classList.toggle("is-error", Boolean(hot && hot.status === "error"));
+}
+
+async function saveHotReload() {
+  try {
+    state.hot = await api.saveHotReload({
+      enabled: $("hot-enabled").checked,
+      path: $("hot-path").value.trim(),
+    });
+    renderHotStatus();
+    toast(state.hot.message || "Hot reload saved.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+function noteHotReload() {
+  if (!state.hot || !state.hot.enabled) return;
+  const token = ++state.hotToken;
+  const delays = [800, 2000, 5000, 12000];
+  (async () => {
+    for (const delay of delays) {
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (token !== state.hotToken) return;
+      try {
+        state.hot = await api.hotReload();
+      } catch (error) {
+        state.hot = { ...(state.hot || {}), status: "error", message: error.message };
+      }
+      renderHotStatus();
+      if (!state.hot || state.hot.status !== "pending") return;
+    }
+  })();
+}
+
 async function saveDump() {
   try {
     state.status = await api.saveConfig({ dump: $("dump-path").value.trim() });
@@ -314,19 +755,138 @@ function openProjectDialog() {
     summary.textContent = "No project is open.";
   }
   if (state.status.dump && state.status.dump.root) $("dump-path").value = state.status.dump.root;
+  fillHotReload();
   if (state.status.repo) $("import-path").placeholder = `${state.status.repo}/examples/ato-scenes`;
+  const catalog = $("project-catalog");
+  catalog.replaceChildren();
+  if (projectReady()) catalog.append(catalogList(project.catalog));
+  fillProjectChanges();
+  fillLibrary();
   $("project-dialog").showModal();
+}
+
+function renderProjectContents() {
+  const box = $("project-contents");
+  const body = $("project-contents-body");
+  if (!box || !body) return;
+  body.replaceChildren();
+  const project = state.status && state.status.project;
+  if (!projectReady() || !project.catalog) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const all = document.createElement("button");
+  all.type = "button";
+  all.className = "ghost";
+  all.textContent = "All map changes";
+  all.addEventListener("click", () => openProjectDialog());
+  const list = catalogList(project.catalog);
+  body.append(all);
+  if (list.querySelector("section")) body.append(list);
+}
+
+function catalogList(catalog) {
+  const root = document.createElement("div");
+  root.className = "catalog";
+  const sections = [
+    ["Quests", (catalog.quests || []).map((item) => `${item.name} · ${item.kind}`)],
+    ["Text", (catalog.text || []).map((item) => item.label || item.file)],
+    ["Events", (catalog.events || []).map((item) => `${item.title} · ${item.kind}`)],
+    ["Tables", (catalog.tables || []).map((item) => item.file)],
+    ["Game data", (catalog.gamedata || []).map((item) => (item.names || []).join(", ") || item.file)],
+    ["UI", (catalog.ui || []).map((item) => item.name)],
+    ["Scene recipes", (catalog.scenes || []).map((item) => item.summary)],
+  ];
+  for (const [title, rows] of sections) {
+    if (!rows.length) continue;
+    const block = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const list = document.createElement("ul");
+    for (const row of rows) {
+      const item = document.createElement("li");
+      item.textContent = row;
+      list.append(item);
+    }
+    block.append(heading, list);
+    root.append(block);
+  }
+  if (!root.childElementCount) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "This project has no text, events, or quests yet.";
+    root.append(empty);
+  }
+  return root;
+}
+
+async function fillLibrary() {
+  const host = $("project-library");
+  if (!host) return;
+  host.replaceChildren(empty("Loading projects…"));
+  try {
+    const [data, local] = await Promise.all([api.projects(), api.localMods()]);
+    host.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "muted tight";
+    note.textContent = data.root;
+    host.append(note);
+    if (!data.projects.length) {
+      host.append(empty("No Forge projects there yet. Leave the folder blank to create one in it."));
+    } else {
+      for (const item of data.projects) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "name-row";
+        button.textContent = `${item.title} · ${item.modId}`;
+        button.addEventListener("click", () => {
+          $("open-dir").value = item.root;
+          openProject();
+        });
+        host.append(button);
+      }
+    }
+    const heading = document.createElement("h3");
+    heading.textContent = "Local game mods";
+    host.append(heading);
+    const localRoot = document.createElement("p");
+    localRoot.className = "muted tight";
+    localRoot.textContent = local.root;
+    host.append(localRoot);
+    if (!local.mods.length) {
+      host.append(empty("No local mods found."));
+    }
+    for (const item of local.mods) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "name-row";
+      button.disabled = !item.editable;
+      const action = item.action === "open_project" ? "Open Forge project" : "Import and open";
+      button.textContent = item.editable
+        ? `${item.title} · ${item.id} · ${action}`
+        : `${item.title} · ${item.id} · Not editable`;
+      button.title = item.reason || "";
+      if (item.editable) button.addEventListener("click", () => openLocalMod(item.id));
+      host.append(button);
+    }
+  } catch (error) {
+    host.replaceChildren(empty(error.message));
+  }
 }
 
 async function createProject() {
   try {
-    await api.createProject({
-      directory: $("new-dir").value.trim(),
+    const directory = $("new-dir").value.trim();
+    const body = {
       name: $("new-name").value.trim(),
       title: $("new-title").value.trim(),
       author: $("new-author").value.trim(),
+      description: ($("new-description") && $("new-description").value.trim()) || "",
       version: $("new-version").value.trim() || "0.1.0",
-    });
+    };
+    if (directory) body.directory = directory;
+    await api.createProject(body);
     state.status = await api.status();
     closeDialogs();
     renderChrome();
@@ -343,6 +903,19 @@ async function openProject() {
     closeDialogs();
     renderChrome();
     await refreshScenes();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function openLocalMod(id) {
+  try {
+    await api.openLocalMod(id);
+    state.status = await api.status();
+    closeDialogs();
+    renderChrome();
+    if (dumpReady()) await refreshScenes();
+    else showGate();
   } catch (error) {
     toast(error.message);
   }
@@ -370,12 +943,14 @@ async function importAto(path) {
 
 async function refreshScenes() {
   const data = await api.scenes();
-  state.scenes = data.scenes;
+  state.scenes = sceneEntries(data.scenes);
   state.modified = new Set(data.modified || []);
+  state.recipes = new Set(data.recipes || []);
   state.projectOnly = data.projectOnly || [];
+  state.changeCounts = data.changes || {};
   $("scene-count").textContent = `${state.scenes.length} scenes`;
   renderScenes();
-  const preferred = [...state.modified][0] || (state.scenes[0] && state.scenes[0].path);
+  const preferred = state.scenes.flatMap((scene) => scene.banks).find((bank) => state.modified.has(bank)) || state.scenes[0]?.path;
   if (!state.banc && preferred) await openScene(preferred, { frame: true });
 }
 
@@ -385,7 +960,7 @@ function renderScenes() {
   list.replaceChildren();
   const groups = new Map();
   for (const scene of state.scenes) {
-    const hay = `${scene.area} ${scene.name} ${scene.path}`.toLowerCase();
+    const hay = `${scene.area} ${scene.name} ${scene.banks.join(" ")}`.toLowerCase();
     if (query && !hay.includes(query)) continue;
     if (!groups.has(scene.area)) groups.set(scene.area, []);
     groups.get(scene.area).push(scene);
@@ -423,19 +998,36 @@ function sceneButton(scene) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "scene-item";
-  button.setAttribute("aria-current", scene.path === state.banc ? "true" : "false");
+  button.setAttribute("aria-current", scene.banks.includes(state.banc) ? "true" : "false");
   const text = document.createElement("span");
   text.className = "grow";
   const strong = document.createElement("strong");
   strong.textContent = pretty(scene.name);
   const small = document.createElement("small");
-  small.textContent = scene.path;
+  small.textContent = scene.banks.length > 1 ? "Static + Dynamic" : scene.path;
+  small.title = scene.banks.join("\n");
   text.append(strong, small);
   button.append(text);
-  if (state.modified.has(scene.path)) {
+  const counts = {};
+  for (const bank of scene.banks) {
+    for (const [key, count] of Object.entries(state.changeCounts[bank] || {})) {
+      counts[key] = (counts[key] || 0) + count;
+    }
+  }
+  if (counts.total) {
+    const dot = document.createElement("i");
+    dot.className = actorChange(counts) ? "dot" : "dot recipe";
+    dot.title = changeSummary(counts);
+    button.append(dot);
+  } else if (scene.banks.some((bank) => state.modified.has(bank))) {
     const dot = document.createElement("i");
     dot.className = "dot";
-    dot.title = "This scene has edits in the project";
+    dot.title = "This scene has actor edits in the project";
+    button.append(dot);
+  } else if (scene.banks.some((bank) => state.recipes.has(bank))) {
+    const dot = document.createElement("i");
+    dot.className = "dot recipe";
+    dot.title = "An advanced patch in this project rewrites this scene at build time";
     button.append(dot);
   }
   button.addEventListener("click", () => {
@@ -445,46 +1037,345 @@ function sceneButton(scene) {
   return button;
 }
 
-async function openScene(banc, options = {}) {
-  $("viewport-empty").hidden = true;
-  $("viewport").classList.add("is-live");
-  try {
-    const view = await api.scene(banc);
-    state.banc = banc;
-    if (!options.keepHistory) state.history = { undo: [], redo: [] };
-    const interesting = view.actors.find((actor) => actor.status === "edited" || actor.status === "added");
-    applyView(view, { frame: Boolean(options.frame), select: interesting ? interesting.id : null });
-    const scene = state.scenes.find((item) => item.path === banc);
-    $("scene-name").textContent = scene ? pretty(scene.name) : pretty(banc.split("/").pop() || banc);
-    renderScenes();
-    updateHistoryButtons();
-  } catch (error) {
-    toast(error.message);
-    $("warnings").hidden = false;
-    $("warnings").textContent = error.message;
+function setScenePreparation(title, message, done = 0, total = 0) {
+  const box = $("scene-prepare");
+  if (!box) return;
+  $("scene-prepare-title").textContent = title;
+  $("scene-prepare-text").textContent = message;
+  $("scene-prepare-bar").style.width = `${total ? Math.round((100 * done) / total) : 0}%`;
+  box.hidden = false;
+}
+
+function clearScenePreparation() {
+  const box = $("scene-prepare");
+  if (box) {
+    box.hidden = true;
   }
 }
 
-function applyView(view, { frame = false, select } = {}) {
-  state.view = view;
+function updateSceneViewerProgress(info) {
+  if (!info) return;
+  sceneVisualBoxes = info.boxes || 0;
+  sceneVisualDeferred = info.deferred || 0;
+  sceneVisualResidentCapped = Boolean(info.residentCapped);
+  const extra = info.boxes ? ` · ${info.boxes} box actors` : "";
+  setScenePreparation(
+    "Loading scene in viewer",
+    `${info.done} of ${info.total} scene models loaded${extra}`,
+    info.done,
+    info.total,
+  );
+}
+
+function finishSceneViewerLoad(result = {}) {
+  const token = sceneVisualLoad;
+  if (!token || token !== sceneOpenToken) return;
+  if (result.batchesBuilt === false) {
+    setScenePreparation("Scene assembly failed", "The previous view is still visible. Choose another scene or retry.", 1, 1);
+    return;
+  }
+  sceneActorsReady = true;
+  if (!sceneTerrainReady) {
+    setScenePreparation("Loading terrain", "Preparing the terrain mesh…", 0, 1);
+    return;
+  }
+  let message = "All scene models are loaded.";
+  if (sceneVisualResidentCapped) message = "Visible detail is ready. Distant models load as you move.";
+  else if (sceneVisualDeferred) message = "Visible detail is ready. The rest of the scene is loading in the background.";
+  else if (sceneVisualBoxes) message = `Scene loaded with ${sceneVisualBoxes} box actor${sceneVisualBoxes === 1 ? "" : "s"}.`;
+  setScenePreparation("Scene ready", message, 1, 1);
+  window.setTimeout(() => {
+    if (sceneVisualLoad !== token || sceneOpenToken !== token) return;
+    sceneVisualLoad = 0;
+    clearScenePreparation();
+  }, 350);
+}
+
+async function openScene(banc, options = {}) {
+  const token = ++sceneOpenToken;
+  const terrainAlreadyReady = state.banc === banc && sceneTerrainReady;
+  sceneVisualLoad = 0;
+  sceneVisualBoxes = 0;
+  sceneVisualDeferred = 0;
+  sceneVisualResidentCapped = false;
+  sceneActorsReady = false;
+  sceneTerrainReady = terrainAlreadyReady;
+  setScenePreparation(`Preparing ${banc.split("/").pop()}`, "Reading scene and companion assets…");
+  try {
+    const view = await api.scene(banc);
+    if (token !== sceneOpenToken) return;
+    sceneVisualLoad = token;
+    setScenePreparation("Loading scene in viewer", "Preparing and streaming scene models…", 0, 1);
+    $("viewport-empty").hidden = true;
+    $("viewport").classList.add("is-live");
+    state.banc = banc;
+    if (!options.keepHistory) state.history = blankHistory(null);
+    const interesting = view.actors.find((actor) => actor.status === "edited" || actor.status === "added");
+    applyView(view, { frame: Boolean(options.frame), select: interesting ? interesting.id : null, forceSceneLoad: true });
+    if (!options.keepHistory) state.history = blankHistory(captureShot());
+    renderScenes();
+    updateHistoryButtons();
+    renderChanges();
+  } catch (error) {
+    if (token === sceneOpenToken) {
+      sceneVisualLoad = 0;
+      clearScenePreparation();
+      toast(error.message);
+    }
+  }
+}
+
+function bancKind(banc) {
+  const name = (banc || "").split("/").pop() || "";
+  if (name.includes("_Dynamic")) return "Dynamic";
+  if (name.includes("_Static")) return "Static";
+  return "companion";
+}
+
+function composeView(view) {
+  if (!view) return view;
+  const host = view.banc || state.banc;
+  const actors = (view.actors || [])
+    .filter((actor) => !actor.companion)
+    .map((actor) => ({ ...actor, banc: actor.banc || host, companion: false }));
+  if (state.showCompanions !== false) {
+    for (const extra of view.companions || []) {
+      const label = bancKind(extra.banc);
+      for (const actor of extra.actors || []) {
+        if (!actor.id) continue;
+        actors.push({
+          ...actor,
+          companion: true,
+          banc: extra.banc,
+          placementId: actor.placementId || actor.id,
+          id: String(actor.id).includes("::") ? actor.id : `${extra.banc}::${actor.id}`,
+          companionLabel: label,
+          pickable: state.companionPick !== false,
+        });
+      }
+    }
+  }
+  return { ...view, actors };
+}
+
+function commandTarget(command) {
+  const id = command.id || state.selected;
+  const actor = actorRecord(id);
+  const forced = command.banc || "";
+  const rest = { ...command };
+  delete rest.banc;
+  const banc = forced || (actor && actor.banc) || state.banc;
+  const placement = actor && actor.placementId;
+  return {
+    banc,
+    command: placement ? { ...rest, id: placement } : rest,
+    select: id,
+  };
+}
+
+function actorRecord(id) {
+  return ((state.view && state.view.actors) || []).find((actor) => actor.id === id) || null;
+}
+
+function noteCompanion() {
+  const scene = state.scenes.find((item) => item.banks.includes(state.banc));
+  const base = scene ? pretty(scene.name) : pretty((state.banc || "").split("/").pop() || "");
+  const extras = (state.raw && state.raw.companions) || [];
+  const kinds = extras.map((item) => bancKind(item.banc));
+  const actor = actorRecord(state.selected);
+  let suffix = "";
+  if (scene?.banks.length > 1 && kinds.length) {
+    suffix = state.showCompanions !== false ? " · Static + Dynamic" : ` · ${bancKind(state.banc)} only`;
+  } else if (state.showCompanions !== false && kinds.length) {
+    suffix = ` · with ${kinds.join(", ")}`;
+  }
+  if (actor && actor.companion) suffix += ` · editing ${actor.companionLabel}`;
+  const node = $("scene-name");
+  if (node) node.textContent = base + suffix;
+  const active = $("active-bank");
+  active.hidden = !(scene?.banks.length > 1 && kinds.length);
+  active.value = bancKind(state.banc);
+}
+
+function applyView(view, { frame = false, select, forceSceneLoad = false } = {}) {
+  const previousActors = state.view ? state.view.actors : null;
+  state.raw = view;
+  const composed = composeView(view);
+  state.view = composed;
   if (select !== undefined) state.selected = select;
   else if (view.focus) state.selected = view.focus;
-  else if (state.selected && !view.actors.some((actor) => actor.id === state.selected)) state.selected = null;
-  viewport.setActors(view.actors, { frame });
+  if (state.selected && !composed.actors.some((actor) => actor.id === state.selected)) state.selected = null;
+  const plan = frame ? { mode: "rebuild" } : planActorRefresh(previousActors, composed.actors);
+  const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
+  // A new or deleted actor joins the batches that are already on screen.
+  // Opening a scene still goes through setActors, which is the one full load.
+  if (forceSceneLoad || (!patched && (frame || !viewport.reconcileActors(composed.actors)))) {
+    state.modelErrors = [];
+    state.meshAudit = null;
+    state.terrainNotes = [];
+    viewport.setActors(composed.actors, { frame, banc: view.banc, previewUrl: view.previewUrl });
+  }
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
-  const warnings = $("warnings");
-  warnings.replaceChildren();
-  warnings.hidden = !view.warnings || view.warnings.length === 0;
-  for (const message of view.warnings || []) {
-    const p = document.createElement("p");
-    p.textContent = message;
-    warnings.append(p);
+  renderOutliner();
+  renderProps();
+  loadChanges(view.banc || state.banc);
+  loadProblems(view.banc || state.banc);
+  if (state.banc) state.modified.add(state.banc);
+  if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
+  for (const extra of view.companions || []) {
+    const touched = extra.diff && Object.keys(extra.diff.actors || {}).length;
+    if (touched) state.modified.add(extra.banc);
+    else state.modified.delete(extra.banc);
+  }
+  noteCompanion();
+}
+
+function snapshot() {
+  const raw = state.raw || state.view || {};
+  const actors = structuredClone((raw.diff && raw.diff.actors) || {});
+  const recipes = ((state.view && state.view.actors) || [])
+    .filter((actor) => actor.status === "recipe" && !actor.companion)
+    .map((actor) => ({
+      id: actor.id,
+      gyaml: actor.gyaml,
+      name: actor.name,
+      translate: actor.translate,
+      rotate: actor.rotate,
+      scale: actor.scale,
+      params: actor.params,
+      recipe: actor.recipe,
+    }));
+  return {
+    actors,
+    recipes,
+    companions: (raw.companions || []).map((item) => ({
+      banc: item.banc,
+      actors: structuredClone((item.diff && item.diff.actors) || {}),
+      recipes: (item.actors || [])
+        .filter((actor) => actor.status === "recipe")
+        .map((actor) => ({
+          id: actor.placementId || actor.id,
+          gyaml: actor.gyaml,
+          name: actor.name,
+          translate: actor.translate,
+          rotate: actor.rotate,
+          scale: actor.scale,
+          params: actor.params,
+          recipe: actor.recipe,
+        })),
+    })),
+  };
+}
+
+function captureShot() {
+  const file = snapshot();
+  return {
+    ...file,
+    select: state.selected,
+    viewActors: structuredClone((state.view && state.view.actors) || []),
+  };
+}
+
+let persistChain = Promise.resolve();
+let persistToken = 0;
+
+function persistShot(shot, rollback) {
+  const token = ++persistToken;
+  const banc = state.banc;
+  const leaving = rollback && rollback.shot;
+  const writeRecipes = shotHasRecipes(shot) || shotHasRecipes(leaving);
+  persistChain = persistChain.then(async () => {
+    try {
+      await writeShot(banc, shot, writeRecipes);
+    } catch (error) {
+      if (token !== persistToken) return;
+      toast(error.message || "The project file did not save.");
+      if (!rollback) return;
+      state.history = rollback.history;
+      if (rollback.shot) applyLocal(rollback.shot);
+      updateHistoryButtons();
+    }
+  });
+}
+
+function shotHasRecipes(shot) {
+  if (!shot) return false;
+  if (shot.recipes && shot.recipes.length) return true;
+  return (shot.companions || []).some((item) => item.recipes && item.recipes.length);
+}
+
+async function writeShot(banc, shot, writeRecipes) {
+  if (!banc || !shot) return;
+  await api.putDiff(banc, shot.actors || {});
+  if (writeRecipes) await api.putRecipes(banc, shot.recipes || []);
+  for (const item of shot.companions || []) {
+    if (!item.banc || item.banc === banc) continue;
+    await api.putDiff(item.banc, item.actors || {});
+    if (writeRecipes && Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
+  }
+  if (state.banc === banc) {
+    loadChanges(banc);
+    loadProblems(banc);
+    noteHotReload();
+  }
+}
+
+function applyLocal(shot) {
+  if (!shot || !state.raw) return;
+  const previousActors = state.view ? state.view.actors : null;
+  const nextActors = structuredClone(shot.viewActors || []);
+  const hostActors = nextActors.filter((actor) => !actor.companion).map((actor) => {
+    const copy = { ...actor };
+    delete copy.companion;
+    delete copy.companionLabel;
+    delete copy.banc;
+    return copy;
+  });
+  const companionActors = new Map();
+  for (const actor of nextActors) {
+    if (!actor.companion) continue;
+    const list = companionActors.get(actor.banc) || [];
+    const copy = { ...actor, id: actor.placementId || String(actor.id).split("::").pop() };
+    delete copy.companion;
+    delete copy.companionLabel;
+    delete copy.pickable;
+    list.push(copy);
+    companionActors.set(actor.banc, list);
+  }
+  state.raw = {
+    ...state.raw,
+    actors: hostActors,
+    diff: { ...(state.raw.diff || {}), actors: structuredClone(shot.actors || {}) },
+    recipes: structuredClone(shot.recipes || []),
+    companions: (state.raw.companions || []).map((item) => {
+      const saved = (shot.companions || []).find((entry) => entry.banc === item.banc);
+      const listed = companionActors.get(item.banc);
+      return {
+        ...item,
+        ...(saved ? { diff: { ...(item.diff || {}), actors: structuredClone(saved.actors || {}) } } : {}),
+        ...(listed ? { actors: listed } : {}),
+      };
+    }),
+  };
+  state.view = { ...(state.view || {}), actors: nextActors };
+  const plan = planActorRefresh(previousActors, nextActors);
+  const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
+  if (!patched && !viewport.reconcileActors(nextActors)) {
+    viewport.setActors(nextActors, { frame: false, banc: state.banc });
+  }
+  state.selected = shot.select && nextActors.some((actor) => actor.id === shot.select) ? shot.select : null;
+  viewport.select(state.selected);
+  const diff = (state.raw.diff && state.raw.diff.actors) || {};
+  if (state.banc) {
+    if (Object.keys(diff).length) state.modified.add(state.banc);
+    else state.modified.delete(state.banc);
   }
   renderOutliner();
   renderProps();
-  if (state.banc) state.modified.add(state.banc);
-  if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
+  renderScenes();
+  renderChanges();
+  noteCompanion();
 }
 
 async function edit(command) {
@@ -494,45 +1385,199 @@ async function edit(command) {
     openProjectDialog();
     return;
   }
-  const before = structuredClone((state.view && state.view.diff && state.view.diff.actors) || {});
-  state.history.undo.push(before);
-  state.history.redo = [];
+  const target = commandTarget(command);
+  const subject = actorRecord(command.id) || { gyaml: command.actor || command.gyaml || "" };
+  const label = editLabel(command, subject, { gizmo: state.gizmo });
+  await persistChain;
   try {
-    const view = await api.edit(state.banc, command);
-    applyView(view, { select: view.focus || state.selected });
+    const view = await api.edit(target.banc, target.command);
+    if (target.banc !== state.banc && state.raw) {
+      const companions = (state.raw.companions || []).map((item) =>
+        item.banc === target.banc
+          ? { banc: item.banc, actors: view.actors, removed: view.removed, diff: view.diff }
+          : item,
+      );
+      const focus = view.focus ? `${target.banc}::${view.focus}` : target.select;
+      applyView({ ...state.raw, companions }, { select: focus });
+    } else {
+      applyView(
+        { ...view, companions: (state.raw && state.raw.companions) || [] },
+        { select: view.focus || state.selected },
+      );
+    }
+    state.history = pushEdit(state.history, { label, shot: captureShot() });
     renderScenes();
+    renderChanges();
+    noteHotReload();
   } catch (error) {
-    state.history.undo.pop();
     toast(error.message);
-    if (state.view) viewport.setActors(state.view.actors, { frame: false });
+    if (state.view && !viewport.patchActors(state.view.actors)) {
+      viewport.setActors(state.view.actors, { frame: false, banc: state.banc });
+    }
     viewport.select(state.selected);
   }
   updateHistoryButtons();
 }
 
-async function undo() {
-  if (!state.history.undo.length || !state.banc) return;
-  state.history.redo.push(structuredClone(state.view.diff.actors || {}));
-  const previous = state.history.undo.pop();
-  await restore(previous);
+function undo() {
+  if (!state.banc) return;
+  const previousHistory = state.history;
+  const step = popUndo(state.history);
+  if (!step) return;
+  state.history = step.history;
+  updateHistoryButtons();
+  if (step.entry.behavior) {
+    restoreBehavior(step.entry.gyaml, step.entry.before, previousHistory);
+    return;
+  }
+  if (step.entry.local) {
+    setCategory(step.entry.category, step.entry.before, { record: false });
+    renderOutliner();
+    renderChanges();
+    return;
+  }
+  if (!step.scene) return;
+  applyLocal(step.scene);
+  persistShot(step.scene, { history: previousHistory, shot: step.entry.shot });
 }
 
-async function redo() {
-  if (!state.history.redo.length || !state.banc) return;
-  state.history.undo.push(structuredClone(state.view.diff.actors || {}));
-  const next = state.history.redo.pop();
-  await restore(next);
+function redo() {
+  if (!state.banc) return;
+  const previousHistory = state.history;
+  const step = popRedo(state.history);
+  if (!step) return;
+  state.history = step.history;
+  updateHistoryButtons();
+  if (step.entry.behavior) {
+    restoreBehavior(step.entry.gyaml, step.entry.after, previousHistory);
+    return;
+  }
+  if (step.entry.local) {
+    setCategory(step.entry.category, step.entry.after, { record: false });
+    renderOutliner();
+    renderChanges();
+    return;
+  }
+  applyLocal(step.entry.shot);
+  persistShot(step.entry.shot, { history: previousHistory, shot: step.scene });
 }
 
-async function restore(actors) {
+async function restoreBehavior(gyaml, ops, previousHistory) {
   try {
-    const view = await api.putDiff(state.banc, actors);
-    applyView(view, { select: state.selected });
-    renderScenes();
+    const graph = await api.putBehaviorOps({ gyaml, ops: ops || [] });
+    if (state.behavior && state.behavior.gyaml === gyaml) {
+      state.behavior = graph;
+      drawBehavior();
+    }
+    renderChanges();
   } catch (error) {
+    state.history = previousHistory;
+    updateHistoryButtons();
     toast(error.message);
   }
+}
+
+function removeRecipe(actor) {
+  const file = (actor.recipe && actor.recipe.file) || "the recipe";
+  const label = actor.name || actor.gyaml;
+  if (!window.confirm(`Remove ${label} from ${file}? The build will no longer place it.`)) return;
+  edit({ command: "remove", id: actor.id });
+}
+
+const CATEGORY_FILTERS = [
+  ["npc", "NPC"],
+  ["enemy", "Enemy"],
+  ["object", "Object"],
+  ["land", "Land"],
+  ["effect", "Effect"],
+  ["animal", "Animal"],
+  ["area", "Area"],
+  ["system", "System"],
+  ["other", "Other"],
+];
+
+const HELPER_DEFAULTS = {
+  npc: true,
+  enemy: true,
+  object: true,
+  land: true,
+  effect: true,
+  animal: true,
+  area: false,
+  system: false,
+  other: true,
+};
+
+function loadHelperBoxes() {
+  const next = { ...HELPER_DEFAULTS };
+  try {
+    const raw = localStorage.getItem("ocarinaforge.helperBoxes");
+    if (!raw) return next;
+    const parsed = JSON.parse(raw);
+    for (const key of Object.keys(HELPER_DEFAULTS)) {
+      if (parsed && typeof parsed[key] === "boolean") next[key] = parsed[key];
+    }
+  } catch {
+    /* a bad saved value keeps the defaults */
+  }
+  return next;
+}
+
+function eyeMarkup(on) {
+  const slash = on ? "" : '<path d="M2.2 13.6 13.8 2.4" fill="none" stroke="currentColor" stroke-width="1.4"/>';
+  return `<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 3.2C4.2 3.2 1.6 8 1.6 8S4.2 12.8 8 12.8 14.4 8 14.4 8 11.8 3.2 8 3.2zm0 7.6A2.8 2.8 0 1 1 8 5.2a2.8 2.8 0 0 1 0 5.6z"/>${slash}</svg>`;
+}
+
+function renderLegend() {
+  const host = document.querySelector(".legend");
+  if (!host || !state.helperBoxes) return;
+  host.replaceChildren();
+  for (const [id, label] of CATEGORY_FILTERS) {
+    if (id === "other") continue;
+    const on = state.helperBoxes[id] !== false;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = on ? "legend-toggle" : "legend-toggle is-off";
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+    button.title = on
+      ? `Hide ${label} helper boxes and labels. Models stay. The selected or hovered actor still shows its box.`
+      : `Show ${label} helper boxes for actors without a model, and their labels.`;
+    const swatch = document.createElement("i");
+    swatch.className = `swatch ${id}`;
+    const name = document.createElement("span");
+    name.textContent = label;
+    const eye = document.createElement("i");
+    eye.className = "eye";
+    eye.innerHTML = eyeMarkup(on);
+    button.append(swatch, name, eye);
+    button.addEventListener("click", () => {
+      state.helperBoxes[id] = !on;
+      localStorage.setItem("ocarinaforge.helperBoxes", JSON.stringify(state.helperBoxes));
+      viewport.setFlags({ boxes: { [id]: state.helperBoxes[id] } });
+      renderLegend();
+    });
+    host.append(button);
+  }
+}
+
+state.helperBoxes = loadHelperBoxes();
+viewport.setFlags({ boxes: state.helperBoxes });
+renderLegend();
+
+function setCategory(cat, mode, options = {}) {
+  const previous = state.categories[cat] || "show";
+  if (previous === mode) return;
+  state.categories[cat] = mode;
+  document.querySelectorAll(`[data-cat="${cat}"]`).forEach((item) => {
+    item.classList.toggle("is-on", item.dataset.mode === mode);
+  });
+  viewport.setFlags({ categories: { [cat]: mode } });
+  if (options.record === false || !state.banc) return;
+  const name = (CATEGORY_FILTERS.find(([id]) => id === cat) || [cat, cat])[1];
+  const label = mode === "lock" ? `Lock ${name}` : mode === "hide" ? `Hide ${name}` : `Show ${name}`;
+  state.history = pushEdit(state.history, { label, local: true, category: cat, before: previous, after: mode });
   updateHistoryButtons();
+  renderChanges();
 }
 
 function updateHistoryButtons() {
@@ -541,6 +1586,7 @@ function updateHistoryButtons() {
 }
 
 function renderOutliner() {
+  renderFilters();
   const list = $("outliner");
   list.replaceChildren();
   if (!state.view) {
@@ -573,6 +1619,27 @@ function renderOutliner() {
     row.append(text, badge, restore);
     list.append(row);
   }
+  for (const extra of (state.raw && state.raw.companions) || []) {
+    if (state.showCompanions === false) continue;
+    const label = bancKind(extra.banc);
+    for (const removed of extra.removed || []) {
+      const row = document.createElement("div");
+      row.className = "actor-row";
+      const text = document.createElement("span");
+      text.className = "grow";
+      text.textContent = `${removed.gyaml || "Removed"} · ${label}`;
+      const badge = document.createElement("span");
+      badge.className = "badge removed";
+      badge.textContent = "removed";
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "ghost";
+      restore.textContent = "Restore";
+      restore.addEventListener("click", () => edit({ command: "revert", id: removed.id, banc: extra.banc }));
+      row.append(text, badge, restore);
+      list.append(row);
+    }
+  }
 }
 
 function actorRow(actor) {
@@ -586,15 +1653,17 @@ function actorRow(actor) {
   const text = document.createElement("span");
   text.className = "grow";
   const strong = document.createElement("strong");
-  strong.textContent = actor.name || actor.gyaml;
+  strong.textContent = actor.companion
+    ? `${actor.name || actor.gyaml} · ${actor.companionLabel || "companion"}`
+    : actor.name || actor.gyaml;
   const small = document.createElement("small");
-  small.textContent = actor.name ? actor.gyaml : actor.category;
+  small.textContent = actor.status === "recipe" ? (actor.recipe && actor.recipe.note) || "added by build" : actor.name ? actor.gyaml : actor.category;
   text.append(strong, small);
   button.append(swatch, text);
   if (actor.status && actor.status !== "vanilla") {
     const badge = document.createElement("span");
     badge.className = `badge ${actor.status}`;
-    badge.textContent = actor.status;
+    badge.textContent = actor.status === "recipe" ? "build" : actor.status;
     button.append(badge);
   }
   button.addEventListener("click", () => {
@@ -602,29 +1671,70 @@ function actorRow(actor) {
     viewport.select(actor.id);
     renderOutliner();
     renderProps();
+    noteCompanion();
     showTab("props");
   });
   button.addEventListener("dblclick", () => viewport.frame(actor.id));
   return button;
 }
 
+function renderFilters() {
+  const host = $("outliner-filters");
+  if (!host) return;
+  host.replaceChildren();
+  if (!state.view) return;
+  const volumes = document.createElement("button");
+  volumes.type = "button";
+  volumes.className = state.hideVolumes ? "is-off" : "";
+  volumes.textContent = "Volumes";
+  volumes.title = state.hideVolumes ? "Show volume outlines" : "Hide every volume outline";
+  volumes.addEventListener("click", () => {
+    state.hideVolumes = !state.hideVolumes;
+    viewport.setFlags({ volumes: state.hideVolumes });
+    renderOutliner();
+  });
+  host.append(volumes);
+  const present = new Set(state.view.actors.map((actor) => actor.category));
+  for (const [id, label] of CATEGORY_FILTERS) {
+    if (!present.has(id) && state.categories[id] !== "hide") continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = state.categories[id] === "hide" ? "is-off" : "";
+    button.textContent = label;
+    const hidden = state.categories[id] === "hide";
+    button.title = hidden ? `Show ${label}` : `Hide ${label}`;
+    button.addEventListener("click", () => {
+      if (!state.categoryMemory) state.categoryMemory = {};
+      if (hidden) setCategory(id, state.categoryMemory[id] || "show");
+      else {
+        state.categoryMemory[id] = state.categories[id] || "show";
+        setCategory(id, "hide");
+      }
+      renderOutliner();
+    });
+    host.append(button);
+  }
+}
+
 function renderProps() {
+  if (dock.isOpen("behavior")) refreshBehavior();
+  renderDetails();
   const panel = $("props-panel");
   panel.replaceChildren();
   const actor = selectedActor();
   if (!actor) {
-    panel.append(empty("Select an actor in the view or the list. Move and Rotate use the gizmo. G moves, R rotates, F frames."));
+    panel.append(empty("Select an actor in the view or the list. Move, Rotate, and Scale use the gizmo. G moves, R rotates, F frames."));
     return;
   }
   const head = document.createElement("div");
   head.className = "identity";
   const title = document.createElement("h3");
   title.textContent = actor.name || actor.gyaml;
-  const gyaml = document.createElement("div");
-  gyaml.textContent = actor.gyaml;
-  const hash = document.createElement("div");
-  hash.className = "hash";
-  hash.textContent = actor.id || "No instance hash. This actor cannot be edited until the file has a Hash.";
+  const info = viewport.modelInfo(actor.id);
+  const line = document.createElement("p");
+  line.className = "model-line";
+  line.textContent = modelLine(info);
+  line.title = (info && info.source) || line.textContent;
   const meta = document.createElement("div");
   const cat = document.createElement("span");
   cat.className = "badge";
@@ -633,27 +1743,55 @@ function renderProps() {
   if (actor.status !== "vanilla") {
     const status = document.createElement("span");
     status.className = `badge ${actor.status}`;
-    status.textContent = actor.status;
+    status.textContent = actor.status === "recipe" ? "build" : actor.status;
     meta.append(" ", status);
   }
-  head.append(title, gyaml, hash, meta);
+  head.append(
+    title,
+    line,
+    identityRow("Gyaml", actor.gyaml),
+    identityRow("Hash", actor.id || "none. This actor cannot be edited until the file has a Hash.", true),
+    meta,
+  );
   panel.append(head);
+  const jumps = document.createElement("div");
+  jumps.className = "actions";
+  jumps.append(action("Behavior", () => showTab("behavior")), action("Details", () => showTab("details")));
+  panel.append(jumps);
+  const notes = actorProblems(actor);
+  if (notes.length) panel.append(problemNotes(notes));
+  if (actor.status === "recipe") panel.append(recipeNote(actor));
 
   if (!actor.id || actor.status === "locked") return;
 
   panel.append(vectorFields("Position (metres)", "t", actor.translate));
-  panel.append(vectorFields("Rotation (degrees, Y is yaw)", "r", actor.rotate.map(deg)));
+  panel.append(vectorFields("Rotation (degrees, X then Y then Z)", "r", actor.rotate.map(deg)));
   panel.append(vectorFields("Scale", "s", actor.scale));
+  if (actor.scaleInFile === false) {
+    const scaleNote = document.createElement("p");
+    scaleNote.className = "muted";
+    scaleNote.textContent = "This actor has no Scale in the banc. Saving a different scale writes an add. The patch grows the file, and the game applies it on the next process start.";
+    panel.append(scaleNote);
+  }
 
   const actions = document.createElement("div");
   actions.className = "actions";
-  actions.append(
-    action("Duplicate", () => edit({ command: "duplicate", id: actor.id })),
-    action(actor.status === "hidden" ? "Show" : "Hide", () => edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: actor.id })),
-    action("Delete", () => edit({ command: "remove", id: actor.id })),
-    action("Change actor", () => openAdd("replace")),
-  );
-  if (actor.status !== "vanilla") actions.append(action("Revert", () => edit({ command: "revert", id: actor.id })));
+  if (actor.status === "recipe") {
+    actions.append(
+      action("Duplicate", () => edit({ command: "duplicate", id: actor.id })),
+      action("Hide", () => removeRecipe(actor)),
+      action("Delete", () => removeRecipe(actor)),
+      action("Revert", () => edit({ command: "revert", id: actor.id })),
+    );
+  } else {
+    actions.append(
+      action("Duplicate", () => edit({ command: "duplicate", id: actor.id })),
+      action(actor.status === "hidden" ? "Show" : "Hide", () => edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: actor.id })),
+      action("Delete", () => edit({ command: "remove", id: actor.id })),
+      action("Change actor", () => openAdd("replace")),
+    );
+    if (actor.status !== "vanilla") actions.append(action("Revert", () => edit({ command: "revert", id: actor.id })));
+  }
   panel.append(actions);
 
   const nameField = document.createElement("div");
@@ -685,6 +1823,148 @@ function renderProps() {
     srt.textContent = `SRT hash ${actor.srtHash}. The instance id is left alone; the project uses it as the key.`;
     panel.append(srt);
   }
+}
+
+function identityRow(caption, value, mono = false) {
+  const row = document.createElement("div");
+  row.className = mono ? "id-row hash" : "id-row";
+  const label = document.createElement("span");
+  label.textContent = caption;
+  row.append(label, document.createTextNode(value));
+  return row;
+}
+
+function recipeNote(actor) {
+  const wrap = document.createElement("div");
+  wrap.className = "model-note";
+  const note = document.createElement("p");
+  note.textContent = (actor.recipe && actor.recipe.note) || "added by build";
+  const file = document.createElement("p");
+  file.className = "muted";
+  file.textContent = (actor.recipe && actor.recipe.file) || "";
+  wrap.append(note, file);
+  if (actor.recipe && actor.recipe.flag) {
+    const flag = document.createElement("p");
+    flag.className = "muted";
+    flag.textContent = `Present while ${actor.recipe.flag} is set. Edits are written to the recipe file. The vanilla banc stays as it is until you build.`;
+    wrap.append(flag);
+  } else {
+    const flag = document.createElement("p");
+    flag.className = "muted";
+    flag.textContent = "Edits are written to the recipe file. The vanilla banc stays as it is until you build.";
+    wrap.append(flag);
+  }
+  return wrap;
+}
+
+function renderDetails() {
+  const panel = $("details-panel");
+  if (!panel) return;
+  panel.replaceChildren();
+  const actor = selectedActor();
+  if (!actor) {
+    panel.append(empty("Select an actor to read its model."));
+    return;
+  }
+  const title = document.createElement("h3");
+  title.textContent = actor.name || actor.gyaml;
+  panel.append(title, modelBlock(actor));
+  const materials = materialBlock(viewport.modelInfo(actor.id));
+  if (materials) panel.append(materials);
+}
+
+function modelBlock(actor) {
+  const wrap = document.createElement("div");
+  wrap.className = "model-note";
+  const info = viewport.modelInfo(actor.id) || { status: "loading", reason: "Waiting to convert" };
+  const title = document.createElement("div");
+  title.className = "axis-label";
+  title.textContent = "Model";
+  const body = document.createElement("p");
+  if (info.status === "mesh") {
+    const bits = [`${info.triangles || 0} triangles`];
+    if (info.textures) bits.push(info.textures === 1 ? "1 base color" : `${info.textures} base colors`);
+    if (info.source) bits.push(info.source);
+    body.textContent = bits.join(" · ");
+  } else if (info.status === "loading" || info.status === "queued") {
+    body.textContent = "Waiting to convert";
+  } else {
+    wrap.classList.add("is-box");
+    body.textContent = info.reason || "This actor stays a labeled box.";
+  }
+  wrap.append(title, body);
+  if (info.status === "mesh" && info.reason) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = info.reason;
+    wrap.append(note);
+  } else if (info.status !== "mesh" && info.source) {
+    const source = document.createElement("p");
+    source.className = "muted";
+    source.textContent = info.source;
+    wrap.append(source);
+  }
+  return wrap;
+}
+
+function materialBlock(info) {
+  const rows = (info && info.textureLog) || [];
+  const useful = rows.filter((row) => row && (row.material || (row.roles && row.roles.length) || (row.params && row.params.length)));
+  if (!useful.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "model-note";
+  const title = document.createElement("div");
+  title.className = "axis-label";
+  title.textContent = "Materials";
+  wrap.append(title);
+  for (const row of useful.slice(0, 8)) {
+    const body = document.createElement("p");
+    body.className = "material-dump";
+    body.textContent = materialText(row);
+    wrap.append(body);
+  }
+  if (useful.length > 8) {
+    const more = document.createElement("p");
+    more.className = "muted";
+    more.textContent = `${useful.length - 8} more. python -m ocarina_forge material-debug prints every material.`;
+    wrap.append(more);
+  }
+  return wrap;
+}
+
+function materialText(row) {
+  const lines = [row.material || "material"];
+  const shader = [row.archive, row.shader].filter(Boolean).join(" / ");
+  lines.push(shader || "no shader assign");
+  if (row.hints && row.hints.length) lines.push("name hint " + row.hints.join(", "));
+  const attributes = row.attributes || {};
+  for (const key of Object.keys(attributes)) lines.push(`${key} = ${attributes[key]}`);
+  const projection = row.projection || {};
+  for (const key of Object.keys(projection)) lines.push(`${key} = ${projection[key]}`);
+  for (const role of row.roles || []) {
+    const slot = role[0] || "?";
+    const texture = role[1] || "?";
+    const kind = role[2] || "other";
+    const uv = role[3] ? `uv ${role[3]}` : "uv (not in the shader assign)";
+    const srt = role[4] ? `srt ${role[4]}` : "srt (none named for this sampler)";
+    lines.push(`${slot} = ${texture}  ${kind}  ${uv}  ${srt}`);
+  }
+  if (row.alpha) lines.push(String(row.alpha));
+  const options = row.options || {};
+  for (const key of Object.keys(options)) lines.push(`${key} = ${options[key]}`);
+  for (const param of row.params || []) lines.push(paramText(param));
+  return lines.join("\n");
+}
+
+function paramText(param) {
+  if (!param) return "";
+  if (param.kind === "texsrt") {
+    const scale = (param.scale || []).join(" ");
+    const translate = (param.translate || []).join(" ");
+    return `${param.name}  texsrt ${param.mode}  scale ${scale}  rotate ${param.rotate}  translate ${translate}`;
+  }
+  const value = Array.isArray(param.value) ? param.value.join(" ") : param.value ?? "";
+  return `${param.name}  ${param.kind || ""} ${value}`.trim();
 }
 
 function vectorFields(label, prefix, values) {
@@ -884,6 +2164,30 @@ function chooseActor(name) {
   edit({ command: "add", actor: name, translate: viewport.spawnPoint() });
 }
 
+async function runModExport() {
+  const log = $("build-log");
+  log.replaceChildren();
+  const line = document.createElement("li");
+  line.textContent = "Writing the Longshot mod…";
+  log.append(line);
+  try {
+    const result = await api.exportLongshot({ install: true });
+    log.replaceChildren();
+    for (const entry of result.log || []) {
+      const item = document.createElement("li");
+      item.className = entry.level;
+      item.textContent = entry.message;
+      log.append(item);
+    }
+  } catch (error) {
+    log.replaceChildren();
+    const item = document.createElement("li");
+    item.className = "error";
+    item.textContent = error.message;
+    log.append(item);
+  }
+}
+
 async function runBuild() {
   const log = $("build-log");
   log.replaceChildren();
@@ -915,27 +2219,1125 @@ function selectedActor() {
   return state.view.actors.find((actor) => actor.id === state.selected) || null;
 }
 
-function showTab(name) {
-  state.tab = name;
-  $("outliner-panel").hidden = name !== "outliner";
-  $("props-panel").hidden = name !== "props";
-  $("tab-outliner").classList.toggle("is-on", name === "outliner");
-  $("tab-props").classList.toggle("is-on", name === "props");
-  $("tab-outliner").setAttribute("aria-selected", name === "outliner" ? "true" : "false");
-  $("tab-props").setAttribute("aria-selected", name === "props" ? "true" : "false");
-  if (mobileQuery.matches) {
-    $("side-pane").classList.remove("shut");
-    $("scene-pane").classList.add("shut");
+const CHANGE_LABELS = [
+  ["added", "added"],
+  ["removed", "removed or hidden"],
+  ["moved", "moved"],
+  ["turned", "rotated or scaled"],
+  ["params", "parameters"],
+  ["events", "events"],
+  ["logic", "logic"],
+  ["schedule", "schedules"],
+  ["text", "text"],
+];
+
+function actorProblems(actor) {
+  const rows = (state.problems && state.problems.diagnostics) || [];
+  if (!actor) return [];
+  return rows.filter((row) => row.actor && row.actor === actor.id);
+}
+
+function problemClass(severity) {
+  if (severity === "info") return "problem-info";
+  if (severity === "warning") return "problem-warning";
+  return "problem-error";
+}
+
+function problemNotes(rows) {
+  const list = document.createElement("div");
+  list.className = "problem-notes";
+  for (const row of rows) {
+    if (row.severity === "info" && !state.showProblemNotes) continue;
+    const line = document.createElement("p");
+    line.className = problemClass(row.severity);
+    line.textContent = row.message;
+    list.append(line);
+  }
+  return list;
+}
+
+function noteModelError(gyaml, message) {
+  if (!gyaml || isMarker(gyaml)) return;
+  const text = message || "The glTF did not load.";
+  if (state.modelErrors.some((item) => item.gyaml === gyaml)) return;
+  state.modelErrors = [...state.modelErrors, { gyaml, message: text }];
+  console.error(`${gyaml}: ${text}`);
+  renderProblems();
+}
+
+function noteTerrain(message) {
+  const text = message || "The terrain did not load.";
+  if (state.terrainNotes.includes(text)) return;
+  state.terrainNotes = [...state.terrainNotes, text];
+  renderProblems();
+}
+
+function modelGroups() {
+  const actors = (state.view && state.view.actors) || [];
+  return groupModelErrors(state.modelErrors, actors);
+}
+
+function sceneWarnings() {
+  return ((state.view && state.view.warnings) || []).filter((message) => message);
+}
+
+function problemsMarkdown(report) {
+  const rows = (report && report.diagnostics) || [];
+  const groups = modelGroups();
+  const notes = [...state.terrainNotes, ...sceneWarnings()];
+  const counts = { error: groups.reduce((sum, group) => sum + group.count, 0), warning: notes.length, info: 0 };
+  for (const row of rows) counts[row.severity] = (counts[row.severity] || 0) + 1;
+  const summary = ["error", "warning", "info"].filter((key) => counts[key]).map((key) => `${counts[key]} ${key}`).join(", ");
+  const lines = [`# Problems for ${(report && report.banc) || state.banc || "scene"}`, "", summary || "No problems.", ""];
+  for (const group of groups) {
+    lines.push(`- **error** ${group.message} (${group.count})`);
+    for (const actor of group.actors) lines.push(`  - ${actor.name || actor.gyaml}${actor.id ? ` \`${actor.id}\`` : ""}`);
+  }
+  for (const message of notes) lines.push(`- **warning** ${message}`);
+  for (const row of rows) {
+    lines.push(`- **${row.severity}** \`${row.code}\` ${row.message}`);
+    const where = [row.file, row.pointer || row.actor].filter(Boolean).join(" · ");
+    if (where) lines.push(`  ${where}`);
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+function downloadText(filename, text, type) {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function loadProblems(banc) {
+  const token = ++state.problemToken;
+  if (!banc || !projectReady()) {
+    state.problems = { banc, diagnostics: [] };
+    renderProblems();
+    return;
+  }
+  if (!state.problems || state.problems.banc !== banc) {
+    state.problems = null;
+    renderProblems();
+  }
+  try {
+    const report = await api.problems(banc);
+    if (token !== state.problemToken || state.banc !== banc) return;
+    state.problems = report;
+  } catch (error) {
+    if (token !== state.problemToken) return;
+    const missing = /404/.test(error.message || "");
+    state.problems = {
+      banc,
+      diagnostics: [],
+      error: missing ? "Restart the editor (./scripts/dev.sh) so validation can run." : error.message,
+    };
+  }
+  renderProblems();
+  if (state.selected) renderProps();
+}
+
+async function runMeshAudit() {
+  const audit = { banc: state.banc, loading: true };
+  const view = {
+    backend: viewport.backend,
+    placements: viewport.auditPlacements(),
+    shaderErrors: viewport.shaderDiagnostics(),
+    ...viewport.auditView(),
+  };
+  audit.viewport = view;
+  state.meshAudit = audit;
+  renderProblems();
+  try {
+    audit.report = await api.meshAudit(audit.banc);
+    if (state.meshAudit === audit && state.banc === audit.banc) {
+      audit.report.viewport = view;
+    }
+  } catch (error) {
+    audit.error = error.message;
+  } finally {
+    audit.loading = false;
+    if (state.meshAudit === audit && state.banc === audit.banc) renderProblems();
   }
 }
 
-function setNav(mode) {
-  state.nav = mode;
-  viewport.setNav(mode);
-  document.querySelectorAll("[data-nav]").forEach((button) => button.classList.toggle("is-on", button.dataset.nav === mode));
-  $("stage-hint").textContent = mode === "fly"
-    ? "WASD moves. Q and E go down and up. Right-drag looks. Shift is faster."
-    : "Left drag orbits. Right drag pans. Scroll zooms. Click a box to select.";
+function renderMeshAudit(panel) {
+  const audit = state.meshAudit?.banc === state.banc ? state.meshAudit : null;
+  const tools = document.createElement("div");
+  tools.className = "problem-tools";
+  const run = document.createElement("button");
+  run.type = "button";
+  run.className = "ghost";
+  run.textContent = audit?.loading ? "Checking meshes…" : "Audit meshes";
+  run.disabled = Boolean(audit?.loading);
+  run.addEventListener("click", runMeshAudit);
+  tools.append(run);
+  panel.append(tools);
+  if (audit?.error) panel.append(empty(audit.error));
+  const report = audit?.report;
+  const center = audit?.viewport?.centerSurface;
+  if (center) {
+    const { queued, loading } = audit.viewport.streaming;
+    const stage = center.stage === "preview"
+      ? queued || loading ? "startup preview" : "startup preview still visible while model requests are idle"
+      : `model mesh${center.lod == null ? "" : ` (LOD ${center.lod})`}`;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "change-row";
+    row.disabled = !center.id || !state.view?.actors.some(({ id }) => id === center.id);
+    const content = document.createElement("span");
+    content.className = "grow";
+    const name = document.createElement("strong");
+    name.textContent = `Center of viewport · ${center.gyaml}`;
+    const detail = document.createElement("small");
+    detail.textContent = [stage, center.surface, `${Math.round(center.distance)} m`, center.stage === "preview" && center.reason]
+      .filter(Boolean).join(" · ");
+    detail.title = center.source;
+    content.append(name, detail);
+    row.append(content);
+    row.addEventListener("click", () => focusActor(center.id, { frame: false }));
+    panel.append(row);
+  }
+  if (!report) return;
+
+  const json = document.createElement("button");
+  json.type = "button";
+  json.className = "ghost";
+  json.textContent = "Mesh audit JSON";
+  json.addEventListener("click", () => downloadText("mesh-audit.json", `${JSON.stringify(report, null, 2)}\n`, "application/json"));
+  tools.append(json);
+  const labels = {
+    ready: "validated", no_mesh: "no mesh expected", uncached: "uncached",
+    unsupported: "unsupported geometry", partial: "partially decoded",
+    missing: "missing file", failed: "conversion failed", invalid: "invalid glTF",
+  };
+  const summary = Object.entries(report.counts).map(([status, count]) => `${count} ${labels[status]}`);
+  panel.append(empty(summary.join(" · ") || "No model placements to audit."));
+  const misplaced = (report.viewport?.placements || []).filter((placement) => placement.mismatched);
+  if (misplaced.length) panel.append(empty(`${misplaced.length} viewport placement${misplaced.length === 1 ? "" : "s"} differ from the actor transform. See Mesh audit JSON.`));
+  const shaderErrors = report.viewport?.shaderErrors?.length || 0;
+  if (shaderErrors) panel.append(empty(`${shaderErrors} WGSL compiler errors in this viewport session. See Mesh audit JSON.`));
+  const list = document.createElement("div");
+  list.className = "change-list";
+  const visible = new Set((state.view?.actors || []).map((actor) => actor.id));
+  for (const row of report.models) {
+    if (["ready", "no_mesh", "uncached"].includes(row.status)) continue;
+    const actor = row.actors.find((item) => visible.has(item.id));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "change-row";
+    button.disabled = !actor;
+    const text = document.createElement("span");
+    text.className = "grow";
+    const name = document.createElement("strong");
+    name.textContent = `${row.gyaml} · ${labels[row.status]} (${row.actors.length})`;
+    const detail = document.createElement("small");
+    detail.textContent = row.reason;
+    detail.title = row.source;
+    text.append(name, detail);
+    button.append(text);
+    if (actor) button.addEventListener("click", () => focusActor(actor.id));
+    list.append(button);
+  }
+  if (list.childElementCount) panel.append(list);
+}
+
+function renderProblems() {
+  const panel = $("problems-panel");
+  const badge = $("problem-count");
+  if (!panel || !badge) return;
+  panel.replaceChildren();
+  const report = state.problems;
+  const rows = (report && report.diagnostics) || [];
+  const groups = modelGroups();
+  const loadErrors = groups.reduce((sum, group) => sum + group.count, 0);
+  const sceneNotes = [...state.terrainNotes, ...sceneWarnings()];
+  const errors = rows.filter((row) => row.severity === "error").length + loadErrors;
+  const warnings = rows.filter((row) => row.severity === "warning").length + sceneNotes.length;
+  const notes = rows.filter((row) => row.severity === "info").length;
+  badge.hidden = !(errors || warnings);
+  badge.textContent = errors ? String(errors) : String(warnings);
+  badge.classList.toggle("removed", errors > 0);
+  syncDockTitles();
+  if (!state.banc) {
+    panel.append(empty("Open a scene to check it."));
+    return;
+  }
+  renderMeshAudit(panel);
+  if (!report) {
+    if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
+    else panel.append(empty("Checking this scene…"));
+    return;
+  }
+  if (report.error) {
+    panel.append(empty(report.error));
+    if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
+    return;
+  }
+  const tools = document.createElement("div");
+  tools.className = "problem-tools";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "ghost";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    const text = problemsMarkdown(report);
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied the problem list.");
+    } catch {
+      downloadText("problems.md", text, "text/markdown");
+      toast("Clipboard is blocked here, so the list was downloaded instead.");
+    }
+  });
+  const asJson = document.createElement("button");
+  asJson.type = "button";
+  asJson.className = "ghost";
+  asJson.textContent = "JSON";
+  asJson.addEventListener("click", () => downloadText("problems.json", `${JSON.stringify(report, null, 2)}\n`, "application/json"));
+  const asMarkdown = document.createElement("button");
+  asMarkdown.type = "button";
+  asMarkdown.className = "ghost";
+  asMarkdown.textContent = "Markdown";
+  asMarkdown.addEventListener("click", () => downloadText("problems.md", problemsMarkdown(report), "text/markdown"));
+  tools.append(copy, asJson, asMarkdown);
+  if (notes) {
+    const label = document.createElement("label");
+    label.className = "check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = state.showProblemNotes;
+    box.addEventListener("change", () => {
+      state.showProblemNotes = box.checked;
+      renderProblems();
+      renderProps();
+    });
+    label.append(box, document.createTextNode(`Vanilla notes (${notes})`));
+    tools.append(label);
+  }
+  panel.append(tools);
+  const visible = rows.filter((row) => row.severity !== "info" || state.showProblemNotes);
+  if (!visible.length && !groups.length && !sceneNotes.length) {
+    panel.append(empty(notes ? "No errors. Vanilla notes are hidden." : "No problems in this scene."));
+    return;
+  }
+  if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
+  if (!visible.length) return;
+  const list = document.createElement("div");
+  list.className = "change-list";
+  for (const row of visible) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "change-row";
+    const mark = document.createElement("span");
+    mark.className = row.severity === "error" ? "badge removed" : "badge";
+    mark.textContent = row.severity === "error" ? "error" : row.severity === "info" ? "note" : "warn";
+    const text = document.createElement("span");
+    text.className = "grow";
+    const strong = document.createElement("strong");
+    strong.textContent = row.message;
+    const small = document.createElement("small");
+    const where = [row.code, row.file, row.pointer || row.actor].filter(Boolean).join(" · ");
+    small.textContent = where;
+    text.append(strong, small);
+    button.append(mark, text);
+    button.addEventListener("click", () => focusProblem(row));
+    list.append(button);
+  }
+  panel.append(list);
+}
+
+function modelProblemList(groups, notes) {
+  const root = document.createElement("div");
+  for (const group of groups) {
+    const block = document.createElement("section");
+    block.className = "problem-group";
+    const head = document.createElement("p");
+    head.className = "problem-error";
+    head.textContent = `${group.message} (${group.count})`;
+    block.append(head);
+    const list = document.createElement("div");
+    list.className = "change-list";
+    for (const actor of group.actors) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "change-row";
+      const mark = document.createElement("span");
+      mark.className = "badge removed";
+      mark.textContent = "model";
+      const text = document.createElement("span");
+      text.className = "grow";
+      const strong = document.createElement("strong");
+      strong.textContent = actor.name || actor.gyaml;
+      const small = document.createElement("small");
+      small.textContent = [actor.name && actor.name !== actor.gyaml ? actor.gyaml : "", actor.id].filter(Boolean).join(" · ");
+      text.append(strong, small);
+      button.append(mark, text);
+      button.addEventListener("click", () => focusActor(actor.id));
+      list.append(button);
+    }
+    block.append(list);
+    root.append(block);
+  }
+  for (const message of notes) {
+    const line = document.createElement("p");
+    line.className = "problem-warning";
+    line.textContent = message;
+    root.append(line);
+  }
+  return root;
+}
+
+function focusActor(id, { frame = true } = {}) {
+  if (!id || !state.view) {
+    toast("That actor is not in the open scene.");
+    return;
+  }
+  const actor = state.view.actors.find((item) => item.id === id);
+  if (!actor) {
+    toast("That actor is not in the open scene.");
+    return;
+  }
+  state.selected = actor.id;
+  viewport.select(actor.id);
+  if (frame) viewport.frame(actor.id);
+  renderOutliner();
+  renderProps();
+  noteCompanion();
+  showTab("props");
+}
+
+function focusProblem(row) {
+  if (!row.actor || !state.view) return;
+  const actor = state.view.actors.find((item) => item.id === row.actor);
+  if (!actor) {
+    toast("That actor is not in the open scene.");
+    return;
+  }
+  state.selected = actor.id;
+  viewport.select(actor.id);
+  viewport.frame(actor.id);
+  renderOutliner();
+  renderProps();
+  noteCompanion();
+  showTab("props");
+}
+
+function changeSummary(counts) {
+  if (!counts || !counts.total) return "";
+  return CHANGE_LABELS.filter(([key]) => counts[key]).map(([key, label]) => `${counts[key]} ${label}`).join(", ");
+}
+
+function actorChange(counts) {
+  return Boolean(counts && (counts.added || counts.removed || counts.moved || counts.turned || counts.params));
+}
+
+async function loadChanges(banc) {
+  const token = ++state.changeToken;
+  if (!banc || !projectReady()) {
+    state.changes = { banc, groups: [], counts: { total: 0 } };
+    renderChanges();
+    return;
+  }
+  state.changes = null;
+  renderChanges();
+  try {
+    const report = await api.sceneChanges(banc);
+    if (token !== state.changeToken || state.banc !== banc) return;
+    state.changes = report;
+    state.changeCounts[banc] = report.counts || {};
+    renderChanges();
+    renderScenes();
+  } catch (error) {
+    if (token !== state.changeToken) return;
+    state.changes = { error: error.message, groups: [], counts: { total: 0 } };
+    renderChanges();
+  }
+}
+
+function renderChanges() {
+  const panel = $("changes-panel");
+  const badge = $("change-count");
+  if (!panel || !badge) return;
+  panel.replaceChildren();
+  const report = state.changes;
+  const total = report && report.counts ? report.counts.total : 0;
+  badge.hidden = !total;
+  badge.textContent = total ? String(total) : "";
+  syncDockTitles();
+  panel.append(sessionBlock());
+  if (!state.banc) {
+    panel.append(empty("Open a scene to see what the project changed."));
+    return;
+  }
+  if (!report) {
+    panel.append(empty("Loading the project diff…"));
+    return;
+  }
+  if (report.error) {
+    panel.append(empty(report.error));
+    return;
+  }
+  if (!total) {
+    panel.append(empty("Nothing in this project changes this map."));
+    return;
+  }
+  panel.append(changeGroups(report.groups || []));
+}
+
+function sessionBlock() {
+  const root = document.createElement("div");
+  root.className = "change-list";
+  const heading = document.createElement("div");
+  heading.className = "area";
+  heading.textContent = "This session";
+  root.append(heading);
+  const rows = historyRows(state.history);
+  if (!rows.length) {
+    root.append(empty("No edits this sitting. Ctrl+Z steps back through a move, a property, add, delete, duplicate, hide, and lock."));
+    return root;
+  }
+  for (const row of rows) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = row.place === "redo" ? "change-row is-redo" : "change-row";
+    if (row.latest) button.classList.add("is-current");
+    const text = document.createElement("span");
+    text.className = "grow";
+    const strong = document.createElement("strong");
+    strong.textContent = row.entry.label;
+    const small = document.createElement("small");
+    small.textContent = row.place === "redo" ? "Redo" : row.latest ? "Latest · Ctrl+Z" : "Undo";
+    text.append(strong, small);
+    button.append(text);
+    button.addEventListener("click", () => focusHistory(row.entry));
+    root.append(button);
+  }
+  return root;
+}
+
+function focusHistory(entry) {
+  const id = entry.shot && entry.shot.select;
+  if (!id || !state.view || !state.view.actors.some((actor) => actor.id === id)) return;
+  state.selected = id;
+  viewport.select(id);
+  viewport.frame(id);
+  renderOutliner();
+  renderProps();
+}
+
+function changeGroups(groups) {
+  const root = document.createElement("div");
+  root.className = "change-list";
+  for (const group of groups) {
+    const heading = document.createElement("div");
+    heading.className = "area";
+    heading.textContent = group.title;
+    root.append(heading);
+    for (const entry of group.entries || []) root.append(changeRow(entry));
+  }
+  return root;
+}
+
+function changeRow(entry) {
+  const row = document.createElement("div");
+  row.className = "change-row";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "change-row";
+  const text = document.createElement("span");
+  text.className = "grow";
+  const strong = document.createElement("strong");
+  const who = entry.label || entry.gyaml || entry.title;
+  strong.textContent = entry.title && entry.title !== who ? `${who} · ${entry.title}` : entry.title || who;
+  const delta = document.createElement("small");
+  delta.textContent = `${entry.before} → ${entry.after}`;
+  const source = document.createElement("small");
+  source.textContent = `${entry.sourceLabel || "Project"} · ${entry.file || "project"}`;
+  text.append(strong, delta, source);
+  button.append(text);
+  button.addEventListener("click", () => focusChange(entry));
+  row.append(button);
+  if (entry.revertable && entry.actorId) {
+    const revert = document.createElement("button");
+    revert.type = "button";
+    revert.className = "ghost";
+    revert.textContent = "Revert";
+    revert.addEventListener("click", async () => {
+      const command = { command: "revert_part", id: entry.actorId, part: entry.part, path: entry.path || "" };
+      const open = document.querySelector("dialog[open]");
+      if (open) open.close();
+      if (entry.banc && entry.banc !== state.banc) await openScene(entry.banc, { keepHistory: true });
+      showTab("changes");
+      edit(command);
+    });
+    row.append(revert);
+  }
+  return row;
+}
+
+async function focusChange(entry) {
+  const open = document.querySelector("dialog[open]");
+  if (open) open.close();
+  if (entry.banc && entry.banc !== state.banc) {
+    await openScene(entry.banc, { frame: false, keepHistory: true });
+  }
+  showTab("changes");
+  if (!entry.actorId || !state.view) {
+    toast(entry.source === "patch"
+      ? "This patch is applied when you build. It does not select an actor in the view."
+      : "That actor is not in the view. Restore it to frame it.");
+    return;
+  }
+  const actor = state.view.actors.find((item) => item.id === entry.actorId);
+  if (!actor) {
+    toast("That actor is not in the view. Restore it to frame it.");
+    return;
+  }
+  if (actor.status === "hidden" && !state.showHidden) {
+    state.showHidden = true;
+    $("show-hidden").checked = true;
+    viewport.setFlags({ hidden: true });
+  }
+  state.selected = entry.actorId;
+  viewport.select(entry.actorId);
+  viewport.frame(entry.actorId);
+  renderOutliner();
+  renderProps();
+}
+
+async function fillProjectChanges() {
+  const host = $("project-changes");
+  if (!host) return;
+  host.hidden = false;
+  host.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.textContent = "Changes";
+  if (!projectReady()) {
+    host.append(heading, empty("Open a project to see map changes."));
+    return;
+  }
+  host.append(heading, empty("Loading changes…"));
+  try {
+    const report = await api.projectChanges();
+    if (!$("project-dialog").open) return;
+    host.replaceChildren(heading);
+    host.append(projectChangeList(report));
+  } catch (error) {
+    host.replaceChildren(heading, empty(error.message));
+  }
+}
+
+function projectChangeList(report) {
+  const root = document.createElement("div");
+  const maps = report.maps || [];
+  if (!maps.length) {
+    root.append(empty("No map in this project has edits yet."));
+    return root;
+  }
+  const intro = document.createElement("p");
+  intro.className = "muted";
+  intro.textContent = `${maps.length} ${maps.length === 1 ? "map" : "maps"} · ${changeSummary(report.totals)}`;
+  root.append(intro);
+  for (const map of maps) {
+    const details = document.createElement("details");
+    details.className = "map-change";
+    const summary = document.createElement("summary");
+    summary.textContent = `${pretty(map.name)} · ${changeSummary(map.counts)}`;
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "ghost";
+    open.textContent = "Open map";
+    open.addEventListener("click", () => {
+      closeDialogs();
+      openScene(map.banc, { frame: true, keepHistory: true });
+      showTab("changes");
+    });
+    details.append(summary, open, changeGroups(map.groups || []));
+    root.append(details);
+  }
+  return root;
+}
+
+let paletteIndex = 0;
+let paletteCache = [];
+
+function openPalette() {
+  paletteIndex = 0;
+  const dialog = $("palette-dialog");
+  const input = $("palette-search");
+  if (!dialog || !input) return;
+  input.value = "";
+  renderPalette();
+  if (!dialog.open) dialog.showModal();
+  input.focus();
+  input.select();
+}
+
+function renderPalette() {
+  const host = $("palette-results");
+  const input = $("palette-search");
+  if (!host || !input) return;
+  paletteCache = paletteRows({
+    actors: paletteActors(),
+    scenes: state.scenes || [],
+    query: input.value,
+  });
+  host.replaceChildren();
+  if (!paletteCache.length) {
+    host.append(empty("Nothing matches. Try a name, an actor class, a hash, a scene, or a command."));
+    return;
+  }
+  if (paletteIndex >= paletteCache.length) paletteIndex = paletteCache.length - 1;
+  paletteCache.forEach((row, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = index === paletteIndex ? "palette-row is-on" : "palette-row";
+    button.setAttribute("role", "option");
+    const kind = document.createElement("span");
+    kind.className = "palette-kind";
+    kind.textContent = row.kind;
+    const text = document.createElement("span");
+    text.className = "grow";
+    const strong = document.createElement("strong");
+    strong.textContent = row.label;
+    const small = document.createElement("small");
+    small.textContent = row.detail;
+    text.append(strong, small);
+    button.append(kind, text);
+    button.addEventListener("click", () => runPalette(row));
+    button.addEventListener("mouseenter", () => {
+      paletteIndex = index;
+      host.querySelectorAll(".palette-row").forEach((item, itemIndex) => item.classList.toggle("is-on", itemIndex === index));
+    });
+    host.append(button);
+  });
+  const current = host.querySelector(".is-on");
+  if (current && current.scrollIntoView) current.scrollIntoView({ block: "nearest" });
+}
+
+function onPaletteKey(event) {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    paletteIndex = Math.min(paletteIndex + 1, Math.max(paletteCache.length - 1, 0));
+    renderPalette();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    paletteIndex = Math.max(paletteIndex - 1, 0);
+    renderPalette();
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    runPalette(paletteCache[paletteIndex]);
+  }
+}
+
+function paletteActors() {
+  const rows = [...((state.view && state.view.actors) || [])];
+  if (state.showCompanions === false && state.raw) {
+    const seen = new Set(rows.map((actor) => actor.id).filter(Boolean));
+    for (const extra of state.raw.companions || []) {
+      for (const actor of extra.actors || []) {
+        const id = actor.id && !String(actor.id).includes("::") ? `${extra.banc}::${actor.id}` : actor.id;
+        if (id && seen.has(id)) continue;
+        rows.push({ ...actor, id, companionLabel: bancKind(extra.banc) });
+        if (id) seen.add(id);
+      }
+    }
+  }
+  return rows;
+}
+
+function runPalette(row) {
+  const dialog = $("palette-dialog");
+  if (dialog && dialog.open) dialog.close();
+  if (!row) return;
+  if (row.kind === "actor") {
+    if (!row.id) {
+      toast("That actor has no hash, so it cannot be selected.");
+      return;
+    }
+    state.selected = row.id;
+    viewport.select(row.id);
+    viewport.frame(row.id);
+    renderOutliner();
+    renderProps();
+    noteCompanion();
+    showTab("props");
+    return;
+  }
+  if (row.kind === "scene") {
+    openScene(row.id, { frame: true });
+    return;
+  }
+  runCommand(row.id);
+}
+
+function toggleSnap() {
+  const box = $("snap-surface");
+  if (!box) return;
+  box.checked = !box.checked;
+  viewport.setSnap(box.checked);
+  toast(box.checked ? "Snap to ground and collision is on." : "Snap is off.");
+}
+
+function runCommand(id) {
+  if (id === "undo") undo();
+  else if (id === "redo") redo();
+  else if (id === "frame") viewport.frame(state.selected);
+  else if (id === "snap") toggleSnap();
+  else if (id === "add") openAdd("add");
+  else if (id === "hide") {
+    const actor = selectedActor();
+    if (!actor) toast("Select an actor first.");
+    else if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: actor.status === "hidden" ? "unhide" : "hide", id: actor.id });
+  } else if (id === "duplicate") {
+    const actor = selectedActor();
+    if (!actor || !actor.id) toast("Select an actor first.");
+    else edit({ command: "duplicate", id: actor.id });
+  } else if (id === "delete") {
+    const actor = selectedActor();
+    if (!actor || !actor.id) toast("Select an actor first.");
+    else if (actor.status === "recipe") removeRecipe(actor);
+    else edit({ command: "remove", id: actor.id });
+  } else if (id === "hidden") {
+    const box = $("show-hidden");
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  } else if (id === "changes") showTab("changes");
+  else if (id === "problems") showTab("problems");
+  else if (id === "behavior") showTab("behavior");
+  else if (id === "details") showTab("details");
+  else if (id === "project") openProjectDialog();
+  else if (id === "build") $("build-dialog").showModal();
+  else if (id === "ground") {
+    const box = $("show-ground");
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  } else if (id === "stats") {
+    const box = $("show-stats");
+    box.checked = !box.checked;
+    box.dispatchEvent(new Event("change"));
+  }
+}
+
+function showTab(name) {
+  state.tab = name;
+  dock.reveal(panelIdForTab(name));
+  if (name === "behavior") refreshBehavior();
+  if (name === "details") renderDetails();
+  if (viewport) viewport.resize();
+}
+
+function syncDockTitles() {
+  const problems = $("problem-count");
+  const changes = $("change-count");
+  const problemText = problems && !problems.hidden && problems.textContent ? `Problems ${problems.textContent}` : "Problems";
+  const changeText = changes && !changes.hidden && changes.textContent ? `Edits ${changes.textContent}` : "Edits";
+  dock.setTitle("problems", problemText);
+  dock.setTitle("edits", changeText);
+}
+
+function renderWindowMenu() {
+  const menu = $("window-menu");
+  if (!menu) return;
+  menu.replaceChildren();
+  for (const panel of dock.panels) {
+    const open = dock.isOpen(panel.id);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-pressed", open ? "true" : "false");
+    button.textContent = `${open ? "Hide" : "Show"} ${panel.title}`;
+    button.addEventListener("click", () => {
+      if (open) dock.close(panel.id);
+      else showTab(tabForPanel(panel.id));
+    });
+    menu.append(button);
+  }
+  const rule = () => {
+    const line = document.createElement("hr");
+    return line;
+  };
+  const command = (label, run) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      const root = $("window-menu-root");
+      if (root) root.open = false;
+      run();
+    });
+    return button;
+  };
+  menu.append(rule(), command("Pop out Behavior", () => popOutPanel("behavior")), command("Pop out Details", () => popOutPanel("details")), command("Pop out Inspector", () => popOutPanel("inspector")), rule(), command("Reset layout", () => {
+    dock.reset();
+    toast("Layout reset. The behavior graph is under the view.");
+  }));
+}
+
+async function popOutPanel(id) {
+  showTab(tabForPanel(id));
+  const opened = await dock.popOut(id);
+  if (!opened) toast("The browser blocked the window. Allow pop-ups for this site, then try Pop out again.");
+  if (viewport) viewport.resize();
+}
+
+function refreshBehavior() {
+  const host = $("behavior-panel");
+  if (!host) return;
+  const actor = selectedActor();
+  const banc = actor?.banc || state.banc || "";
+  const id = actor?.placementId || actor?.id || "";
+  const key = actor ? `${banc}|${id}|${actor.gyaml || ""}` : "";
+  if (key !== state.behaviorKey) {
+    state.behaviorKey = key;
+    state.behavior = null;
+    state.behaviorNode = "";
+    state.behaviorFile = "";
+    state.behaviorEntry = "";
+    state.behaviorQuery = "";
+    state.behaviorError = "";
+    state.behaviorTrail = [];
+    state.behaviorAhead = [];
+    state.behaviorFrame = "";
+    state.behaviorLoading = Boolean(actor);
+    if (actor) {
+      const requestKey = key;
+      api
+        .behavior({ banc, id, gyaml: actor.gyaml || "" })
+        .then((graph) => {
+          if (state.behaviorKey !== requestKey) return;
+          state.behavior = graph;
+          state.behaviorLoading = false;
+          drawBehavior();
+        })
+        .catch((error) => {
+          if (state.behaviorKey !== requestKey) return;
+          state.behaviorError = error.message || "The behavior graph could not be read.";
+          state.behaviorLoading = false;
+          drawBehavior();
+        });
+    }
+  }
+  drawBehavior();
+}
+
+function jumpBehavior(id, outside) {
+  const graph = state.behavior;
+  const node = graph && (graph.nodes || []).find((item) => item.id === id);
+  const current = { node: state.behaviorNode, entry: state.behaviorEntry, file: state.behaviorFile };
+  const file = node && node.source ? node.source : state.behaviorFile;
+  const next = {
+    node: id,
+    entry: outside ? id : state.behaviorEntry,
+    file: file || state.behaviorFile,
+  };
+  const history = graphHistory({ trail: state.behaviorTrail, ahead: state.behaviorAhead }, current, next);
+  state.behaviorTrail = history.trail;
+  state.behaviorAhead = history.ahead;
+  state.behaviorNode = id;
+  state.behaviorFile = next.file;
+  if (outside) {
+    state.behaviorEntry = id;
+    state.behaviorQuery = "";
+  }
+  state.behaviorFrame = id;
+  drawBehavior();
+}
+
+function stepBehavior(dir) {
+  const current = { node: state.behaviorNode, entry: state.behaviorEntry, file: state.behaviorFile };
+  const stepped = historyStep({ trail: state.behaviorTrail, ahead: state.behaviorAhead }, current, dir);
+  if (!stepped.current || stepped.current === current) return;
+  state.behaviorTrail = stepped.trail;
+  state.behaviorAhead = stepped.ahead;
+  state.behaviorNode = stepped.current.node || "";
+  state.behaviorEntry = stepped.current.entry || "";
+  state.behaviorFile = stepped.current.file || "";
+  state.behaviorQuery = "";
+  state.behaviorFrame = stepped.current.node || "";
+  drawBehavior();
+}
+
+function drawBehavior() {
+  const host = $("behavior-panel");
+  if (!host) return;
+  const frameId = state.behaviorFrame;
+  state.behaviorFrame = "";
+  renderBehavior(host, {
+    actor: selectedActor(),
+    graph: state.behavior,
+    layer: state.behaviorLayer,
+    selectedId: state.behaviorNode,
+    file: state.behaviorFile,
+    entry: state.behaviorEntry,
+    query: state.behaviorQuery,
+    frameId,
+    loading: state.behaviorLoading,
+    error: state.behaviorError,
+    onLayer: (layer) => {
+      state.behaviorLayer = layer;
+      drawBehavior();
+    },
+    onSelect: (id) => {
+      state.behaviorNode = id;
+      drawBehavior();
+    },
+    onSpotlight: (target) => {
+      const stage = host.querySelector(".graph-stage");
+      if (stage && stage.__spotlight) stage.__spotlight(target);
+    },
+    onJump: (id, outside) => jumpBehavior(id, outside),
+    onFile: (id, keepQuery) => {
+      state.behaviorFile = id;
+      state.behaviorEntry = "";
+      state.behaviorNode = "";
+      if (!keepQuery) state.behaviorQuery = "";
+      drawBehavior();
+    },
+    onEntry: (id) => {
+      state.behaviorEntry = id;
+      state.behaviorQuery = "";
+      state.behaviorNode = id;
+      drawBehavior();
+    },
+    onQuery: (value) => {
+      state.behaviorQuery = value;
+      drawBehavior();
+      const input = host.querySelector(".behavior-search");
+      if (input) {
+        input.focus();
+        const end = input.value.length;
+        input.setSelectionRange(end, end);
+      }
+    },
+    onField: (node, field, value) => saveBehaviorField(node, field, value),
+    onRevert: (op) => revertBehaviorField(op),
+    onExport: () => exportBehavior(),
+    onFlags: (input) => fillFlagList(input),
+  });
+}
+
+async function saveBehaviorField(node, field, value) {
+  const gyaml = state.behavior && state.behavior.gyaml;
+  if (!gyaml) return;
+  if (!projectReady()) {
+    toast("Open a project first. Looking around does not write anything.");
+    openProjectDialog();
+    return;
+  }
+  const before = (state.behavior.ops || []).map((op) => ({ ...op }));
+  try {
+    const graph = await api.setBehaviorField({ gyaml, id: node.id, field: field.name, type: field.type, value });
+    state.behavior = graph;
+    state.history = pushEdit(state.history, {
+      label: `Set ${field.name} on ${node.name || node.raw}`,
+      behavior: true,
+      gyaml,
+      before,
+      after: graph.ops || [],
+    });
+    drawBehavior();
+    renderChanges();
+    updateHistoryButtons();
+    const source = (graph.sources || []).find((item) => item.id === node.source);
+    if (source && source.warning) toast(source.warning);
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function revertBehaviorField(op) {
+  const gyaml = state.behavior && state.behavior.gyaml;
+  if (!gyaml) return;
+  const before = (state.behavior.ops || []).map((item) => ({ ...item }));
+  const node = (state.behavior.nodes || []).find((item) => item.id === op.id);
+  const field = node && (node.fields || []).find((item) => item.name === op.field);
+  if (!field) return;
+  await saveBehaviorField(node, { ...field, name: op.field, type: op.type || field.type }, field.base);
+  if (state.history.undo.length && state.history.undo[state.history.undo.length - 1].behavior) {
+    state.history.undo[state.history.undo.length - 1].label = `Revert ${op.field}`;
+    state.history.undo[state.history.undo.length - 1].before = before;
+  }
+}
+
+async function exportBehavior() {
+  const gyaml = state.behavior && state.behavior.gyaml;
+  if (!gyaml) return;
+  try {
+    const result = await api.exportBehavior(gyaml);
+    const lines = (result.files || []).map((file) => file.message);
+    toast(lines.join(" ") || "Nothing to export.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function fillFlagList(input) {
+  const query = input.value.trim();
+  if (query.length < 2) return;
+  let list = document.getElementById("flag-names");
+  if (!list) {
+    list = document.createElement("datalist");
+    list.id = "flag-names";
+    document.body.append(list);
+  }
+  try {
+    const result = await api.flags(query);
+    list.replaceChildren();
+    for (const name of result.names || []) {
+      const option = document.createElement("option");
+      option.value = name;
+      list.append(option);
+    }
+  } catch {
+    list.replaceChildren();
+  }
+}
+
+function openShortcuts() {
+  const dialog = $("shortcuts-dialog");
+  const host = $("shortcuts-list");
+  if (!dialog || !host) return;
+  if (!host.childElementCount) fillShortcuts(host);
+  if (!dialog.open) dialog.showModal();
+}
+
+function fillShortcuts(host) {
+  host.replaceChildren();
+  for (const group of SHORTCUT_GROUPS) {
+    const section = document.createElement("section");
+    section.className = "shortcut-group";
+    const title = document.createElement("h3");
+    title.textContent = group.label;
+    section.append(title);
+    for (const item of group.items) {
+      const row = document.createElement("div");
+      row.className = "shortcut-row";
+      const keys = document.createElement("span");
+      keys.className = "shortcut-keys";
+      keys.textContent = item.keys;
+      const action = document.createElement("span");
+      action.textContent = item.action;
+      row.append(keys, action);
+      section.append(row);
+    }
+    host.append(section);
+  }
+}
+
+function storedFlag(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw === "0") return false;
+    if (raw === "1") return true;
+  } catch {
+    /* private mode */
+  }
+  return fallback;
 }
 
 function setGizmo(mode) {
@@ -986,12 +3388,12 @@ function empty(text) {
   return p;
 }
 
-function toast(message) {
+function toast(message, { persistent = false } = {}) {
   const node = document.createElement("div");
   node.className = "toast";
   node.textContent = message;
   $("toasts").append(node);
-  setTimeout(() => node.remove(), 5200);
+  if (!persistent) setTimeout(() => node.remove(), 5200);
 }
 
 function closeDialogs() {

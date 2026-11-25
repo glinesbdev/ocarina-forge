@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>gpu quad</title>
+  <style>html, body { margin: 0; background: #000; }</style>
+</head>
+<body>
+  <pre id="out">pending</pre>
+  <script type="importmap">
+    {"imports":{"three":"../node_modules/three/build/three.module.js"}}
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { GLTFLoader } from "../node_modules/three/examples/jsm/loaders/GLTFLoader.js";
+    import { createGpuTextureLoader, repairCompressedTexture, textureSupport } from "../src/gpu-texture.js";
+
+    const params = new URLSearchParams(location.search);
+    const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false, preserveDrawingBuffer: true });
+    renderer.setSize(64, 64);
+    renderer.setClearColor(0x000000, 1);
+    document.body.prepend(renderer.domElement);
+    const gl = renderer.getContext();
+    const caps = textureSupport(gl);
+    const loader = new GLTFLoader();
+    const enabled = params.get("bitmap") !== "1";
+    const repair = params.get("repair") !== "0";
+    loader.setKTX2Loader(createGpuTextureLoader({
+      THREE,
+      gl,
+      caps,
+      enabled: () => enabled,
+      basisParse: null,
+    }));
+
+    function finish(text) {
+      document.getElementById("out").textContent = text;
+      document.title = text;
+    }
+
+    try {
+      const response = await fetch(params.get("file"));
+      const buffer = await response.arrayBuffer();
+      const gltf = await new Promise((resolve, reject) => loader.parse(buffer, "", resolve, reject));
+      if (repair) {
+        gltf.scene.traverse((child) => {
+          if (child.material && child.material.map) repairCompressedTexture(child.material.map);
+        });
+      }
+      let material = null;
+      gltf.scene.traverse((child) => {
+        if (!material && child.material && child.material.map) material = child.material;
+      });
+      if (!material) throw new Error("no map");
+      const scene = new THREE.Scene();
+      // Standard materials stay black without a light. The map is the thing under test.
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ map: material.map }));
+      scene.add(mesh);
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+      camera.position.z = 1;
+      renderer.render(scene, camera);
+      const pixel = new Uint8Array(4);
+      gl.readPixels(32, 32, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      const map = material.map;
+      const filter = map ? map.minFilter : 0;
+      const compressed = map && map.isCompressedTexture ? 1 : 0;
+      const levels = map && map.mipmaps ? map.mipmaps.length : 0;
+      finish(`pixel ${pixel[0]},${pixel[1]},${pixel[2]} compressed ${compressed} filter ${filter} levels ${levels} s3tc ${caps.s3tc ? 1 : 0} bptc ${caps.bptc ? 1 : 0}`);
+    } catch (error) {
+      finish(`error ${error.message}`);
+    }
+  </script>
+</body>
+</html>

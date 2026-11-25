@@ -1,0 +1,31 @@
+# Saria's forest talk during the epilogue.
+#
+# Bool case 0 is true. When HavePlayedEvent.TitleEventBase is set, the flow
+# asks EventQueryIsOnRecentTalkFlag the way her vanilla Event4 does. Case 0
+# (a repeat) plays AtO_SariaLine. Case 1 calls InitTalk::InitTalk_KokiriOnly
+# and then plays the line. The line is Npc_EventStarter.EventTalk, with
+# MaintainPerformanceState 0, not a narration window.
+# NpcFairy_MovingFlag is false. InitTalk forks a Navi look-at, and Navi is
+# banned in this epilogue. That look-at was not shown to be a no-op.
+# Case 1 of the flag check runs the event this entry already started at, so
+# a new game still reaches her mask check.
+#
+# The entry hook is in front of Event4. Event4 case 0, the repeat, never
+# reaches the mask check at Event141, so retargeting only that edge would
+# leave a repeat talk on the vanilla line. retarget_case is available for a
+# later edit that has one edge to move. This talk does not call it.
+#
+# On a cleared save the holder's talk row is HavePlayedEvent.Dm_Kokiri_0150.
+# Its entry is HavePlayedEvent.Dm_Kokiri_0150_Talk (it starts at Event4).
+# InitTalk_Saria_OcarinaPlaying is not called.
+patches:
+  - file: Event/EventFlow/Npc_Kokiri_Saria_Child.bfevfl.zs
+    epilogue_talk: true
+    entry_point: HavePlayedEvent.Dm_Kokiri_0150_Talk
+    steps:
+      - name: AtO_CheckEpilogueTalk
+        call: EventQueryIsGameDataBool
+        continue_case: 0
+        params:
+          GameDataName: HavePlayedEvent.TitleEventBase
+          Index: -1

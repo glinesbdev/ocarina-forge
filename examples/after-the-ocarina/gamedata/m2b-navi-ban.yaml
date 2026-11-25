@@ -1,0 +1,13 @@
+# Keep Navi_Ban across a banc change.
+#
+# ResetTypeValue 9 is bits 0 and 3. ChangeBanc runs SeqExecuteResetGameData
+# with ResetType 0 on every banc change (not on a load from a save), and that
+# clears bit 0. 8 keeps bit 3 and drops bit 0. The entry is the bool whose
+# Hash is murmur3("Navi_Ban"), 3472889777. The array index is not used.
+# The source value has to be 9. A file that is already 8 is refused.
+edits:
+  - file: GameData/GameDataList.Product.110.byml.zs
+    name: Navi_Ban
+    hash: 3472889777
+    reset_from: 9
+    reset_to: 8

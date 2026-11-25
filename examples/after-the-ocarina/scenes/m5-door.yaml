@@ -1,0 +1,26 @@
+# Temple of Time once HavePlayedEvent.TitleEventBase is set.
+#
+# Market_Common_f252 is shared with the adult banc. Node 5 is
+# OperateORFixInputTrue. The door's isOpen and IsSkipAnim, and the three
+# Spiritual Stones' Logic_Create, read that node's output 1. isClose stays
+# constant true. The build does not edit node 5. It ANDs output 1 with NOT
+# the flag, and points those inputs at the AND. A false flag leaves them
+# equal to output 1. OperateORFixInputTrue is not the NOT: a fixed true
+# input would close the door on a new game. The NOT is a plain OperateOR
+# from the Saria donor, one input, False output.
+#
+# Market_Child_Prefab_e700 node 6 is the Master Sword. Logic_Delete is
+# unwired, so the same delete as the courtyard guard removes him. The
+# Dynamic pedestal and sword meshes are not edited. The closed door hides
+# them. See docs/blockers.md.
+#
+# DoorOfTime_IsAfter_Step03/04/05/06_Exp and DoorOfTime_IsCompleted_Exp
+# are not edited. The Song of Time altar already ignores the song once
+# the door's Opened flag is set.
+place: false
+flag: HavePlayedEvent.TitleEventBase
+door: Logic/Market_Common_f252.logic.module.ainb
+deletes:
+  - logic: Logic/Market_Child_Prefab_e700.logic.module.ainb
+    node: 6
+    node_name: ActorLogicAttentionActor

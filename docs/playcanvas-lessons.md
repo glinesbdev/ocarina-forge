@@ -1,0 +1,140 @@
+# What Forge can learn from PlayCanvas
+
+This note reviews the PlayCanvas engine and editor for performance ideas that fit Ocarina Forge's Hyrule Field problem. It was written on 25 Nov 2026 (America/New_York) against `playcanvas/engine` at `06e233b` and `playcanvas/editor` at `dc6dc1b`, both shallow clones of `main`. File references are `repo/path:line` at those commits. Forge facts come from `docs/rendering-performance.md` and a read-only look at `frontend/src` on the `forge-wasm` branch. The three.js facts are from the published `three@0.170.0` package.
+
+## Licenses
+
+Both repositories are MIT licensed, "Copyright (c) 2011-2026 PlayCanvas Ltd." (`engine/LICENSE`, `editor/LICENSE`). MIT lets us copy code if we keep the copyright notice and license text with it. In practice we should take ideas rather than code. PlayCanvas is a different engine with its own scene graph, shader system and device layer, so little of its code would drop into three.js anyway. If a function is ever ported close to line for line (for example the radix sorter or the budget balancer math), add a header comment naming the source file and commit, and add the PlayCanvas MIT notice to `THIRD_PARTY_NOTICES` (or the equivalent).
+
+## Where Forge's frame time probably goes
+
+Forge reports about 5,600 draws and about 50 ms per frame on the Field. That draw number adds two different things (`frontend/src/backend.js:40-57`, `viewport.js:3910-3925`):
+
+- **three.js render objects.** `renderer.info.render.drawCalls` counts every ordinary mesh and every `BatchedMesh` as one object. Each object goes through the full per-object path in r170's `Renderer`/`WebGPUBackend`: node and binding refresh, uniform writes, pipeline lookup and bind group sets. That costs tens of microseconds of JavaScript per object.
+- **BatchedMesh sub-draws.** Inside one `BatchedMesh`, r170 loops `passEncoder.drawIndexed` once per geometry range (`three/src/renderers/webgpu/WebGPUBackend.js:972-986`). Forge folds same-geometry runs into instanced draws (`instance.js` `groupGeometryDraws` / `patchBatchedDraw`). Each sub-draw is roughly one encoder call, about 1 µs.
+
+`batchKey` includes the texture (`instance.js`: `${image}|${alpha}|s${side}|c${tint}|${indexed}|${attributes}`), so every distinct albedo gets its own `BatchedMesh`. With about 700 unique textures resident, Forge likely has many hundreds of render objects as well as the sub-draws. A mix like that, plus the per-instance cull in JavaScript, fits a 50 ms frame. **That split has not been measured.** Recommendation 0 below measures it before anything else, because the ranking of the next wins depends on whether the frame is CPU-bound on render objects, on culling, or GPU-bound on pixels.
+
+PlayCanvas handles this with the same discipline throughout. It sorts so state changes happen once per material (`engine/src/scene/renderer/forward-renderer.js:217-266`), skips any device state that did not change (`engine/src/platform/graphics/webgpu/webgpu-graphics-device.js:1497-1610`), and keeps per-draw data in persistent GPU buffers so the CPU writes only what changed (`engine/src/platform/graphics/mesh-instance-storage.js:9-30`).
+
+## Ranked recommendations
+
+The estimates are for the Hyrule Field Child case at the 240-model resident cap. They are judgments from reading the code, not measurements, so treat each as a range to confirm with Recommendation 0.
+
+| Rank | Technique | PlayCanvas reference | Forge today | Expected gain on the Field | Effort |
+| --- | --- | --- | --- | --- | --- |
+| 0 | CPU and GPU frame split, per-object vs sub-draw counts | `engine/src/platform/graphics/gpu-profiler.js`, `engine/src/extras/mini-stats/` | Total frame ms and a combined draw count only | None by itself. It decides the order of 1–5 | 0.5 day |
+| 1 | GPU ID-buffer picking, then drop CPU pick geometry | `engine/src/framework/graphics/picker.js:243,305,509`, `editor/src/editor/viewport/viewport-pick.ts:98-103` | CPU `Raycaster` over kept part geometries | About −300 to −400 MB of CPU geometry (426 MB "Geo CPU" today). That room lets the resident cap rise | 2–3 days |
+| 2 | Fewer render objects: texture arrays so batches don't split by texture | Material-keyed batching in `engine/src/scene/batching/batch-manager.js:481-600`, persistent instance storage in `mesh-instance-storage.js` | One `BatchedMesh` per texture | Render objects drop from hundreds to tens. If CPU-bound, roughly 50 → 20–30 ms | 4–6 days |
+| 3 | Spatial static chunks: cull per chunk, merge rarely repeated scenery | Static batch groups with `maxAabbSize` (`batch-manager.js:114,481-600,685-760`) | Per-instance CPU cull, no merging | Cull cost goes from per instance to per chunk. Sub-draws fall 20–40% where meshes rarely repeat. A few ms per frame | 3–4 days |
+| 4 | Distance budget with hysteresis, a behind-camera penalty and cooldown unload | `engine/src/scene/gsplat-unified/gsplat-budget-balancer.js:10-78`, `gsplat-octree.js:459-552`, `gsplat-params.js:430-450,988` | Count/heap cap, distance priority, max 8 evictions | Less load and evict churn while orbiting, and the view ahead loads first. A steadier memory peak, about 10–20% lower | 2–3 days |
+| 5 | Async pipeline creation with a concurrency cap | `engine/src/platform/graphics/webgpu/webgpu-render-pipeline.js:170-205` | Synchronous `createRenderPipeline`, plus a known r170 race (`backend.js` `warmWebGLPrograms` comment) | No steady-state change. Fewer 50–300 ms hitches while models stream in | 1–2 days |
+
+Smaller or later items follow in the per-area sections: render bundles for static layers, far proxies instead of boxes, a GPU-written indirect buffer, and on-demand rendering polish.
+
+### 0. Measure the split first
+
+**PlayCanvas.** `GpuProfiler` (`engine/src/platform/graphics/gpu-profiler.js:10`) uses WebGPU `timestamp-query` (enabled at `webgpu-graphics-device.js:786` and written per pass at `:1772-1790`) to time each render pass on the GPU. `MiniStats` (`engine/src/extras/mini-stats/mini-stats.js:119`, `cpu-timer.js`, `gpu-timer.js`) graphs CPU and GPU time side by side. The renderer counts material switches (`forward-renderer.js:109,256`), draw calls and instanced draws separately (`forward-renderer.js:395-400`). It also tracks VRAM by category: textures, shadow, asset textures and lightmaps (`engine/src/platform/graphics/texture.js:578-590`, `graphics-device.js:924`).
+
+**Forge.** `gpu-profile.js` counts pipeline creations. The stats line has total frame ms and `drawTotal`, which mixes render objects and sub-draws.
+
+**Do in three.js.** Construct `WebGPURenderer` with `trackTimestamp: true`. r170 passes it to the backend, which turns it on only when the adapter has `timestamp-query` (`three/src/renderers/webgpu/WebGPUBackend.js:33,124,1171-1240`). Read `renderer.info.render.timestamp` (`three/src/renderers/common/Info.js:17`) after `renderer.renderAsync()`, which resolves it (`Renderer.js:402`), or wrap the backend's render pass to add `timestampWrites` if that path is too coarse. Then split the stats line into `objects` (`info.render.drawCalls` minus batches), `batches`, `subDraws` (the sum of `_multiDrawCount`), `cullMs` (time in `cull.js` per frame), `cpuMs` (`performance.now()` around `renderer.render`) and `gpuMs`. Add these to `__forgeMemory()`.
+
+**Decision rule.** If `cpuMs` is far above `gpuMs` and `objects + batches` runs into the hundreds or more, do 2 before 3. If `cullMs` is large, do 3 first. If `gpuMs` dominates, look at overdraw, alpha-tested foliage, and the triangle count from far meshes, and favor far proxies and front-to-back sorting.
+
+### 1. GPU ID-buffer picking (memory)
+
+**PlayCanvas.** `Picker` renders the pickable layers into an offscreen render target. Each mesh instance writes its id as a color (`engine/src/scene/picker-id.js`), and the result is read back asynchronously on WebGPU (`picker.js:243 getSelectionAsync`, `:272 _readTexture`). The picker can render at reduced resolution (`picker.js:46-50`, `:544 resize`) and can capture depth to unproject a world point (`picker.js:305 getWorldPointAsync`, `:356 getPointDepthAsync`). Rect selection is the same readback over a rectangle (`editor/src/editor/viewport/viewport-pick.ts:143-170`). The editor coalesces hover picks to one per animation frame with `frameLimiter`, renders the picker to its own buffer, and notes that "hovering no longer forces a full (splat) re-render" (`viewport-pick.ts:98-103`). Clicks pick immediately (`:251`).
+
+**Forge.** It uses a CPU `Raycaster` against actor part geometries (`viewport.js:2424-2444, 3116-3123`). Those part geometries stay resident "for picking" (`rendering-performance.md`, Template geometry). That is the 426 MB "Geo CPU" line, while `BatchedMesh` holds its own GPU copy.
+
+**Gain.** Dropping the per-actor CPU part geometries after `BatchedMesh.addGeometry` should save most of the 426 MB of CPU geometry, plus the JS heap overhead of `BufferGeometry` objects. Picking cost no longer grows with triangle count. Depth readback also gives exact surface points for placement on any mesh, not only terrain.
+
+**Do in three.js.** Add a second render of the scene into a `RenderTarget` with an `R32Uint` (or RGBA8-packed) color attachment and a depth attachment. Use one TSL material override that outputs the batch's global id: `batchId` (the per-instance index already used for the matrices texture) plus a per-`BatchedMesh` base offset as a uniform. Render it only when a pick is requested, with a scissor or viewport of a few pixels around the cursor. Read it back with `renderer.readRenderTargetPixelsAsync`, which r170 has. Keep a CPU geometry only for the selected actor and its attached decorations, loaded on demand from the GLB cache, for the gizmo, Snap's exclude logic and collision previews. Volumes and edge-picking of collision boxes can stay on CPU, since those are cheap boxes.
+
+**Risk.** Alpha-tested foliage needs the alpha test in the ID material. The "second click walks the stack" behaviour (`pick.js chooseHit`) needs either a depth-peeled second pass or a CPU raycast restricted to the few ids under the cursor. The second is simpler: fetch the geometry for the two or three candidates.
+
+### 2. Fewer render objects (draw-call CPU)
+
+**PlayCanvas.** Static and dynamic batching both group mesh instances by material, then merge each group into one draw (`batch-manager.js:481-600`). The split rules at `:517-597` are: material, layer, vertex format, indexed vs not, shader defines, vertex count, AABB size, stencil, negative scale, shadow casting and parameters. Dynamic batches carry a per-vertex bone index into a matrix palette of up to 1,024 transforms (`:536-541, :805-810`). Static batches pre-transform vertices into world space (`:740-760`). On WebGPU, per-object matrices live in one persistent storage buffer with a slot per mesh instance. Each draw passes its slot as `firstInstance`, and only dirty slots are uploaded, coalescing gaps of up to 16 slots (`mesh-instance-storage.js:9-30`, used from `forward-renderer.js:355-358` and `renderer.js:1266`). That removes per-draw uniform buffer writes. The radix sort key puts the material id in the low 22 bits (`engine/src/scene/mesh-instance.js:1561-1572`), and the linear-time radix sort is in `engine/src/scene/renderer/mesh-instance-sorter.js`. The forward loop then rebinds shader, material bind group, blend and depth state only when `material !== prevMaterial` (`forward-renderer.js:251-266, 311-333`).
+
+**Forge.** The `BatchedMesh` key includes `image`, so a material, and hence a three render object, exists per texture.
+
+**Gain.** Remove texture identity from the batch key and pass a texture-array layer per instance. Then one `BatchedMesh` covers each (alpha mode, side, tint, vertex layout, texture size class) combination: tens of render objects instead of hundreds. The sub-draw count stays the same, but each sub-draw is about 1 µs of JavaScript, against tens of µs for each three render object. If Recommendation 0 shows a CPU-bound frame, expect roughly 50 → 20–30 ms. Memory is neutral, plus some padding if sizes are bucketed.
+
+**Do in three.js.**
+- At cache build (Python or Rust), group BC7 textures by `(width, height, mip count, color space)`. Write one KTX2 2D-array file per group, or upload the layers individually into a `CompressedArrayTexture`.
+- Store each actor's layer index per instance. A small `DataTexture` keyed by `batchId`, like the existing matrices and color textures, works.
+- In the TSL material, sample `texture(arrayTex, uv).depth(layer)`.
+- Keep separate batches for alpha-test and blend, and for double-sided.
+
+**Risk.** r170's WebGPU backend needs `CompressedArrayTexture` with BC7, and we already had to patch BC7 in `getFormat` (`webgpu-bptc-plugin.js`). Spike that first, for half a day. A cheaper first step that needs no arrays: drop `tint` from the key and read tint from the per-instance color texture, which `BatchedMesh` already supports. Also check whether materials that differ only by texture could share one `NodeMaterial` with a texture swapped per batch. That doesn't reduce render objects, but it reduces pipelines.
+
+### 3. Spatial static chunks (culling CPU, some draws)
+
+**PlayCanvas.** A `BatchGroup` has `dynamic` and `maxAabbSize` (`engine/src/scene/batching/batch-group.js`, `batch-manager.js:114`). `prepare` keeps adding mesh instances to a batch only while the combined AABB stays under `maxAabbSize`, "to keep a balance between the number of draw calls and the number of drawn triangles, because smaller batches can be hidden when not visible in camera" (`batch-manager.js:470-480, 553-561`). Static batches are culled as one bounding box. Each mesh instance also caches its world AABB by version numbers of the node, mesh and skin, so unchanged objects skip the bounds recompute (`mesh-instance.js:899-971`). The frustum test is a plain `containsAabb` (`mesh-instance.js:1545-1556`, `engine/src/scene/renderer/culler.js:99-130`). There is no occlusion culling for meshes in the engine. The only GPU-side culling is for gaussian splats, done inline in a compute pass (`engine/src/scene/gsplat-unified/gsplat-frustum-culler.js`).
+
+**Forge.** `cull.js` tests instances one by one in JavaScript and hides culled instances, which then needs `groupGeometryDraws` to re-fold runs.
+
+**Gain.** Bucket instances into world chunks, for example 64 m cells on the Field, and keep each chunk's AABB. Then frustum culling tests a few hundred boxes, not thousands of instances. Only chunks on the frustum edge test their instances. For meshes that appear only once or twice in the Field (cliffs, unique ruins), merge them per material and chunk into one geometry with world-space vertices, as PlayCanvas static batches do. That turns many sub-draws into one. Expect a few ms of CPU per frame back, and 20–40% fewer sub-draws in those areas. Memory goes up a little for merged copies, so only merge low-repeat meshes and leave heavily repeated ones instanced.
+
+**Do in three.js.** Keep the chunk index alongside the actor table. Assign each `BatchedMesh` instance a chunk id, and toggle visibility per chunk when its state changes, not per instance per frame. For merged chunks, build them in a worker with `BufferGeometryUtils.mergeGeometries` after applying each actor's matrix. On select or move, hide the actor's range in the merged chunk (or rebuild that chunk) and draw the actor through its normal instance path. That's the break-out plan already in `rendering-performance.md`.
+
+### 4. Distance budget and unload policy (memory and streaming)
+
+**PlayCanvas.** Gaussian-splat streaming is PlayCanvas's large-scene system, and its policy ideas carry over to meshes:
+- **Budget allocator.** `GSplatBudgetBalancer` (`gsplat-budget-balancer.js:10-78`) maps distance to a level band with `1 + log_m(d / (s·b))` and picks one scene-wide scale `s` that fills the budget. The first refinement that doesn't fit ends the sweep, so "small camera movements do not flip nodes on and off".
+- **Hysteresis.** LOD and streaming are recomputed only after the camera moves `lodUpdateDistance` (1 unit) or turns `lodUpdateAngle` (90°) (`gsplat-params.js:426-437`, used at `gsplat-world.js:529,1054`).
+- **Behind penalty.** Nodes behind the camera have their distance multiplied by `lodBehindPenalty` (1.5), and loads go in the same penalized order, so "the view in front of the camera" loads first (`gsplat-params.js:440-450`).
+- **Reference counts and cooldown.** Files are reference-counted. At zero they enter a cooldown of `cooldownTicks` (100 frames) before unloading, and a re-reference cancels it (`gsplat-octree.js:130-142, 459-552`; `gsplat-params.js:988`).
+- **Explicit unload.** `Asset.unload()` releases resources and revokes blob URLs (`engine/src/framework/asset/asset.js:781-800`).
+
+**Forge.** It has a 240 soft / 280 hard unique-model cap plus heap caps, distance and tier priority, and up to 8 evictions per pass (`resident-budget.js`).
+
+**Gain.** A behind-camera penalty and movement thresholds stop the queue from reshuffling every frame while orbiting. A cooldown stops a model from being evicted and reloaded when you swing the camera back. Measuring the budget in bytes (geometry plus BC7 texture bytes from `__forgeMemory()`) is better than counting models, because one Field model can be ten times another. Expect steadier memory and fewer re-fetches. Peak memory may drop 10–20% when the byte budget replaces the count.
+
+**Do in Forge.** Add `behindPenalty` and `cooldownFrames` to `modelsToEvict` and `isWorsePriority`. Recompute priorities only after more than 2 m of movement or more than 30° of rotation. Switch the soft cap to bytes, for example 1.2 GB of geometry plus textures. Keep the 240 count only as a safety cap.
+
+### 5. Async pipelines with a cap (load hitches)
+
+**PlayCanvas.** It creates render pipelines with `createRenderPipelineAsync` and caps concurrent creations at `hardwareConcurrency` clamped to 4–32. The comment explains why: with too many in flight, the browser's GPU process "cannot present any update of the page for a while" (`webgpu-render-pipeline.js:170-205`). The draw is skipped until its pipeline exists (`webgpu-graphics-device.js:1530-1560`). Pipelines are cached by a hash of their state (`webgpu-render-pipeline.js:129-167, 299-312`). Each material caches its shader variants (`engine/src/scene/materials/material.js:133-139`).
+
+**Forge.** `backend.js` notes that r170 publishes WebGPU cache entries before the native pipeline exists, so a live draw can call `setPipeline(undefined)`. `warmWebGLPrograms` only runs on WebGL.
+
+**Gain.** No steady-state gain. Streaming new materials into the Field stops stalling the frame.
+
+**Do in three.js.** Before adding a new batch to the scene, call `await renderer.compileAsync(batchMesh, camera, scene)` on WebGPU (r170 signature `compileAsync(scene, camera, targetScene)`, `Renderer.js:269`; pass the batch as the first argument and the live scene as `targetScene`) with a small semaphore (four to eight at a time), then attach it. Since Recommendation 2 collapses materials, the number of distinct pipelines also drops a lot. Also evaluate upgrading three. The current npm release is 0.187.0 against Forge's r170. Several WebGPU paths we patched may have changed, but check the changelog before assuming any specific fix.
+
+## Other techniques reviewed
+
+**Render bundles.** PlayCanvas does not use WebGPU render bundles; a search of `engine/src` finds none. three r170 does support them through `BundleGroup` (`three/src/renderers/common/Renderer.js:443-505, 1474-1490`). A bundle records draws once and replays them, but r170 still refreshes per-object bindings when `needsRefresh` is true, and any change to a batch's visible ranges means re-recording. Bundles therefore fit layers that don't change per frame: terrain, water, and far proxies with culling disabled. Expected gain is a few ms of encoder time. Effort is a 1–2 day spike. Do it after Recommendation 3, so chunk visibility changes rarely.
+
+**Indirect and multi-draw.** PlayCanvas exposes `DrawCommands` and `MeshInstance.setMultiDraw` / `setIndirect` (`engine/src/platform/graphics/draw-commands.js`, `webgpu/webgpu-draw-commands.js:16-153`, `mesh-instance.js:1656,1690`). On WebGPU it still loops one `drawIndexedIndirect` per entry, with a TODO for `multiDrawIndirect` once browsers ship it (`webgpu-graphics-device.js:1592-1600`). There is also a per-frame shared indirect buffer that compute passes can fill (`webgpu-graphics-device.js:1247-1280`). Forge's CPU fold already gets the instancing benefit, so a GPU-written indirect buffer only pays off after culling moves to a compute pass. That is the same conclusion `rendering-performance.md` reached. The gain is low now and large only with GPU culling. Effort is high, about a week, because r170's `BatchedMesh` path would need a custom backend draw.
+
+**Occlusion culling.** There is none in PlayCanvas for meshes. Nothing to copy. If Recommendation 0 shows a GPU-bound frame, a hierarchical depth (Hi-Z) pass over chunk boxes, built from last frame's depth, is the standard next step.
+
+**LOD and far proxies.** The PlayCanvas mesh path has no automatic mesh LOD. Its LOD system is for splats (above). Forge already picks near or far game meshes (`cull.js chooseLod`). Its weak spot is the boxes shown for non-resident models. A cheap fix: at cache build, generate a 2–5% triangle proxy per model with meshoptimizer's simplifier, run in the Rust crate, and an average-color material. Keep proxies always resident, so the 240-model cap never shows boxes. Proxies for all 852 models should be tens of MB.
+
+**Texture compression and transcoding.** PlayCanvas transcodes Basis/KTX2 in a worker pool, by default sized to the core count up to 16, with transferable buffers (`engine/src/framework/handlers/basis.js:126-240, 296-320`). It picks a target format by device capability and alpha (`basis-worker.js:20-40, 125-160`), and the editor converts textures in a worker too (`editor/src/workers/texture-convert.worker.ts`). Forge already ships BC7 and BC1 pre-encoded on the server, which is better on desktop because nothing is transcoded at runtime. Forge already does this, so no action is needed. If Forge ever has to run on a non-BC device, Basis UASTC transcoding to ASTC in a worker is the path.
+
+**Texture uploads.** PlayCanvas has an `UploadStream` that pools staging buffers so uploads don't stall (`engine/src/platform/graphics/upload-stream.js`, `webgpu/webgpu-upload-stream.js`), and it uploads with `writeTexture` and `copyExternalImageToTexture` (`webgpu/webgpu-texture.js:563,666`). Forge already releases CPU mips after upload (`releaseTextureCpu`). A small win: spread texture uploads over frames with a per-frame byte budget, for example 32 MB, so a burst of streaming doesn't spike one frame.
+
+**Geometry compression.** PlayCanvas decodes meshopt- and Draco-compressed glTF in workers (`engine/src/framework/parsers/meshopt-decoder.js`, `draco-worker.js`, `glb/extensions/meshopt-compression.js`). Forge has `geometry-decode-worker.js`. If the GLB cache isn't already quantized, `KHR_mesh_quantization` (16-bit positions, 8-bit normals) roughly halves GPU vertex memory. That would cut the `BatchedMesh` share of geometry memory, about 446 MB at the earlier 388-model cap. It needs shader dequantization, which three handles through normalized attributes. Effort is 1–2 days in the cache builder.
+
+**On-demand rendering.** The editor renders only when `redraw` is set, while still ticking streaming logic every frame (`editor/src/editor/viewport/viewport-application.ts:68-100`; `viewport:keepRendering` at `viewport.ts:90-95`). Forge already does this with `requestRender()`. One idea to borrow: run picking without a full viewport render.
+
+**Scene sync for big scenes.** The editor defers hierarchy resync and component creation with `setTimeout(…, 0)`, so a bulk load creates entities first and wires components once (`editor/src/editor/viewport/viewport-entities-create.ts:130-170`). This matches Forge's batching of actor adds. Make sure `BatchedMesh` instance adds and `groupGeometryDraws` run once per burst, not per actor.
+
+**Selection outline and gizmos.** The editor draws selection with an `OutlineRenderer` on its own layer (`editor/src/editor/viewport/viewport-outline.ts:15-20`), and gizmos on separate layers (`editor/src/editor/viewport/gizmo/`, `engine/src/extras/gizmo/`). The selected object is drawn again only in that layer, and the main scene is untouched. For Forge, drawing the selected actor and its attached decorations as a separate small overlay pass also keeps the gizmo and model in sync. That relates to the gizmo-vs-model mismatch after Snap.
+
+**Gaussian splats.** `scene/gsplat-unified/` is PlayCanvas's answer to very large captured scenes: an octree of LOD files, a work buffer, compute-based interval compaction and culling, and a sort worker. Forge has no splats, so only the budget and streaming policy ideas in Recommendation 4 apply.
+
+## Suggested order
+
+1. Recommendation 0 (half a day). Measure CPU vs GPU, objects vs sub-draws, and cull ms.
+2. Recommendation 1 (2–3 days). ID-buffer picking, then drop CPU pick geometry. A safe memory win whatever the frame split shows.
+3. Recommendation 2 or 3, depending on step 1: 2 if the frame is bound on render objects, 3 if culling dominates.
+4. Recommendation 4 alongside: a byte budget, a behind-camera penalty, cooldown, and far proxies instead of boxes.
+5. Recommendation 5 and the three.js upgrade evaluation, when streaming hitches become the main complaint.
+
+Credit for the Forge-side findings carried over from earlier passes stays with the existing docs. Ideas here are from PlayCanvas (MIT, © PlayCanvas Ltd.), and no code was copied.

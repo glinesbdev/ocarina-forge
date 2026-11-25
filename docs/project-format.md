@@ -1,6 +1,8 @@
 # Project format
 
-A Bancwright project is a folder of small text files. Format version is **1**. The folder is meant to be committed. The game dump is not.
+An Ocarina Forge project is a folder of small text files. One project is one mod. Format versions **1** and **2** are read. Format 1 is a scene-editor project. Format 2 is the same folder plus an `engine` key, so a build can run a scripted pipeline. The folder is meant to be committed. The game dump is not.
+
+New projects are created in `~/.local/share/ocarina-forge/projects/<project-id>/` (or `OCARINA_FORGE_PROJECTS`). That folder is outside the dump and outside the game. The mod id is `local/<project-id>`. **Save Longshot mod** writes `build/mod/` and, when asked, copies it to `<game>/mods/local/<project-id>/`. The default game is `~/Games/Longshot/mod-test` (`OCARINA_FORGE_GAME`). `build/mod/` is export output. Editor state stays in the project. The export rules are [design/mod-editor.md](design/mod-editor.md).
 
 ```text
 my-mod/
@@ -8,11 +10,20 @@ my-mod/
   scenes/<Area>/<Scene>.yaml
   text/          # reserved
   events/        # reserved
+  behaviors/     # set-field ops for one actor graph
   tables/        # reserved
   build/         # export output, not part of the source
 ```
 
 `build/` is produced by export. Do not treat it as source.
+
+## Importing local Longshot mods
+
+The project chooser also scans `<game>/mods/local/` (the `OCARINA_FORGE_GAME` game root). It can open a matching Forge
+project or import a mod whose `patches/*.json` files contain placement `set` operations on `Translate`, `Rotate`, or
+`Scale`. Other local mods are shown as **Not editable**. Import creates a project in the Forge library and keeps the
+original mod tree, including its runtime entry and manifest fields, in `.longshot-source/`; export and install preserve
+those files while regenerating the placement patches. The game’s Ocarina Forge page can open a local mod directly.
 
 ## manifest.yaml
 
@@ -37,7 +48,48 @@ domains:
 
 `target.version` is the game the diffs were written against. Export warns when it is not `1.1.1`, because the size-table rule was checked against that version.
 
-`domains` lists the kinds of patch the project may contain. This version only exports `scenes`. The other three are stored so a later editor can fill them without a format break. See `bancwright/domains.py`. A new exporter should be called from `bancwright.export.build` beside the scene loop.
+`domains` lists the kinds of patch the project may contain. A format 1 project exports `scenes` and stores `text`, `events`, and `tables` for a later editor. See `ocarina_forge/domains.py`. `behaviors/` is the behavior editor's op list. It is not one of those reserved domains.
+
+`engine` defaults to `scenes`. `after-ocarina` builds the project with the vendored pipeline instead of the scene rewriter. That project root is the pipeline's `src` directory:
+
+```text
+after-the-ocarina/
+  manifest.yaml          # format: 2, engine: after-ocarina
+  mod.toml
+  text/*.yaml            # MSBT edits
+  events/*.yaml          # flow patches, the boot hook, the rumor builder
+  scenes/*.yaml          # logic, schedule, stone, and castle recipes
+  rsdb/*.yaml            # GameAnalyzedEventInfo, EventSetting, challenge rows
+  gamedata/*.yaml        # GameDataList reset type and BoolExp appends
+  ui/*.yaml              # tapestry recipe; the bfres is cloned from the dump
+```
+
+`tables/` is still the name a visual RSDB editor would write. The pipeline reads `rsdb/` when that folder exists. Scene files in an engine project are recipes, not actor-hash diffs, unless they actually contain an `actors` map. The viewport highlights a recipe's banc with an open dot. Actor diffs, when a project has them, stay the filled dot and are not merged into the After the Ocarina build.
+
+Some of those recipes have no visual editor yet. They are advanced patches: the YAML is the source, and the build produces the romfs. That includes event flows, the rumor builder, the boot hook, GameDataList, RSDB rows, AINB logic, AIScheduleParam, the stone clones, and the tapestry. The scene editor still owns ordinary actor diffs for a format 1 project.
+
+## Behavior edits
+
+One file per actor class:
+
+```text
+behaviors/Npc_Kokiri_Saria_Child.yaml
+```
+
+The dump's AINB, event flow, and schedule stay the base. The file stores `set field` ops. Each op names the node's stable id, the field, its type, and the new value. Setting the field back to the dump value removes the op. Undo replaces the whole list. Export writes the rebuilt file under `build/romfs` only after that format round-trips with no ops applied. A format that cannot round-trip keeps the ops and does not write the file.
+
+```yaml
+format: 1
+gyaml: Npc_Kokiri_Saria_Child
+ops:
+  - op: set field
+    id: "event:Event/EventFlow/Npc_Kokiri_Saria_Child.bfevfl.zs#0:Talk"
+    field: action
+    type: string
+    value: Demo_Talk
+```
+
+Connecting nodes and adding nodes are not written yet.
 
 ## Scene diffs
 
@@ -121,11 +173,11 @@ Actors with no `Hash` are shown as locked and copied through unchanged.
 
 ## Text, events, tables
 
-Any `text/**/*.yaml`, `events/**/*.yaml`, or `tables/**/*.yaml` is part of the project and is left alone by this version’s exporter. The build log says so. The shapes those files will take (MSBT control codes, evfl graphs, RSDB rows) belong to later stages. Do not invent a second scene format beside `scenes/`.
+On a format 1 project, `text/**/*.yaml`, `events/**/*.yaml`, and `tables/**/*.yaml` are stored and the scene build says they were not written. On `engine: after-ocarina` they are the sources the pipeline applies, together with `rsdb/`, `gamedata/`, and `ui/`. The project panel lists the labels, flows, and quests. It does not edit them.
 
 ## After the Ocarina YAML
 
-The importer (`bancwright/importers/ato.py`) reads the scene patches from After the Ocarina, which are a different on-disk shape, and writes format 1 diffs.
+The importer (`ocarina_forge/importers/ato.py`) reads the scene patches from After the Ocarina, which are a different on-disk shape, and writes format 1 diffs.
 
 Accepted inputs:
 
@@ -135,5 +187,7 @@ Accepted inputs:
 - A directory of `*.yaml` files. `manifest.yaml` is skipped.
 
 An actor entry with `op: add`, or a `gyaml` and no hash, becomes `added` and gets a new hash. `hide: true` or `op: hide` hides. `op: remove` (or `delete`) removes. `translate`, `rotate`, and `scale` copy across. `params` is flattened into `set` paths. A `Name` parameter becomes the instance name.
+
+How these files line up with the Longshot mod package, and what an exporter still has to translate, is [longshot-mapping.md](longshot-mapping.md). The YAML stays the source.
 
 `examples/ato-scenes/hyrule_field.yaml` is a fixture in that shape. Point the importer at a real `src/scenes` folder when you have the After the Ocarina tree.

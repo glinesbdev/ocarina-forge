@@ -1,0 +1,10 @@
+# Placeholder for a later visible event (milestone M2 in docs/plan.md).
+# A non-empty `flows` list fails the build. The boot hook that is applied now
+# is src/events/m2a-boot-hook.yaml, not this list.
+#
+# Planned records, once a visible post-game event is written:
+# flows:
+#   - file: Event/EventFlow/SomeFlow.bfevfl.zs
+#     when_flag: SomeFlag
+#     set_flag: SomeFlag
+flows: []
