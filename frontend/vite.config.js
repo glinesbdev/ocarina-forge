@@ -1,8 +1,22 @@
+import { execFileSync } from "node:child_process";
 import { createReadStream, existsSync, cpSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { oneThreePlugin } from "./one-three.js";
 import { webgpuBptcPlugin } from "./webgpu-bptc-plugin.js";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function forgeRevision() {
+  try {
+    const revision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+    const committedAt = execFileSync("git", ["log", "-1", "--format=%ct", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+    return { revision, committedAt };
+  } catch {
+    return { revision: "unknown", committedAt: "0" };
+  }
+}
 
 const basisDir = path.resolve("node_modules/three/examples/jsm/libs/basis");
 
@@ -14,6 +28,9 @@ const isolationHeaders = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Embedder-Policy": "credentialless",
   "Cross-Origin-Resource-Policy": "same-origin",
+  // Dev and preview URLs are not content-hashed. Without this, a tab can keep
+  // the module graph from before a restart and stay on a classic WebGLRenderer.
+  "Cache-Control": "no-cache",
 };
 
 function basisTranscoder() {
@@ -43,8 +60,19 @@ function basisTranscoder() {
 const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js").replaceAll("\\", "/");
 
 const apiPort = process.env.OCARINA_FORGE_PORT || process.env.BANCWRIGHT_PORT || "47232";
+const forge = forgeRevision();
 
 export default defineConfig(({ mode }) => ({
+  define: {
+    __FORGE_REVISION__: JSON.stringify(forge.revision),
+    __FORGE_COMMITTED_AT__: JSON.stringify(forge.committedAt),
+  },
+  // A prebundled `three` is three.module.js, which exports WebGLRenderer.
+  // createBackendRenderer treats that as the WebGL graph. Keep the raw build
+  // so a stale frontend/node_modules/.vite/deps/three.js cannot force WebGL.
+  optimizeDeps: {
+    exclude: ["three", "three/webgpu", "three/tsl"],
+  },
   plugins: [
     ...(mode === "webgl"
       ? [{

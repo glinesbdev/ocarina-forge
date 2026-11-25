@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ocarina Forge — renderer troubleshooting</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; background: #121614; color: #e7eee3; font: 16px/1.45 "Segoe UI", sans-serif; }
+      main { max-width: 44rem; margin: 0 auto; padding: 28px 20px 64px; }
+      main h1 { margin-top: 0; font-weight: 560; }
+      main h2 { margin-top: 1.6em; font-weight: 560; }
+      a { color: #e0b15a; }
+      code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+      pre { background: #0d110f; padding: 12px; border-radius: 8px; overflow: auto; }
+      table { border-collapse: collapse; width: 100%; }
+      td, th { border-bottom: 1px solid #2c3a32; text-align: left; padding: 6px 8px; vertical-align: top; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><a href="/">Back to Forge</a></p>
+      <h1>Renderer troubleshooting</h1>
+      <p>The same notes are in <code>docs/troubleshooting.md</code> in the repo. The viewport <strong>Stats</strong> line names the backend that actually started. The short git revision at the end of that line is this page's build. <code>GET /api/health</code> returns the API's <code>build.revision</code>.</p>
+
+      <h2>What the stats line means</h2>
+      <table>
+        <tr><th>Starts with</th><th>Meaning</th></tr>
+        <tr><td><code>WebGPU</code></td><td>Real WebGPU device</td></tr>
+        <tr><td><code>WebGPU (WebGL2 fallback: …)</code></td><td>three's WebGPU renderer is on its WebGL2 backend</td></tr>
+        <tr><td><code>WebGL (WebGPU unavailable: …)</code></td><td>WebGPU was requested and a classic WebGL renderer is drawing. The reason is in the parentheses</td></tr>
+        <tr><td><code>WebGL</code></td><td>This session asked for WebGL, or the page is older than this label</td></tr>
+      </table>
+      <p><code>?renderer=webgpu-strict</code> shows the reason and does not fall back. <code>?renderer=webgl</code> forces WebGL.</p>
+
+      <h2>Plain WebGL that cleared after a restart</h2>
+      <p>A stale bundle constructs <code>WebGLRenderer</code> and the old label was the literal <code>WebGL</code>, even when the adapter was fine. That is a cached module, an old <code>frontend/dist</code>, a <code>build:webgl</code> bundle, or a Vite prebundle of <code>three</code> (that file is <code>three.module.js</code>, which exports <code>WebGLRenderer</code>). <code>three.webgpu.js</code> does not.</p>
+      <p>Starlette used to serve <code>frontend/dist</code> with <code>ETag</code> and <code>Last-Modified</code> and no <code>Cache-Control</code>, so the browser could keep <code>index.html</code>. Restarting the API does not rebuild <code>dist</code>. Hard-reload, then compare the stats stamp with <code>/api/health</code>. A banner that says the server is older means restart <code>scripts/dev.sh</code> (API and Vite). A banner that says this page is older means the bundle is stale: hard-reload, and rebuild <code>frontend/dist</code> if the Python server is what you opened. <code>index.html</code> is now <code>no-cache</code>. Fingerprinted files under <code>assets/</code> stay cached.</p>
+      <p>three r170 also hides the original WebGPU error. A null adapter or a failed <code>requestDevice</code> makes it swap in a WebGL2 backend and continue. Forge records that reason instead of leaving the line as plain WebGL. Missing <code>texture-compression-bc</code> does not block startup. A device lost after WebGPU has started leaves the line on <code>WebGPU</code> and shows a toast.</p>
+
+      <h2>Brave Shields and the WebGPU flag</h2>
+      <ol>
+        <li>Open <code>brave://flags/#enable-unsafe-webgpu</code> and set it to Enabled. Relaunch.</li>
+        <li>Shields for this site can still hide the adapter. Lower <strong>Fingerprinting blocking</strong>, or turn Shields off for <code>127.0.0.1</code>. The line then says <code>adapter is null</code> or <code>requestDevice failed: …</code>.</li>
+        <li>Open <code>brave://gpu</code> (Chrome: <code>chrome://gpu</code>). WebGPU should be Hardware accelerated.</li>
+      </ol>
+
+      <h2>Linux</h2>
+      <p>WebGPU on Linux goes through Vulkan. If the GPU page shows it unavailable, launch with <code>--enable-unsafe-webgpu</code>. If Vulkan is disabled there, add <code>--enable-features=Vulkan</code> or <code>--use-angle=vulkan</code>. Some Brave builds have <code>brave://flags/#enable-vulkan</code>. Driver problems on that same page (old Mesa, missing NVIDIA Vulkan ICD) fail the adapter before Forge runs.</p>
+
+      <h2>Check from the console</h2>
+      <pre>navigator.gpu
+const adapter = await navigator.gpu.requestAdapter()
+adapter &amp;&amp; (adapter.info || await adapter.requestAdapterInfo())
+const device = await adapter.requestDevice()</pre>
+      <p><code>navigator.gpu</code> undefined means the API is hidden. <code>requestAdapter()</code> returning <code>null</code> is the no-adapter / Shields case. A throw from <code>requestDevice()</code> is the message on the stats line. Forge also logs <code>code</code>, <code>adapterInfo</code>, and limits.</p>
+    </main>
+  </body>
+</html>

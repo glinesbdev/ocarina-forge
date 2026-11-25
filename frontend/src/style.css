@@ -90,6 +90,28 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 14px;
 }
 .banner button { margin-left: 8px; }
+.notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.notice p { flex: 1; min-width: 16rem; }
+.notice a { color: var(--gold); }
+.strict-webgpu {
+  max-width: 40rem;
+  margin: 12vh auto;
+  padding: 8px 20px 28px;
+}
+.strict-webgpu pre {
+  white-space: pre-wrap;
+  background: var(--bg-inset);
+  padding: 12px;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.strict-webgpu a { color: var(--gold); }
 
 #workspace {
   flex: 1;

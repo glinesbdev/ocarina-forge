@@ -64,7 +64,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 ## How to measure
 
 1. Start `scripts/dev-wasm.bat` so Vite is on 47241 and the API on 47242. That launcher does not run pip or maturin, and it leaves 47231/47232 free. `scripts/dev.sh` and `scripts/dev.bat` are the normal launchers on 47231/47232.
-2. Open the viewer, turn **Stats** on (it is on by default), and load Hyrule Field Child.
+2. Open the viewer, turn **Stats** on (it is on by default), and load Hyrule Field Child. The line starts with the backend that actually started (`WebGPU`, or `WebGL (WebGPU unavailable: …)` with the reason). A plain `WebGL` from a stale `frontend/dist` or a cached module is not a WebGPU fallback. The short revision at the end of the line should match `/api/health`. See [troubleshooting.md](troubleshooting.md).
 3. In the devtools console, `copy(__forgeMemory())` after the background load finishes. The report includes texture format counts, geometry roles, unique models vs instances, draws, and frame time.
 4. Chrome's task manager (or a headless script using `--enable-precise-memory-info`) is the working-set number. JS heap alone under-reports GPU textures.
 
