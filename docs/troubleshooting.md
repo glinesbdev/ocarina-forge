@@ -24,15 +24,15 @@ That label is what `backendLabel` returns for anything that is not a `WebGPURend
 1. **The WebGL module graph.** `three.module.js` exports `WebGLRenderer`. `three.webgpu.js` does not. `createBackendRenderer` used that export as the signal to construct `WebGLRenderer`. A cached module, an old `frontend/dist`, a `webgl`-mode bundle (`npm run build:webgl`), or a Vite prebundle of `three` (`frontend/node_modules/.vite/deps/three.js`, which is `three.module.js`) still has `WebGLRenderer`. Boot then treated startup as a success, so the line never became `WebGPU (WebGL2 fallback)`.
 2. **three r170 swallows the WebGPU error.** `WebGPURenderer` sets `getFallback`. If `requestAdapter()` returns null or `requestDevice()` throws, `Renderer.init` logs `WebGPU is not available, running under WebGL2 backend` and swaps in `WebGLBackend`. Forge rejected that renderer and booted the classic WebGL graph, which labeled itself `WebGL`. The toast said "Using WebGL2" and did not say why. `texture-compression-bc` is not required to start (a missing BC7 feature decodes to RGBA later). A device lost after a good init does not swap in classic WebGL: the line stays `WebGPU`, and a toast says the device was lost.
 
-`scripts/serve_editor.py` serves `frontend/dist` with Starlette, which sends `ETag` and `Last-Modified` and used to send no `Cache-Control`. Browsers then heuristically cache `index.html` and keep the previous bundle. Restarting the API does not rebuild `dist`. `npm run build:webgl` is the WebGL-only bundle (`import.meta.env.MODE === "webgl"`); it never calls `navigator.gpu` until this page's label says `this bundle was built in webgl mode`.
+`python -m ocarina_forge --static frontend/dist` serves that folder with Starlette, which sends `ETag` and `Last-Modified` and used to send no `Cache-Control`. Browsers then heuristically cache `index.html` and keep the previous bundle. Restarting the API does not rebuild `dist`. `npm run build:webgl` is the WebGL-only bundle (`import.meta.env.MODE === "webgl"`); it never calls `navigator.gpu` until this page's label says `this bundle was built in webgl mode`.
 
-`scripts/dev.sh` runs Vite on port 47231 and the API on 47232. A tab left open across a checkout change can keep the previous module graph until Vite restarts and the browser reloads. Vite's dep cache survives that restart. `three` is excluded from prebundling so `deps/three.js` is not the WebGL build.
+`build.bat` and `./build.sh` serve the built editor with Vite preview on port 47231 and the API on 47232. Preview sends `Cache-Control: no-cache` on the page. A tab left open across a checkout change can keep the previous module graph until the preview restarts and the browser reloads. `three` is excluded from prebundling so a stale `deps/three.js` is not the WebGL build.
 
 What to do:
 
 1. Hard-reload (Ctrl+Shift+R). Compare the revision on the status label with `curl -s http://127.0.0.1:47232/api/health`.
-2. If a banner says the server is older than the page, restart `scripts/dev.sh` so the API and Vite both come back. If it says the page is older, the browser or `frontend/dist` is stale.
-3. For `scripts/serve_editor.py`, rebuild with `npm run build` inside `frontend/`. `index.html` is `Cache-Control: no-cache`. Fingerprinted files under `assets/` are `public, max-age=31536000, immutable`. A WebGL-only `build:webgl` stays on WebGL on purpose, and the status label says so.
+2. If a banner says the server is older than the page, restart `build.bat` or `./build.sh` so the API and the editor both come back. If it says the page is older, the browser or `frontend/dist` is stale.
+3. The builder rebuilds `frontend/dist` when editor sources changed. `index.html` is `Cache-Control: no-cache`. Fingerprinted files under `assets/` are `public, max-age=31536000, immutable`. A WebGL-only `build:webgl` stays on WebGL on purpose, and the status label says so.
 
 ## Brave Shields and the WebGPU flag
 

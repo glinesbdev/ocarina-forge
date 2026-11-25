@@ -776,7 +776,7 @@ async function refreshHotReload() {
     state.hot = {
       enabled: false,
       status: "error",
-      message: missing ? "Restart the editor (./scripts/dev.sh) so hot reload can run." : error.message,
+      message: missing ? "Restart the editor (./build.sh or build.bat) so the API can run." : error.message,
     };
   }
   renderHotStatus();
@@ -3122,7 +3122,7 @@ async function loadProblems(banc) {
     state.problems = {
       banc,
       diagnostics: [],
-      error: missing ? "Restart the editor (./scripts/dev.sh) so validation can run." : error.message,
+      error: missing ? "Restart the editor (./build.sh or build.bat) so validation can run." : error.message,
     };
   }
   renderProblems();

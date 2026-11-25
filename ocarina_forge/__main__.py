@@ -15,7 +15,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``lighting-import <results.json>`` splits a lighting-capture storage JSON into per-scene files in the user data directory.
 ``lighting-survey <banc>`` lists effect actors and GameBancParam key names. It does not invent light values.
 ``lighting-mod`` prints how to run the capture mod. ``--install`` copies it into the game's mods/local folder.
-With no subcommand, the server starts, which is what dev.sh runs.
+With no subcommand, the server starts, which is what the builder runs.
 """
 
 from __future__ import annotations
