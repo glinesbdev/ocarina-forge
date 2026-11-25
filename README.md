@@ -64,6 +64,10 @@ If you do not have a dump on this machine, choose **Use the bundled sample dump*
 
 The dump path and the open project are stored in `./ocarina-forge.local.yaml` (gitignored), or in `~/.config/ocarina-forge/config.yaml` if that file already exists. A `bancwright.local.yaml` or `~/.config/bancwright/config.yaml` from the previous name is still read, and the home config is renamed on first use. `OCARINA_FORGE_CONFIG`, `OCARINA_FORGE_DUMP`, and `OCARINA_FORGE_PROJECT` override them. `BANCWRIGHT_CONFIG`, `BANCWRIGHT_DUMP`, and `BANCWRIGHT_PROJECT` are still read so an existing shell keeps those paths. Converted models are written to `$OCARINA_FORGE_CACHE`, or `$XDG_CACHE_HOME/ocarina-forge/models`, or `~/.cache/ocarina-forge/models`. If `~/.cache/bancwright` is still there and the new folder is not, it is renamed across. `$BANCWRIGHT_CACHE` is still honored. That cache stays outside the repo. The command is `python -m ocarina_forge`.
 
+## If the view stays on WebGL
+
+The viewport **Stats** line names the renderer. `WebGPU` is a real WebGPU device. `WebGL (WebGPU unavailable: …)` means WebGPU was the choice and the view fell back; the reason is in the line and in a dismissible notice. Plain `WebGL` means this session asked for WebGL (`?renderer=webgl`), or the page is older than that label. The short git revision at the end of the line is the page. If it does not match the API, or a banner says the server is older, restart `scripts/dev.sh` and hard-reload. A cached `frontend/dist` (including `npm run build:webgl`) stays on the bundle that was last built. `?renderer=webgpu-strict` shows the reason and does not fall back. Details, Brave Shields, and the Linux Vulkan flags are in [docs/troubleshooting.md](docs/troubleshooting.md).
+
 ## What you can do
 
 - Browse scenes by area and variant. Each matching Static and Dynamic pair appears once, with both banks visible when **Companion banc** is on. Each actor's edits go to its own bank. The viewport's bank selector switches the target for new actors and the bank shown when viewing a single bank.

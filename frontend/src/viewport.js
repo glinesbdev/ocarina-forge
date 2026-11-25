@@ -32,6 +32,7 @@ import { guardPointerCapture } from "./pointer-capture.js";
 import { shouldReloadTerrain } from "./terrain.js";
 import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
 import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
+import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatStats, keepRendering } from "./frame.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -55,9 +56,17 @@ THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 let preparedRenderer = null;
+const buildStamp = shortRevision(frontendBuild().revision);
 
-export async function prepareViewportRenderer(note = "") {
-  preparedRenderer = { ...await createBackendRenderer(THREE), note };
+export async function prepareViewportRenderer(options = "") {
+  const settings = typeof options === "string" ? { note: options } : (options || {});
+  const created = await createBackendRenderer(THREE, settings);
+  preparedRenderer = {
+    ...created,
+    note: settings.note || created.note || "",
+    reason: settings.reason || created.reason || "",
+  };
+  return preparedRenderer;
 }
 
 export const CATEGORY_COLOR = {
@@ -86,6 +95,7 @@ export async function createViewport(host, hooks) {
   const renderer = created.renderer;
   const backendName = created.backend;
   const backendNote = created.note;
+  const backendReason = created.reason || "";
   let terrainNodes = null;
   let mapNodes = null;
   let blendNodes = null;
@@ -4154,6 +4164,7 @@ uniform float terrainLayerMissing;`
       warmDone: statWarmDone,
       warmTotal: statWarmTotal,
       sceneStream: sceneStreamStats,
+      build: buildStamp,
     });
     if (showStats) statsEl.textContent = text;
     if (hooks.onStats) hooks.onStats(text);
@@ -4299,6 +4310,7 @@ uniform float terrainLayerMissing;`
   return {
     backend: backendName,
     backendNote,
+    backendReason,
     setActors,
     patchActors,
     reconcileActors,

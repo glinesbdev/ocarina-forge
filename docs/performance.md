@@ -6,7 +6,7 @@ Baseline on Bradyn’s PC, Kokiri Forest child Static+Dynamic, before this pass:
 
 `renderer.render` runs only from the animation frame requested by `requestRender`. Nothing calls `setAnimationLoop`. A frame schedules the next one only while the camera is moving (orbit damping, fly keys, or right-button look), the gizmo is dragging, or a model or terrain load is still in flight. Water does not animate, so it does not keep the loop. When that stops, the overlay reads `idle` and the last draw and triangle counts stay put.
 
-Check: **Stats** starts on. Orbit or fly, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead. The line starts with the backend (`WebGL` or `WebGPU`) and, once a run of frames has been measured, the frame time in milliseconds.
+Check: **Stats** starts on. Orbit or fly, then let go. The line should switch to `idle` within a frame of the camera settling. Holding a fly key, dragging the gizmo, or opening a scene (while the progress chip is up) should show a frame rate instead. The line starts with the backend (`WebGPU`, or `WebGL (WebGPU unavailable: …)` when a requested WebGPU session fell back) and, once a run of frames has been measured, the frame time in milliseconds. A short git revision is at the end. See [troubleshooting.md](troubleshooting.md).
 
 ## Instanced repeats
 
@@ -318,7 +318,7 @@ What r170 cannot do, and what is still unresolved:
 - **Render-call loop.** `info.render.calls` is how many times `render()` ran, not the draw count. A quiet editor frame is one call. The Kokiri console reached about 80 calls in a frame. That loop is not fixed.
 - **Cutouts.** Some grass cards still drew as solid sheets after the colour-node discard. The mask path is not reliable on this three.
 
-Use the viewport **Stats** to confirm the backend. A WebGPU run starts with `WebGPU`, and the WebGL2 fallback starts with `WebGL`. For renderer comparisons, keep the scene, camera, and texture settings the same across both runs.
+Use the viewport **Stats** to confirm the backend. A WebGPU run starts with `WebGPU`. A fallback names the reason, for example `WebGL (WebGPU unavailable: adapter is null)`. Plain `WebGL` means this session asked for WebGL, or the page is a build from before that label. The short revision at the end of the line is the page; `/api/health` is the server. When they disagree, restart and hard-reload before comparing frames. See [troubleshooting.md](troubleshooting.md). For renderer comparisons, keep the scene, camera, and texture settings the same across both runs.
 
 ## Field-scale memory and further GPU techniques
 

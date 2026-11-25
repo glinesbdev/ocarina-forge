@@ -24,6 +24,7 @@ export async function request(path, options = {}) {
 }
 
 export const api = {
+  health: () => request("/api/health"),
   status: () => request("/api/status"),
   stream: () => request("/api/stream"),
   saveConfig: (body) => request("/api/config", { method: "PUT", body: JSON.stringify(body) }),

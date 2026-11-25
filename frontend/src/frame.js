@@ -19,6 +19,7 @@ function formatMs(value) {
  * Stats line. `instances` and `culled` are omitted until that pass records them.
  * A frame that will not be followed by another one is `idle`, even if fps was just measured.
  * `backend` and `frameMs` are included when the caller has them.
+ * `build` is the page's short git revision, when the caller has one.
  */
 export function formatStats({
   rendering,
@@ -42,6 +43,7 @@ export function formatStats({
   warmDone,
   warmTotal,
   sceneStream,
+  build,
 }) {
   const rate = rendering ? (fps ? `${fps} fps` : "…") : "idle";
   const parts = [];
@@ -70,5 +72,6 @@ export function formatStats({
     parts.push(`${sceneStream.slowFrames} streaming frames >25 ms`);
     if (sceneStream.editBytes != null) parts.push(`first edit ${formatMs(sceneStream.editBytes / 1048576)} MiB`);
   }
+  if (build) parts.push(build);
   return parts.join(" · ");
 }

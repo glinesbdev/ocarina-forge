@@ -1,4 +1,9 @@
-"""Serve the built WebGL editor and signal readiness to Longshot's broker."""
+"""Serve the built editor and signal readiness to Longshot's broker.
+
+`frontend/dist` is whatever `npm run build` last wrote. `npm run build:webgl`
+never starts WebGPU. index.html is revalidated; restarting this process does
+not rebuild the bundle.
+"""
 
 from __future__ import annotations
 

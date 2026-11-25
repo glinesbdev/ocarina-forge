@@ -18,9 +18,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 
 from ocarina_forge import __version__
+from ocarina_forge.buildstamp import read_build
+from ocarina_forge.editor_static import EditorStaticFiles
 from ocarina_forge.actors import is_marker
 from ocarina_forge.changes import project_report, scene_changes
 from ocarina_forge.config import load_config, save_config
@@ -72,6 +73,8 @@ async def _lifespan(_app):
         _WARM_TASK.cancel()
     _close_pool()
 
+
+_BUILD = read_build()
 
 app = FastAPI(title="Ocarina Forge", version=__version__, lifespan=_lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -573,7 +576,7 @@ def _project_status() -> dict | None:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": __version__}
+    return {"ok": True, "version": __version__, "build": _BUILD}
 
 
 @app.get("/api/stream")
@@ -624,6 +627,7 @@ def status():
     ready = bool(dump) and "error" not in dump and bool(project) and "error" not in project
     return {
         "version": __version__,
+        "build": _BUILD,
         "config": config,
         "dump": dump,
         "project": project,
@@ -1295,4 +1299,4 @@ def _diff_for(banc: str) -> dict:
 
 def mount_frontend(directory: Path) -> None:
     if (directory / "index.html").is_file():
-        app.mount("/", StaticFiles(directory=directory, html=True), name="frontend")
+        app.mount("/", EditorStaticFiles(directory=directory, html=True), name="frontend")

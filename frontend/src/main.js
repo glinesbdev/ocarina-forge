@@ -1,6 +1,8 @@
 import "dockview-core/dist/styles/dockview.css";
 
 import { api } from "./api.js";
+import { dismissWebgpuNotice, webgpuNoticeVisible } from "./backend.js";
+import { buildNoticeId, buildNoticeVisible, describeBuildMismatch, dismissBuildNotice, frontendBuild } from "./build-info.js";
 import { planActorRefresh } from "./actors.js";
 import { graphHistory, historyStep, renderBehavior } from "./behavior.js";
 import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
@@ -341,7 +343,8 @@ if (statsBox) {
     }
   });
 }
-if (viewport.backendNote) toast(viewport.backendNote);
+showRendererNotice();
+watchBuildSkew();
 $("draw-distance").addEventListener("change", (event) => {
   viewport.setFlags({ distance: Number(event.target.value) || 0 });
 });
@@ -3386,6 +3389,60 @@ function empty(text) {
   p.className = "empty";
   p.textContent = text;
   return p;
+}
+
+function showRendererNotice() {
+  const reason = viewport && viewport.backendReason;
+  if (!reason) return;
+  let storage;
+  try {
+    storage = localStorage;
+  } catch {
+    storage = null;
+  }
+  if (storage && !webgpuNoticeVisible(storage, reason)) return;
+  const node = $("renderer-notice");
+  const label = $("renderer-notice-text");
+  if (!node || !label) return;
+  label.textContent = viewport.backendNote || `WebGPU is unavailable (${reason}). Using WebGL.`;
+  node.hidden = false;
+  const button = $("renderer-notice-dismiss");
+  if (!button) return;
+  button.addEventListener("click", () => {
+    if (storage) dismissWebgpuNotice(storage, reason);
+    node.hidden = true;
+  }, { once: true });
+}
+
+function watchBuildSkew() {
+  const page = frontendBuild();
+  api.health().then((body) => {
+    const server = body && body.build;
+    const skew = describeBuildMismatch(page, server);
+    if (!skew) return;
+    console.warn(skew.message, { page, server });
+    const id = buildNoticeId(page, server);
+    let storage;
+    try {
+      storage = localStorage;
+    } catch {
+      storage = null;
+    }
+    if (storage && !buildNoticeVisible(storage, id)) return;
+    const node = $("build-notice");
+    const label = $("build-notice-text");
+    if (!node || !label) return;
+    label.textContent = skew.message;
+    node.hidden = false;
+    const button = $("build-notice-dismiss");
+    if (!button) return;
+    button.addEventListener("click", () => {
+      if (storage) dismissBuildNotice(storage, id);
+      node.hidden = true;
+    }, { once: true });
+  }).catch(() => {
+    /* the editor still runs when the health check cannot */
+  });
 }
 
 function toast(message, { persistent = false } = {}) {
