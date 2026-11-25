@@ -70,12 +70,23 @@ function sampleHasLight(sample) {
   return LIGHT_KEYS.some((key) => sample[key] != null);
 }
 
+export function lightingFields(sample) {
+  const fromCapture = [];
+  const editorDefault = [];
+  for (const key of LIGHT_KEYS) {
+    if (sample && sample[key] != null) fromCapture.push(key);
+    else editorDefault.push(key);
+  }
+  return { fromCapture, editorDefault };
+}
+
 /**
  * Merge one capture sample over the editor default.
  * `focus` is `{x, z}` in metres (the orbit target). A sample with no sun,
  * fog, or other light field does not replace the default.
+ * `options.editorDefaults` draws the editor lights even when a reference exists.
  */
-export function resolveLighting(payload, focus) {
+export function resolveLighting(payload, focus, options = {}) {
   const samples = (payload && payload.samples) || [];
   const sample = nearestSample(samples, focus);
   const lighting = {
@@ -88,8 +99,9 @@ export function resolveLighting(payload, focus) {
     sky: null,
     env: null,
   };
+  const ignore = Boolean(options.editorDefaults);
   let applied = false;
-  if (sample) {
+  if (sample && !ignore) {
     for (const key of LIGHT_KEYS) {
       if (sample[key] != null) {
         lighting[key] = sample[key];
@@ -97,27 +109,34 @@ export function resolveLighting(payload, focus) {
       }
     }
   }
-  const source = applied ? "capture" : sample ? "capture-partial" : "editor-default";
+  const source = ignore ? "editor-default" : applied ? "capture" : sample ? "capture-partial" : "editor-default";
   return {
     lighting,
     source,
     sample: applied ? sample : null,
     timeOfDay: sample && finite(sample.timeOfDay),
     sampleCount: samples.length,
-    note: lightingNote(source, samples.length, payload),
+    note: lightingNote(source, samples.length, payload, { editorDefaults: ignore }),
   };
 }
 
-export function lightingNote(source, count, payload) {
-  if (source === "capture") return `Captured lighting (${count} sample${count === 1 ? "" : "s"}).`;
-  if (source === "capture-partial") {
-    return `Capture has ${count} sample${count === 1 ? "" : "s"} (time of day and effects). Sun, fog, and exposure were not in the game API.`;
+export function lightingNote(source, count, payload, options = {}) {
+  const map = payload && payload.map ? String(payload.map) : "";
+  const path = payload && payload.referencePath ? String(payload.referencePath) : "";
+  const found = Boolean(payload && payload.referenceFound) || count > 0;
+  const fields = lightingFields(found ? nearestSample((payload && payload.samples) || [], null) : null);
+  const where = [map, count ? `${count} sample${count === 1 ? "" : "s"}` : "0 samples", path].filter(Boolean).join(" · ");
+  const fromFile = fields.fromCapture.length ? fields.fromCapture.join(", ") : "none";
+  const defaults = fields.editorDefault.join(", ");
+  if (options.editorDefaults && found) {
+    return `Showing editor defaults. Reference on disk: ${where}. From the file: ${fromFile}. Editor default: ${defaults}.`;
   }
-  const notes = payload && payload.notes;
-  if (Array.isArray(notes) && typeof notes[0] === "string" && notes[0]) return notes[0];
-  const unavailable = payload && payload.unavailable;
-  if (Array.isArray(unavailable) && unavailable.length) {
-    return "Editor lighting. This scene has no captured sun or fog.";
+  if (!found) {
+    const expected = path ? ` Expected ${path}.` : "";
+    return `No reference file${map ? ` for ${map}` : ""}. Editor defaults.${expected}`;
   }
-  return "Editor lighting. No capture for this scene.";
+  if (source === "capture") {
+    return `Using reference ${where}. From the file: ${fromFile}. Editor default: ${defaults || "none"}.`;
+  }
+  return `Using reference ${where}. From the file: ${fromFile}. Editor default: ${defaults}.`;
 }

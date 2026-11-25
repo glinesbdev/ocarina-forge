@@ -241,6 +241,8 @@ export async function createViewport(host, hooks) {
   let showEffectGizmos = true;
   let lightingState = null;
   let lightingSample = null;
+  let showEditorDefaults = false;
+  let lastLightingNote = "";
   const effectGizmoGeometry = new THREE.BufferGeometry();
   effectGizmoGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
     -0.5, 0, 0, 0.5, 0, 0,
@@ -3481,19 +3483,25 @@ uniform float terrainLayerMissing;`
 
   function applyLighting(payload, focus) {
     lightingState = payload;
-    const resolved = resolveLighting(payload, focus || { x: orbit.target.x, z: orbit.target.z });
+    const resolved = resolveLighting(payload, focus || { x: orbit.target.x, z: orbit.target.z }, {
+      editorDefaults: showEditorDefaults,
+    });
     paintLights(resolved);
+    lastLightingNote = resolved.note;
     return resolved.note;
   }
 
   function maybeRelight() {
     if (!lightingState || !lightingState.samples || !lightingState.samples.length) return;
-    const resolved = resolveLighting(lightingState, { x: orbit.target.x, z: orbit.target.z });
+    const resolved = resolveLighting(lightingState, { x: orbit.target.x, z: orbit.target.z }, {
+      editorDefaults: showEditorDefaults,
+    });
     if (resolved.sample === lightingSample) return;
     paintLights(resolved);
+    lastLightingNote = resolved.note;
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, shadows, ao, effectGizmos }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, shadows, ao, effectGizmos, editorDefaults }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
@@ -3512,6 +3520,10 @@ uniform float terrainLayerMissing;`
       uvDirty = true;
     }
     if (effectGizmos !== undefined) showEffectGizmos = Boolean(effectGizmos);
+    if (editorDefaults !== undefined) {
+      showEditorDefaults = Boolean(editorDefaults);
+      if (lightingState) applyLighting(lightingState);
+    }
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
@@ -4687,6 +4699,9 @@ uniform float terrainLayerMissing;`
     setGizmo,
     setFlags,
     applyLighting,
+    lightingStatus() {
+      return lastLightingNote;
+    },
     modelInfo,
     auditPlacements,
     auditView,

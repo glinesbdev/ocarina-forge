@@ -1,13 +1,16 @@
-// Forge lighting capture. Mirrors the height-check mod: play, then read
-// storage.global. This file imports only Longshot modules the modding spec
-// (revision 4, 2026-11-19) marks as built. longshot/world, longshot/gfx,
-// longshot/capture, and longshot/memory are not imported: a missing module
-// is refused at link time, and none of those is a lighting reader.
+// Forge lighting capture. Static imports are only modules the modding spec
+// (revision 4, 2026-11-19) marks as built. A missing static import is refused
+// at link time.
 //
-// game.state() returns frame, mode, map, age, and timeOfDay. It does not
-// return sun, ambient, fog, sky, exposure, or a tonemap. Those fields are
-// written as null. Extra fields this build actually puts on state() or
-// player.state() are copied under observed, size-capped.
+// From that spec, game.state() returns frame, mode, map, age, and timeOfDay.
+// It does not return sun, ambient, fog, sky, exposure, or a tonemap. Those
+// fields stay null. longshot/gfx is specified as world drawing (lines, boxes,
+// circles, billboards, models), permission gfx.world. The same spec marks
+// that module not built, and it publishes no sun, fog, ambient, exposure, or
+// env-palette getter. A build can still answer has("gfx.world"), so this
+// file asks first and dynamic-imports longshot/gfx only then. It logs the
+// export names. It does not call drawing methods, and it does not copy
+// unknown keys into the light fields.
 
 import { has } from "longshot";
 import log from "longshot/log";
@@ -28,6 +31,7 @@ const maps = {};
 let last = null;
 let framesSince = 120;
 let actorNote = null;
+let gfxNote = null;
 
 function num(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -109,6 +113,44 @@ function activeEffects(origin) {
   return rows.slice(0, 24);
 }
 
+function describeValue(value, depth) {
+  if (typeof value === "function") return "function";
+  if (value == null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return shrink(value, depth);
+  }
+  if (depth <= 0 || typeof value !== "object") return typeof value;
+  if (Array.isArray(value)) return shrink(value, depth);
+  const out = {};
+  for (const key of Object.keys(value).slice(0, 16)) {
+    const item = value[key];
+    out[key] = typeof item === "function" ? "function" : shrink(item, depth - 1);
+  }
+  return out;
+}
+
+async function readGfx() {
+  if (!has("gfx.world")) {
+    gfxNote = { present: false };
+    log.info("FORGE_LIGHTING gfx " + JSON.stringify(gfxNote));
+    return;
+  }
+  try {
+    const mod = await import("longshot/gfx");
+    const world = mod && Object.prototype.hasOwnProperty.call(mod, "world") ? mod.world : null;
+    gfxNote = {
+      present: true,
+      moduleKeys: mod && typeof mod === "object" ? Object.keys(mod).slice(0, 24) : [],
+      worldType: world === null ? "null" : typeof world,
+      worldKeys: world && typeof world === "object" ? Object.keys(world).slice(0, 24) : [],
+      world: describeValue(world, 2),
+    };
+    log.info("FORGE_LIGHTING gfx " + JSON.stringify(gfxNote));
+  } catch (error) {
+    gfxNote = { present: true, import: error && error.name ? error.name : "error" };
+    log.warn("FORGE_LIGHTING gfx " + JSON.stringify(gfxNote));
+  }
+}
+
 function persist(mapName) {
   const probes = {};
   for (const name of PROBES) probes[name] = has(name);
@@ -119,8 +161,9 @@ function persist(mapName) {
     probes,
     mapsSeen: Object.keys(maps),
     actorNote,
+    gfx: gfxNote,
     notes: [
-      "sun, ambient, hemisphere, fog, sky, exposure, tonemap, and env stay null. The built Longshot modules do not return them. observed copies extra fields this build's state() actually has.",
+      "sun, ambient, hemisphere, fog, sky, exposure, tonemap, and env stay null. The published longshot/gfx surface is drawing, not those values. gfx is a size-capped dump of the live module when has('gfx.world') is true.",
     ],
   };
   const bucket = maps[mapName];
@@ -193,4 +236,5 @@ function sample() {
 const probes = {};
 for (const name of PROBES) probes[name] = has(name);
 log.info("FORGE_LIGHTING ready " + JSON.stringify({ probes, unavailable: UNAVAILABLE }));
+readGfx();
 update.on(sample);

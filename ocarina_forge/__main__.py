@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
         ],
         help="Commands for auditing, editing, and preparing scenes. The default is the editor server.",
     )
-    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action, actor class, or a height-diff or lighting-capture JSON.")
+    parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action, actor class, a height-diff JSON, a lighting-capture JSON, or a Longshot game folder.")
     parser.add_argument("extra", nargs="?", help="Project name for 'project create' and 'project open'.")
     parser.add_argument("--id", help="Actor hash. behavior reads that placement as well as the actor pack.")
     parser.add_argument("--trace", action="store_true", help="behavior prints the pack, each component, and every path it tried.")
@@ -477,22 +477,20 @@ def print_height_diff(results_path: str, *, dump: str | None = None, as_json: bo
 
 
 def print_lighting_import(results_path: str, *, out: str | None = None) -> int:
-    """Split a lighting-capture JSON into per-scene files. 2 when the file is missing or empty."""
-    from ocarina_forge.lighting import import_capture, references_dir
+    """Split a lighting-capture JSON, or a game folder, into per-scene files."""
+    from ocarina_forge.lighting import find_store, import_capture, references_dir
 
-    path = Path(results_path)
-    if not path.is_file():
-        print(f"No capture file at {results_path}.", file=sys.stderr)
-        return 2
     try:
-        written = import_capture(path, out)
+        source = find_store(results_path)
+        written = import_capture(source, out)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     folder = written[0].parent if written else references_dir()
+    print(f"Read {source}")
     print(f"Wrote {len(written)} scene file(s) to {folder}")
     for item in written:
-        print(item.name)
+        print(f"{item.stem}  {item}")
     return 0
 
 

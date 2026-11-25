@@ -9,6 +9,7 @@ from ocarina_forge.lighting import (
     capture_root,
     collect_emitters,
     emitter_kind,
+    find_store,
     import_capture,
     install_mod,
     lighting_report,
@@ -99,6 +100,38 @@ def test_import_splits_storage_chunks_and_does_not_keep_bad_colors(tmp_path, mon
     assert scenes_from_capture(payload)["KokiriForest_Child"]["probes"]["world.ray"] is False
 
 
+def test_game_folder_store_imports_the_kokiri_map_key(tmp_path):
+    game = tmp_path / "modding-with-editor"
+    store = game / "dev" / "user" / "modstore" / "global" / "local~lighting-capture.json"
+    store.parent.mkdir(parents=True)
+    store.write_text(json.dumps({
+        "lighting": {
+            "schema": 1,
+            "probes": {"gfx.world": True, "gfx.shader": False},
+            "gfx": {
+                "present": True,
+                "moduleKeys": ["world", "model", "effect"],
+                "worldType": "object",
+                "worldKeys": ["line", "circle", "box"],
+                "world": {"line": "function", "circle": "function", "box": "function"},
+            },
+        },
+        "lighting:KokiriForest_Child": {
+            "map": "KokiriForest_Child",
+            "samples": [{"x": 1, "y": 2, "z": 3, "timeOfDay": 8, "sun": None, "effects": []}],
+        },
+    }), encoding="utf-8")
+    assert find_store(game) == store
+    written = import_capture(game, tmp_path / "out")
+    assert [path.name for path in written] == ["KokiriForest_Child.json"]
+    document = json.loads(written[0].read_text(encoding="utf-8"))
+    assert document["map"] == "KokiriForest_Child"
+    assert document["gfx"]["moduleKeys"] == ["world", "model", "effect"]
+    assert document["gfx"]["world"]["line"] == "function"
+    assert map_name_for_banc(KOKIRI_STATIC) == "KokiriForest_Child"
+    assert map_name_for_banc(KOKIRI_STATIC.replace("_Static", "_Dynamic")) == "KokiriForest_Child"
+
+
 def test_fixture_report_lists_the_firefly_and_does_not_invent_a_sun(tmp_path, monkeypatch):
     monkeypatch.setattr("ocarina_forge.lighting.references_dir", lambda: tmp_path / "empty")
     dump = Dump(build_fixture(tmp_path / "dump"))
@@ -106,6 +139,9 @@ def test_fixture_report_lists_the_firefly_and_does_not_invent_a_sun(tmp_path, mo
     kinds = {(row["gyaml"], row["kind"]) for row in report["emitters"]}
     assert ("Eft_Firefly", "emitter") in kinds
     assert report["samples"] == []
+    assert report["referenceFound"] is False
+    assert report["map"] == "KokiriForest_Child"
+    assert report["referencePath"].endswith("KokiriForest_Child.json")
     assert "sun" in report["unavailable"]
     assert report["param"]["keys"] == []
     assert "Env" in report["directories"]["absent"]
@@ -119,6 +155,8 @@ def test_install_copies_the_script_only(tmp_path):
     for banned in ("longshot/world", "longshot/gfx", "longshot/capture", "longshot/memory"):
         assert f'from "{banned}"' not in text
         assert f'import "{banned}"' not in text
+    assert 'import("longshot/gfx")' in text
+    assert 'has("gfx.world")' in text
     assert "sun: null" in text
     manifest = json.loads((dest / "mod.json").read_text(encoding="utf-8"))
     assert manifest["id"] == "local/lighting-capture"
@@ -133,6 +171,9 @@ def test_windows_steps_name_the_commands_bradyn_runs():
     assert "lighting-survey" in text
     assert "FORGE_LIGHTING" in text
     assert "local/lighting-capture" in text
+    assert "logs\\mod-run.txt" in text
+    assert "local~lighting-capture.json" in text
+    assert "Select-String" not in text
 
 
 def test_collect_emitters_lists_dynamic_key_names_only():

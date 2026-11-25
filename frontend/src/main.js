@@ -367,6 +367,7 @@ for (const [id, flag, fallback] of [
   ["show-shadows", "shadows", false],
   ["show-ao", "ao", true],
   ["show-effect-gizmos", "effectGizmos", true],
+  ["show-editor-lighting", "editorDefaults", false],
 ]) {
   const box = $(id);
   if (!box) continue;
@@ -375,6 +376,10 @@ for (const [id, flag, fallback] of [
   viewport.setFlags({ [flag]: on });
   box.addEventListener("change", () => {
     viewport.setFlags({ [flag]: box.checked });
+    if (flag === "editorDefaults") {
+      const note = $("lighting-note");
+      if (note) note.textContent = viewport.lightingStatus();
+    }
     try {
       localStorage.setItem(`ocarinaforge.${flag}`, box.checked ? "1" : "0");
     } catch {

@@ -196,6 +196,37 @@ def _sky(value):
     return {"color": color}
 
 
+def _gfx_note(value):
+    """Keep a live longshot/gfx dump. Key lists stay intact past the generic cap."""
+    if not isinstance(value, dict):
+        return None
+    note = {}
+    for key in ("present", "import", "worldType"):
+        item = value.get(key)
+        if isinstance(item, bool) or item is None:
+            note[key] = item
+        elif isinstance(item, str):
+            note[key] = item[:80]
+    for key in ("moduleKeys", "worldKeys"):
+        rows = value.get(key)
+        if isinstance(rows, list):
+            note[key] = [str(item)[:80] for item in rows[:24] if isinstance(item, (str, int))]
+    world = value.get("world")
+    if isinstance(world, dict):
+        copied = {}
+        for index, (key, item) in enumerate(world.items()):
+            if index >= 24:
+                break
+            if isinstance(item, str):
+                copied[str(key)[:80]] = item[:80]
+            elif isinstance(item, (int, float, bool)) or item is None:
+                copied[str(key)[:80]] = item
+            else:
+                copied[str(key)[:80]] = _shrink(item, 1)
+        note["world"] = copied
+    return note or None
+
+
 def _shrink(value, depth: int = 2):
     if value is None or isinstance(value, bool):
         return value
@@ -316,9 +347,10 @@ def scenes_from_capture(raw) -> dict[str, dict]:
     notes = [str(item) for item in (summary.get("notes") or []) if isinstance(item, str)]
     unavailable = [str(item) for item in (summary.get("unavailable") or UNAVAILABLE)]
     probes = summary.get("probes") if isinstance(summary.get("probes"), dict) else {}
+    gfx = _gfx_note(summary.get("gfx"))
     for map_name, rows in grouped.items():
         samples = [item for item in (normalize_sample(row) for row in rows) if item]
-        documents[map_name] = {
+        document = {
             "schema": SCHEMA,
             "map": map_name,
             "mod": mod or MOD_ID,
@@ -327,6 +359,9 @@ def scenes_from_capture(raw) -> dict[str, dict]:
             "notes": notes,
             "samples": samples[:48],
         }
+        if gfx:
+            document["gfx"] = gfx
+        documents[map_name] = document
     if not documents and isinstance(data.get("samples"), list) and isinstance(data.get("map"), str):
         map_name = data["map"]
         if _MAP_NAME.match(map_name):
@@ -343,9 +378,50 @@ def scenes_from_capture(raw) -> dict[str, dict]:
     return documents
 
 
+STORE_NAME = "local~lighting-capture.json"
+
+
+def find_store(path: str | Path) -> Path:
+    """A capture JSON, or the store file inside a Longshot game folder.
+
+    A Longshot run reported the store at
+    ``<game>/dev/user/modstore/global/local~lighting-capture.json``. The ``~``
+    is the mod id ``local/lighting-capture`` with the slash replaced. That
+    file is the storage key map. It does not contain a ``mod`` field.
+    """
+    source = Path(path).expanduser()
+    if source.is_file():
+        return source
+    if not source.is_dir():
+        raise ValueError(f"{source} is not a capture file or a game folder")
+    preferred = [
+        source / "dev" / "user" / "modstore" / "global" / STORE_NAME,
+        source / "user" / "modstore" / "global" / STORE_NAME,
+    ]
+    for candidate in preferred:
+        if candidate.is_file():
+            return candidate
+    matches: list[Path] = []
+    for candidate in source.rglob(STORE_NAME):
+        if candidate.is_file():
+            matches.append(candidate)
+        if len(matches) >= 8:
+            break
+    if not matches:
+        raise ValueError(
+            f"no {STORE_NAME} under {source}. "
+            f"Expected dev/user/modstore/global/{STORE_NAME}"
+        )
+    for candidate in matches:
+        parts = set(candidate.parts)
+        if "modstore" in parts and "global" in parts:
+            return candidate
+    return matches[0]
+
+
 def import_capture(path: str | Path, dest: str | Path | None = None) -> list[Path]:
     """Write one JSON file per map. Returns the paths written."""
-    source = Path(path)
+    source = find_store(path)
     raw = json.loads(source.read_text(encoding="utf-8"))
     documents = scenes_from_capture(raw)
     if not documents:
@@ -381,6 +457,7 @@ def load_reference(map_name: str, folder: str | Path | None = None) -> dict | No
         "notes": [str(item) for item in (raw.get("notes") or []) if isinstance(item, str)],
         "samples": samples[:48],
         "path": str(path),
+        "gfx": raw.get("gfx") if isinstance(raw.get("gfx"), dict) else None,
     }
 
 
@@ -491,7 +568,9 @@ def lighting_report(dump, banc: str, *, survey: bool = False) -> dict:
         if isinstance(other, dict):
             emitters.extend(collect_emitters(other, sibling))
     param_path, param_document = _open_param(dump, banc)
-    reference = load_reference(map_name_for_banc(banc))
+    map_name = map_name_for_banc(banc)
+    reference = load_reference(map_name)
+    expected = references_dir() / f"{map_name}.json"
     area = banc.split("/")[1] if banc.startswith("Banc/") and banc.count("/") >= 2 else ""
     names = matching_names(dump, "Banc/GameBancParam")
     if area:
@@ -505,7 +584,8 @@ def lighting_report(dump, banc: str, *, survey: bool = False) -> dict:
         ],
         "probes": (reference or {}).get("probes") or {},
         "samples": (reference or {}).get("samples") or [],
-        "referencePath": (reference or {}).get("path"),
+        "referencePath": (reference or {}).get("path") or str(expected),
+        "referenceFound": reference is not None,
         "emitters": emitters[:400],
         "param": {"path": param_path, **param_summary(param_document)},
         "directories": probe_directories(dump),
@@ -602,24 +682,32 @@ def windows_steps(game: Path | None = None) -> str:
         "",
         "3. Load a map and walk. The mod records a sample when Link moves about 8 m,",
         "   and at most 48 samples per map. It does not change the picture.",
-        "   longshot_log.txt gains a line starting with FORGE_LIGHTING.",
-        "   The ready line lists has() for world.ray, world.rayAll, game.pause, gfx.world, gfx.shader.",
+        "   The log is <game>\\logs\\mod-run.txt. A capture line contains FORGE_LIGHTING.",
+        "   When has(\"gfx.world\") is true, a second line FORGE_LIGHTING gfx lists",
+        "   the live longshot/gfx export names. Send that line. It is not a light reading.",
         "",
-        "4. Quit the game so storage flushes. The file is the mod's storage.global",
-        "   under the user modstore folder (beside the game's save folder).",
-        "   The exact file name is not verified in this checkout. Search after quitting:",
-        "   Get-ChildItem -Recurse -Filter *.json \"$env:USERPROFILE\\Games\\Longshot\" | Select-String -Pattern '\"mod\": \"local/lighting-capture\"'",
-        "   Also search the Longshot user folder if the game is not under Games\\Longshot.",
+        "4. Quit the game so storage flushes. The store file reported from a",
+        "   Longshot run is:",
+        r"   <game>\dev\user\modstore\global\local~lighting-capture.json",
+        "   The ~ stands in for the slash in the mod id local/lighting-capture.",
+        "   The file is the storage key map. It has no \"mod\" field, so a search",
+        "   for \"mod\": \"local/lighting-capture\" does not match it. To find it:",
+        "   Get-ChildItem -Recurse -Filter local~lighting-capture.json <game>",
         "",
-        "5. Import that JSON. It writes one small file per map. Nothing is committed:",
-        f"   python -m ocarina_forge lighting-import .\\lighting-capture.json",
+        "5. Import the game folder, or that JSON. One small file is written per map",
+        "   name. Nothing is committed. The printed name is the map key",
+        "   (KokiriForest_Child for the Child Kokiri bancs):",
+        "   python -m ocarina_forge lighting-import <game>",
         f"   Files land in {data} (OCARINA_FORGE_LIGHTING overrides the folder).",
         "",
-        "6. Restart Forge and open the same map. The stage bar says whether the",
-        "   capture had sun and fog. This API does not return those, so the line",
-        "   stays on editor lighting until a reference file contains the numbers.",
-        "   Shadows stay off. AO toggles glTF occlusion maps. Effect gizmos mark Eft_,",
-        "   EftLoc_, and fog actors.",
+        "6. Restart the Forge server after pulling this change, then reload the page.",
+        "   A later import does not need another server restart: /api/lighting reads",
+        "   the file on each request. Reload the page, because the editor keeps the",
+        "   lighting it already fetched for that scene.",
+        "   The line under the stage bar names the reference file, the sample count,",
+        "   and which fields came from the file. Editor defaults draws the editor",
+        "   lights so the two can be compared. The published API does not return",
+        "   sun or fog, so those stay on the editor values until a file contains them.",
         "",
         "7. Optional file survey, with your dump (prints key names, does not decode payloads):",
         "   python -m ocarina_forge lighting-survey Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs --dump <dump>",

@@ -84,27 +84,33 @@ Open the Child Hyrule Field (or Kokiri) scene and toggle **Snap**. Drag the isla
 
 ## Lighting capture
 
-The capture mod is `ocarina_forge/lighting_capture/` (`mod.json` and `main.js` only). It follows height-check: a Longshot mod writes `storage.global`, and Forge imports that JSON. It does not copy game files. Sun, fog, sky, and exposure stay null, because the built Longshot API (`game.state()`) returns time of day and not those values. Extra fields a build actually returns are kept under `observed` and are not treated as colours until someone checks them.
+The capture mod is `ocarina_forge/lighting_capture/` (`mod.json` and `main.js` only). It follows height-check: a Longshot mod writes `storage.global`, and Forge imports that JSON. It does not copy game files. From the modding spec, `game.state()` returns time of day and not sun, fog, sky, or exposure, so those fields stay null. Extra fields a build actually returns are kept under `observed`. When `has("gfx.world")` is true the mod dynamic-imports `longshot/gfx` and logs the export names. The published API for that module is drawing, so the names are not copied into the light fields.
 
-On Windows, from the repo:
+On Windows, from the repo, with the game folder you actually run:
 
 ```bat
-.venv\Scripts\python.exe -m ocarina_forge lighting-mod --install
+.venv\Scripts\python.exe -m ocarina_forge lighting-mod --install --game E:\sw2\oot\stable\modding-with-editor
 ```
 
-`--game` overrides the default `%USERPROFILE%\Games\Longshot\mod-test`. The command copies the mod to `<game>\mods\local\lighting-capture\`. Quit Longshot, start it, and enable `local/lighting-capture` (permissions `state.read`, `actors.read`, `storage`). Walk the map. The log line `FORGE_LIGHTING` counts samples. Quit so storage flushes, then find the JSON (the modstore path is not verified in this checkout):
+`--game` overrides the default `%USERPROFILE%\Games\Longshot\mod-test`. The command copies the mod to `<game>\mods\local\lighting-capture\`. Quit Longshot completely, start it, and enable `local/lighting-capture` (permissions `state.read`, `actors.read`, `storage`). Walk the map. The log is `<game>\logs\mod-run.txt`. A line containing `FORGE_LIGHTING` counts samples. A line `FORGE_LIGHTING gfx` lists the live `longshot/gfx` exports when that feature is present. Quit so storage flushes. A run on 2026-11-25 wrote:
+
+```text
+<game>\dev\user\modstore\global\local~lighting-capture.json
+```
+
+The file is the storage key map. It does not contain `"mod": "local/lighting-capture"`. Find it with:
 
 ```powershell
-Get-ChildItem -Recurse -Filter *.json "$env:USERPROFILE\Games\Longshot" | Select-String -Pattern '"mod": "local/lighting-capture"'
+Get-ChildItem -Recurse -Filter local~lighting-capture.json E:\sw2\oot\stable\modding-with-editor
 ```
 
-Import it. The files stay in your data folder, not the repo:
+Import the game folder. The command prints the map key it wrote (`KokiriForest_Child` for the Child Kokiri bancs). The files stay in your data folder, not the repo:
 
 ```bat
-.venv\Scripts\python.exe -m ocarina_forge lighting-import path\to\lighting-capture.json
+.venv\Scripts\python.exe -m ocarina_forge lighting-import E:\sw2\oot\stable\modding-with-editor
 ```
 
-That writes `%USERPROFILE%\.local\share\ocarina-forge\lighting\<Map>.json` unless `OCARINA_FORGE_LIGHTING` is set. Restart Forge and open the same map. The stage bar says whether the file had sun and fog. **Shadows** stays off. **AO** toggles glTF occlusion maps. **Effect gizmos** marks `Eft_`, `EftLoc_`, and fog actors.
+That writes `%USERPROFILE%\.local\share\ocarina-forge\lighting\<Map>.json` unless `OCARINA_FORGE_LIGHTING` is set. Restart the Forge server after pulling the editor change, then reload the page. Another import after that does not need a server restart, because each lighting request reads the file again. Reload the page so the open scene fetches it. The line under the stage bar names the reference path, the sample count, and which fields are from the file. **Editor defaults** draws the editor lights for comparison. **Shadows** stays off. **AO** toggles glTF occlusion maps. **Effect gizmos** marks `Eft_`, `EftLoc_`, and fog actors.
 
 To list parameter key names from the dump without decoding unknown payloads:
 
