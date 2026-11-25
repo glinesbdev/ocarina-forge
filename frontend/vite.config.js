@@ -5,6 +5,16 @@ import { oneThreePlugin } from "./one-three.js";
 
 const basisDir = path.resolve("node_modules/three/examples/jsm/libs/basis");
 
+// COOP/COEP so the page is crossOriginIsolated and can use SharedArrayBuffer
+// with a wasm worker pool. /api is same-origin through the Vite proxy.
+// credentialless is enough for isolation and is gentler on any future
+// cross-origin texture or model URLs than require-corp.
+const isolationHeaders = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "credentialless",
+  "Cross-Origin-Resource-Policy": "same-origin",
+};
+
 function basisTranscoder() {
   const serve = (req, res, next) => {
     const name = (req.url || "/").split("?")[0].replace(/^\//, "");
@@ -12,6 +22,7 @@ function basisTranscoder() {
     const file = path.join(basisDir, name);
     if (!file.startsWith(basisDir) || !existsSync(file)) return next();
     res.setHeader("Content-Type", name.endsWith(".wasm") ? "application/wasm" : "text/javascript");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
     createReadStream(file).pipe(res);
   };
   return {
@@ -50,6 +61,7 @@ export default defineConfig(({ mode }) => ({
     host: "0.0.0.0",
     port: 47231,
     strictPort: true,
+    headers: isolationHeaders,
     proxy: {
       "/api": "http://127.0.0.1:47232",
     },
@@ -58,6 +70,7 @@ export default defineConfig(({ mode }) => ({
     host: "0.0.0.0",
     port: 47231,
     strictPort: true,
+    headers: isolationHeaders,
     proxy: {
       "/api": "http://127.0.0.1:47232",
     },

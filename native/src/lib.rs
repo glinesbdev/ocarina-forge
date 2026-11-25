@@ -3,6 +3,7 @@ mod bfres;
 mod decode;
 mod image;
 mod mesh;
+mod surface;
 mod swizzle;
 mod verts;
 
@@ -13,6 +14,10 @@ pub use decode::{apply_channels, decode_linear, decode_swizzle, noise};
 pub use image::{bc1_mip_chain, blit_channel, downsample, encode_bc1, has_near_magenta, limit_rgba, rgba_opaque};
 pub use swizzle::{deswizzle, fill_partial_gob, swizzle};
 pub use verts::{close_uv_seams, pack_f32_from_f64, shape_key, transform_positions, vec_bounds};
+pub use surface::{compose_height, triangle_height, MeshIndex};
+
+#[cfg(feature = "wasm")]
+mod wasm;
 
 #[cfg(feature = "python")]
 mod py {

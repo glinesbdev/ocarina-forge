@@ -16,3 +16,8 @@ native/target/
 tools/wgsl/target/
 *.zip
 .DS_Store
+tools/wasm-bench/node_modules/
+tools/wasm-bench/dist/
+tools/wasm-bench/pkg/
+tools/wasm-bench/data/*.bin
+tools/wasm-bench/data/*.json
