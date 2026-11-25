@@ -345,6 +345,21 @@ if (statsBox) {
 }
 showRendererNotice();
 watchBuildSkew();
+const profileBox = $("show-profile");
+if (profileBox) {
+  const fromQuery = new URLSearchParams(window.location.search).get("profile") === "1";
+  const profileOn = fromQuery || storedFlag("ocarinaforge.profile", false);
+  profileBox.checked = profileOn;
+  viewport.setShowProfile(profileOn);
+  profileBox.addEventListener("change", () => {
+    viewport.setShowProfile(profileBox.checked);
+    try {
+      localStorage.setItem("ocarinaforge.profile", profileBox.checked ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+  });
+}
 $("draw-distance").addEventListener("change", (event) => {
   viewport.setFlags({ distance: Number(event.target.value) || 0 });
 });
@@ -474,6 +489,10 @@ onShortcut = (event) => {
     else edit({ command: "remove", id: state.selected });
   } else if (event.key.toLowerCase() === "v" && !meta) {
     toggleSnap();
+  } else if (!meta && !event.repeat && event.key.toLowerCase() === "p") {
+    if (document.querySelector("dialog[open]")) return;
+    event.preventDefault();
+    toggleProfile();
   } else if (event.key === "Escape") {
     if (document.querySelector("dialog[open]")) return;
     state.selected = null;
@@ -2978,6 +2997,13 @@ function runPalette(row) {
   runCommand(row.id);
 }
 
+function toggleProfile() {
+  const box = $("show-profile");
+  if (!box) return;
+  box.checked = !box.checked;
+  box.dispatchEvent(new Event("change"));
+}
+
 function toggleSnap() {
   const box = $("snap-surface");
   if (!box) return;
@@ -3024,6 +3050,8 @@ function runCommand(id) {
     const box = $("show-stats");
     box.checked = !box.checked;
     box.dispatchEvent(new Event("change"));
+  } else if (id === "profile") {
+    toggleProfile();
   }
 }
 

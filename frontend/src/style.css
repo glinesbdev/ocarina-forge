@@ -269,6 +269,7 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   top: 10px;
   left: 12px;
   z-index: 3;
+  max-width: min(640px, calc(100% - 24px));
   padding: 6px 8px;
   background: rgba(16, 22, 18, 0.88);
   border: 1px solid rgba(224, 177, 90, 0.28);
@@ -276,6 +277,32 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   color: #e7efe4;
   font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   pointer-events: none;
+}
+.view-profile {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: min(440px, calc(100% - 24px));
+  padding: 8px 10px;
+  background: rgba(16, 22, 18, 0.92);
+  border: 1px solid rgba(224, 177, 90, 0.28);
+  border-radius: 8px;
+  color: #e7efe4;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  pointer-events: none;
+}
+.view-profile[hidden] { display: none; }
+.view-profile pre { margin: 0; white-space: pre-wrap; font: inherit; }
+.view-profile button {
+  pointer-events: auto;
+  min-height: 28px;
+  padding: 4px 10px;
+  font: inherit;
 }
 .actor-label {
   font-family: var(--sans);

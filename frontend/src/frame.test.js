@@ -48,6 +48,38 @@ test("a stopped view says idle and keeps the last counts", () => {
   );
 });
 
+test("the profile split is added to the stats line while the hud is open", () => {
+  assert.equal(
+    formatStats({
+      backend: "WebGPU",
+      rendering: true,
+      fps: 19,
+      frameMs: 50.3,
+      cpuMs: 18.2,
+      gpuMs: 31,
+      gpuState: "ready",
+      cullMs: 6.1,
+      objects: 40,
+      batchCount: 380,
+      subDraws: 5200,
+      draws: 5600,
+      instances: 9000,
+      culled: 100,
+      separate: 12,
+      tris: 80000,
+    }),
+    "WebGPU · 19 fps · 50.3 ms · cpu 18.2 · gpu 31 · cull 6.1 · 40 obj · 380 batches · 5200 sub · 5600 draws · 9000 inst · 100 culled · 12 separate · 80k tris",
+  );
+  assert.match(
+    formatStats({ rendering: true, fps: 10, draws: 1, separate: 1, tris: 1, gpuState: "unsupported", cpuMs: 4 }),
+    /cpu 4 · gpu n\/a · 1 draws/,
+  );
+  assert.match(
+    formatStats({ rendering: false, draws: 1, separate: 1, tris: 1, gpuState: "pending" }),
+    /gpu …/,
+  );
+});
+
 test("background models are counted separately from active view loads", () => {
   assert.equal(
     formatStats({ draws: 2, separate: 0, tris: 20, queued: 0, loading: 0, loaded: 5, deferred: 2, backgroundLoading: 1 }),

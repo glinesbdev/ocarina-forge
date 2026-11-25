@@ -18,6 +18,7 @@ export const EDITOR_COMMANDS = [
   { id: "build", label: "Build the mod", detail: "", fields: ["build", "export", "install"] },
   { id: "ground", label: "Toggle ground", detail: "", fields: ["ground", "terrain", "heightmap"] },
   { id: "stats", label: "Toggle stats", detail: "", fields: ["stats", "fps", "frame time"] },
+  { id: "profile", label: "Toggle frame profile", detail: "P", fields: ["profile", "profiler", "cpu", "gpu", "hud", "frame time"] },
 ];
 
 export function fuzzyScore(query, text) {

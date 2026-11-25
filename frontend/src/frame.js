@@ -27,6 +27,13 @@ export function formatStats({
   frameMs,
   backend,
   draws,
+  cpuMs,
+  gpuMs,
+  gpuState,
+  cullMs,
+  objects,
+  batchCount,
+  subDraws,
   instances,
   culled,
   separate,
@@ -50,6 +57,14 @@ export function formatStats({
   if (backend) parts.push(backend);
   parts.push(rate);
   if (frameMs != null) parts.push(`${formatMs(frameMs)} ms`);
+  if (cpuMs != null) parts.push(`cpu ${formatMs(cpuMs)}`);
+  if (gpuState === "unsupported" || gpuState === "disjoint") parts.push("gpu n/a");
+  else if (gpuState === "pending") parts.push("gpu …");
+  else if (gpuState === "ready") parts.push(gpuMs != null ? `gpu ${formatMs(gpuMs)}` : "gpu …");
+  if (cullMs != null) parts.push(`cull ${formatMs(cullMs)}`);
+  if (objects != null) parts.push(`${objects} obj`);
+  if (batchCount != null) parts.push(`${batchCount} batches`);
+  if (subDraws != null) parts.push(`${subDraws} sub`);
   parts.push(`${draws} draws`);
   if (instances != null) parts.push(`${instances} inst`);
   if (culled != null) parts.push(`${culled} culled`);

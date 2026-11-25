@@ -64,6 +64,7 @@ export const SHORTCUT_GROUPS = [
     items: [
       { keys: "Esc", action: "Close a dialog, release mouse look, or clear the selection" },
       { keys: "Stats", action: "The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line" },
+      { keys: "P", action: "Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open" },
     ],
   },
   {

@@ -47,6 +47,7 @@ The editor shows this same list with ? or the Shortcuts button.
 
 - Esc: Close a dialog, release mouse look, or clear the selection
 - Stats: The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line
+- P: Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open
 
 ## Behavior graph
 

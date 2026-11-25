@@ -14,7 +14,7 @@ The largest cause on WebGPU was that packed KTX2 textures never actually uploade
 - **BC7 format mapping.** A Vite plugin (`frontend/webgpu-bptc-plugin.js`) inserts the missing `RGBA_BPTC_Format` case into r170's `getFormat`, and corrects r170's typo `BC7RGBAUnormSRGB: 'bc7-rgba-srgb'` to the WebGPU name `bc7-rgba-unorm-srgb`. `patchWebgpuBc7Format` in `frontend/src/backend.js` also wraps `backend.textureUtils.getFormat` at init (and when `textureUtils` is assigned later).
 - **Normals, ORM, and other data maps are packed too.** Albedos already went through `gpu_image`. Extra maps used `_encode_cached(..., gpu=False)` and stayed PNG, which is most of the unique Field textures (thousands of PNG files in the shared-v1 store vs ~1.3k packed KTX2). Those now pack as BC7 as well. `asDataMap` keeps them in linear color space and repairs the compressed sampler. Model caches are `shared-v3` / `models-53` so existing GLBs rebuild.
 - **Template geometry.** After `partsFromTemplate` clones and bakes a mesh, the source template geometries are disposed. `BatchedMesh.addGeometry` keeps the copy it uploaded. The part clone is dropped once that copy exists; see GPU picking below.
-- **Instrumentation.** In development, `window.__forgeMemory()` (and `viewport.getMemoryReport()`) returns a per-category breakdown: textures by format (unique sources, not clones), geometries by role, unique models vs instances, draw counts, and frame time.
+- **Instrumentation.** In development, `window.__forgeMemory()` (and `viewport.getMemoryReport()`) returns a per-category breakdown: textures by format (unique sources, not clones), geometries by role, unique models vs instances, draw counts, and frame time. The Profile HUD splits that frame into CPU and GPU. It stays closed until opened. See [Profiling HUD](#profiling-hud).
 
 CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTextureCpu`). The source is marked so clones do not re-upload emptied mips. `repairCompressedTexture` will not set `needsUpdate` on a released texture.
 
@@ -79,11 +79,44 @@ After `addGeometry` the part clone's typed arrays are released (`geometry-retain
 - Preview instance geometry, which the preview draw already needs.
 - The sync center-view audit, and the immediate alt-drag focus, raycast `BatchedMesh`'s own geometry rather than the released part clone. If the id readback throws, selection uses that same path.
 
+## Profiling HUD
+
+The stats line's single frame time does not say whether the Field is bound on JavaScript or on the GPU. The Profile HUD splits that frame. It stays off until you open it, so timestamp queries are not recorded during ordinary editing.
+
+Turn it on with the **Profile** checkbox on the viewport toolbar, with `P`, from the command palette ("Toggle frame profile"), or by opening the page with `?profile=1`. The checkbox is remembered in `ocarinaforge.profile`. Fly or orbit so the view keeps drawing. A still camera records the frames that were actually drawn. The GPU number fills in when the readback lands, a frame or two behind the CPU numbers.
+
+The HUD shows the latest frame and the rolling average and p95 over the last 180 frames:
+
+- **CPU** — JavaScript in the frame. Update is fly, streaming, and labels. Cull is `syncBatchVisibility`. Submit is `renderer.render` on the CPU.
+- **GPU** — On WebGPU, a `timestamp-query` query set is written at the render-pass boundaries, resolved into a buffer, and mapped with `mapAsync`. On WebGL, and on the WebGPU renderer's WebGL2 fallback, the timer is `EXT_disjoint_timer_query_webgl2`. The line reads `n/a` when the adapter has neither, and when a WebGL disjoint sync throws the result away. It reads `…` until the first result arrives.
+- **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `sub` is the sum of `_multiDrawCount` (the folded WebGPU draws). `draws` is the same total the stats line already prints.
+- **tris, meshes, tex, heap** — triangles, resident unique meshes, resident textures on batches and terrain, and `performance.memory` when the browser exposes it. Otherwise the heap reads `n/a`.
+- **avg / p95** — mean and 95th percentile. GPU samples that have not come back are left out of the GPU average.
+
+While Profile is open, the stats line gains `cpu`, `gpu`, `cull`, `obj`, `batches`, and `sub`. `__forgeMemory().frame` includes `cpuMs`, `updateMs`, `cullMs`, `submitMs`, `gpuMs`, `objects`, `batches`, and `subDraws`. `__forgeMemory().profile` includes the rolling summary and the next-step line. `__forgeProfile()` returns the same capture the **Dump JSON** button copies to the clipboard and prints in the console:
+
+```js
+copy(JSON.stringify(__forgeProfile(), null, 2))
+```
+
+Closing the HUD removes the command-encoder hook and does not begin another timer query. Opening it allocates a small ring of timestamp buffers. A readback that is still in flight when you close the HUD is dropped.
+
+The next-step line uses the rolling averages once 12 frames are in the window:
+
+| Reading | Next step |
+| --- | --- |
+| GPU average is at least 1.5× the CPU average | Overdraw, alpha-tested foliage, far meshes, far proxies |
+| Cull average is at least 5 ms and at least 35% of CPU | Spatial chunk batching |
+| CPU average is at least 1.5× the GPU average, and objects + batches average at least 100 | Fewer render objects (texture arrays) |
+| Otherwise | CPU and GPU are close. Compare cull with the object count |
+
+This checkout has no game dump, so there is no new Field split recorded here. The last total on a capped Hyrule Field Child load is still **50.3 ms** and about **5,600 draws** (see the table below). Open that scene with Profile on, orbit, and dump. The HUD's last line is the recommended next step.
+
 ## How to measure
 
 1. Start `scripts/dev-wasm.bat` so Vite is on 47241 and the API on 47242. That launcher does not run pip or maturin, and it leaves 47231/47232 free. `scripts/dev.sh` and `scripts/dev.bat` are the normal launchers on 47231/47232.
-2. Open the viewer, turn **Stats** on (it is on by default), and load Hyrule Field Child. The line starts with the backend that actually started (`WebGPU`, or `WebGL (WebGPU unavailable: …)` with the reason). A plain `WebGL` from a stale `frontend/dist` or a cached module is not a WebGPU fallback. The short revision at the end of the line should match `/api/health`. See [troubleshooting.md](troubleshooting.md).
-3. In the devtools console, `copy(__forgeMemory())` after the background load finishes. The report includes texture format counts, geometry roles, unique models vs instances, draws, and frame time.
+2. Open the viewer, turn **Stats** on (it is on by default), and load Hyrule Field Child. The line starts with the backend that actually started (`WebGPU`, or `WebGL (WebGPU unavailable: …)` with the reason). A plain `WebGL` from a stale `frontend/dist` or a cached module is not a WebGPU fallback. The short revision at the end of the line should match `/api/health`. See [troubleshooting.md](troubleshooting.md). Turn **Profile** on and orbit so frames keep coming. The stats line then shows the CPU and GPU split beside the usual counts.
+3. In the devtools console, `copy(__forgeMemory())` after the background load finishes. The report includes texture format counts, geometry roles, unique models vs instances, draws, frame time, and the profile block. `copy(JSON.stringify(__forgeProfile(), null, 2))` is the short frame capture.
 4. Chrome's task manager (or a headless script using `--enable-precise-memory-info`) is the working-set number. JS heap alone under-reports GPU textures.
 
 `tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the stats line, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone. Defaults: `FORGE_WASM_MAX_WS_MB=10240` (kill the Chrome tree at that working set), `FORGE_WASM_MIN_FREE_MB=4096` (stop if system free RAM falls this low), `FORGE_WASM_MIN_FREE_START_MB=10240` (refuse to launch below that floor).

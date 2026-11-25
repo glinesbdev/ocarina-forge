@@ -264,11 +264,20 @@ export function collectMemoryReport(state = {}) {
     frame: {
       fps: stats.fps ?? null,
       frameMs: stats.frameMs ?? null,
+      cpuMs: stats.cpuMs ?? null,
+      updateMs: stats.updateMs ?? null,
+      cullMs: stats.cullMs ?? null,
+      submitMs: stats.submitMs ?? null,
+      gpuMs: stats.gpuMs ?? null,
+      objects: stats.objects ?? null,
+      batches: stats.batchCount ?? null,
+      subDraws: stats.subDraws ?? null,
       draws: stats.draws != null ? stats.draws : (info && (info.drawCalls || info.calls)) || null,
       triangles: (info && info.triangles) || null,
       instances: stats.instances ?? null,
       culled: stats.culled ?? null,
     },
+    profile: stats.profile ?? null,
     wasmSurfaceMB: stats.wasmSurfaceMB ?? null,
   };
 }
