@@ -96,17 +96,20 @@ export function sampleGroundSurface(x, z, excludeId) {
   return Number.isFinite(y) ? y : null;
 }
 
-export async function loadGroundSurface(url) {
+export async function loadGroundSurface(url, options = {}) {
+  const signal = options.signal;
   const token = ++loadToken;
+  if (signal?.aborted) return null;
   await ensureGroundWasm();
-  const response = await fetch(url);
+  if (signal?.aborted || token !== loadToken) return null;
+  const response = await fetch(url, { signal });
   if (!response.ok) {
     throw new Error(`The ground surface pack could not be loaded (${response.status}).`);
   }
   const bytes = await readSurfaceBuffer(response);
-  if (token !== loadToken) return null;
+  if (signal?.aborted || token !== loadToken) return null;
   const next = new wasmMod.WasmGroundSurface(bytes);
-  if (token !== loadToken) {
+  if (signal?.aborted || token !== loadToken) {
     next.free?.();
     return null;
   }

@@ -629,6 +629,16 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     pickDistance,
     attachNodeMaterial,
     get material() { return nodeMaterial || material; },
+    reset() {
+      keyToId.clear();
+      idToKey.clear();
+      nextId = 1;
+      const exclude = uniforms.forgeExclude.value;
+      if (exclude && exclude !== zero) {
+        exclude.dispose?.();
+        uniforms.forgeExclude.value = zero;
+      }
+    },
     dispose() {
       target?.dispose?.();
       target = null;
