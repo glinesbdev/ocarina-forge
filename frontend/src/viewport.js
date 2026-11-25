@@ -26,7 +26,7 @@ import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick,
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
-import { chooseSnap } from "./snap.js";
+import { chooseSnap, groundReplyApplies, GROUND_SNAP_RADIUS, nearestGroundSample } from "./snap.js";
 import { resolveTextureIndex } from "./problems.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -2994,28 +2994,21 @@ uniform float terrainLayerMissing;`
     return name.includes("collision") || name.includes("collider");
   }
 
-  function rememberedGround(x, z, maxDistance = 1.5) {
-    let best = null;
-    let bestDistance = maxDistance;
-    for (const hit of groundHits) {
-      const distance = Math.hypot(hit.x - x, hit.z - z);
-      if (distance <= bestDistance) {
-        best = hit;
-        bestDistance = distance;
-      }
-    }
-    return best;
+  function rememberedGround(x, z) {
+    return nearestGroundSample(groundHits, x, z, GROUND_SNAP_RADIUS);
   }
 
   function requestGround(x, z) {
     if (!hooks.fetchGround || !terrainBanc) return null;
     const banc = terrainBanc;
-    const key = `${banc}:${x.toFixed(2)},${z.toFixed(2)}`;
+    const requestX = x;
+    const requestZ = z;
+    const key = `${banc}:${x.toFixed(3)},${z.toFixed(3)}`;
     if (groundInflight && groundInflight.key === key) return groundInflight.promise;
     const promise = hooks.fetchGround(banc, x, z).then((data) => {
       if (terrainBanc !== banc) return data;
       if (Number.isFinite(data.worldY)) {
-        groundHits.push({ x, z, y: data.worldY });
+        groundHits.push({ x: requestX, z: requestZ, y: data.worldY });
         if (groundHits.length > 200) groundHits.splice(0, groundHits.length - 200);
       }
       return data;
@@ -3033,7 +3026,10 @@ uniform float terrainLayerMissing;`
     const hits = [];
     snapRay.ray.origin.set(x, y + 80, z);
     snapRay.ray.direction.set(0, -1, 0);
-    if (terrainRoot) {
+    // When Snap uses /api/ground, do not raycast the visible heightmap. That
+    // mesh misses island floors, and chooseSnap will then prefer the lower
+    // slope once Y has dropped, which also shifts the gizmo XZ plane.
+    if (terrainRoot && !hooks.fetchGround) {
       terrainRoot.traverse((child) => {
         if (!child.isMesh || !child.visible || !child.geometry || child.userData.subTerrain) return;
         const found = [];
@@ -3056,24 +3052,31 @@ uniform float terrainLayerMissing;`
     return chooseSnap(y, hits);
   }
 
+  function applyComposedSnap(entry, requestX, requestZ, worldY) {
+    if (!snapOn || !entries.get(entry.id) || !Number.isFinite(worldY)) return false;
+    const cur = entry.pivot.position;
+    if (!groundReplyApplies(requestX, requestZ, cur.x, cur.z)) return false;
+    const next = surfaceAt(cur.x, worldY, cur.z, entry.id);
+    cur.y = next == null ? worldY : next;
+    syncPreviewPlacement(entry);
+    hooks.onPreview(entry.id, [cur.x, cur.y, cur.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+    syncInstanceMatrix(entry);
+    requestRender();
+    return true;
+  }
+
   function maybeSnap(entry) {
     if (!snapOn || !entry || transform.mode !== "translate") return;
     const p = entry.pivot.position;
     const y = surfaceAt(p.x, p.y, p.z, entry.id);
     if (y != null) p.y = y;
-    const pending = requestGround(p.x, p.z);
+    const requestX = p.x;
+    const requestZ = p.z;
+    const pending = requestGround(requestX, requestZ);
     if (!pending) return;
     return pending.then((data) => {
-      if (!snapOn || !entries.get(entry.id) || !data || !Number.isFinite(data.worldY)) return;
-      const cur = entry.pivot.position;
-      if (Math.hypot(cur.x - p.x, cur.z - p.z) > 2) return;
-      const next = surfaceAt(cur.x, cur.y, cur.z, entry.id);
-      if (next == null) return;
-      cur.y = next;
-      syncPreviewPlacement(entry);
-      hooks.onPreview(entry.id, [cur.x, cur.y, cur.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
-      syncInstanceMatrix(entry);
-      requestRender();
+      if (!data || !Number.isFinite(data.worldY)) return;
+      applyComposedSnap(entry, requestX, requestZ, data.worldY);
     });
   }
 

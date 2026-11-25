@@ -5,6 +5,10 @@
  * one the actor stands on. If the pivot is under every surface, the nearest
  * one above it is used so a drop still lands on the floor. */
 
+/** Cached /api/ground samples farther than this are a different column (an
+ * island edge is only a metre or two from the lakebed). */
+export const GROUND_SNAP_RADIUS = 0.2;
+
 export function chooseSnap(originY, hits, options = {}) {
   const step = Number.isFinite(options.step) ? options.step : 1.5;
   const finite = (hits || []).map((hit) => hit && hit.y).filter((y) => Number.isFinite(y));
@@ -14,4 +18,22 @@ export function chooseSnap(originY, hits, options = {}) {
   const above = finite.filter((y) => y > originY);
   if (!above.length) return null;
   return Math.min(...above);
+}
+
+export function nearestGroundSample(samples, x, z, maxDistance = GROUND_SNAP_RADIUS) {
+  let best = null;
+  let bestDistance = maxDistance;
+  for (const sample of samples || []) {
+    if (!sample || !Number.isFinite(sample.y)) continue;
+    const distance = Math.hypot(sample.x - x, sample.z - z);
+    if (distance <= bestDistance) {
+      best = sample;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+export function groundReplyApplies(requestX, requestZ, currentX, currentZ, maxDistance = GROUND_SNAP_RADIUS) {
+  return Math.hypot(currentX - requestX, currentZ - requestZ) <= maxDistance;
 }
