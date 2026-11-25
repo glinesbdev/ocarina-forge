@@ -79,11 +79,40 @@ Fields the editor treats as the actor header:
 - `Scale` — optional
 - `Name` — optional instance name
 
-Everything else (`Dynamic`, `Links`, `Presence`, `Bakeable`, `Phive`, …) is a typed parameter. New actors get `Hash` and `Phive.Placement.ID` set to the same new u64.
+Everything else (`Dynamic`, `Links`, `Presence`, `Bakeable`, `Phive`, …) is a typed parameter. New actors get `Hash` and `Phive.Placement.ID` set to the same new u64. `make_actor` also sets `SRTHash` to the low 32 bits of that hash. A hash this project mints sets bit 62. That bit is not part of `SRTHash`.
+
+`Links` is a list of dictionaries. The validator treats `Dst` as the other actor’s hash. An edited link may use `Hash` instead. `Src`, when present, is the hash of the actor that owns the link. A zero hash is an empty slot. The same check accepts a target that lives in another banc in the same area folder (the Static/Dynamic pair, or another layer in that folder).
+
+These root keys are group lists, not actors: `AiGroups`, `FarDeleteGroups`, `SimultaneousGroups`, `PlgGdTable`, and `PhiveHeader.PlacementGroups`. Export copies them through from the source banc. It does not add a new hash to them. A removed actor whose u64 still appears in one of those lists, or in some other actor’s `Links`, is left in place and the export log warns.
 
 Category colors use the pack-name prefix: `Npc_` / `Shop_`, `Enemy_`, `Animal_`, `Eft`, `Land_`, `Area_` / `Area`, `Obj_` / `FldObj_` / `Item_` / `Weapon_` / `Dm_`, and system names (`StartPos`, `Player`, `Sound`, `AirWall`, `Ground`, anything with `Anchor` or ending in `Actor`).
 
-Actor meshes are Switch BFRES plus embedded BNTX. The reader, the cache, and what still falls back to a box are in [models.md](models.md).
+Actor meshes are Switch BFRES plus embedded BNTX. The reader, the cache, and what still falls back to a box are in [models.md](models.md). The pack, the model, and the texture are global files. The banc only stores the placement. What has to be copied when a placement moves to another banc is [research/asset-library.md](research/asset-library.md).
+
+## Phive shapes
+
+Actor-local collision that the terrain fitter reads is `Phive/Shape/Dcc/<Gyaml>__Physical.Nin_Ounce_NVN2.bphsh`, with or without `.zs`. `read_mesh_shape` returns triangles only for a file this parser accepts. Anything else, including a bad length, is an empty list. The synthetic file in `tests/test_phive.py` is what these offsets were checked against. A retail shape was not part of that test.
+
+The wrapper is little endian. It starts with `Phive\0`. The u32 at `+12` is the start of the payload, and the u32 at `+28` is its size. The payload is big-endian Havok chunks (u32 length with the high bits masked, then a 4-byte kind). The first chunk is `TAG0`. Inside it, `SDKV` must be `20250200`, and the item index must name one `hknpMeshShape` at `(0, 1)`.
+
+In the `DATA` chunk of that shape:
+
+| Offset | Field |
+| --- | --- |
+| `+0x50` | three floats, inverse quantization scale, each finite and greater than 0 |
+| `+0x88` | relative i32/u32 view of `hknpMeshShape::GeometrySection`, stride `0x40` |
+
+Each section:
+
+| Offset | Field |
+| --- | --- |
+| `+8` | relative view of `Primitive` records, 4 bytes each |
+| `+16` | relative view of `hkUint8` vertex bytes |
+| `+32` | three i32 origin values |
+
+A primitive is four vertex indexes. The fourth index equal to the third is one triangle. Otherwise the record is a quad and becomes two triangles. Vertices are three u16s, dequantized as `(value + origin) * inverse_scale`. If the first origin word is `0x7fffffff`, the vertices are three floats instead. A non-finite float rejects the whole shape.
+
+This reader does not open `Phive/StaticCompoundBody`. Those per-scene `.bphsc` bakes are the collision copy discussed in [#10](https://github.com/glinesbdev/ocarina-forge/issues/10) and in the asset-library note. No offset inside a `.bphsc` is implemented here.
 
 ## BFRES models (version 10)
 
