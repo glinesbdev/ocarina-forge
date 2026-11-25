@@ -109,6 +109,7 @@ export const api = {
     if (options.load) params.set("load", options.load);
     return request(`/api/ground?${params}`);
   },
+  lighting: (banc) => request(`/api/lighting?banc=${encodeURIComponent(banc)}`),
   groundSurface: (banc, options = {}) => {
     const params = new URLSearchParams({ banc });
     if (options.load) params.set("load", options.load);

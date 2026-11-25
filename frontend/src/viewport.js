@@ -55,6 +55,7 @@ import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeo
 import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
 import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
 import { resolveTextureIndex } from "./problems.js";
+import { isEffectGizmo, resolveLighting, tonemapName } from "./lighting.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
@@ -187,6 +188,8 @@ export async function createViewport(host, hooks) {
 
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.05;
   renderer.shadowMap.enabled = false;
   if (renderer.shadowMap && "autoUpdate" in renderer.shadowMap) renderer.shadowMap.autoUpdate = false;
   if (renderer.isWebGPURenderer && typeof renderer.onDeviceLost === "function") {
@@ -223,12 +226,46 @@ export async function createViewport(host, hooks) {
   labels.domElement.className = "label-layer";
   host.appendChild(labels.domElement);
 
-  scene.add(new THREE.HemisphereLight(0xf3f6ea, 0x2c3a2e, 0.9));
-  const sun = new THREE.DirectionalLight(0xfff6df, 1.2);
+  const hemi = new THREE.HemisphereLight(0xd5e0d4, 0x4a4034, 0.45);
+  hemi.name = "forge-hemi";
+  const sun = new THREE.DirectionalLight(0xfff2d6, 2.6);
+  sun.name = "forge-sun";
   sun.position.set(18, 36, 14);
   sun.castShadow = false;
+  sun.shadow.mapSize.set(512, 512);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 180;
+  sun.shadow.camera.left = -40;
+  sun.shadow.camera.right = 40;
+  sun.shadow.camera.top = 40;
+  sun.shadow.camera.bottom = -40;
+  sun.shadow.bias = -0.0004;
+  sun.shadow.autoUpdate = false;
+  const ambient = new THREE.AmbientLight(0x8ea090, 0.08);
+  ambient.name = "forge-ambient";
+  scene.add(hemi);
   scene.add(sun);
-  scene.add(new THREE.AmbientLight(0x8ea090, 0.25));
+  scene.add(ambient);
+  const editorBackground = new THREE.Color(0x141b16);
+  let showShadows = false;
+  let showAo = true;
+  let showEffectGizmos = true;
+  let lightingState = null;
+  let lightingSample = null;
+  let showEditorDefaults = false;
+  let lastLightingNote = "";
+  const effectGizmoGeometry = new THREE.BufferGeometry();
+  effectGizmoGeometry.setAttribute("position", new THREE.Float32BufferAttribute([
+    -0.5, 0, 0, 0.5, 0, 0,
+    0, -0.5, 0, 0, 0.5, 0,
+    0, 0, -0.5, 0, 0, 0.5,
+  ], 3));
+  const effectGizmoMaterial = new THREE.LineBasicMaterial({
+    color: CATEGORY_COLOR.effect,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false,
+  });
 
   const orbit = new OrbitControls(camera, renderer.domElement);
   orbit.enableDamping = true;
@@ -970,6 +1007,15 @@ let convertSlots = 8;
     }
     entry.mesh.visible = show && (!volume || on);
     entry.edges.visible = show;
+    if (entry.effectGizmo) {
+      const scale = entry.pivot.scale;
+      entry.effectGizmo.scale.set(
+        0.75 / (Math.abs(scale.x) || 1),
+        0.75 / (Math.abs(scale.y) || 1),
+        0.75 / (Math.abs(scale.z) || 1),
+      );
+      entry.effectGizmo.visible = showEffectGizmos && entry.pivot.visible;
+    }
   }
 
   function paint(entry) {
@@ -1088,6 +1134,14 @@ let convertSlots = 8;
     placeRotate(pivot, [rx, ry, rz]);
     pivot.scale.set(sx || 1, sy || 1, sz || 1);
     pivot.userData.actorId = actor.id;
+    let effectGizmo = null;
+    if (isEffectGizmo(actor)) {
+      const marker = new THREE.LineSegments(effectGizmoGeometry, effectGizmoMaterial);
+      marker.userData.forgeEffectGizmo = true;
+      marker.raycast = () => {};
+      pivot.add(marker);
+      effectGizmo = marker;
+    }
     const gate = {
       status: actor.status,
       present: presentByDefault(actor.params),
@@ -1132,6 +1186,7 @@ let convertSlots = 8;
       recipeNote: (actor.recipe && actor.recipe.note) || "",
       label: null,
       labelText: "",
+      effectGizmo,
     };
     paintLabel(entry);
     if (!volume) {
@@ -1870,6 +1925,7 @@ let convertSlots = 8;
         }
         if (template) attachModel(entry, template, meta.url);
         else fitBounds(entry, meta.bounds);
+        if (!showAo) paintAo(entry.pivot);
       }
       if (gyaml === FISHING_POND_WATER || fishingPondFish(gyaml)) refreshPondFish();
     }
@@ -3513,7 +3569,7 @@ uniform float terrainLayerMissing;`
       nextRoot.traverse((child) => {
         child.raycast = () => {};
         child.castShadow = false;
-        child.receiveShadow = false;
+        child.receiveShadow = showShadows && !child.userData.subTerrain;
         child.frustumCulled = false;
         child.renderOrder = -1;
         if (child.userData.subTerrain) return;
@@ -3657,7 +3713,90 @@ uniform float terrainLayerMissing;`
     });
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers }) {
+  function applyColor(color, value) {
+    if (typeof value === "string") color.set(value);
+    else if (Array.isArray(value) && value.length >= 3) color.setRGB(value[0], value[1], value[2]);
+  }
+
+  function paintAo(root) {
+    if (!root) return;
+    const intensity = showAo ? 1 : 0;
+    root.traverse((child) => {
+      const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+      for (const material of materials) {
+        if (material && material.aoMap) material.aoMapIntensity = intensity;
+      }
+    });
+  }
+
+  function paintShadows() {
+    renderer.shadowMap.enabled = showShadows;
+    sun.castShadow = showShadows;
+    if (sun.shadow) sun.shadow.needsUpdate = true;
+    if (terrainRoot) {
+      terrainRoot.traverse((child) => {
+        child.castShadow = false;
+        child.receiveShadow = showShadows && !child.userData.subTerrain;
+      });
+    }
+  }
+
+  function paintLights(resolved) {
+    const lighting = resolved.lighting;
+    applyColor(hemi.color, lighting.hemisphere.sky);
+    applyColor(hemi.groundColor, lighting.hemisphere.ground);
+    hemi.intensity = Number(lighting.hemisphere.intensity) || 0;
+    applyColor(sun.color, lighting.sun.color);
+    sun.intensity = Number(lighting.sun.intensity) || 0;
+    const position = lighting.sun.position || [18, 36, 14];
+    sun.position.set(position[0], position[1], position[2]);
+    applyColor(ambient.color, lighting.ambient.color);
+    ambient.intensity = Number(lighting.ambient.intensity) || 0;
+    const name = tonemapName(lighting.tonemap);
+    renderer.toneMapping = name === "reinhard" ? THREE.ReinhardToneMapping
+      : name === "cineon" ? THREE.CineonToneMapping
+        : name === "linear" || name === "none" ? THREE.NoToneMapping
+          : THREE.ACESFilmicToneMapping;
+    const exposure = Number(lighting.exposure);
+    renderer.toneMappingExposure = Number.isFinite(exposure) ? Math.min(8, Math.max(0.05, exposure)) : 1.05;
+    const fog = lighting.fog;
+    if (fog && fog.kind === "exp2" && Number.isFinite(Number(fog.density))) {
+      scene.fog = new THREE.FogExp2(0xffffff, Number(fog.density));
+      applyColor(scene.fog.color, fog.color);
+    } else if (fog && Number.isFinite(Number(fog.near)) && Number.isFinite(Number(fog.far))) {
+      scene.fog = new THREE.Fog(0xffffff, Number(fog.near), Number(fog.far));
+      applyColor(scene.fog.color, fog.color);
+    } else {
+      scene.fog = null;
+    }
+    const background = (lighting.sky && lighting.sky.color) || (lighting.env && lighting.env.color);
+    if (background) applyColor(scene.background, background);
+    else scene.background.copy(editorBackground);
+    lightingSample = resolved.sample;
+    requestRender();
+  }
+
+  function applyLighting(payload, focus) {
+    lightingState = payload;
+    const resolved = resolveLighting(payload, focus || { x: orbit.target.x, z: orbit.target.z }, {
+      editorDefaults: showEditorDefaults,
+    });
+    paintLights(resolved);
+    lastLightingNote = resolved.note;
+    return resolved.note;
+  }
+
+  function maybeRelight() {
+    if (!lightingState || !lightingState.samples || !lightingState.samples.length) return;
+    const resolved = resolveLighting(lightingState, { x: orbit.target.x, z: orbit.target.z }, {
+      editorDefaults: showEditorDefaults,
+    });
+    if (resolved.sample === lightingSample) return;
+    paintLights(resolved);
+    lastLightingNote = resolved.note;
+  }
+
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers, shadows, ao, effectGizmos, editorDefaults }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
@@ -3668,6 +3807,19 @@ uniform float terrainLayerMissing;`
     if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
     if (distance !== undefined) drawDistance = Number(distance) || 0;
     if (visibleLayers) Object.assign(layerVisibility, visibleLayers);
+    if (shadows !== undefined) {
+      showShadows = Boolean(shadows);
+      uvDirty = true;
+    }
+    if (ao !== undefined) {
+      showAo = Boolean(ao);
+      uvDirty = true;
+    }
+    if (effectGizmos !== undefined) showEffectGizmos = Boolean(effectGizmos);
+    if (editorDefaults !== undefined) {
+      showEditorDefaults = Boolean(editorDefaults);
+      if (lightingState) applyLighting(lightingState);
+    }
     if (next) Object.assign(categories, next);
     if (boxes) Object.assign(boxCategories, boxes);
     for (const entry of entries.values()) {
@@ -3696,6 +3848,12 @@ uniform float terrainLayerMissing;`
     applyTerrainUniforms();
     applyBlendUniforms();
     drawLinks();
+    if (shadows !== undefined) paintShadows();
+    if (ao !== undefined) {
+      paintAo(terrainRoot);
+      for (const entry of entries.values()) if (entry.pivot) paintAo(entry.pivot);
+      for (const batch of batches) paintAo(batch.mesh);
+    }
     attach();
     syncLabels();
     prioritizeLoad();
@@ -4764,6 +4922,7 @@ uniform float terrainLayerMissing;`
     orbitGesture = false;
     orbit.mouseButtons.LEFT = -1;
     orbitSettle = 24;
+    maybeRelight();
     requestRender();
   });
   orbit.addEventListener("change", () => requestRender());
@@ -4847,6 +5006,10 @@ uniform float terrainLayerMissing;`
     select,
     setGizmo,
     setFlags,
+    applyLighting,
+    lightingStatus() {
+      return lastLightingNote;
+    },
     modelInfo,
     auditPlacements,
     auditView,
@@ -4913,6 +5076,8 @@ uniform float terrainLayerMissing;`
       clearGrid();
       boxGeometry.dispose();
       edgesGeometry.dispose();
+      effectGizmoGeometry.dispose();
+      effectGizmoMaterial.dispose();
       renderer.dispose();
       renderer.domElement.remove();
       labels.domElement.remove();

@@ -22,3 +22,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 include = ["ocarina_forge*"]
+
+[tool.setuptools.package-data]
+ocarina_forge = ["lighting_capture/*"]

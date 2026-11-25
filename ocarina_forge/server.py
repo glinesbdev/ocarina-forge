@@ -45,6 +45,7 @@ from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, keep_unloaded_diff, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
 from ocarina_forge.grounddebug import query_ground
+from ocarina_forge.lighting import lighting_report
 from ocarina_forge.surface_pack import load_or_build_surface
 from ocarina_forge.scene_preview import corrected_terrain_path, prepare_scene_terrain, preview_bank, preview_path, terrain_fit_pending
 from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, shared_model_path, shared_texture_path
@@ -1234,6 +1235,14 @@ def _exclude_ids(value) -> list[str]:
     if isinstance(value, (list, tuple)):
         return [str(item) for item in value if item not in (None, "")]
     return [item for item in str(value).split(",") if item.strip()]
+
+
+@app.get("/api/lighting")
+def scene_lighting(banc: str):
+    """Emitters, GameBancParam key names, and an imported capture when one exists."""
+    if not banc or ".." in banc or banc.startswith("/"):
+        raise BancError("That scene path is not in the dump.", "not_found")
+    return lighting_report(_open_dump(), banc)
 
 
 @app.get("/api/ground")

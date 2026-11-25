@@ -177,26 +177,62 @@ export function cloneMaterialPreservingTextures(material) {
   return copy;
 }
 
+const SAMPLED_SLOTS = [
+  "map", "normalMap", "roughnessMap", "metalnessMap", "emissiveMap", "alphaMap",
+  "bumpMap", "displacementMap", "specularMap", "aoMap", "lightMap",
+];
+
+function hasUvAttribute(geometry, name) {
+  if (!geometry || !name) return false;
+  if (typeof geometry.hasAttribute === "function") return geometry.hasAttribute(name);
+  return Boolean(geometry.attributes && geometry.attributes[name]);
+}
+
+/**
+ * The node material reads `uv` for channel 0 and `uv1` for channel 1.
+ * AO and light maps are the second set when their channel is 1. Channel 0,
+ * including an occlusion texture written without texCoord, reads `uv`.
+ */
+function sampledAttribute(slot, texture) {
+  const channel = texture && Number.isInteger(texture.channel) ? texture.channel : 0;
+  if ((slot === "aoMap" || slot === "lightMap") && channel > 0) return `uv${channel}`;
+  return channel > 0 ? `uv${channel}` : "uv";
+}
+
 /**
  * A mapped material on a geometry without its UV channel makes the node builder warn
- * every compile. Clone that material and drop the map. The shared material
+ * every compile. Clone that material and drop the samples. The shared material
  * stays mapped for the meshes that do have uvs. Returns the object names.
+ * Colour nodes that already avoid `uv` keep their map. AO and light maps are
+ * skipped when `uv` (channel 0) or `uv1` (channel 1) is missing.
  */
 export function dropMapWithoutUv(root) {
   const names = [];
   const visit = (node) => {
     if (!node) return;
     const geometry = node.geometry;
-    if (typeof geometry?.hasAttribute === "function" && node.material) {
+    if (geometry && node.material && (typeof geometry.hasAttribute === "function" || geometry.attributes)) {
       const list = Array.isArray(node.material) ? node.material : [node.material];
       let next = null;
       list.forEach((material, index) => {
-        if (!material || !material.map) return;
-        const channel = material.map.channel || 0;
-        if (geometry.hasAttribute(channel === 0 ? "uv" : `uv${channel}`)) return;
-        if (material.colorNode || (material.userData && (material.userData.terrainNode || material.userData.cutoutNode))) return;
+        if (!material) return;
+        const ownsColor = Boolean(
+          material.colorNode
+          || (material.userData && (material.userData.terrainNode || material.userData.cutoutNode || material.userData.blendNode)),
+        );
+        const drop = [];
+        for (const slot of SAMPLED_SLOTS) {
+          if (slot === "map" && ownsColor) continue;
+          const texture = material[slot];
+          if (!texture) continue;
+          if (hasUvAttribute(geometry, sampledAttribute(slot, texture))) continue;
+          drop.push(slot);
+        }
+        if (!drop.length) return;
         const copy = typeof material.clone === "function" ? cloneMaterialPreservingTextures(material) : material;
-        copy.map = null;
+        for (const slot of drop) copy[slot] = null;
+        if (drop.includes("aoMap")) copy.aoMapIntensity = 0;
+        if (drop.includes("lightMap")) copy.lightMapIntensity = 0;
         copy.needsUpdate = true;
         if (list.length === 1) node.material = copy;
         else {

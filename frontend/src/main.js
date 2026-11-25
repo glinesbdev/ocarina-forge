@@ -407,6 +407,30 @@ if (showTextures) {
     if (viewport.setTextureShown) viewport.setTextureShown(showTextures.checked);
   });
 }
+for (const [id, flag, fallback] of [
+  ["show-shadows", "shadows", false],
+  ["show-ao", "ao", true],
+  ["show-effect-gizmos", "effectGizmos", true],
+  ["show-editor-lighting", "editorDefaults", false],
+]) {
+  const box = $(id);
+  if (!box) continue;
+  const on = storedFlag(`ocarinaforge.${flag}`, fallback);
+  box.checked = on;
+  viewport.setFlags({ [flag]: on });
+  box.addEventListener("change", () => {
+    viewport.setFlags({ [flag]: box.checked });
+    if (flag === "editorDefaults") {
+      const note = $("lighting-note");
+      if (note) note.textContent = viewport.lightingStatus();
+    }
+    try {
+      localStorage.setItem(`ocarinaforge.${flag}`, box.checked ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+  });
+}
 $("show-sub").addEventListener("change", (event) => {
   state.showSub = event.target.checked;
   viewport.setFlags({ subTerrain: state.showSub });
@@ -1502,6 +1526,22 @@ function noteCompanion() {
   active.value = bancKind(state.banc);
 }
 
+let lightingBanc = "";
+
+function loadLighting(banc) {
+  if (!banc || banc === lightingBanc) return;
+  lightingBanc = banc;
+  const note = $("lighting-note");
+  api.lighting(banc).then((data) => {
+    if (banc !== lightingBanc) return;
+    const text = viewport.applyLighting(data);
+    if (note) note.textContent = text || "";
+  }).catch(() => {
+    if (banc !== lightingBanc) return;
+    if (note) note.textContent = viewport.applyLighting(null) || "";
+  });
+}
+
 function applyView(view, { frame = false, select, forceSceneLoad = false } = {}) {
   const previousActors = state.view ? state.view.actors : null;
   const filtered = viewForLoad(view);
@@ -1524,6 +1564,7 @@ function applyView(view, { frame = false, select, forceSceneLoad = false } = {})
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels, visibleLayers: state.load && state.load.visible });
   refreshLinkGizmos();
+  loadLighting(view.banc || state.banc);
   renderOutliner();
   renderProps();
   loadChanges(view.banc || state.banc);

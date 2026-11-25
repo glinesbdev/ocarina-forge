@@ -81,3 +81,61 @@ python -m ocarina_forge serve --dump <dump>
 ```
 
 Open the Child Hyrule Field (or Kokiri) scene and toggle **Snap**. Drag the island tree; it should sit on the island mesh near 131.35 m, not on the lakebed heightmap, even while the visible ground is still the lighter heightmap.
+
+## Lighting capture
+
+The capture mod is `ocarina_forge/lighting_capture/` (`mod.json`, `main.js`, and `capture.js`). It follows height-check: a Longshot mod writes `storage.global`, and Forge imports that JSON. It does not copy game files. From the modding spec, `game.state()` returns time of day and not sun, fog, sky, or exposure, so those fields stay null. Extra fields a build actually returns are kept under `observed`.
+
+On 2026-11-25 the static probe on the `modding-with-editor` build logged this `longshot/gfx` surface. Names and types only. Nothing was called:
+
+```json
+{"present":true,"staticImport":true,"moduleKeys":["world","effect"],"types":{"world":"object","effect":"function"},"worldType":"object","worldKeys":["line","box","circle","billboard"],"world":{"line":"function","box":"function","circle":"function","billboard":"function"}}
+```
+
+Spec revision 4, section 10.1, also names `world.quad`, `world.model`, and a `model` import. Those were not exported here. Section 10.3 describes `effect` as `effect({ fragment, stage, uniforms })`, a screen-effect handle (`set`, `setEnabled`) whose output is drawn and not read back (section 10.4). This build exports `effect` as a function. An earlier run the same day had `has("gfx.shader")` false, and section 7.2 says that function would throw `NotAvailableError` if called. It was not called. The module is overlay drawing plus that function. It has no lighting getters, so the capture does not fill sun, fog, ambient, exposure, sky, or env from it.
+
+The capture sampler on that run tripped the spec's 2 ms/frame script warning (section 7.5). `actors.list` was about 0.9 ms a call. The mod now refreshes that list on a frame that does not write storage, at most once every 600 frames. Reinstall the mod to pick that up. The Forge server does not need a restart for it. The gfx surface above is already recorded, so another probe run is not required for these docs.
+
+On Windows, from the repo, with the game folder you actually run:
+
+Quit Longshot first. The spec's section 7.2 does not provide a dynamic import, and a run of that call logged `TypeError` with the message that `import()` is not available. `--gfx-probe` installs the entry that static-imports `longshot/gfx` (its default export is the frozen namespace). The command prints `main.js` byte size and `static import of longshot/gfx`. The dynamic entry is the 1176-byte file; the probe install must not leave that file in place. The manifest asks for `gfx.world` as well as `state.read`, `actors.read`, and `storage`. A build without the module should omit `--gfx-probe`; that install does not static-import it.
+
+The game keeps grants in `<game>\dev\mods.json`, on the mod entry's `"granted"` array (spec section 12.4 names that field; this path is from the modding-with-editor build). Pre-granting avoids the in-game prompt:
+
+```json
+{ "id": "local/lighting-capture", "enabled": true, "granted": ["state.read", "actors.read", "storage", "gfx.world"] }
+```
+
+That array is the game's record of what the player allowed. It is not `mod.json`. Changing `mod.json` permissions still needs a restart so the game reads the manifest again.
+
+```bat
+.venv\Scripts\python.exe -m ocarina_forge lighting-mod --install --gfx-probe --game E:\sw2\oot\stable\modding-with-editor
+```
+
+`--game` overrides the default `%USERPROFILE%\Games\Longshot\mod-test`. The command copies the mod to `<game>\mods\local\lighting-capture\`. Start Longshot, re-enable `local/lighting-capture`, and walk the map. The log is `<game>\logs\mod-run.txt`. A line containing `FORGE_LIGHTING` counts samples. A line `FORGE_LIGHTING gfx` lists the live export names. Quit so storage flushes. A run on 2026-11-25 wrote:
+
+```text
+<game>\dev\user\modstore\global\local~lighting-capture.json
+```
+
+The file is the storage key map. It does not contain `"mod": "local/lighting-capture"`. Find it with:
+
+```powershell
+Get-ChildItem -Recurse -Filter local~lighting-capture.json E:\sw2\oot\stable\modding-with-editor
+```
+
+Import the game folder. The command prints the map key it wrote (`KokiriForest_Child` for the Child Kokiri bancs). The files stay in your data folder, not the repo:
+
+```bat
+.venv\Scripts\python.exe -m ocarina_forge lighting-import E:\sw2\oot\stable\modding-with-editor
+```
+
+That writes `%USERPROFILE%\.local\share\ocarina-forge\lighting\<Map>.json` unless `OCARINA_FORGE_LIGHTING` is set. Restart the Forge server after pulling the editor change, then reload the page. Another import after that does not need a server restart, because each lighting request reads the file again. Reload the page so the open scene fetches it. The line under the stage bar names the reference path, the sample count, and which fields are from the file. **Editor defaults** draws the editor lights for comparison. **Shadows** stays off. **AO** toggles glTF occlusion maps. **Effect gizmos** marks `Eft_`, `EftLoc_`, and fog actors.
+
+To list parameter key names from the dump without decoding unknown payloads:
+
+```bat
+.venv\Scripts\python.exe -m ocarina_forge lighting-survey Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs --dump path\to\Longshot
+```
+
+The format of the reference file is in [formats.md](formats.md).

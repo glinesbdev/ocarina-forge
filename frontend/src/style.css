@@ -343,6 +343,20 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   background: #171d19;
 }
 .stage-bar > * { flex: 0 0 auto; }
+.lighting-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: baseline;
+  margin: 0;
+  padding: 4px 10px 8px;
+  background: #101612;
+  border-top: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.lighting-status #lighting-note { color: var(--text); }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
 .seg button { background: transparent; border: 0; padding: 7px 10px; min-height: 34px; color: var(--muted); }
 .seg button.is-on { background: #2a362e; color: var(--text); }

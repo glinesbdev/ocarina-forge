@@ -217,6 +217,95 @@ For a Child or Adult banc, Forge tries `<name>.<child|adult>.mate` in the tile's
 
 The Lake Hylia fishing pond fit uses the placed `Obj_LakeHrl_WaterPlane_A_07` mesh to bound the underwater area. Where the coarse ground intersects that water sheet, the fit limits ground height to 0.12 m below the local surface. The fit runs in the existing terrain preparation worker. In the viewport, bass and loach spawn positions above the pond mesh have a separate submerged display pose. The saved placement and Inspector coordinates still identify the spawn point.
 
+## Scene lighting, fog, and effects
+
+Forge does not yet decode a scene environment file into sun, fog, or exposure. What follows is what this checkout can actually point at. Anything not measured on a dump here is marked unverified. No offsets were added for a layout this code does not read.
+
+### What the placement files already contain
+
+Effect actors are the `Eft` prefix (`Eft_Firefly` is in the synthetic fixture). `EftLoc_` and any gyaml with `Locator` are markers: a missing mesh is not an error. A gyaml with `Fog` in the name, including `VolumeFogArea`, is a volume outline. The viewport draws a small cross on those three groups. The cross is a gizmo. It is not a particle simulation.
+
+`Dynamic` keys on those actors are listed by name (`lighting-survey`, `/api/lighting`). The values are not read as colours. This checkout has not seen a retail `VolumeFogArea` parameter list, so no fog colour, near, or far field is named from the banc.
+
+### GameBancParam
+
+`Banc/GameBancParam/<Level>.game__banc__GameBancParam.bgyml` is the per-area parameter file the terrain loader already opens. The keys Forge interprets are `TerrainSceneName`, `TerrainScenePosition`, and `$parent`. Other keys are reported by name and left alone. A test fixture once used a document shaped `{"Climate": {}}` as a stand-in for a file with no actors. That is not evidence the game has a `Climate` key.
+
+### Baked light already in the terrain and materials
+
+The TSCB index declares `bake_ao.extm` (`0x5100`) and `bake_gi.extm` (`0x5200`). `bake_ao.extm` is the ground occlusion grid described above. `bake_gi.extm` is only a declared extension. Its payload is not decoded. `custom.extm` is not decoded either.
+
+BFRES `bake0` and `bake1` bind `CmnTex_BakeLightDefault` or a `Dummy*` texture. Those are shared placeholders, not a per-scene lightmap, and the viewer does not sample them. The `bake` vertex attribute is a second UV. It is not written into the glTF. The glTF writer stores occlusion as `occlusionTexture` on the ORM image and does not set `texCoord`, so the loader samples `TEXCOORD_0` (attribute `uv`). A channel of 1 samples `TEXCOORD_1` (`uv1`). A mesh that lacks that attribute is drawn without the sample.
+
+### What Longshot has said, not re-checked on a dump here
+
+These notes are from public Longshot write-ups. They are not file layouts, and this checkout did not open the game's files to confirm them.
+
+- Volumetric Ground and Sky fog is edited in memory from "environment-palette" resources (Longshot PR #2423, unmerged). The PR names the menu fields (near/far density, noise, scattering, absorption, emission attenuation). It does not publish a romfs path or a struct. Placed mist and local fog volumes are separate from those two layers.
+- Fog and exposure come from the game's own values. `RX_VK_OOT_FOG` and `RX_VK_OOT_EXPOSURE` do nothing (Longshot PR #159).
+- The renderer description in Longshot PR #727 talks about screen-space AO, cascaded sun shadows, per-object baked light, and reflections from a fixed environment picture. That is a description of the frame, not a file format.
+
+From the Longshot modding API (spec revision 4, 2026-11-19, and the world-layer commit described on PR #1958). These are the published names, not measurements from a dump:
+
+- `has(name)` answers whether this game build has a feature. It returns false for an unknown name and does not throw. Importing a `longshot/...` module this API version does not have is refused at link time (section 9). Section 7.2 says a mod's modules are its static imports, and `import()` does not resolve. The same section says every API module's default export is its frozen namespace, and a function whose feature this build lacks is still exported and throws `NotAvailableError` when called. A static import fails when the module is absent from the API version. It does not fail merely because `has()` is false. The default capture entry does not static-import `longshot/gfx`. `lighting-mod --install --gfx-probe` does, and reads that default export's names without calling them.
+- `game.state()` returns `frame`, `mode`, `map`, `age`, and `timeOfDay`. The published return does not include sun direction, sun colour, ambient, fog, sky, exposure, or a tonemap curve.
+- `player.state()` returns `position`, `velocity`, `life`, `maxLife`, `rupees`, and `maxRupees`.
+- `longshot/gfx` is the world-drawing module. Its permission and `has()` name are `gfx.world` (drawing) and `gfx.shader` (screen effects). Spec section 10.1 lists `world.line`, `world.circle`, `world.box`, `world.quad`, `world.model`, and a separate `model` import. Section 10.3 exports `effect`. PR #1958's world-layer commit describes lines, boxes, circles, and billboards, and `WorldShape` handles (`moveTo`, `setPoints`, `setStyle`, `setText`, follow an actor, `setVisible`, `release`). The spec says those shapes are lit by a simple model that uses the scene's sun direction. That sentence describes the renderer. It is not a function that returns the sun. Section 10.3: `effect({ fragment, stage, uniforms })` returns a screen-effect handle (`set`, `setEnabled`). The shader's output goes to the screen. Section 10.4 says nothing reads that output back into a script, and the API does not replace the game's shaders. No published getter returns sun, fog, ambient, exposure, or an environment palette.
+- The same spec revision marks `longshot/gfx` and `longshot/world` as not built yet. `docs/modding/gfx.md` and `docs/modding/world.md` on the public `mod-api` branch were not readable from here (404). `longshot/world` (`world.ray`) is the collision query height-check uses once `has("world.ray")` is true. Lighting capture does not static-import it.
+
+From a Longshot run on 2026-11-25 (the `modding-with-editor` build), not from the spec: `has("gfx.world")` was true, `has("gfx.shader")` was false, `has("game.pause")` was true, and `has("world.ray")` and `has("world.rayAll")` were false. The log file was `<game>\logs\mod-run.txt`. The store file was `<game>\dev\user\modstore\global\local~lighting-capture.json` (the slash in `local/lighting-capture` is a `~`). That file is the storage key map (`lighting` and `lighting:<map>`). It has no `mod` field. `game.state().map` for Child Kokiri was `KokiriForest_Child`, which is the same key `map_name_for_banc` makes from `KokiriForest_Child_Static` and `KokiriForest_Child_Dynamic`. A run of the dynamic import logged `TypeError` with the message `import("longshot/gfx") in /main.js: a mod's modules are its static imports; import() is not available`. That text is the runtime saying what section 7.2 says. The same run granted the permissions the manifest asked for, including `gfx.world`. The permission grant and the missing dynamic import are separate.
+
+Observed on Bradyn's `modding-with-editor` build, 2026-11-25, from a static import that read names and types and did not call them. The log line was `FORGE_LIGHTING gfx` followed by:
+
+```json
+{"present":true,"staticImport":true,"moduleKeys":["world","effect"],"types":{"world":"object","effect":"function"},"worldType":"object","worldKeys":["line","box","circle","billboard"],"world":{"line":"function","box":"function","circle":"function","billboard":"function"}}
+```
+
+Compared with spec revision 4, this build's module exports `world` and `effect` only. There is no `model` export. `world` has `line`, `box`, `circle`, and `billboard`. It does not have `quad` or `model`, which section 10.1 names. The four values are functions. The `WorldShape` methods in the PR #1958 note are on a handle those functions return. This run did not call them, so those names are not in the log. `effect` is a function. Section 10.3 says that function builds a screen-effect handle from a fragment shader. It does not return sun, fog, ambient, exposure, or an environment palette. An earlier run the same day had `has("gfx.shader")` false. Section 7.2 says a function whose feature the build lacks is still exported and throws `NotAvailableError` when called. This run did not call `effect`.
+
+What that means: `longshot/gfx` on this build is overlay drawing (`world.line`, `world.box`, `world.circle`, `world.billboard`) plus `effect`. It has no lighting getters. Capture leaves sun, fog, ambient, exposure, sky, and env null. Those names are stored under `gfx` and are not copied into the lights.
+
+Spec section 7.5 warns when one mod's script exceeds 2 ms in a frame (8 ms is a fault). On this build `actors.list` was about 0.9 ms a call, and the capture tripped that warning. The mod now calls `actors.list` on a frame that does not also write storage, and at most once every 600 frames. A sample keeps the effect list from the last refresh.
+
+From the spec, section 12.4: grants are kept in `mods.json`, in the mod entry's `"granted"` field, and a required permission goes with the mod's switch. Section 5.4 says `mods.json` is the one list of which mods are on, in the user folder, and the sample entry has `id`, `enabled`, and `version`. From Bradyn's Longshot log on the `modding-with-editor` build, not from the spec's sample path: that file is `<game>\dev\mods.json`, and a permission can be pre-granted by listing it in the mod entry's `"granted"` array. That is the game's grant record. It is relevant to setting permissions when Forge creates a mod (issue #30). It is not a field of `mod.json`.
+
+`lighting-survey` stats a fixed list of directory names (`Env`, `Sky`, `Fog`, `Lighting`, and the rest in `ocarina_forge/lighting.py`). Those names are a probe. A hit is a path to look at. A miss is not a claim that no such file exists under another name.
+
+### Capture reference (Forge's own JSON, not a game format)
+
+`python -m ocarina_forge lighting-import <game-or-json>` writes one file per map under `~/.local/share/ocarina-forge/lighting/` (`OCARINA_FORGE_LIGHTING` overrides it). A game folder is searched at `dev/user/modstore/global/local~lighting-capture.json` first. The written file name is the map key (`KokiriForest_Child.json` for Child Kokiri). The file is numeric data from the player's own session. It is not committed. `gfx`, when present, is the live module dump from the run above. It is not applied as a light.
+
+```json
+{
+  "schema": 1,
+  "map": "KokiriForest_Child",
+  "mod": "local/lighting-capture",
+  "unavailable": ["sun", "ambient", "hemisphere", "fog", "sky", "exposure", "tonemap", "env"],
+  "probes": { "world.ray": false },
+  "samples": []
+}
+```
+
+A sample's `x`, `y`, `z` are Link's position in metres, Y up. `timeOfDay` is whatever `game.state()` returned; the unit in the modding spec is hours of the in-game day. `effects` are live actors whose type starts with `Eft` or `Effect` or contains `Fog` (`type`, `key`, `x`, `y`, `z` only). `observed.game` and `observed.player` are extra fields that build's `state()` actually had, size-capped. They are not applied as lights.
+
+Optional light fields, when a later capture or a hand-filled file sets them:
+
+| Field | Meaning in Forge |
+| --- | --- |
+| `sun.color` | `#rrggbb` (sRGB) or `[r, g, b]` linear 0..1 |
+| `sun.position` | Direction toward the sun, the directional light's position relative to the origin |
+| `sun.intensity` | 0..20 |
+| `hemisphere.sky`, `hemisphere.ground`, `hemisphere.intensity` | Fill light |
+| `ambient.color`, `ambient.intensity` | A small extra ambient term |
+| `exposure` | 0.05..8, multiplied in the tonemap |
+| `tonemap` | `aces` (default), `reinhard`, `cineon`, `linear`, or `none` |
+| `fog` | `{kind: "linear", color, near, far}` or `{kind: "exp2", color, density}` |
+| `sky.color` or `env.color` | Background colour. `env` is not a cubemap |
+
+`aces` is three.js ACES Filmic. It is a stand-in. It is not verified as the game's curve. Invalid numbers are dropped. A null field keeps the editor default, which is also not a measurement: sun `#fff2d6` at intensity 2.6 from `[18, 36, 14]`, hemisphere sky `#d5e0d4` / ground `#4a4034` at 0.45, ambient `#8ea090` at 0.08, exposure 1.05, no fog. Output is sRGB. Shadows default off (one 512² sun shadow on the ground mesh only). AO toggles glTF occlusion maps. The terrain `bake_ao` grid stays in the ground mesh.
+
+The capture mod and the Windows steps are in [testing-on-real-dump.md](testing-on-real-dump.md).
+
 ## BNTX
 
 16-byte elements (ASTC, BC2, BC3, BC5, BC6, BC7) are read in the Switch 2 GOB order: bit 5 is y1 and bit 6 is x0. BC1, BC4, and RGBA8 stay on the Tegra X1 order. The measurement, the BRTI flag bytes, and `tex-audit` are in [textures.md](textures.md).
