@@ -115,6 +115,10 @@
             <label class="check" title="Show the ground. A heightmap is on by default. An untextured stand-in is a neutral grid, not a green sheet."><input id="show-ground" type="checkbox" /> Ground</label>
             <label class="check" title="Show the separate sub terrain heightmap as a wireframe reference."><input id="show-sub" type="checkbox" /> Sub terrain</label>
             <label class="check" title="Draw water. The front sheet is a faint desaturated layer and does not write depth."><input id="show-water" type="checkbox" checked /> Water</label>
+            <label class="check" title="One sun shadow on the ground mesh. Off keeps the frame cheap. Actor batches do not cast."><input id="show-shadows" type="checkbox" /> Shadows</label>
+            <label class="check" title="glTF occlusion maps. The ground's baked AO stays in the terrain mesh either way."><input id="show-ao" type="checkbox" checked /> AO</label>
+            <label class="check" title="Small crosses on effect emitters, locators, and fog volumes."><input id="show-effect-gizmos" type="checkbox" checked /> Effect gizmos</label>
+            <span id="lighting-note" class="hint"></span>
             <label class="check" title="Colour the ground by tile. A tile from the _sub folder is lighter."><input id="terrain-debug" type="checkbox" /> Tile colors</label>
             <label class="check" title="Show the moss blend mask instead of the two textures. White is the overlay, black is the base."><input id="blend-mask" type="checkbox" /> Blend mask</label>
             <div class="seg cat-toggle" role="group" aria-label="Areas">

@@ -81,3 +81,35 @@ python -m ocarina_forge serve --dump <dump>
 ```
 
 Open the Child Hyrule Field (or Kokiri) scene and toggle **Snap**. Drag the island tree; it should sit on the island mesh near 131.35 m, not on the lakebed heightmap, even while the visible ground is still the lighter heightmap.
+
+## Lighting capture
+
+The capture mod is `ocarina_forge/lighting_capture/` (`mod.json` and `main.js` only). It follows height-check: a Longshot mod writes `storage.global`, and Forge imports that JSON. It does not copy game files. Sun, fog, sky, and exposure stay null, because the built Longshot API (`game.state()`) returns time of day and not those values. Extra fields a build actually returns are kept under `observed` and are not treated as colours until someone checks them.
+
+On Windows, from the repo:
+
+```bat
+.venv\Scripts\python.exe -m ocarina_forge lighting-mod --install
+```
+
+`--game` overrides the default `%USERPROFILE%\Games\Longshot\mod-test`. The command copies the mod to `<game>\mods\local\lighting-capture\`. Quit Longshot, start it, and enable `local/lighting-capture` (permissions `state.read`, `actors.read`, `storage`). Walk the map. The log line `FORGE_LIGHTING` counts samples. Quit so storage flushes, then find the JSON (the modstore path is not verified in this checkout):
+
+```powershell
+Get-ChildItem -Recurse -Filter *.json "$env:USERPROFILE\Games\Longshot" | Select-String -Pattern '"mod": "local/lighting-capture"'
+```
+
+Import it. The files stay in your data folder, not the repo:
+
+```bat
+.venv\Scripts\python.exe -m ocarina_forge lighting-import path\to\lighting-capture.json
+```
+
+That writes `%USERPROFILE%\.local\share\ocarina-forge\lighting\<Map>.json` unless `OCARINA_FORGE_LIGHTING` is set. Restart Forge and open the same map. The stage bar says whether the file had sun and fog. **Shadows** stays off. **AO** toggles glTF occlusion maps. **Effect gizmos** marks `Eft_`, `EftLoc_`, and fog actors.
+
+To list parameter key names from the dump without decoding unknown payloads:
+
+```bat
+.venv\Scripts\python.exe -m ocarina_forge lighting-survey Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs --dump path\to\Longshot
+```
+
+The format of the reference file is in [formats.md](formats.md).
