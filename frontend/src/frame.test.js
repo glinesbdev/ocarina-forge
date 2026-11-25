@@ -80,3 +80,25 @@ test("the profile detail keeps the counters that used to sit on the stats line",
     ["idle", "0 queued · 0 loading · 5 loaded · 3 background · 1 background loading"],
   );
 });
+
+test("unloaded layers are named on the status label", () => {
+  assert.equal(
+    formatStatusLabel({ backend: "WebGPU", draws: 2, layersOff: ["effects", "behavior"] }),
+    "WebGPU · 2 draws · off: effects, behavior",
+  );
+  assert.equal(formatStatusLabel({ draws: 12, layersOff: [] }), "12 draws");
+  assert.equal(
+    formatStatusLabel({
+      backend: "WebGPU",
+      draws: 240,
+      queued: 40,
+      loading: 8,
+      texturesDone: 120,
+      texturesTotal: 450,
+      layersOff: ["effects"],
+    }),
+    "WebGPU · 240 draws · 40 queued · 8 loading · textures 120/450 · off: effects",
+  );
+  assert.equal(formatStatusLabel({ draws: 12, texturesDone: 450, texturesTotal: 450 }), "12 draws");
+  assert.equal(formatStatusLabel({ draws: 12, texturesDone: 0, texturesTotal: 0 }), "12 draws");
+});

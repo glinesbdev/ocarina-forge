@@ -189,7 +189,12 @@ export function chooseTexture(buffer, options) {
       reason: misaligned ? "size is not a multiple of 4" : "the GPU rejected the blocks",
     };
   }
-  if (!info || info.vkFormat !== 0) {
+  if (!info) {
+    // Not a KTX2. The texture manifest stores JPEG or PNG when the image is
+    // not a multiple of 4, and those bytes are the file, not an OCFG trailer.
+    return { kind: "bitmap", bytes: packed.ktx.length ? packed.ktx : packed.fallback, reason: "" };
+  }
+  if (info.vkFormat !== 0) {
     return { kind: "bitmap", bytes: packed.fallback, reason: "" };
   }
   return { kind: "basis", bytes: packed.ktx, reason: "" };

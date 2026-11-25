@@ -36,6 +36,9 @@ import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
+import { planAssetFetches, wantsMesh } from "./layers.js";
+import { applyTextureManifest, presentTextures } from "./texture-apply.js";
+import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
@@ -117,6 +120,14 @@ export async function createViewport(host, hooks) {
   let lastCpu = null;
 
   const scene = new THREE.Scene();
+  const linkLines = new THREE.LineSegments(
+    new THREE.BufferGeometry(),
+    new THREE.LineBasicMaterial({ color: 0x8ec8ff, transparent: true, opacity: 0.85 }),
+  );
+  linkLines.frustumCulled = false;
+  linkLines.raycast = () => {};
+  linkLines.visible = false;
+  scene.add(linkLines);
   scene.background = new THREE.Color(0x141b16);
 
   const camera = new THREE.PerspectiveCamera(50, 1, 0.05, 8000);
@@ -410,6 +421,27 @@ let convertSlots = 8;
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
+  const layerVisibility = {
+    models: true,
+    terrain: true,
+    water: true,
+    collision: true,
+    behavior: true,
+    effects: true,
+    decorations: true,
+    lights: true,
+  };
+  let statLayersOff = [];
+  let textureAllow = true;
+  let texturesShown = true;
+  let texturesShownArmed = false;
+  let textureGeneration = 0;
+  let textureActive = 0;
+  let statTexturesDone = 0;
+  let statTexturesTotal = 0;
+  const textureDocs = new Map();
+  const textureQueue = createTextureQueue();
+  let linkPairs = [];
   let showSub = false;
   let drawDistance = 0;
   let showTerrainDebug = false;
@@ -578,8 +610,15 @@ let convertSlots = 8;
       if (material[key]) into.add(material[key]);
     }
     const extra = material.userData || {};
-    for (const key of ["mossMap", "orm1Map", "normal1Map"]) {
+    for (const key of ["mossMap", "orm1Map", "normal1Map", "blendMap"]) {
       if (extra[key]) into.add(extra[key]);
+    }
+    const lit = extra.forgeLit;
+    if (lit) {
+      for (const key of TEXTURE_KEYS) {
+        if (lit[key]) into.add(lit[key]);
+      }
+      if (lit.blendMap) into.add(lit.blendMap);
     }
   }
 
@@ -671,6 +710,234 @@ let convertSlots = 8;
     groundHits.length = 0;
     groundWanted = null;
     disposeGroundSurface();
+  }
+
+  function dropTerrainMeshes() {
+    showTerrain(null);
+    groundHits.length = 0;
+    groundWanted = null;
+    disposeGroundSurface();
+  }
+
+  function dropTerrain() {
+    terrainToken += 1;
+    dropTerrainMeshes();
+  }
+
+  function ensureTerrain() {
+    if (!terrainBanc) return;
+    const next = ++terrainToken;
+    void loadTerrain(next, terrainBanc);
+  }
+
+  function drawLinks() {
+    const positions = [];
+    const hidden = layerVisibility.behavior === false;
+    if (!hidden) {
+      for (const pair of linkPairs) {
+        const left = entries.get(pair[0]);
+        const right = entries.get(pair[1]);
+        if (!left || !right || !left.pivot.visible || !right.pivot.visible) continue;
+        positions.push(left.pivot.position.x, left.pivot.position.y, left.pivot.position.z);
+        positions.push(right.pivot.position.x, right.pivot.position.y, right.pivot.position.z);
+      }
+    }
+    linkLines.geometry.dispose();
+    linkLines.geometry = new THREE.BufferGeometry();
+    if (!positions.length) {
+      linkLines.visible = false;
+      return;
+    }
+    linkLines.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    linkLines.visible = true;
+  }
+
+  function setLinks(pairs) {
+    linkPairs = Array.isArray(pairs) ? pairs : [];
+    drawLinks();
+    requestRender();
+  }
+
+  function setLoadState(load) {
+    statLayersOff = (load && load.off) || [];
+    paintFrame(lastRendering, false);
+  }
+
+  function refreshTextureMaterial(material) {
+    if (!material) return;
+    const map = material.map && material.map.isTexture === true ? material.map : null;
+    if (material.map && !map) material.map = null;
+    if (map) {
+      map.colorSpace = THREE.SRGBColorSpace;
+      map.wrapS = THREE.RepeatWrapping;
+      map.wrapT = THREE.RepeatWrapping;
+      const maxAniso = renderer.capabilities && renderer.capabilities.getMaxAnisotropy
+        ? renderer.capabilities.getMaxAnisotropy()
+        : 4;
+      map.anisotropy = Math.min(4, maxAniso);
+      if (map.isCompressedTexture) repairCompressedTexture(map);
+      else map.generateMipmaps = true;
+      map.needsUpdate = true;
+    }
+    for (const key of ["normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap"]) {
+      const tex = material[key];
+      if (tex && tex.isTexture === true) asDataMap(tex);
+      else if (tex) material[key] = null;
+    }
+    // The cutout node captures the map it saw. A later assign has to build it
+    // again, and only from a real three.js texture. That recompiles the
+    // material. The mesh stays.
+    if (mapNodes) {
+      material.colorNode = null;
+      material.alphaTestNode = null;
+      if (material.userData) material.userData.cutoutNode = false;
+      if (material.alphaTest > 0 && map) mapNodes.attachCutout(material);
+    }
+    material.needsUpdate = true;
+  }
+
+  function finishTextureEdit(parts) {
+    const seen = new Set();
+    for (const part of parts || []) {
+      if (!part.material || seen.has(part.material)) continue;
+      seen.add(part.material);
+      refreshTextureMaterial(part.material);
+    }
+  }
+
+  function loadOwnedTexture(url) {
+    return sharedImage(url, () => new Promise((resolve, reject) => {
+      gpuTextureLoader.load(url, (texture) => {
+        if (texture && texture.isTexture === true) resolve(texture);
+        else reject(new Error("decoded image is not a three.js texture"));
+      }, undefined, reject);
+    })).then((texture) => {
+      if (!texture || texture.isTexture !== true || typeof texture.clone !== "function") return null;
+      const copy = texture.clone();
+      if (!copy || copy.isTexture !== true) return null;
+      copy.needsUpdate = true;
+      return copy;
+    });
+  }
+
+  function textureManifest(gyaml) {
+    const plan = planAssetFetches({
+      wantGeometry: false,
+      geometryResident: true,
+      wantTextures: true,
+      texturesResident: textureDocs.has(gyaml),
+    });
+    if (!plan.textures) return textureDocs.get(gyaml);
+    const pending = typeof hooks.fetchTextures === "function"
+      ? Promise.resolve(hooks.fetchTextures(gyaml)).catch(() => ({ materials: {} }))
+      : Promise.resolve({ materials: {} });
+    textureDocs.set(gyaml, pending);
+    return pending;
+  }
+
+  function textureRank(gyaml) {
+    let distance = Infinity;
+    let visible = false;
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml || !entry.pivot) continue;
+      const gap = entry.pivot.position.distanceToSquared(camera.position);
+      if (gap < distance) distance = gap;
+      if (entry.pivot.visible !== false) visible = true;
+    }
+    return { distance, visible };
+  }
+
+  function publishTextureProgress() {
+    const progress = textureQueue.progress();
+    const done = progress ? progress.done : 0;
+    const total = progress ? progress.total : 0;
+    if (done === statTexturesDone && total === statTexturesTotal) return;
+    statTexturesDone = done;
+    statTexturesTotal = total;
+    paintFrame(lastRendering, false);
+  }
+
+  function pumpTextures() {
+    if (!textureAllow) return;
+    textureQueue.rank((job) => textureRank(job.gyaml));
+    const room = textureSlotLimit({ geometryBusy: statLoading > 0 || statQueued > 0 }) - textureActive;
+    if (room <= 0) return;
+    const generation = textureGeneration;
+    for (const job of textureQueue.take(room)) {
+      textureActive += 1;
+      void paintActorTextures(job.gyaml, job.url, generation).catch(() => {}).finally(() => {
+        textureActive = Math.max(0, textureActive - 1);
+        if (generation !== textureGeneration) return;
+        textureQueue.finish(job.gyaml);
+        publishTextureProgress();
+        pumpTextures();
+      });
+    }
+    publishTextureProgress();
+  }
+
+  function enqueueTexture(gyaml, url) {
+    if (!textureAllow || !gyaml || !url) return;
+    const rank = textureRank(gyaml);
+    if (!textureQueue.note({ gyaml, url, distance: rank.distance, visible: rank.visible })) return;
+    pumpTextures();
+  }
+
+  function enqueueResidentTextures() {
+    const seen = new Set();
+    for (const entry of entries.values()) {
+      if (!entry.gyaml || !entry.templateUrl || !entry.parts || seen.has(entry.gyaml)) continue;
+      seen.add(entry.gyaml);
+      enqueueTexture(entry.gyaml, entry.templateUrl);
+    }
+  }
+
+  async function paintActorTextures(gyaml, url, generation = textureGeneration) {
+    if (!url) return;
+    const parsed = parsedTemplates.get(url);
+    if (!parsed) return;
+    const manifest = await textureManifest(gyaml);
+    if (generation !== textureGeneration) return;
+    if (!parsedTemplates.has(url)) return;
+    await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
+    if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
+    presentTextures(parsed.parts, texturesShown);
+    finishTextureEdit(parsed.parts);
+    requestRender();
+  }
+
+  function presentResidentTextures() {
+    const seen = new Set();
+    for (const parsed of parsedTemplates.values()) {
+      if (!parsed || seen.has(parsed)) continue;
+      seen.add(parsed);
+      presentTextures(parsed.parts, texturesShown);
+      finishTextureEdit(parsed.parts);
+    }
+    requestRender();
+  }
+
+  function setTextureShown(on) {
+    const next = Boolean(on);
+    if (texturesShownArmed && next === texturesShown) return;
+    texturesShownArmed = true;
+    texturesShown = next;
+    presentResidentTextures();
+  }
+
+  function setTextureLoad(on) {
+    const next = Boolean(on);
+    if (next === textureAllow) {
+      if (next) pumpTextures();
+      return;
+    }
+    textureAllow = next;
+    textureQueue.setAllow(next);
+    if (!next) {
+      publishTextureProgress();
+      return;
+    }
+    enqueueResidentTextures();
   }
 
   function clearGround() {
@@ -880,6 +1147,8 @@ let convertSlots = 8;
       present: presentByDefault(actor.params),
       category: actor.category,
       volume,
+      layer: actor.layer || "",
+      layersVisible: layerVisibility,
       showHidden,
       categories,
       hideVolumes,
@@ -898,6 +1167,7 @@ let convertSlots = 8;
       volume,
       region,
       companion: Boolean(actor.companion),
+      layer: actor.layer || "",
       parts: null,
       farNames: null,
       slots: [],
@@ -956,12 +1226,13 @@ let convertSlots = 8;
     sceneStreamStats = { start: performance.now(), firstDetail: null, slowFrames: 0, editBytes: null };
     modelStage = { previous: batches.slice(), pending: new Map(), timer: 0, done: false, failed: false };
     const previewReady = options.previewUrl ? loadScenePreview(options.previewUrl, reloadTerrain) : null;
-    loadModels(token, actors, previewReady);
+    loadModels(token, actors.filter((actor) => wantsMesh(actor)), previewReady);
     if (reloadTerrain) {
       const banc = options.banc;
       const next = ++terrainToken;
       terrainBanc = banc;
-      void loadTerrain(next, banc);
+      if (options.terrain === false) dropTerrainMeshes();
+      else void loadTerrain(next, banc);
     }
   }
 
@@ -1238,6 +1509,7 @@ let convertSlots = 8;
     if (!entry.parts || !entry.parts.length) entry.volume = Boolean(actor.volume);
     if (actor.region !== undefined) entry.region = Boolean(actor.region);
     entry.companion = Boolean(actor.companion);
+    entry.layer = actor.layer || entry.layer || "";
     entry.pickable = actor.pickable !== false;
     entry.color = color;
     entry.material.color.setHex(color);
@@ -1252,6 +1524,8 @@ let convertSlots = 8;
       present: entry.present,
       category: actor.category,
       volume: entry.volume,
+      layer: entry.layer,
+      layersVisible: layerVisibility,
       showHidden,
       categories,
       hideVolumes,
@@ -1353,11 +1627,15 @@ let convertSlots = 8;
       syncPreviewPlacement(item.entry);
       if (!adoptModel(item.entry)) loading.push(item.actor);
     }
-    modelLoads?.update(actors, loading);
+    modelLoads?.update(
+      actors.filter((actor) => wantsMesh(actor)),
+      loading.filter((actor) => wantsMesh(actor)),
+    );
     refreshPondFish();
     if (selected && !entries.has(selected)) selected = null;
     syncBatchVisibility();
     syncLabels();
+    drawLinks();
     attach();
     requestRender();
     return true;
@@ -1452,6 +1730,14 @@ let convertSlots = 8;
   }
 
   function fetchModelOnce(gyaml, priority) {
+    const cached = metaCache.get(gyaml);
+    const plan = planAssetFetches({
+      wantGeometry: true,
+      geometryResident: Boolean(cached && cached.status !== "queued"),
+      wantTextures: false,
+      texturesResident: true,
+    });
+    if (!plan.models) return Promise.resolve(cached);
     const existing = modelRequests.get(gyaml);
     if (existing) return existing;
     const pending = (
@@ -1480,6 +1766,7 @@ let convertSlots = 8;
   }
 
   function unloadResidentModel(gyaml) {
+    textureQueue.forget(gyaml);
     const urls = new Set();
     for (const entry of entries.values()) {
       if (entry.gyaml !== gyaml) continue;
@@ -1615,6 +1902,7 @@ let convertSlots = 8;
         residentCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()) && queue.length > 0,
       }, foregroundSettled);
       requestRender();
+      pumpTextures();
     };
     const failEntry = (entry, meta, message) => {
       entry.modelMeta = { ...(meta || entry.modelMeta || {}), status: "box", reason: message };
@@ -1650,7 +1938,7 @@ let convertSlots = 8;
           metaCache.set(gyaml, meta);
         }
         if (meta.status !== "mesh" || !meta.url) {
-          if (meta.status === "box") boxes.add(gyaml);
+          if (meta.status === "box" || meta.status === "skipped") boxes.add(gyaml);
           for (const entry of entries.values()) {
             if (entry.gyaml !== gyaml) continue;
             entry.modelMeta = meta;
@@ -1660,7 +1948,10 @@ let convertSlots = 8;
           return;
         }
         const template = needsModelGeometry(gyaml) ? await ensureTemplate(meta.url, meta, priority) : null;
-        if (token === generation) deliver(gyaml, meta, template);
+        if (token === generation) {
+          deliver(gyaml, meta, template);
+          if (textureAllow && template) enqueueTexture(gyaml, meta.url);
+        }
       } catch (error) {
         if (token !== generation) return;
         const message = error.message || "The model did not load.";
@@ -2000,7 +2291,11 @@ let convertSlots = 8;
       parts.push({
         lod: identity.lod,
         family: identity.family,
+        // child.name has had ':' stripped. The manifest key is the family
+        // from the original node name (`Body:0`), which modelLod reads off
+        // userData.name.
         name: child.name || "",
+        materialKey: identity.family,
         geometry,
         material,
         keepCpu,
@@ -3501,7 +3796,7 @@ uniform float terrainLayerMissing;`
     lastLightingNote = resolved.note;
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, shadows, ao, effectGizmos, editorDefaults }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers, shadows, ao, effectGizmos, editorDefaults }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
@@ -3511,6 +3806,7 @@ uniform float terrainLayerMissing;`
     if (subTerrain !== undefined) showSub = Boolean(subTerrain);
     if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
     if (distance !== undefined) drawDistance = Number(distance) || 0;
+    if (visibleLayers) Object.assign(layerVisibility, visibleLayers);
     if (shadows !== undefined) {
       showShadows = Boolean(shadows);
       uvDirty = true;
@@ -3532,6 +3828,8 @@ uniform float terrainLayerMissing;`
         present: entry.present,
         category: entry.category,
         volume: entry.volume,
+        layer: entry.layer,
+        layersVisible: layerVisibility,
         showHidden,
         categories,
         hideVolumes,
@@ -3549,6 +3847,7 @@ uniform float terrainLayerMissing;`
     applyWater();
     applyTerrainUniforms();
     applyBlendUniforms();
+    drawLinks();
     if (shadows !== undefined) paintShadows();
     if (ao !== undefined) {
       paintAo(terrainRoot);
@@ -4495,6 +4794,9 @@ uniform float terrainLayerMissing;`
       queued: statQueued,
       loading: statLoading,
       background,
+      texturesDone: statTexturesDone,
+      texturesTotal: statTexturesTotal,
+      layersOff: statLayersOff,
     });
     if (showProfile) paintProfile();
     if (hooks.onFrame) hooks.onFrame();
@@ -4692,6 +4994,12 @@ uniform float terrainLayerMissing;`
     setActors,
     patchActors,
     reconcileActors,
+    dropTerrain,
+    ensureTerrain,
+    setLinks,
+    setLoadState,
+    setTextureShown,
+    setTextureLoad,
     setSnap(on) {
       snapOn = Boolean(on);
     },

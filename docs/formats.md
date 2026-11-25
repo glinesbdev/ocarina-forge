@@ -87,6 +87,29 @@ These root keys are group lists, not actors: `AiGroups`, `FarDeleteGroups`, `Sim
 
 Category colors use the pack-name prefix: `Npc_` / `Shop_`, `Enemy_`, `Animal_`, `Eft`, `Land_`, `Area_` / `Area`, `Obj_` / `FldObj_` / `Item_` / `Weapon_` / `Dm_`, and system names (`StartPos`, `Player`, `Sound`, `AirWall`, `Ground`, anything with `Anchor` or ending in `Actor`).
 
+### Load layers
+
+One banc file holds every actor. There is no decoration list, light list, or water list in the placement BYML. Forge splits the editor payload by `Gyaml`, and skips the separate files those layers decode:
+
+| Layer | What it is |
+| --- | --- |
+| models | Actor BFRES for `Npc_`, `Enemy_`, `Animal_`, `Shop_`, and everything that is not one of the layers below. `Land_*` is an actor mesh, not the heightmap |
+| terrain | The static-map TSCB (`TerrainArc`) and the walkable surface pack. Not a Gyaml |
+| water | Actor BFRES whose name has a water token (`water`, `lake`, `waterfall`, `ocean`, `pond`, `sea`, `river`, `stream`, `moat`, `aqua`, `mizu`, `brook`), including a camel-case piece such as `WaterPlane` or `LakeHrl`. An `npc` token stays a model. The material reader splits only on underscores, so `WaterPlane` is one token there and is not how this layer is chosen. Surveyed TSCB indexes have no water type |
+| collision | `AirWall`, `collision`, `collider`, or `navmesh` in the Gyaml. Drawn as a gizmo. Collision, navmesh, and occluder shapes inside a BFRES are already left out of the drawn glb |
+| behavior | The per-class AINB graph, plus link gizmos. Not a slice of the banc |
+| effects | Gyaml starts with `Eft` (`Eft_` and `EftLoc_`) |
+| decorations | Dressing tokens: grass, flower, bush, weed, ivy, fern, mushroom, moss, vine, shrub, plant, clover, herb, petal. `Obj_Tree` stays a model |
+| lights | `light`, `lamp`, `torch`, `candle`, `lantern`, `chandelier`. `bake0` / `bake1` are not this layer |
+
+`textures` is not an actor layer and it is not a second glb. The editor always fetches one geometry file, `/api/models/<Gyaml>/model.glb?flat=1`. That file has the mesh and a plain material. It does not embed images, and its cache key does not include texture bytes. Images are `GET /api/models/<Gyaml>/textures`. The manifest is keyed by `partName:materialIndex`, which is the glTF node name with the `lodN:` prefix removed. Three.js strips `:` from `Object3D.name`, so `lod0:Body:0` becomes `lod0Body0` and does not match that key. The original node name stays on `userData.name`. The client looks the slot up with that name, not the sanitized object name. Albedo is sRGB. Normal, ORM, and emissive maps are linear. A decoded image is assigned only when it is a three.js texture. Each image is a content-addressed file in the shared texture store (`shared-v1`, `/api/model-textures/<sha256>.ktx2`, or `.png` / `.jpg`). The manifest itself is cached under `texman/` (`texman-1` plus the converter prefix and the bfres bytes). A second request reads that file and does not decode the BNTX again.
+
+`Load textures` (on unless the preset is Layout or Logic, or the URL says `textures=0`) streams those manifests after the mesh, a few at a time, nearest visible actors first. One runs while model loads are still in flight, and four run once geometry is idle. The stage-bar Textures box only shows or hides the images. That swap writes the resident maps back onto the same material the batches already use. It does not fetch, decode, or dispose. Turning Load textures off stops the queue and leaves images that already arrived in memory. The status label shows `textures 120/450` while that queue is open. Turning models on while textures are loaded fetches the geometry file once and the manifest once. The geometry cache key is `models-56`.
+
+`gpu_image` will not pack a BC level 0 whose width or height is not a multiple of 4, so that manifest entry is a JPEG or PNG (`/api/model-textures/<sha256>.jpg` or `.png`), not an OCFG. The stream loads every one of those URLs through the GPU texture loader. A file that is not KTX2 is the image itself and is decoded with `createImageBitmap`. An OCFG or raw KTX2 whose blocks the GPU cannot upload, and which has no JPEG or PNG trailer, does not reject: the loader resolves a 1×1 flat colour and warns once for that texture. The show/hide switch does not fetch, so it does not hit this path.
+
+`Links` is described above. A load filter does not strip `Phive`, and `Phive.Placement.ID` still mirrors `Hash`. Save, Save Longshot mod, and Build mod read the source banc plus the project diff. They do not drop an actor because its layer was not fetched.
+
 Actor meshes are Switch BFRES plus embedded BNTX. The reader, the cache, and what still falls back to a box are in [models.md](models.md). The pack, the model, and the texture are global files. The banc only stores the placement. What has to be copied when a placement moves to another banc is [research/asset-library.md](research/asset-library.md).
 
 ## Phive shapes

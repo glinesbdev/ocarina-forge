@@ -130,6 +130,7 @@ test("a pick mask is a three.js texture, including a render target's color textu
   assert.deepEqual(pickMask({ alphaTest: 0.4, alphaMap: alpha }), { alphaTest: 0.4, map: alpha, channel: "g" });
   assert.deepEqual(pickMask({ alphaTest: 0, map: texture }), { alphaTest: 0, map: null, channel: "a" });
   assert.deepEqual(pickMask({ alphaTest: 0.4 }), { alphaTest: 0.4, map: null, channel: "a" });
+  assert.deepEqual(pickMask({ alphaTest: 0.4, map: { url: "placeholder" } }), { alphaTest: 0.4, map: null, channel: "a" });
 });
 
 test("the id shader packs little-endian and discards a miss", () => {

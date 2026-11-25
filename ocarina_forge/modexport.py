@@ -3,6 +3,9 @@
 The project YAML stays the source. New patch-only projects emit minimal game
 files; imported projects also retain their original runtime tree and manifest
 fields. A value equal to the base is dropped. Editor state stays in the project.
+Load filters are ignored. A layer the editor did not fetch is not removed
+from the source tree and is not given a placement op unless the project diff
+already had one.
 """
 
 from __future__ import annotations

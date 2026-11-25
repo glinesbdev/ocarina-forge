@@ -161,6 +161,12 @@ def actor_id(actor: dict) -> str | None:
         return None
 
 
+def _actor_layer(gyaml: str) -> str:
+    from ocarina_forge.layers import actor_layer
+
+    return actor_layer(gyaml)
+
+
 def view_actor(actor: dict, status: str) -> dict:
     gyaml = str(actor.get("Gyaml") or "Unnamed")
     params = {key: value for key, value in actor.items() if key not in HEADER_KEYS}
@@ -179,6 +185,7 @@ def view_actor(actor: dict, status: str) -> dict:
         "srtHash": f"0x{int(srt) & 0xFFFFFFFF:08x}" if srt is not None else None,
         "status": status,
         "params": tag(params),
+        "layer": _actor_layer(gyaml),
     }
 
 

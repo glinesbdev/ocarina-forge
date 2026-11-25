@@ -35,6 +35,9 @@ export function planActorRefresh(previous, next) {
   for (const actor of next) {
     const old = actor && prior.get(actor.id);
     if (!old || !samePlacement(old, actor)) return { mode: "rebuild" };
+    if (Boolean(old.logicOnly) !== Boolean(actor.logicOnly) || old.fetchModel !== actor.fetchModel || old.layer !== actor.layer) {
+      return { mode: "rebuild" };
+    }
     const moved = !sameVector(old.translate, actor.translate) || !sameVector(old.rotate, actor.rotate) || !sameVector(old.scale, actor.scale);
     const dressed =
       old.status !== actor.status ||

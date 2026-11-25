@@ -36,12 +36,13 @@ from ocarina_forge.models import (
     _cached_glb,
     describe_actor,
     describe_actor_at,
+    describe_actor_textures,
     describe_terrain,
     describe_terrain_at,
 )
 from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
-from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
+from ocarina_forge.scene import apply_command, keep_unloaded_diff, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
 from ocarina_forge.grounddebug import query_ground
 from ocarina_forge.lighting import lighting_report
@@ -414,28 +415,38 @@ def _note_stream(kind: str, name: str, info: dict) -> dict:
     return info
 
 
-async def _describe_model(gyaml: str, *, interactive: bool = True) -> dict:
+async def _describe_model(gyaml: str, *, interactive: bool = True, flat: bool = False) -> dict:
     if interactive:
         _enter_interactive()
     try:
         dump = _open_dump()
         try:
-            return _note_stream("model", gyaml, _publish(describe_actor(dump, gyaml, convert=False)))
+            return _note_stream(
+                "model",
+                gyaml,
+                _publish(describe_actor(dump, gyaml, convert=False, flat=True) if flat else describe_actor(dump, gyaml, convert=False)),
+            )
         except CacheMiss:
             pass
 
         async def run():
             count, _cpus, _source = _configured_workers()
             if count <= 1:
-                info = await _submit(describe_actor, dump, gyaml)
+                info = await _submit(_describe_actor_here, dump, gyaml, flat)
             else:
-                info = await _submit(describe_actor_at, str(dump.root), gyaml)
+                info = await _submit(describe_actor_at, str(dump.root), gyaml, flat)
             return _publish(info)
 
-        return _note_stream("model", gyaml, await _convert(f"model:{gyaml}", run))
+        return _note_stream("model", gyaml, await _convert(f"model:{gyaml}:{'flat' if flat else 'textured'}", run))
     finally:
         if interactive:
             _leave_interactive()
+
+
+def _describe_actor_here(dump, gyaml: str, flat: bool = False):
+    if flat:
+        return describe_actor(dump, gyaml, flat=True)
+    return describe_actor(dump, gyaml)
 
 
 async def _describe_terrain_model(banc: str) -> dict:
@@ -608,6 +619,9 @@ async def start_warm(body: dict):
         names = await asyncio.to_thread(scene_warm_queue, dump, banc, nearest)
     except ValueError as exc:
         raise BancError(str(exc), "not_found") from exc
+    spec = _load_spec(str(body.get("load") or ""), str(body.get("textures") or ""))
+    if spec is not None:
+        names = [name for name in names if _layer_allowed(name, spec)]
     _WARM_JOB_ID += 1
     _WARM_JOB = _WarmJob(
         job_id=_WARM_JOB_ID,
@@ -643,6 +657,32 @@ def status():
         "workers": _worker_public(),
         "cache": cache_public(),
     }
+
+
+@app.get("/api/load-filters")
+def get_load_filters():
+    from ocarina_forge.layers import default_filters
+
+    try:
+        project = _open_project()
+    except BancError:
+        return default_filters()
+    try:
+        return project.load_filters()
+    except Exception:
+        return default_filters()
+
+
+@app.put("/api/load-filters")
+def put_load_filters(body: dict):
+    from ocarina_forge.layers import normalize_filters
+
+    normal = normalize_filters(body if isinstance(body, dict) else {})
+    try:
+        project = _open_project()
+    except BancError:
+        return normal
+    return project.write_load_filters(normal)
 
 
 @app.put("/api/config")
@@ -949,8 +989,46 @@ def scene_mesh_audit(banc: str):
     return audit_scene_meshes(dump, banc, view=view)
 
 
+def _load_spec(load: str = "", textures: str = ""):
+    from ocarina_forge.layers import parse_load_query
+
+    return parse_load_query(load or "", textures)
+
+
+def _skipped_model(gyaml: str) -> dict:
+    return {
+        "gyaml": gyaml,
+        "status": "skipped",
+        "reason": "This layer is not loaded.",
+        "source": "",
+        "triangles": 0,
+        "textures": 0,
+        "bounds": None,
+        "url": None,
+        "digest": "",
+        "textureLog": [],
+    }
+
+
+def _apply_load_filter(view: dict, load: str = "", textures: str = "") -> dict:
+    spec = _load_spec(load, textures)
+    if spec is None:
+        return view
+    from ocarina_forge.layers import filter_attached
+
+    return filter_attached(view, spec)
+
+
+def _layer_allowed(gyaml: str, spec) -> bool:
+    if spec is None:
+        return True
+    from ocarina_forge.layers import actor_layer
+
+    return actor_layer(gyaml) in spec.layers
+
+
 @app.get("/api/scene")
-def get_scene(banc: str):
+def get_scene(banc: str, load: str = "", textures: str = ""):
     dump = _open_dump()
     document, _dict_id, _raw = dump.read_byml(banc)
     diff = _diff_for(banc)
@@ -965,7 +1043,7 @@ def get_scene(banc: str):
         pass
     else:
         view["previewUrl"] = "/api/scene/preview.glb?" + urlencode({"banc": preview, "v": version})
-    return view
+    return _apply_load_filter(view, load, textures)
 
 
 @app.get("/api/scene/preview.glb")
@@ -996,7 +1074,7 @@ def edit_scene(body: dict):
         view["banc"] = banc
         view["focus"] = focus
         _schedule_hot_reload()
-        return _attach_recipes(view, banc)
+        return _apply_load_filter(_attach_recipes(view, banc), str(body.get("load") or ""), str(body.get("textures") or ""))
     document, _dict_id, _raw = dump.read_byml(banc)
     diff = project.load_scene_diff(banc)
     updated, focus = apply_command(document, diff, command)
@@ -1005,7 +1083,7 @@ def edit_scene(body: dict):
     view["banc"] = banc
     view["focus"] = focus
     _schedule_hot_reload()
-    return _attach_recipes(view, banc)
+    return _apply_load_filter(_attach_recipes(view, banc), str(body.get("load") or ""), str(body.get("textures") or ""))
 
 
 @app.put("/api/scene/diff")
@@ -1016,12 +1094,16 @@ def put_diff(body: dict):
     dump = _open_dump()
     project = _open_project()
     document, _dict_id, _raw = dump.read_byml(banc)
-    updated = replace_diff(document, banc, (body.get("actors") or {}))
+    stored = project.load_scene_diff(banc)
+    if isinstance(body.get("loaded"), list):
+        updated = keep_unloaded_diff(document, banc, body.get("actors") or {}, stored, body.get("loaded"))
+    else:
+        updated = replace_diff(document, banc, (body.get("actors") or {}))
     project.save_scene_diff(updated)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc
     _schedule_hot_reload()
-    return _attach_recipes(view, banc)
+    return _apply_load_filter(_attach_recipes(view, banc), str(body.get("load") or ""), str(body.get("textures") or ""))
 
 
 @app.put("/api/scene/recipes")
@@ -1058,12 +1140,26 @@ async def models_batch(body: dict):
     def lookup() -> dict[str, dict]:
         found: dict[str, dict] = {}
         for name in names:
+            if spec is not None and not _layer_allowed(name, spec):
+                found[name] = _skipped_model(name)
+                continue
             try:
-                found[name] = _publish(describe_actor(dump, name, convert=False))
+                if flat:
+                    found[name] = _publish(describe_actor(dump, name, convert=False, flat=True))
+                else:
+                    found[name] = _publish(describe_actor(dump, name, convert=False))
             except CacheMiss:
-                found[name] = _queued_model(name)
+                queued = _queued_model(name)
+                if flat:
+                    queued["url"] = f"/api/models/{name}/model.glb?flat=1"
+                found[name] = queued
         return found
 
+    spec = _load_spec(str(body.get("load") or ""), str(body.get("textures") or ""))
+    # `flat` is the geometry file. The editor always asks for it, then loads
+    # images from /textures when that layer is on. A texture flag must not
+    # switch this URL back to an embedded-image glb.
+    flat = bool(body.get("flat")) or bool(spec is not None and not spec.textures)
     found = await asyncio.to_thread(lookup)
     # The page only asks for a handful of glbs at once. Start the rest on the
     # process pool now, so a scene open is not limited to those slots. The
@@ -1074,20 +1170,42 @@ async def models_batch(body: dict):
     if count > 1 and body.get("prefetch", True):
         for name, info in found.items():
             if info.get("status") == "queued":
-                task = asyncio.create_task(_describe_model(name, interactive=True))
+                task = asyncio.create_task(_describe_model(name, interactive=True, flat=flat))
                 _PREFETCH.add(task)
                 task.add_done_callback(_PREFETCH.discard)
     return {"models": found}
 
 
 @app.get("/api/models/{gyaml}")
-async def model_info(gyaml: str):
-    return await _describe_model(gyaml)
+async def model_info(gyaml: str, load: str = "", textures: str = "", flat: int = 0):
+    spec = _load_spec(load, textures)
+    if spec is not None and not _layer_allowed(gyaml, spec):
+        return _skipped_model(gyaml)
+    use_flat = bool(flat) or bool(spec is not None and not spec.textures)
+    return await _describe_model(gyaml, flat=use_flat)
+
+
+@app.get("/api/models/{gyaml}/textures")
+async def model_textures(gyaml: str, load: str = "", textures: str = ""):
+    """Decoded images for one actor. Does not convert or return the glb."""
+    from ocarina_forge.layers import parse_textures_flag
+
+    spec = _load_spec(load, textures)
+    if parse_textures_flag(textures) is False or (spec is not None and not spec.textures):
+        return {"gyaml": gyaml, "skipped": True, "reason": "Textures are not loaded.", "materials": {}}
+    if spec is not None and not _layer_allowed(gyaml, spec):
+        return {"gyaml": gyaml, "skipped": True, "reason": "This layer is not loaded.", "materials": {}}
+    dump = _open_dump()
+    return await asyncio.to_thread(describe_actor_textures, dump, gyaml)
 
 
 @app.get("/api/models/{gyaml}/model.glb")
-async def model_file(gyaml: str, request: Request):
-    info = await _describe_model(gyaml)
+async def model_file(gyaml: str, request: Request, flat: int = 0, load: str = "", textures: str = ""):
+    spec = _load_spec(load, textures)
+    if spec is not None and not _layer_allowed(gyaml, spec):
+        raise BancError("This layer is not loaded.", "not_found")
+    use_flat = bool(flat) or bool(spec is not None and not spec.textures)
+    info = await _describe_model(gyaml, flat=use_flat)
     digest = info.get("digest") or ""
     path = _cached_glb(digest) if info.get("status") == "mesh" else None
     if path is None:
@@ -1128,20 +1246,26 @@ def scene_lighting(banc: str):
 
 
 @app.get("/api/ground")
-async def ground_at(banc: str, x: float, z: float, exclude: str = ""):
+async def ground_at(banc: str, x: float, z: float, exclude: str = "", load: str = "", textures: str = ""):
     """Composed walkable height at one XZ: height tile plus Land_* island/cliff/hill meshes."""
     if not banc or ".." in banc or banc.startswith("/"):
         raise BancError("That scene path is not in the dump.", "not_found")
+    spec = _load_spec(load, textures)
+    if spec is not None and "terrain" not in spec.layers:
+        return {"status": "skipped", "reason": "Terrain is not loaded.", "hit": False}
     dump = _open_dump()
     samples = await asyncio.to_thread(query_ground_cached, dump, banc, [(x, z)], _exclude_ids(exclude))
     return samples[0]
 
 
 @app.get("/api/ground/surface")
-async def ground_surface(banc: str):
+async def ground_surface(banc: str, load: str = "", textures: str = ""):
     """Gzipped walkable-surface pack for local Snap in the viewer."""
     if not banc or ".." in banc or banc.startswith("/"):
         raise BancError("That scene path is not in the dump.", "not_found")
+    spec = _load_spec(load, textures)
+    if spec is not None and "terrain" not in spec.layers:
+        return {"status": "skipped", "reason": "Terrain is not loaded."}
     dump = _open_dump()
     path, meta = await asyncio.to_thread(load_or_build_surface, dump, banc)
     headers = {
@@ -1156,7 +1280,10 @@ async def ground_surface(banc: str):
 
 
 @app.get("/api/terrain")
-async def terrain_info(banc: str, refine: bool = False):
+async def terrain_info(banc: str, refine: bool = False, load: str = "", textures: str = ""):
+    spec = _load_spec(load, textures)
+    if spec is not None and "terrain" not in spec.layers:
+        return {"banc": banc, "status": "skipped", "reason": "Terrain is not loaded.", "url": None}
     info = await _describe_terrain_model(banc)
     if info.get("status") != "mesh":
         return info
@@ -1186,7 +1313,10 @@ def _corrected_terrain(dump, banc: str, info: dict) -> tuple[Path | None, str]:
 
 
 @app.get("/api/terrain/model.glb")
-async def terrain_file(banc: str, request: Request):
+async def terrain_file(banc: str, request: Request, load: str = "", textures: str = ""):
+    spec = _load_spec(load, textures)
+    if spec is not None and "terrain" not in spec.layers:
+        raise BancError("Terrain is not loaded.", "not_found")
     info = await _describe_terrain_model(banc)
     digest = info.get("digest") or ""
     if info.get("status") == "mesh" and request.query_params.get("v") != digest:
@@ -1200,7 +1330,10 @@ async def terrain_file(banc: str, request: Request):
 
 
 @app.get("/api/behavior")
-def behavior(gyaml: str = "", banc: str = "", id: str = ""):
+def behavior(gyaml: str = "", banc: str = "", id: str = "", load: str = "", textures: str = ""):
+    spec = _load_spec(load, textures)
+    if spec is not None and "behavior" not in spec.layers:
+        return {"gyaml": gyaml, "skipped": True, "reason": "Behavior is not loaded.", "nodes": [], "edges": []}
     from ocarina_forge.behavior import load_actor_graph
     from ocarina_forge.behavior_edit import apply_ops
 

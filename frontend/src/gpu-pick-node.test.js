@@ -61,6 +61,13 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
   const cutoffShader = shaderFor(webgpu, new THREE.Mesh(geometry, cutoffOnly));
   assert.match(cutoffShader, /textureLoad/);
 
+  const placeholder = createNodePickMaterial({ uniforms, getActiveObject: () => null });
+  placeholder.alphaTest = 0.4;
+  placeholder.map = { url: "/api/model-textures/not-a-texture" };
+  const placeholderShader = shaderFor(webgpu, new THREE.Mesh(geometry, placeholder));
+  assert.match(placeholderShader, /textureLoad/);
+  assert.equal(placeholder.userData.forgePickMask, undefined);
+
   const target = new THREE.WebGLRenderTarget(2, 2);
   const fromTarget = createNodePickMaterial({ uniforms, getActiveObject: () => null });
   fromTarget.alphaTest = 0.4;

@@ -80,6 +80,16 @@ test("hidden actors and volumes follow the stage-bar switches", () => {
     categories: open,
     hideVolumes: true,
   }), false);
+  assert.equal(actorShown({
+    status: "stock",
+    category: "object",
+    volume: false,
+    showHidden: false,
+    categories: open,
+    hideVolumes: false,
+    layer: "effects",
+    layersVisible: { effects: false },
+  }), false);
 });
 
 test("a companion that cannot be picked is locked, and a locked actor has no gizmo", () => {
