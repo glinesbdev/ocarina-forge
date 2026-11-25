@@ -36,7 +36,7 @@ import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
-import { planAssetFetches, wantsMesh } from "./layers.js";
+import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, presentTextures } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
@@ -52,8 +52,10 @@ import {
   ndcFromClient,
 } from "./gpu-pick.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
-import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSnapSelfHit, nearestGroundSample, shouldApplyGroundReply, shouldSnapTranslate, snapExcludeId, translateAfterSnap } from "./snap.js";
-import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
+import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, snapExcludeId } from "./snap.js";
+import { columnHits } from "./snap-surface.js";
+import { commitTranslateDrag } from "./drag-commit.js";
+import { disposeGroundSurface, groundSurfaceMeta, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
 import { resolveTextureIndex } from "./problems.js";
 import { isEffectGizmo, resolveLighting, tonemapName } from "./lighting.js";
 
@@ -3981,8 +3983,7 @@ uniform float terrainLayerMissing;`
   }
 
   function isCollisionEntry(entry) {
-    const name = String(entry.gyaml || "").toLowerCase();
-    return name.includes("collision") || name.includes("collider");
+    return actorLayer(entry && entry.gyaml) === "collision";
   }
 
   function rememberedGround(x, z) {
@@ -4024,39 +4025,67 @@ uniform float terrainLayerMissing;`
     }
   }
 
+  function rejectsDraggedHit(hit, ignoreId) {
+    if (!ignoreId) return false;
+    const id = idOfHit(hit);
+    if (isSnapSelfHit(id, ignoreId)) return true;
+    const entry = id ? entries.get(id) : null;
+    if (!entry) return false;
+    return isSnapSelfHit(entry.id, ignoreId) || isSnapSelfHit(entry.key, ignoreId);
+  }
+
+  function modelSnapRoots() {
+    const roots = [];
+    for (const batch of batches) {
+      if (!batch.mesh || !batch.mesh.visible || batch.water) continue;
+      roots.push(batch.mesh);
+    }
+    if (scenePreview && scenePreview.models) {
+      for (const meshes of scenePreview.models.values()) {
+        for (const mesh of meshes || []) {
+          if (mesh && mesh.visible) roots.push(mesh);
+        }
+      }
+    }
+    return roots;
+  }
+
   function surfaceAt(x, y, z, ignoreId) {
-    const hits = [];
     snapRay.ray.origin.set(x, y + 80, z);
     snapRay.ray.direction.set(0, -1, 0);
     const dragged = ignoreId ? entries.get(ignoreId) : null;
-    // The dragged mesh, including a Land_ piece in the walkable pack, is not a hit.
+    // The dragged mesh, including a Land_ piece and its proxy, is not a hit.
     const exclude = snapExcludeId(dragged) || (ignoreId ? String(ignoreId) : "");
+    const ground = [];
     const local = sampleGroundSurface(x, z, exclude);
-    if (local != null) hits.push({ y: local });
-    // When Snap uses a composed sampler, do not raycast the visible heightmap.
-    // That mesh misses island floors, and chooseSnap will then prefer the lower
-    // slope once Y has dropped, which also shifts the gizmo XZ plane.
-    if (local == null && terrainRoot && !hooks.fetchGround) {
-      terrainRoot.traverse((child) => {
-        if (!child.isMesh || !child.visible || !child.geometry || child.userData.subTerrain) return;
-        const found = [];
-        try {
-          acceleratedRaycast.call(child, snapRay, found);
-        } catch {
-          return;
-        }
-        for (const hit of found) if (hit.point) hits.push({ y: hit.point.y });
-      });
+    if (local != null && Number.isFinite(local)) ground.push({ y: local });
+    // A real heightmap is the wrong fallback: it misses island floors, and
+    // chooseSnap then prefers the lower slope. The sample pack has no walkable
+    // triangles, so the visible stand-in plane is the ground the user sees.
+    const pack = groundSurfaceMeta();
+    const emptyPack = groundSurfaceReady() && Number(pack && pack.triangles) === 0;
+    if (local == null && terrainRoot && (emptyPack || !hooks.fetchGround)) {
+      for (const hit of columnHits([terrainRoot], x, y, z)) ground.push({ y: hit.point.y });
     }
+    const collision = [];
     for (const candidate of entries.values()) {
       if (!isCollisionEntry(candidate) || !candidate.pivot.visible) continue;
       if (isSnapSelfHit(candidate.id, ignoreId) || isSnapSelfHit(candidate.key, ignoreId)) continue;
       const top = volumeSurfaceY(candidate, snapRay);
-      if (top != null) hits.push({ y: top });
+      if (top != null && Number.isFinite(top)) collision.push({ y: top });
     }
-    if (local == null) {
+    // Rooms such as Boss Rush Internal Room have no heightmap. The floor is
+    // the static map mesh or a batched instance. A miss stays empty so the
+    // actor keeps its height instead of falling to y = 0.
+    let models = [];
+    if (!ground.length && !collision.length) {
+      models = columnHits(modelSnapRoots(), x, y, z, (hit) => !rejectsDraggedHit(hit, ignoreId))
+        .map((hit) => ({ y: hit.point.y }));
+    }
+    let hits = selectSnapHits({ ground, collision, models });
+    if (!hits.length && local == null) {
       const remembered = rememberedGround(x, z);
-      if (remembered) hits.push({ y: remembered.y });
+      if (remembered && Number.isFinite(remembered.y)) hits = [{ y: remembered.y }];
     }
     return chooseSnap(y, hits);
   }
@@ -4094,16 +4123,26 @@ uniform float terrainLayerMissing;`
   function maybeSnap(entry, phase, axis = null) {
     if (!snapOn || !entry || transform.mode !== "translate") return null;
     const used = axis || (phase === "release" ? dragAxis : null) || transform.axis;
-    if (isExplicitLift(used)) {
-      verticalHold = true;
-      return null;
-    }
-    if (!shouldSnapTranslate(used, phase)) return null;
-    verticalHold = false;
     const p = entry.pivot.position;
-    const surfaceY = surfaceAt(p.x, p.y, p.z, snapExcludeId(entry));
-    const posed = translateAfterSnap([p.x, p.y, p.z], surfaceY, { axis: used, phase, snapOn: true });
-    p.y = posed.translate[1];
+    const surfaceY = isExplicitLift(used) ? null : surfaceAt(p.x, p.y, p.z, snapExcludeId(entry));
+    const posed = commitTranslateDrag({
+      position: p,
+      axis: used,
+      phase,
+      snapOn: true,
+      surfaceY,
+      write: () => {
+        // Compose after the snap writes Y. matrixWorld is stale until then,
+        // and the batched instance is not a child of the pivot.
+        entry.pivot.updateWorldMatrix(true, false);
+        return applyActorMatrix(entry.slots, entry.key, displayedActorMatrix(entry, actorMatrix));
+      },
+    });
+    // The instance write above is synchronous. A ground reply may still move Y
+    // later; it goes through applyComposedSnap, which writes the instance again.
+    if (posed.hold) verticalHold = true;
+    else if (posed.snapped) verticalHold = false;
+    if (!posed.snapped) return null;
     return requestGround(p.x, p.z, entry);
   }
 
@@ -4436,6 +4475,10 @@ uniform float terrainLayerMissing;`
     }
     dragAxis = axis;
     const pending = maybeSnap(entry, "release", axis);
+    // maybeSnap already wrote the instance. Write again before awaiting so a
+    // ground reply cannot be the first time the mesh hears about this pose,
+    // and so preview placements follow the same pivot.
+    applySelectedActorTransform(entry, { commit: false });
     const finish = () => {
       // A newer drag owns the pivot. Committing here would save that pose early.
       if (serial !== dragSerial || transform.dragging) return;
@@ -5023,6 +5066,83 @@ uniform float terrainLayerMissing;`
   }
 
   globalThis.__forgeProfile = dumpProfile;
+  if (import.meta.env && import.meta.env.DEV) {
+    globalThis.__forgeSnapDrag = (axis, y, x) => {
+      const entry = selected ? entries.get(selected) : null;
+      if (!entry) return null;
+      if (Number.isFinite(y)) entry.pivot.position.y = y;
+      if (Number.isFinite(x)) entry.pivot.position.x = x;
+      dragAxis = axis;
+      const pending = maybeSnap(entry, "release", axis);
+      applySelectedActorTransform(entry, { commit: false });
+      const probe = new THREE.Matrix4();
+      const reads = (entry.slots || []).map((slot) => {
+        let gpuY = null;
+        if (slot.mesh?.getMatrixAt) {
+          slot.mesh.getMatrixAt(slot.index, probe);
+          gpuY = probe.elements[13];
+        }
+        return { index: slot.index, shown: slot.shown, gpuY, cpuY: slot.matrix ? slot.matrix.elements[13] : null };
+      });
+      const canvas = renderer.domElement;
+      const project = (offsetY) => {
+        const world = entry.pivot.getWorldPosition(new THREE.Vector3());
+        world.y += offsetY;
+        world.project(camera);
+        return {
+          x: (world.x * 0.5 + 0.5) * canvas.width,
+          y: (-world.y * 0.5 + 0.5) * canvas.height,
+        };
+      };
+      return {
+        id: entry.id,
+        gyaml: entry.gyaml,
+        pivotX: entry.pivot.position.x,
+        pivotY: entry.pivot.position.y,
+        reads,
+        pending: Boolean(pending && pending.then),
+        base: project(0.4),
+        width: canvas.width,
+        height: canvas.height,
+      };
+    };
+    globalThis.__forgePose = () => {
+      const entry = selected ? entries.get(selected) : null;
+      if (!entry) return null;
+      const probe = new THREE.Matrix4();
+      const reads = (entry.slots || []).map((slot) => {
+        let gpuY = null;
+        if (slot.mesh?.getMatrixAt) {
+          slot.mesh.getMatrixAt(slot.index, probe);
+          gpuY = probe.elements[13];
+        }
+        return { index: slot.index, shown: slot.shown, gpuY, cpuY: slot.matrix ? slot.matrix.elements[13] : null };
+      });
+      return { pivotX: entry.pivot.position.x, pivotY: entry.pivot.position.y, reads };
+    };
+    // Screen point on the positive translate handle, for a real pointer drag.
+    globalThis.__forgeHandleClient = (axis) => {
+      const picker = transform._gizmo && transform._gizmo.picker && transform._gizmo.picker.translate;
+      if (!picker) return null;
+      picker.updateWorldMatrix(true, true);
+      let best = null;
+      picker.traverse((object) => {
+        if (object.name !== axis || !object.geometry) return;
+        if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+        const center = object.geometry.boundingBox.clone().applyMatrix4(object.matrixWorld).getCenter(new THREE.Vector3());
+        const score = axis === "X" ? center.x : axis === "Z" ? center.z : center.y;
+        if (!best || score > best.score) best = { point: center, score };
+      });
+      if (!best) return null;
+      const canvas = renderer.domElement;
+      const rect = canvas.getBoundingClientRect();
+      best.point.project(camera);
+      return {
+        x: rect.left + (best.point.x * 0.5 + 0.5) * rect.width,
+        y: rect.top + (-best.point.y * 0.5 + 0.5) * rect.height,
+      };
+    };
+  }
   if (import.meta.env && import.meta.env.DEV) {
     globalThis.__forgeMemory = getMemoryReport;
   }

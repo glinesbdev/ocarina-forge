@@ -15,10 +15,10 @@ import {
   translateAfterSnap,
 } from "./snap.js";
 
-test("the highest surface under the actor wins, including a low curb", () => {
+test("the nearest surface under the actor wins, and a shelf above does not beat a floor below", () => {
   assert.equal(chooseSnap(3, [{ y: 0 }, { y: 1.2 }]), 1.2);
   assert.equal(chooseSnap(2, [{ y: 0 }, { y: 10 }]), 0);
-  assert.equal(chooseSnap(2, [{ y: 0 }, { y: 3.2 }]), 3.2);
+  assert.equal(chooseSnap(2, [{ y: 0 }, { y: 3.2 }]), 0);
 });
 
 test("a pivot under the floor snaps up to the nearest surface", () => {
@@ -145,9 +145,12 @@ test("the viewport publishes one pose for the gizmo, the mesh, and the save", ()
   assert.ok(release.indexOf('maybeSnap(entry, "release", axis)') < release.indexOf("applySelectedActorTransform"));
   assert.match(viewport, /snapExcludeId\(entry\)/);
   assert.match(viewport, /isSnapSelfHit\(candidate\.id, ignoreId\)/);
-  assert.match(viewport, /translateAfterSnap\(/);
+  assert.match(viewport, /commitTranslateDrag\(/);
   assert.match(viewport, /followActorTransform\(follow\)/);
   assert.match(viewport, /verticalHold/);
+  const drag = readFileSync(new URL("./drag-commit.js", import.meta.url), "utf8");
+  assert.match(drag, /translateAfterSnap\(/);
+  assert.ok(drag.indexOf("position.y = posed.translate[1]") < drag.indexOf("write()"));
 });
 
 test("a ground reply applies to the latest requested column or the current pivot", () => {

@@ -91,10 +91,10 @@ def test_all_previews_use_one_bank_per_pair_and_reuse_model_work(tmp_path, monke
     monkeypatch.setattr(scene_preview, "_run_worker", pack)
     for _ in range(2):
         assert scene_preview.build_all_scene_previews(dump, 0, prepare_missing=True, share_textures=False) == {
-            "ready": 2, "skipped": 0, "failed": 0, "models": 1, "shared": 0,
+            "ready": 3, "skipped": 0, "failed": 0, "models": 1, "shared": 0,
         }
     assert converted == ["Lamp", "Lamp"]  # One cache lookup per model per build.
-    assert len(packed) == 2  # The second build reused both packs.
+    assert len(packed) == 3  # The second build reused the packs. One pack per scene.
 
 
 def test_terrain_api_serves_base_then_fit_with_separate_cache_keys(tmp_path, monkeypatch):

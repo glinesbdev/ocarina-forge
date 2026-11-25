@@ -37,10 +37,13 @@ TREE2 = 0x100000000000000E
 STAL = 0x1000000000000020
 GUARD = 0x1000000000000021
 ROCK = 0x1000000000000022
+BOSS_FLOOR = 0x1000000000000030
+BOSS_TREE = 0x1000000000000031
 
 KOKIRI_STATIC = "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs"
 KOKIRI_DYNAMIC = "Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs"
 FIELD_STATIC = "Banc/HyruleField/HyruleField_Adult_Static.bcett.byml.zs"
+BOSS_STATIC = "Banc/BossRush/BossRush_InternalRoom_Static.bcett.byml.zs"
 
 CATALOG = (
     "Npc_Kokiri_F_01",
@@ -64,6 +67,7 @@ CATALOG = (
     "Area_Kokiri_Town",
     "Weapon_Sword_Kokiri",
     "Shop_Kokiri",
+    "Obj_BossRoom_Floor",
 )
 
 
@@ -155,6 +159,17 @@ def kokiri_dynamic() -> dict:
     )
 
 
+def boss_room_static() -> dict:
+    """A room with no heightmap. The floor is a model at y=2.5, not the origin."""
+    return _document(
+        "BossRush_InternalRoom",
+        [
+            _actor("Obj_BossRoom_Floor", BOSS_FLOOR, (0, 2.5, 0), name="Room floor"),
+            _actor("Obj_Tree", BOSS_TREE, (0, 6, 0), name="Room tree"),
+        ],
+    )
+
+
 def field_static() -> dict:
     return _document(
         "HyruleField",
@@ -195,6 +210,7 @@ def build_fixture(root: Path) -> Path:
         KOKIRI_STATIC: dumps(kokiri_static()),
         KOKIRI_DYNAMIC: dumps(kokiri_dynamic()),
         FIELD_STATIC: dumps(field_static()),
+        BOSS_STATIC: dumps(boss_room_static()),
     }
     actor_params = {}
     for name in CATALOG:
@@ -228,6 +244,7 @@ def build_fixture(root: Path) -> Path:
         "Npc_Kokiri_F_01": _model_info("Npc_Kokiri_F", "Npc_Kokiri_F_01"),
         # SubModels only, which is how some packs list every mesh.
         "Obj_Tree": _model_info("Obj_Tree", "Obj_Tree", sub=True),
+        "Obj_BossRoom_Floor": _model_info("Obj_BossRoom_Floor", "Obj_BossRoom_Floor", sub=True),
         "Enemy_DekuBaba": _model_info("Enemy_DekuBaba", "Enemy_DekuBaba"),
     }
     for name, payload in actor_params.items():
@@ -254,6 +271,15 @@ def build_fixture(root: Path) -> Path:
         "KokiriForest_01_Alb",
         _terrain_model(),
         _terrain_rgba(),
+    )
+    _write_model(
+        model_dir,
+        tex_dir,
+        loaded,
+        "Obj_BossRoom_Floor.Obj_BossRoom_Floor",
+        "Obj_BossRoom_Floor_Alb",
+        _boss_floor_model(),
+        _boss_floor_rgba(),
     )
     from ocarina_forge.behavior import (
         FADO_AI,
@@ -362,6 +388,28 @@ def _tree_model() -> bytes:
 
 def _terrain_rgba():
     return bytes([78, 112, 58, 255, 96, 128, 64, 255, 70, 104, 50, 255, 88, 120, 60, 255]), 2, 2
+
+
+def _boss_floor_rgba():
+    return bytes([140, 108, 72, 255, 168, 132, 90, 255, 120, 92, 60, 255, 156, 120, 80, 255]), 2, 2
+
+
+def _boss_floor_model() -> bytes:
+    rgba, width, height = _boss_floor_rgba()
+    positions = [(-10.0, 0.0, -10.0), (10.0, 0.0, -10.0), (10.0, 0.0, 10.0), (-10.0, 0.0, 10.0)]
+    uvs = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    indices = [0, 2, 1, 0, 3, 2]
+    return sample_bfres(
+        "Obj_BossRoom_Floor",
+        positions,
+        indices,
+        uvs,
+        rgba,
+        width,
+        height,
+        texture_name="Obj_BossRoom_Floor_Alb",
+        embed_texture=False,
+    )
 
 
 def _terrain_model() -> bytes:

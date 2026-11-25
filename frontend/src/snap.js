@@ -1,23 +1,41 @@
-/** Pick the ground or collision top under an actor.
+/** Pick the walkable surface under an actor.
  *
- * `hits` are `{ y }` from a downward ray. A surface at or below the pivot,
- * within `step` metres above it (a curb), wins. The highest of those is the
- * one the actor stands on. If the pivot is under every surface, the nearest
- * one above it is used so a drop still lands on the floor. */
+ * `hits` are `{ y }` from a downward ray. The nearest surface at or just
+ * under the pivot wins. When every hit is above the pivot, the nearest of
+ * those is used, so a room floor still catches an actor that started below
+ * it. No hit returns null: the caller keeps the current height instead of
+ * inventing y = 0. */
 
 /** Cached /api/ground samples farther than this are a different column (an
  * island edge is only a metre or two from the lakebed). */
 export const GROUND_SNAP_RADIUS = 0.2;
 
 export function chooseSnap(originY, hits, options = {}) {
-  const step = Number.isFinite(options.step) ? options.step : 1.5;
+  const epsilon = Number.isFinite(options.epsilon) ? options.epsilon : 0.05;
   const finite = (hits || []).map((hit) => hit && hit.y).filter((y) => Number.isFinite(y));
   if (!finite.length || !Number.isFinite(originY)) return null;
-  const under = finite.filter((y) => y <= originY + step);
-  if (under.length) return Math.max(...under);
+  const below = finite.filter((y) => y <= originY + epsilon);
+  if (below.length) return Math.max(...below);
   const above = finite.filter((y) => y > originY);
   if (!above.length) return null;
   return Math.min(...above);
+}
+
+function finiteSnapHits(hits) {
+  return (hits || []).filter((hit) => hit && Number.isFinite(hit.y));
+}
+
+/**
+ * Outdoor ground wins when a heightmap or map mesh produced a hit.
+ * A room with neither uses a collision mesh, then the visible static and
+ * batched geometry. An empty list is a miss, not y = 0.
+ */
+export function selectSnapHits({ ground = [], collision = [], models = [] } = {}) {
+  const walkable = finiteSnapHits(ground);
+  if (walkable.length) return walkable;
+  const solids = finiteSnapHits(collision);
+  if (solids.length) return solids;
+  return finiteSnapHits(models);
 }
 
 export function nearestGroundSample(samples, x, z, maxDistance = GROUND_SNAP_RADIUS) {

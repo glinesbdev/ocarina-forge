@@ -137,6 +137,21 @@ A primitive is four vertex indexes. The fourth index equal to the third is one t
 
 This reader does not open `Phive/StaticCompoundBody`. Those per-scene `.bphsc` bakes are the collision copy discussed in [#10](https://github.com/glinesbdev/ocarina-forge/issues/10) and in the asset-library note. No offset inside a `.bphsc` is implemented here.
 
+## What Snap can stand on
+
+Longshot's modding API, on the `main` tree checked for this note, does not export a collision ray. `docs/dev` covers the host, the control bridge, and mods. It does not name Phive, a shape query, or a ground sample. Forge cannot ask a running game for the surface under an actor. The files below are the collision data this repo can read.
+
+| Source | What it is | Snap |
+| --- | --- | --- |
+| Heightmap plus `Land_*` floors | The walkable pack (`OFGS`) and `GET /api/ground` | Used when that sample is finite. A height of exactly 0 from a height tile is the sentinel in `compose_height` and is not a floor |
+| Actor-local `.bphsh` | `Phive/Shape/Dcc/<Gyaml>__Physical.Nin_Ounce_NVN2.bphsh`. Triangles in actor space. The placement transform puts them in the world | Not instanced into the viewport. The drawn collision stand-in is the volume gizmo for a Gyaml containing `AirWall`, `collision`, `collider`, or `navmesh` |
+| `Phive/StaticCompoundBody` | Per-scene baked compound, world space of that scene | Not parsed. Snap does not read it |
+| Visible map and room meshes | The static map glb, plus each `BatchedMesh` or preview `InstancedMesh` instance | Used when the walkable sample and the collision volumes both miss. The actor being dragged, and a mesh marked as its proxy, are left out of the ray. The ray is per instance, not one merged bounds box |
+
+A room such as Boss Rush Internal Room has no TSCB and often no `Land_*` floor. The surface is the room model. Snap raycasts that geometry. The nearest hit at or under the pivot wins. If every hit is above the pivot, the nearest of those wins. If the ray misses, the actor keeps its current height. It does not fall to y = 0.
+
+The same paragraph belongs in After the Ocarina `docs/game-formats.md` under the actor-local collision note. Longshot's API was checked first and has no collision query to add there.
+
 ## BFRES models (version 10)
 
 Version 9 FMDL keeps an 8-byte reserved slot between the material array (`+0x38`) and the material dictionary (`+0x48`). Version 10 does not. On these files:
