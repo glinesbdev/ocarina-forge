@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-52\0"
+_CACHE_VERSION = b"models-53\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1115,7 +1115,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     return None
                 encoded = png_for.get(id(extra))
                 if encoded is None:
-                    encoded = _encode_cached(extra, "mask")
+                    encoded = _encode_cached(extra, "mask", gpu=True)
                     png_for[id(extra)] = encoded
                     if id(extra) not in seen_images:
                         texture_count += 1
@@ -1129,7 +1129,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 encoded = png_for.get(id(image))
                 if encoded is None:
                     # ORM is four data channels. JPEG would crush roughness and metal.
-                    encoded = _encode_cached(image, "png")
+                    # Pack BC7 like albedos: Field's unique normals and ORM were the remaining RGBA cost.
+                    encoded = _encode_cached(image, "png", gpu=True)
                     png_for[id(image)] = encoded
                     if id(image) not in seen_images:
                         texture_count += 1

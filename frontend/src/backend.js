@@ -73,6 +73,50 @@ export async function warmWebGLPrograms(renderer, root, camera, scene) {
   }
 }
 
+/** three r170's WebGPU getFormat() does not map RGBA_BPTC_Format (BC7), and its sRGB enum typo is "bc7-rgba-srgb". */
+const RGBA_BPTC_Format = 36492;
+const BC7_UNORM = "bc7-rgba-unorm";
+const BC7_SRGB = "bc7-rgba-unorm-srgb";
+
+function installBc7GetFormat(utils) {
+  if (!utils || typeof utils.getFormat !== "function") return false;
+  if (utils.__forgeBc7) return true;
+  const original = utils.getFormat.bind(utils);
+  utils.getFormat = function patchedGetFormat(texture, options) {
+    if (texture && texture.format === RGBA_BPTC_Format) {
+      return texture.colorSpace === "srgb" ? BC7_SRGB : BC7_UNORM;
+    }
+    const format = original(texture, options);
+    if (format === "bc7-rgba-srgb") return BC7_SRGB;
+    return format;
+  };
+  utils.__forgeBc7 = true;
+  return true;
+}
+
+export function patchWebgpuBc7Format(renderer) {
+  const backend = renderer && renderer.backend;
+  if (!backend) return false;
+  if (installBc7GetFormat(backend.textureUtils)) return true;
+  if (backend.__forgeBc7Pending) return false;
+  backend.__forgeBc7Pending = true;
+  let current = backend.textureUtils;
+  try {
+    Object.defineProperty(backend, "textureUtils", {
+      configurable: true,
+      enumerable: true,
+      get() { return current; },
+      set(value) {
+        current = value;
+        installBc7GetFormat(value);
+      },
+    });
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /** The module graph supplies its own renderer and scene classes from the same build. */
 export async function createBackendRenderer(THREE) {
   if (typeof THREE.WebGLRenderer === "function") {
@@ -88,6 +132,7 @@ export async function createBackendRenderer(THREE) {
     await Promise.race([initializing, timeout]);
     const backend = backendLabel(gpuRenderer);
     if (backend !== "WebGPU") throw new Error("No usable WebGPU adapter was found.");
+    patchWebgpuBc7Format(gpuRenderer);
     return { renderer: gpuRenderer, backend, nodes: true };
   } catch (error) {
     // If the timeout fired first, release the renderer once initialization settles.

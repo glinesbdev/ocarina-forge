@@ -17,7 +17,7 @@ from ocarina_forge.formats.gltf import join_glb, split_glb
 from ocarina_forge.models import cache_dir
 
 
-VERSION = "shared-v2"
+VERSION = "shared-v3"
 TEXTURE_STORE = "shared-v1"
 INITIAL_EDGE = 256
 MIME_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/ktx2": "ktx2"}

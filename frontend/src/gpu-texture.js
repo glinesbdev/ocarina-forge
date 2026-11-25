@@ -6,6 +6,10 @@
  * r170's KTX2 loader rejects those vkFormats (it only raw-loads a short list,
  * and a Basis file is vkFormat 0). A vkFormat of 0 is handed back to that
  * loader. Anything else the GPU cannot sample uses the trailing image.
+ *
+ * WebGPU caps come from the renderer's `backend.hasFeature`, not from
+ * `getContext().getExtension` — a GPUCanvasContext has no WebGL extensions,
+ * and probing it used to force every texture down the RGBA bitmap path.
  */
 
 const KTX_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -96,7 +100,7 @@ export function chooseTexture(buffer, options) {
   const packed = splitPacked(buffer);
   const info = readKtx2(packed.ktx);
   const format = enabled && info ? formatFor(info.vkFormat, caps) : 0;
-  if (format && gl) {
+  if (format) {
     if (canUploadCompressed(gl, format, info.levels)) {
       return { kind: "compressed", format, width: info.width, height: info.height, levels: info.levels, reason: "" };
     }
@@ -199,8 +203,10 @@ export function createGpuTextureLoader(options) {
 }
 
 export function canUploadCompressed(gl, format, levels) {
-  if (!gl || !format || !levels || !levels.length) return false;
+  if (!format || !levels || !levels.length) return false;
   if (levels[0].width % 4 !== 0 || levels[0].height % 4 !== 0) return false;
+  // A WebGPU canvas context has no compressedTexImage2D. Caps already decided the format.
+  if (!gl || typeof gl.compressedTexImage2D !== "function") return true;
   const tex = gl.createTexture();
   if (!tex) return false;
   gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -245,8 +251,22 @@ export function formatFor(vkFormat, support) {
   return 0;
 }
 
-export function textureSupport(gl) {
-  if (!gl || !gl.getExtension) return { s3tc: false, bptc: false, astc: false };
+/**
+ * WebGPU features are advertised on the renderer backend after init().
+ * Passing only the canvas context leaves every compressed cap false.
+ */
+export function textureSupport(gl, renderer) {
+  const backend = renderer && renderer.backend;
+  if (backend && (backend.isWebGPUBackend === true || renderer.isWebGPURenderer === true) && typeof backend.hasFeature === "function") {
+    const bc = backend.hasFeature("texture-compression-bc");
+    return {
+      s3tc: bc,
+      bptc: bc,
+      astc: backend.hasFeature("texture-compression-astc"),
+      webgpu: true,
+    };
+  }
+  if (!gl || typeof gl.getExtension !== "function") return { s3tc: false, bptc: false, astc: false };
   return {
     s3tc: Boolean(gl.getExtension("WEBGL_compressed_texture_s3tc")),
     bptc: Boolean(gl.getExtension("EXT_texture_compression_bptc")),

@@ -319,3 +319,7 @@ What r170 cannot do, and what is still unresolved:
 - **Cutouts.** Some grass cards still drew as solid sheets after the colour-node discard. The mask path is not reliable on this three.
 
 Use the viewport **Stats** to confirm the backend. A WebGPU run starts with `WebGPU`, and the WebGL2 fallback starts with `WebGL`. For renderer comparisons, keep the scene, camera, and texture settings the same across both runs.
+
+## Field-scale memory and further GPU techniques
+
+Compressed WebGPU textures, draw/frame measurements, static-batching notes, and the remaining technique list live in `docs/rendering-performance.md`.

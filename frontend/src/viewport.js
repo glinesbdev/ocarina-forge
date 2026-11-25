@@ -10,6 +10,7 @@ import {
   repairCompressedTexture,
   textureSupport,
 } from "./gpu-texture.js";
+import { collectMemoryReport } from "./memory-report.js";
 import { geometryDecoder } from "./geometry-decoder.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, MeshBVH } from "three-mesh-bvh";
@@ -221,7 +222,7 @@ export async function createViewport(host, hooks) {
   }));
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
   ktx2Loader.detectSupport(renderer);
-  const gpuCaps = textureSupport(renderer.getContext());
+  const gpuCaps = textureSupport(renderer.getContext(), renderer);
   const gl = renderer.getContext();
   let loadingGyaml = "";
   function reportGpuFallback(reason) {
@@ -360,6 +361,15 @@ let convertSlots = 8;
     for (const key of ["mossMap", "orm1Map", "normal1Map"]) {
       if (extra[key]) into.add(extra[key]);
     }
+  }
+
+  function disposeExtractedTemplateGeometry(template) {
+    if (!template) return;
+    template.traverse((child) => {
+      if (!child.geometry) return;
+      disposeGeometry(child.geometry);
+      child.geometry = undefined;
+    });
   }
 
   function disposeGeometry(geometry) {
@@ -1469,6 +1479,8 @@ let convertSlots = 8;
     map.colorSpace = THREE.LinearSRGBColorSpace;
     map.wrapS = THREE.RepeatWrapping;
     map.wrapT = THREE.RepeatWrapping;
+    if (map.isCompressedTexture) repairCompressedTexture(map);
+    else map.generateMipmaps = true;
     map.needsUpdate = true;
   }
 
@@ -2175,6 +2187,7 @@ let convertSlots = 8;
       parsed = partsFromTemplate(template, url);
       parsed.source = template;
       rememberTemplate(url, parsed);
+      disposeExtractedTemplateGeometry(template);
     }
     entry.parts = parsed.parts;
     entry.farNames = parsed.farNames;
@@ -3810,6 +3823,49 @@ uniform float terrainLayerMissing;`
   orbit.addEventListener("change", () => requestRender());
   requestRender();
 
+
+  function currentDraws() {
+    const info = renderer.info && renderer.info.render;
+    return drawTotal(
+      info,
+      Boolean(renderer.isWebGPURenderer),
+      renderer.backend && renderer.backend.isWebGPUBackend === true
+        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        : 0,
+    );
+  }
+
+  function getMemoryReport() {
+    const report = collectMemoryReport({
+      renderer,
+      entries,
+      batches,
+      parsedTemplates,
+      terrainRoot,
+      stats: {
+        fps,
+        frameMs,
+        draws: currentDraws(),
+        instances: statInstances,
+        culled: statCulled,
+      },
+    });
+    report.load = {
+      queued: statQueued,
+      loading: statLoading,
+      loaded: statLoaded,
+      deferred: statDeferred,
+      backgroundLoading: statBackgroundLoading,
+    };
+    report.backend = backendName;
+    report.gpuCaps = gpuCaps;
+    return report;
+  }
+
+  if (import.meta.env && import.meta.env.DEV) {
+    globalThis.__forgeMemory = getMemoryReport;
+  }
+
   return {
     backend: backendName,
     backendNote,
@@ -3841,6 +3897,7 @@ uniform float terrainLayerMissing;`
       statWarmTotal = total || null;
       requestRender();
     },
+    getMemoryReport,
     setShowStats(on) {
       showStats = Boolean(on);
       statsEl.hidden = !showStats;
@@ -3869,6 +3926,7 @@ uniform float terrainLayerMissing;`
       renderer.dispose();
       renderer.domElement.remove();
       labels.domElement.remove();
+      if (globalThis.__forgeMemory === getMemoryReport) delete globalThis.__forgeMemory;
     },
   };
 }

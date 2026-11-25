@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, VK_FORMAT } from "./gpu-texture.js";
+import { chooseTexture, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport, VK_FORMAT } from "./gpu-texture.js";
 
-test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
+function makePacked() {
   const ktx = new Uint8Array(104);
   ktx.set([0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a]);
   const view = new DataView(ktx.buffer);
@@ -23,7 +23,11 @@ test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   new DataView(file.buffer).setUint32(4, whole.length, true);
   file.set(whole, 8);
   file.set(jpeg, 8 + whole.length);
+  return { file, jpeg };
+}
 
+test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
+  const { file, jpeg } = makePacked();
   const split = splitPacked(file);
   assert.deepEqual([...split.fallback], [...jpeg]);
   const info = readKtx2(split.ktx);
@@ -41,4 +45,33 @@ test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   assert.equal(gpuTexturesEnabled("?textures=bitmap", "1"), false);
   assert.equal(gpuTexturesEnabled("", "0"), false);
   assert.equal(gpuTexturesEnabled("?gpuTextures=1", "0"), true);
+});
+
+test("WebGPU caps choose compressed BC7 without a WebGL probe", () => {
+  const { file } = makePacked();
+  const choice = chooseTexture(file, {
+    enabled: true,
+    caps: { bptc: true },
+    gl: {}, // GPUCanvasContext has no compressedTexImage2D
+  });
+  assert.equal(choice.kind, "compressed");
+  assert.equal(choice.format, 36492);
+  assert.equal(choice.levels.length, 1);
+});
+
+test("a canvas context without extensions reports no compressed caps", () => {
+  assert.deepEqual(textureSupport({}), { s3tc: false, bptc: false, astc: false });
+});
+
+test("textureSupport reads WebGPU compression features from the renderer backend", () => {
+  const renderer = {
+    isWebGPURenderer: true,
+    backend: {
+      isWebGPUBackend: true,
+      hasFeature(name) {
+        return name === "texture-compression-bc";
+      },
+    },
+  };
+  assert.deepEqual(textureSupport({}, renderer), { s3tc: true, bptc: true, astc: false, webgpu: true });
 });

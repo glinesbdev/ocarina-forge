@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, createBackendRenderer, drawCount, drawTotal, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms } from "./backend.js";
+import { backendLabel, createBackendRenderer, drawCount, drawTotal, patchWebgpuBc7Format, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms } from "./backend.js";
 import { formatStats } from "./frame.js";
 
 test("WebGPU is the default and WebGL2 can be forced", () => {
@@ -156,4 +156,36 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
     if (locals.has(name)) continue;
     assert.equal(imported.has(name), true, `${name} is called but not imported from three/tsl`);
   }
+});
+
+test("patchWebgpuBc7Format maps BC7 before the r170 getFormat switch", () => {
+  const calls = [];
+  const utils = {
+    getFormat(texture) {
+      calls.push(texture);
+      return "not-bc7";
+    },
+  };
+  const renderer = { backend: { textureUtils: utils } };
+  assert.equal(patchWebgpuBc7Format(renderer), true);
+  assert.equal(utils.getFormat({ format: 36492, colorSpace: "srgb" }), "bc7-rgba-unorm-srgb");
+  assert.equal(utils.getFormat({ format: 36492, colorSpace: "" }), "bc7-rgba-unorm");
+  assert.equal(utils.getFormat({ format: 33779 }), "not-bc7");
+  assert.equal(calls.length, 1);
+  assert.equal(patchWebgpuBc7Format(renderer), true);
+});
+
+test("patchWebgpuBc7Format rewrites the r170 sRGB typo and hooks late textureUtils", () => {
+  const utils = {
+    getFormat(texture) {
+      if (texture && texture.format === 36492) return "bc7-rgba-srgb";
+      return "other";
+    },
+  };
+  const backend = {};
+  const renderer = { backend };
+  assert.equal(patchWebgpuBc7Format(renderer), false);
+  backend.textureUtils = utils;
+  assert.equal(utils.getFormat({ format: 36492, colorSpace: "srgb" }), "bc7-rgba-unorm-srgb");
+  assert.equal(utils.getFormat({ format: 1 }), "other");
 });

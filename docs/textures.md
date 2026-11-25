@@ -89,3 +89,7 @@ From the repo, with the venv active and the dump that contains `romfs`:
 ```
 
 `Lighter_Alb` should say `1024x1024`, footprint `8x5`, block height 1, `gob switch2`, flags `0x09`, swizzle `0x0000`. `Blend_A_Alb` should say footprint `6x6` and the same gob order. The PNGs should be straight bricks and plaster, not zigzag seams. In `tex-audit`, those two names should show `smoother switch2` with a lower switch2 score. A BC1 or BC4 name should say `gob tegra`. A `disagree` line is the one to paste back.
+
+## WebGPU compressed uploads
+
+On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r170's missing BC7 `getFormat` case is patched at init and by a Vite plugin. See `docs/rendering-performance.md`.

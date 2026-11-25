@@ -2,6 +2,7 @@ import { createReadStream, existsSync, cpSync } from "node:fs";
 import path from "node:path";
 import { defineConfig } from "vite";
 import { oneThreePlugin } from "./one-three.js";
+import { webgpuBptcPlugin } from "./webgpu-bptc-plugin.js";
 
 const basisDir = path.resolve("node_modules/three/examples/jsm/libs/basis");
 
@@ -53,7 +54,7 @@ export default defineConfig(({ mode }) => ({
             if (source === "three/webgpu" || source === "three/tsl") return { id: source, external: true };
           },
         }]
-      : [oneThreePlugin(threeWebgpu)]),
+      : [oneThreePlugin(threeWebgpu), webgpuBptcPlugin()]),
     basisTranscoder(),
   ],
   build: {

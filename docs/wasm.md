@@ -285,3 +285,7 @@ Child (the pack is already cached):
 
 Load-time numbers (`packBytes`, `memoryBytes`, JS heap) are logged when
 the surface is ready: `console.info("Local ground surface ready", …)`.
+
+## Field tab memory
+
+The WebGPU compressed-texture path and Field working-set measurements are in `docs/rendering-performance.md`.
