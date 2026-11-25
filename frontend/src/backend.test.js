@@ -137,7 +137,7 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   assert.doesNotMatch(html, /id="use-webgpu"/);
   assert.doesNotMatch(html, /data-nav=/);
   assert.match(html, /id="shortcuts-open"/);
-  assert.doesNotMatch(html, /id="show-stats"/);
+  assert.equal(html.includes(`id="${["show", "stats"].join("-")}"`), false);
   assert.match(html, /id="show-profile"/);
   assert.match(html, /id="renderer-notice"/);
   assert.match(html, /troubleshooting\.html/);

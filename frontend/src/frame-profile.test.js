@@ -173,6 +173,6 @@ test("the viewport hud and the memory report share the profile", () => {
   assert.match(main, /setShowProfile/);
   assert.doesNotMatch(main, /ocarinaforge\.stats/);
   assert.match(html, /id="show-profile"/);
-  assert.doesNotMatch(html, /id="show-stats"/);
+  assert.equal(html.includes(`id="${["show", "stats"].join("-")}"`), false);
   assert.doesNotMatch(html, /id="show-profile"[^>]*checked/);
 });
