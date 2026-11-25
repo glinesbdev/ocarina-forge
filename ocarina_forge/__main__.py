@@ -155,7 +155,11 @@ def main(argv: list[str] | None = None) -> None:
             parser.error("lighting-survey needs a banc path")
         raise SystemExit(print_lighting_survey(args.banc, dump=args.dump, as_json=args.json, out=args.out))
     if args.command == "lighting-mod":
-        raise SystemExit(print_lighting_mod(install=args.install, game=args.game, gfx_probe=args.gfx_probe))
+        # The flag is also read from argv. A probe install must not depend on
+        # the store_true attribute alone: the 6409840 run left the dynamic entry.
+        requested = list(argv if argv is not None else sys.argv[1:])
+        gfx_probe = bool(args.gfx_probe) or "--gfx-probe" in requested
+        raise SystemExit(print_lighting_mod(install=args.install, game=args.game, gfx_probe=gfx_probe))
     if args.command == "material-debug":
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
@@ -535,11 +539,17 @@ def print_lighting_mod(*, install: bool = False, game: str = "", gfx_probe: bool
         return 0
     try:
         dest = install_mod(root, gfx_probe=gfx_probe)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    kind = "gfx probe" if gfx_probe else "default"
-    print(f"Installed {dest} ({kind})")
+    main_js = dest / "main.js"
+    text = main_js.read_text(encoding="utf-8")
+    kind = "static import of longshot/gfx" if gfx_probe else "dynamic entry"
+    print(f"Installed {dest}")
+    print(f"main.js {main_js.stat().st_size} bytes, {kind}")
+    if gfx_probe and ("import(" in text or 'from "longshot/gfx"' not in text):
+        print(f"{main_js} is not the static gfx entry.", file=sys.stderr)
+        return 2
     return 0
 
 

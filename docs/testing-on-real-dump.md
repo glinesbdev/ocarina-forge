@@ -88,7 +88,15 @@ The capture mod is `ocarina_forge/lighting_capture/` (`mod.json` and `main.js` o
 
 On Windows, from the repo, with the game folder you actually run:
 
-Quit Longshot first. The spec's section 7.2 does not provide `import()`, and a run of that call logged `TypeError`. `--gfx-probe` installs the entry that static-imports `longshot/gfx` (its default export is the frozen namespace). The manifest asks for `gfx.world` as well as `state.read`, `actors.read`, and `storage`. Re-enable the mod after starting the game so the new permission is granted. A build without the module should omit `--gfx-probe`; that install does not static-import it.
+Quit Longshot first. The spec's section 7.2 does not provide a dynamic import, and a run of that call logged `TypeError` with the message that `import()` is not available. `--gfx-probe` installs the entry that static-imports `longshot/gfx` (its default export is the frozen namespace). The command prints `main.js` byte size and `static import of longshot/gfx`. The dynamic entry is the 1176-byte file; the probe install must not leave that file in place. The manifest asks for `gfx.world` as well as `state.read`, `actors.read`, and `storage`. A build without the module should omit `--gfx-probe`; that install does not static-import it.
+
+The game keeps grants in `<game>\dev\mods.json`, on the mod entry's `"granted"` array (spec section 12.4 names that field; this path is from the modding-with-editor build). Pre-granting avoids the in-game prompt:
+
+```json
+{ "id": "local/lighting-capture", "enabled": true, "granted": ["state.read", "actors.read", "storage", "gfx.world"] }
+```
+
+That array is the game's record of what the player allowed. It is not `mod.json`. Changing `mod.json` permissions still needs a restart so the game reads the manifest again.
 
 ```bat
 .venv\Scripts\python.exe -m ocarina_forge lighting-mod --install --gfx-probe --game E:\sw2\oot\stable\modding-with-editor

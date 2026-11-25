@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ocarina_forge.dump import Dump
 from ocarina_forge.fixtures import KOKIRI_STATIC, build_fixture
 from ocarina_forge.lighting import (
@@ -171,11 +173,17 @@ def test_install_copies_the_script_only(tmp_path):
 
 
 def test_gfx_probe_installs_the_static_import(tmp_path):
-    dest = install_mod(tmp_path / "game", gfx_probe=True)
+    from ocarina_forge.__main__ import main
+
+    game = tmp_path / "game"
+    with pytest.raises(SystemExit) as caught:
+        main(["lighting-mod", "--install", "--gfx-probe", "--game", str(game)])
+    assert caught.value.code == 0
+    dest = game / "mods" / "local" / "lighting-capture"
     text = (dest / "main.js").read_text(encoding="utf-8")
     assert text == (capture_root() / "probe.js").read_text(encoding="utf-8")
     assert 'import gfx from "longshot/gfx"' in text
-    assert 'import("longshot/gfx")' not in text
+    assert "import(" not in text
     shared = (dest / "capture.js").read_text(encoding="utf-8")
     assert 'from "longshot/gfx"' not in shared
     assert 'import gfx from "longshot/gfx"' not in shared

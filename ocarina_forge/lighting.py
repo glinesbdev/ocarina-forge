@@ -622,20 +622,44 @@ def _terrain_types(dump, banc: str) -> dict:
     }
 
 
+def _entry_ok(text: str, gfx_probe: bool) -> bool:
+    """The probe entry is a static import. The default entry is not."""
+    static = 'from "longshot/gfx"' in text
+    dynamic = "import(" in text
+    if gfx_probe:
+        return static and not dynamic and "forge-entry: gfx-probe" in text
+    return not static
+
+
 def install_mod(game: Path, *, gfx_probe: bool = False) -> Path:
     """Copy the capture mod into ``<game>/mods/local/lighting-capture``.
 
     The default entry does not static-import ``longshot/gfx``. ``gfx_probe``
     installs the static-import entry for a build that already reports
-    ``has("gfx.world")``.
+    ``has("gfx.world")``. The written ``main.js`` is checked before this
+    returns, so a probe install cannot leave the dynamic entry in place.
     """
     source = capture_root()
+    entry_name = "probe.js" if gfx_probe else "main.js"
+    entry_path = source / entry_name
+    if not entry_path.is_file():
+        raise FileNotFoundError(f"missing capture entry {entry_path}")
+    text = entry_path.read_text(encoding="utf-8")
+    if not _entry_ok(text, gfx_probe):
+        raise RuntimeError(f"{entry_path} is not the {'gfx probe' if gfx_probe else 'default'} entry")
     dest = Path(game).expanduser() / "mods" / "local" / "lighting-capture"
     dest.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source / "mod.json", dest / "mod.json")
+    (dest / "mod.json").write_text((source / "mod.json").read_text(encoding="utf-8"), encoding="utf-8")
     shutil.copyfile(source / "capture.js", dest / "capture.js")
-    entry = source / ("probe.js" if gfx_probe else "main.js")
-    shutil.copyfile(entry, dest / "main.js")
+    main_path = dest / "main.js"
+    if main_path.exists():
+        main_path.unlink()
+    main_path.write_text(text, encoding="utf-8", newline="\n")
+    written = main_path.read_text(encoding="utf-8")
+    if written != text or not _entry_ok(written, gfx_probe):
+        raise RuntimeError(
+            f"wrote the wrong entry to {main_path} ({main_path.stat().st_size} bytes)"
+        )
     stale = dest / "probe.js"
     if stale.is_file():
         stale.unlink()
