@@ -22,7 +22,7 @@ CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTexture
 
 ### GPU instancing
 
-Identical models already share one `BatchedMesh` per material (`batchKey`). Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Stats** shows `inst` for the live instance count.
+Identical models already share one `BatchedMesh` per material (`batchKey`). Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Profile** shows `inst` for the live instance count.
 
 ### Static batching (merge vs instances)
 
@@ -44,7 +44,7 @@ WebGPU supports `drawIndirect` and `multiDrawIndirect`. three r170 has no public
 
 ### Frustum culling
 
-Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; **Stats** shows `culled`.
+Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; **Profile** shows `culled`.
 
 ## Further wins (researched, not all implemented)
 
@@ -81,7 +81,9 @@ After `addGeometry` the part clone's typed arrays are released (`geometry-retain
 
 ## Profiling HUD
 
-The stats line's single frame time does not say whether the Field is bound on JavaScript or on the GPU. The Profile HUD splits that frame. It stays off until you open it, so timestamp queries are not recorded during ordinary editing.
+A one-line status label stays on the viewport. It names the backend that actually started (`WebGPU`, `WebGPU (WebGL2 fallback: …)`, or `WebGL (WebGPU unavailable: …)`), the page's short git revision, and the draw count. While models are still streaming it also shows `queued`, `loading`, or `background` when those counts are above zero. There is no Stats toggle. An old `ocarinaforge.stats` value is ignored.
+
+The Profile HUD is the rest of that readout, plus the CPU and GPU split. It stays off until you open it, so timestamp queries are not recorded during ordinary editing.
 
 Turn it on with the **Profile** checkbox on the viewport toolbar, with `P`, from the command palette ("Toggle frame profile"), or by opening the page with `?profile=1`. The checkbox is remembered in `ocarinaforge.profile`. Fly or orbit so the view keeps drawing. A still camera records the frames that were actually drawn. The GPU number fills in when the readback lands, a frame or two behind the CPU numbers.
 
@@ -89,11 +91,13 @@ The HUD shows the latest frame and the rolling average and p95 over the last 180
 
 - **CPU** — JavaScript in the frame. Update is fly, streaming, and labels. Cull is `syncBatchVisibility`. Submit is `renderer.render` on the CPU.
 - **GPU** — On WebGPU, a `timestamp-query` query set is written at the render-pass boundaries, resolved into a buffer, and mapped with `mapAsync`. On WebGL, and on the WebGPU renderer's WebGL2 fallback, the timer is `EXT_disjoint_timer_query_webgl2`. The line reads `n/a` when the adapter has neither, and when a WebGL disjoint sync throws the result away. It reads `…` until the first result arrives.
-- **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `sub` is the sum of `_multiDrawCount` (the folded WebGPU draws). `draws` is the same total the stats line already prints.
+- **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `sub` is the sum of `_multiDrawCount` (the folded WebGPU draws). `draws` is the same total the status label prints.
+- **fps, inst, culled, separate** — frame rate (`idle` when the view has settled), live instances, hidden instances, and the draw count those actors would cost without batching.
+- **queued, loading, loaded, background** — the model queue. `conv`, `tex`, `dl`, and `up` are this scene's convert, texture, download, and upload times. `warm` is the server warm-up. `detail` is the wait for the first nearby detailed batch. The server convert summary is the last of those lines, and **Dump JSON** keeps the recent convert log with it.
 - **tris, meshes, tex, heap** — triangles, resident unique meshes, resident textures on batches and terrain, and `performance.memory` when the browser exposes it. Otherwise the heap reads `n/a`.
 - **avg / p95** — mean and 95th percentile. GPU samples that have not come back are left out of the GPU average.
 
-While Profile is open, the stats line gains `cpu`, `gpu`, `cull`, `obj`, `batches`, and `sub`. `__forgeMemory().frame` includes `cpuMs`, `updateMs`, `cullMs`, `submitMs`, `gpuMs`, `objects`, `batches`, and `subDraws`. `__forgeMemory().profile` includes the rolling summary and the next-step line. `__forgeProfile()` returns the same capture the **Dump JSON** button copies to the clipboard and prints in the console:
+`__forgeMemory().frame` includes `cpuMs`, `updateMs`, `cullMs`, `submitMs`, `gpuMs`, `objects`, `batches`, and `subDraws`. `__forgeMemory().profile` includes the rolling summary and the next-step line. `__forgeProfile()` returns the same capture the **Dump JSON** button copies to the clipboard and prints in the console:
 
 ```js
 copy(JSON.stringify(__forgeProfile(), null, 2))
@@ -115,15 +119,15 @@ This checkout has no game dump, so there is no new Field split recorded here. Th
 ## How to measure
 
 1. Start `scripts/dev-wasm.bat` so Vite is on 47241 and the API on 47242. That launcher does not run pip or maturin, and it leaves 47231/47232 free. `scripts/dev.sh` and `scripts/dev.bat` are the normal launchers on 47231/47232.
-2. Open the viewer, turn **Stats** on (it is on by default), and load Hyrule Field Child. The line starts with the backend that actually started (`WebGPU`, or `WebGL (WebGPU unavailable: …)` with the reason). A plain `WebGL` from a stale `frontend/dist` or a cached module is not a WebGPU fallback. The short revision at the end of the line should match `/api/health`. See [troubleshooting.md](troubleshooting.md). Turn **Profile** on and orbit so frames keep coming. The stats line then shows the CPU and GPU split beside the usual counts.
+2. Open the viewer and load Hyrule Field Child. The status label names the backend that actually started (`WebGPU`, or `WebGL (WebGPU unavailable: …)` with the reason) and ends with the short revision. A plain `WebGL` from a stale `frontend/dist` or a cached module is not a WebGPU fallback. The revision should match `/api/health`. See [troubleshooting.md](troubleshooting.md). Turn **Profile** on and orbit so frames keep coming. The HUD then shows the CPU and GPU split beside the draw, instance, and streaming counts.
 3. In the devtools console, `copy(__forgeMemory())` after the background load finishes. The report includes texture format counts, geometry roles, unique models vs instances, draws, frame time, and the profile block. `copy(JSON.stringify(__forgeProfile(), null, 2))` is the short frame capture.
 4. Chrome's task manager (or a headless script using `--enable-precise-memory-info`) is the working-set number. JS heap alone under-reports GPU textures.
 
-`tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the stats line, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone. Defaults: `FORGE_WASM_MAX_WS_MB=10240` (kill the Chrome tree at that working set), `FORGE_WASM_MIN_FREE_MB=4096` (stop if system free RAM falls this low), `FORGE_WASM_MIN_FREE_START_MB=10240` (refuse to launch below that floor).
+`tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the status label, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone. Defaults: `FORGE_WASM_MAX_WS_MB=10240` (kill the Chrome tree at that working set), `FORGE_WASM_MIN_FREE_MB=4096` (stop if system free RAM falls this low), `FORGE_WASM_MIN_FREE_START_MB=10240` (refuse to launch below that floor).
 
 ## Measured numbers
 
-Dates and clock times are America/New_York, 25 Nov 2026, headless Chrome against `http://127.0.0.1:47241/` and the `ray-test` dump. The stats overlay stays `idle` until the camera moves, so frame time was not on the line during streaming. Draw counts below are from that overlay. The under-4 GB working-set goal is met at the 240 unique-mesh resident cap; see the last section.
+Dates and clock times are America/New_York, 25 Nov 2026, headless Chrome against `http://127.0.0.1:47241/` and the `ray-test` dump. Those runs read draw counts from the viewport overlay. It stayed `idle` until the camera moved, so frame time was not on the line during streaming. The under-4 GB working-set goal is met at the 240 unique-mesh resident cap; see the last section.
 
 ### Before (WebGPU, every packed map decoded to RGBA; extras already PNG)
 

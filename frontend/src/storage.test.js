@@ -31,7 +31,7 @@ test("bancwright settings are copied to ocarinaforge and a newer value wins", ()
     "ocarinaforge.stats": "1",
   });
   migrateStorage(storage);
-  assert.equal(storage.getItem("ocarinaforge.stats"), "1");
+  assert.equal(storage.getItem("ocarinaforge.stats"), null);
   assert.equal(storage.getItem("ocarinaforge.helperBoxes"), "{\"areas\":false}");
   assert.equal(storage.getItem("bancwright.stats"), "0");
 });

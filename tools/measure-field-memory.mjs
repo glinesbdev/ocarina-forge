@@ -105,7 +105,7 @@ async function heap(page) {
 
 async function snapshot(page, browser, tag) {
   const stats = await page.evaluate(() => {
-    const text = document.querySelector(".view-stats")?.textContent || "";
+    const text = document.querySelector(".view-status")?.textContent || "";
     const prepare = document.getElementById("scene-prepare-text")?.textContent || "";
     const title = document.getElementById("scene-prepare-title")?.textContent || "";
     const scene = document.getElementById("scene-name")?.textContent?.trim() || "";
@@ -155,7 +155,7 @@ async function clickScene(page, pattern) {
 }
 
 function parseLoadState() {
-  const stats = document.querySelector(".view-stats")?.textContent || "";
+  const stats = document.querySelector(".view-status")?.textContent || "";
   const prepare = document.getElementById("scene-prepare-text")?.textContent || "";
   const title = document.getElementById("scene-prepare-title")?.textContent || "";
   const live = document.getElementById("viewport")?.classList.contains("is-live");
@@ -220,7 +220,7 @@ async function waitForBackgroundIdle(page, timeout, browser) {
 }
 
 async function measureMovingFrame(page) {
-  const canvas = await page.$("#viewport canvas, .view-stats, #viewport");
+  const canvas = await page.$("#viewport canvas, .view-status, #viewport");
   const box = await page.$("#viewport");
   if (box) {
     const size = await box.boundingBox();

@@ -183,9 +183,7 @@ viewport = await createViewport($("viewport"), {
     }
   },
   onDeviceLost: (message) => toast(message, { persistent: true }),
-  onStats(text) {
-    const readout = $("stats-readout");
-    if (readout && readout.textContent !== text) readout.textContent = text;
+  onFrame() {
     refreshStreamLog();
   },
   onTransform: (id, translate, rotate, scale) => {
@@ -273,8 +271,6 @@ $("settings-form").addEventListener("submit", async (event) => {
 
 let streamAt = 0;
 function refreshStreamLog() {
-  const box = $("stream-readout");
-  if (!box) return;
   const now = performance.now();
   if (now - streamAt < 1000) return;
   streamAt = now;
@@ -286,7 +282,7 @@ function refreshStreamLog() {
         : "";
       const head = `server ${data.misses || 0} converted · ${data.hits || 0} cache hits · conv ${data.convertMs || 0} ms · tex ${data.textureMs || 0} ms${warm}`;
       const lines = (data.lines || []).slice(-8);
-      box.textContent = lines.length ? `${head}\n${lines.join("\n")}` : head;
+      if (viewport.setServerStatus) viewport.setServerStatus({ head, lines });
     })
     .catch(() => {});
 }
@@ -329,20 +325,6 @@ $("companion-pick").addEventListener("change", (event) => {
   state.companionPick = event.target.checked;
   if (state.raw) applyView(state.raw, { select: state.selected });
 });
-const statsBox = $("show-stats");
-if (statsBox) {
-  const statsOn = storedFlag("ocarinaforge.stats", true);
-  statsBox.checked = statsOn;
-  viewport.setShowStats(statsOn);
-  statsBox.addEventListener("change", () => {
-    viewport.setShowStats(statsBox.checked);
-    try {
-      localStorage.setItem("ocarinaforge.stats", statsBox.checked ? "1" : "0");
-    } catch {
-      /* private mode */
-    }
-  });
-}
 showRendererNotice();
 watchBuildSkew();
 const profileBox = $("show-profile");
@@ -3044,10 +3026,6 @@ function runCommand(id) {
   else if (id === "build") $("build-dialog").showModal();
   else if (id === "ground") {
     const box = $("show-ground");
-    box.checked = !box.checked;
-    box.dispatchEvent(new Event("change"));
-  } else if (id === "stats") {
-    const box = $("show-stats");
     box.checked = !box.checked;
     box.dispatchEvent(new Event("change"));
   } else if (id === "profile") {

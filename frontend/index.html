@@ -102,8 +102,7 @@
             <label class="check"><input id="show-labels" type="checkbox" checked /> All labels</label>
             <label class="check"><input id="show-companions" type="checkbox" checked /> Companion banc</label>
             <label class="check"><input id="companion-pick" type="checkbox" checked /> Pick companions</label>
-            <label class="check"><input id="show-stats" type="checkbox" checked /> Stats</label>
-            <label class="check" title="CPU and GPU frame split. Off until you need it, so timestamp queries stay out of the frame. P toggles this."><input id="show-profile" type="checkbox" /> Profile</label>
+            <label class="check" title="CPU and GPU frame split, plus the old stats counters. Off until you need it, so timestamp queries stay out of the frame. P toggles this."><input id="show-profile" type="checkbox" /> Profile</label>
             <span id="hot-status" class="hot-status" hidden></span>
             <label class="check" title="Auto uses the size rules. A metre cap also hides anything farther than that, except the selection.">Draw
               <select id="draw-distance">
@@ -149,12 +148,6 @@
           <div id="details-panel" class="scroll dock-panel"></div>
           <div id="changes-panel" class="scroll dock-panel"></div>
           <div id="problems-panel" class="scroll dock-panel"></div>
-          <div id="stats-panel" class="scroll dock-panel">
-            <p class="muted">Draw calls, triangles, and streaming. The same line sits on the view while Stats is checked. Profile, on the toolbar, adds the CPU and GPU split.</p>
-            <pre id="stats-readout">Waiting for a frame.</pre>
-            <p class="muted">Server convert log. conv and tex on the line above are this scene. dl is the glb download. up is decode and GPU upload.</p>
-            <pre id="stream-readout">No converts yet.</pre>
-          </div>
         </div>
         <div id="dock-badges" hidden>
           <span id="change-count" class="badge"></span>

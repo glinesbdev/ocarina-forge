@@ -66,7 +66,7 @@ The dump path and the open project are stored in `./ocarina-forge.local.yaml` (g
 
 ## If the view stays on WebGL
 
-The viewport **Stats** line names the renderer. `WebGPU` is a real WebGPU device. `WebGL (WebGPU unavailable: …)` means WebGPU was the choice and the view fell back; the reason is in the line and in a dismissible notice. Plain `WebGL` means this session asked for WebGL (`?renderer=webgl`), or the page is older than that label. The short git revision at the end of the line is the page. If it does not match the API, or a banner says the server is older, restart `scripts/dev.sh` and hard-reload. A cached `frontend/dist` (including `npm run build:webgl`) stays on the bundle that was last built. `?renderer=webgpu-strict` shows the reason and does not fall back. Details, Brave Shields, and the Linux Vulkan flags are in [docs/troubleshooting.md](docs/troubleshooting.md).
+The viewport status label names the renderer. `WebGPU` is a real WebGPU device. `WebGL (WebGPU unavailable: …)` means WebGPU was the choice and the view fell back; the reason is in the line and in a dismissible notice. Plain `WebGL` means this session asked for WebGL (`?renderer=webgl`), or the page is older than that label. The short git revision on that label is the page. If it does not match the API, or a banner says the server is older, restart `scripts/dev.sh` and hard-reload. A cached `frontend/dist` (including `npm run build:webgl`) stays on the bundle that was last built. `?renderer=webgpu-strict` shows the reason and does not fall back. Details, Brave Shields, and the Linux Vulkan flags are in [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## What you can do
 

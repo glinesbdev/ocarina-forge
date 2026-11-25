@@ -4,7 +4,7 @@
  * GPU samples stay null until a timestamp readback lands, and averages skip those.
  */
 
-import { formatTris } from "./frame.js";
+import { formatProfileDetail, formatTris } from "./frame.js";
 
 export const PROFILE_WINDOW = 180;
 export const PROFILE_READY_FRAMES = 12;
@@ -149,24 +149,30 @@ const TIMING_LABEL = {
 
 export function formatProfileHud({
   backend = "",
+  revision = "",
   mode = "none",
   gpuState = "unsupported",
   latest = {},
   summary,
   recommendation = "",
+  detail = null,
 } = {}) {
   const stats = summary || summarize([]);
   const timing = TIMING_LABEL[mode] || TIMING_LABEL.none;
   const name = backend || "renderer";
   const lines = [
     `profile · ${name} · ${timing} · ${stats.frames} frames`,
+  ];
+  if (revision) lines.push(revision);
+  lines.push(
     lineMs("cpu", latest.cpuMs, stats.cpuMs),
     `update ${fmtMs(latest.updateMs)} · cull ${fmtMs(latest.cullMs)} · submit ${fmtMs(latest.submitMs)}`,
     gpuLine(gpuState, latest.gpuMs, stats.gpuMs),
     lineMs("frame", latest.frameMs, stats.frameMs),
     `obj ${fmtInt(latest.objects)} · batches ${fmtInt(latest.batches)} · sub ${fmtInt(latest.subDraws)} · draws ${fmtInt(latest.draws)}`,
     `tris ${formatTris(latest.triangles)} · meshes ${fmtInt(latest.meshes)} · tex ${fmtInt(latest.textures)} · heap ${fmtHeap(latest.heapBytes)}`,
-  ];
+  );
+  if (detail) lines.push(...formatProfileDetail(detail));
   if (recommendation) lines.push(recommendation);
   return lines.join("\n");
 }
@@ -190,9 +196,11 @@ export function countTextures(materials) {
 
 export function buildCapture({
   backend = "",
+  revision = "",
   gpuMode = "none",
   gpuState = "unsupported",
   samples = [],
+  server = null,
   at = new Date().toISOString(),
 } = {}) {
   const frames = samples.map((sample) => ({ ...sample }));
@@ -201,10 +209,12 @@ export function buildCapture({
     version: 1,
     capturedAt: at,
     backend,
+    revision,
     gpuTiming: gpuMode,
     gpuState,
     frames,
     summary,
     recommendation: recommendNext(summary, { gpuState }),
+    server,
   };
 }

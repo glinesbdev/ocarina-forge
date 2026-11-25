@@ -129,19 +129,50 @@ test("a capture is json and counts resident textures once per source", () => {
   ]), 2);
 });
 
-test("the viewport hud, the stats line, and the memory report share the profile", () => {
+test("the hud carries the revision and the counters that used to be the stats line", () => {
+  const text = formatProfileHud({
+    backend: "WebGL (WebGPU unavailable: adapter is null)",
+    revision: "abcdef1",
+    mode: "webgl",
+    gpuState: "ready",
+    latest: { cpuMs: 4, gpuMs: 6, draws: 10, triangles: 1000 },
+    summary: summarize([{ cpuMs: 4, gpuMs: 6, draws: 10, triangles: 1000 }]),
+    detail: {
+      rendering: true,
+      fps: 19,
+      instances: 9000,
+      culled: 100,
+      separate: 12,
+      queued: 0,
+      loading: 1,
+      loaded: 8,
+    },
+    recommendation: "CPU and GPU are close.",
+  });
+  assert.match(text, /^profile · WebGL \(WebGPU unavailable: adapter is null\)/);
+  assert.match(text, /^abcdef1$/m);
+  assert.match(text, /^19 fps$/m);
+  assert.match(text, /9000 inst · 100 culled · 12 separate/);
+  assert.match(text, /0 queued · 1 loading · 8 loaded/);
+});
+
+test("the viewport hud and the memory report share the profile", () => {
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
-  const frame = readFileSync(new URL("./frame.js", import.meta.url), "utf8");
+  const profile = readFileSync(new URL("./frame-profile.js", import.meta.url), "utf8");
   const memory = readFileSync(new URL("./memory-report.js", import.meta.url), "utf8");
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   assert.match(viewport, /createFrameTimer/);
+  assert.match(viewport, /formatStatusLabel/);
   assert.match(viewport, /setShowProfile/);
+  assert.doesNotMatch(viewport, /setShowStats/);
   assert.match(viewport, /__forgeProfile/);
   assert.match(viewport, /syncBatchVisibility\(\)/);
-  assert.match(frame, /gpu n\/a/);
+  assert.match(profile, /gpu n\/a/);
   assert.match(memory, /subDraws/);
   assert.match(main, /setShowProfile/);
+  assert.doesNotMatch(main, /ocarinaforge\.stats/);
   assert.match(html, /id="show-profile"/);
+  assert.doesNotMatch(html, /id="show-stats"/);
   assert.doesNotMatch(html, /id="show-profile"[^>]*checked/);
 });

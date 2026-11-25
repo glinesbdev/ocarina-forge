@@ -1,8 +1,8 @@
 # Troubleshooting the renderer
 
-Forge tries WebGPU first. The viewport **Stats** line says which backend actually started, and why a fallback happened. The short git revision at the end of that line is the page you are looking at. `GET /api/health` returns the API process's `build.revision` and `build.committedAt`.
+Forge tries WebGPU first. The viewport status label says which backend actually started, and why a fallback happened. The short git revision on that label is the page you are looking at. `GET /api/health` returns the API process's `build.revision` and `build.committedAt`.
 
-## What the stats line means
+## What the status label means
 
 | Line starts with | What is running |
 | --- | --- |
@@ -13,13 +13,13 @@ Forge tries WebGPU first. The viewport **Stats** line says which backend actuall
 
 `?renderer=webgpu-strict` shows the reason and does not open the WebGL view. `?renderer=webgl` forces WebGL and stays a plain `WebGL` label.
 
-The first time a fallback happens, a dismissible notice shows the same reason and links here. Dismissing it stores that reason in `localStorage` under `ocarinaforge.webgpuNotice`. A different reason shows the notice again. The stats line keeps the reason either way. Details are also on the console as `WebGPU unavailable` or `WebGPU available`, including adapter info and a few device limits when the browser provided them.
+The first time a fallback happens, a dismissible notice shows the same reason and links here. Dismissing it stores that reason in `localStorage` under `ocarinaforge.webgpuNotice`. A different reason shows the notice again. The status label keeps the reason either way. Details are also on the console as `WebGPU unavailable` or `WebGPU available`, including adapter info and a few device limits when the browser provided them.
 
 ## Plain "WebGL" that went away after a restart
 
 A Brave window with `brave://flags/#enable-unsafe-webgpu` already enabled showed plain `WebGL`, with or without `?webgpu=1`. Restarting the Forge server made WebGPU start. The adapter was fine. The page was stale.
 
-That label is what `backendLabel` returns for anything that is not a `WebGPURenderer`. Two code paths construct a classic `WebGLRenderer` and used to stamp the stats string as the literal `WebGL`:
+That label is what `backendLabel` returns for anything that is not a `WebGPURenderer`. Two code paths construct a classic `WebGLRenderer` and used to stamp the status string as the literal `WebGL`:
 
 1. **The WebGL module graph.** `three.module.js` exports `WebGLRenderer`. `three.webgpu.js` does not. `createBackendRenderer` used that export as the signal to construct `WebGLRenderer`. A cached module, an old `frontend/dist`, a `webgl`-mode bundle (`npm run build:webgl`), or a Vite prebundle of `three` (`frontend/node_modules/.vite/deps/three.js`, which is `three.module.js`) still has `WebGLRenderer`. Boot then treated startup as a success, so the line never became `WebGPU (WebGL2 fallback)`.
 2. **three r170 swallows the WebGPU error.** `WebGPURenderer` sets `getFallback`. If `requestAdapter()` returns null or `requestDevice()` throws, `Renderer.init` logs `WebGPU is not available, running under WebGL2 backend` and swaps in `WebGLBackend`. Forge rejected that renderer and booted the classic WebGL graph, which labeled itself `WebGL`. The toast said "Using WebGL2" and did not say why. `texture-compression-bc` is not required to start (a missing BC7 feature decodes to RGBA later). A device lost after a good init does not swap in classic WebGL: the line stays `WebGPU`, and a toast says the device was lost.
@@ -30,9 +30,9 @@ That label is what `backendLabel` returns for anything that is not a `WebGPURend
 
 What to do:
 
-1. Hard-reload (Ctrl+Shift+R). Compare the revision at the end of **Stats** with `curl -s http://127.0.0.1:47232/api/health`.
+1. Hard-reload (Ctrl+Shift+R). Compare the revision on the status label with `curl -s http://127.0.0.1:47232/api/health`.
 2. If a banner says the server is older than the page, restart `scripts/dev.sh` so the API and Vite both come back. If it says the page is older, the browser or `frontend/dist` is stale.
-3. For `scripts/serve_editor.py`, rebuild with `npm run build` inside `frontend/`. `index.html` is `Cache-Control: no-cache`. Fingerprinted files under `assets/` are `public, max-age=31536000, immutable`. A WebGL-only `build:webgl` stays on WebGL on purpose, and the stats line says so.
+3. For `scripts/serve_editor.py`, rebuild with `npm run build` inside `frontend/`. `index.html` is `Cache-Control: no-cache`. Fingerprinted files under `assets/` are `public, max-age=31536000, immutable`. A WebGL-only `build:webgl` stays on WebGL on purpose, and the status label says so.
 
 ## Brave Shields and the WebGPU flag
 
@@ -60,4 +60,4 @@ adapter && (adapter.info || await adapter.requestAdapterInfo())
 const device = await adapter.requestDevice()
 ```
 
-`navigator.gpu` being `undefined` means the API is hidden (flag off, or this browser has no WebGPU). `requestAdapter()` returning `null` is the Shields / no-adapter case. A throw from `requestDevice()` is the message Forge puts on the stats line. The console object from Forge adds `code`, `adapterInfo`, and `limits` (`maxTextureDimension2D`, `maxBufferSize`, `maxStorageBufferBindingSize` when the adapter has them).
+`navigator.gpu` being `undefined` means the API is hidden (flag off, or this browser has no WebGPU). `requestAdapter()` returning `null` is the Shields / no-adapter case. A throw from `requestDevice()` is the message Forge puts on the status label. The console object from Forge adds `code`, `adapterInfo`, and `limits` (`maxTextureDimension2D`, `maxBufferSize`, `maxStorageBufferBindingSize` when the adapter has them).

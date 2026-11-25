@@ -63,7 +63,7 @@ export const SHORTCUT_GROUPS = [
     label: "View toggles",
     items: [
       { keys: "Esc", action: "Close a dialog, release mouse look, or clear the selection" },
-      { keys: "Stats", action: "The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line" },
+      { keys: "Status", action: "The viewport label stays on. It names the backend, including a WebGPU fallback reason, the page revision, and the draw count" },
       { keys: "P", action: "Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open" },
     ],
   },
@@ -88,7 +88,7 @@ export const SHORTCUT_GROUPS = [
     id: "windows",
     label: "Windows",
     items: [
-      { keys: "Window menu", action: "Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, Problems, and Stats" },
+      { keys: "Window menu", action: "Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, and Problems" },
       { keys: "Drag a tab", action: "Dock that panel beside another, or drop it on a tab to share the group" },
       { keys: "Drag a split", action: "Resize the panels" },
       { keys: "Double-click a tab, or Max", action: "Fill the window with that group. Do it again to restore" },

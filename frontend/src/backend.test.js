@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { backendLabel, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, initFailureReason, inspectWebGPU, patchWebgpuBc7Format, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
 import { buildNoticeId, buildNoticeVisible, describeBuildMismatch, dismissBuildNotice, shortRevision } from "./build-info.js";
-import { formatStats } from "./frame.js";
+import { formatStatusLabel } from "./frame.js";
 
 test("WebGPU is the default and WebGL2 can be forced", () => {
   assert.equal(rendererChoice(""), "webgpu");
@@ -99,39 +99,19 @@ test("the WebGL2 fallback is not labeled as real WebGPU", () => {
   assert.equal(backendLabel({ isWebGLRenderer: true }, { requested: "webgl", reason: "adapter is null" }), "WebGL");
   assert.equal(webgpuFallbackNote("adapter is null"), "WebGPU is unavailable (adapter is null). Using WebGL.");
   assert.equal(
-    formatStats({
-      backend: "WebGPU (WebGL2 fallback)",
-      rendering: true,
-      fps: 50,
-      frameMs: 20,
-      draws: 30,
-      instances: 12,
-      culled: 0,
-      separate: 40,
-      tris: 1000,
-    }),
-    "WebGPU (WebGL2 fallback) · 50 fps · 20 ms · 30 draws · 12 inst · 0 culled · 40 separate · 1k tris",
+    formatStatusLabel({ backend: "WebGPU (WebGL2 fallback)", draws: 30 }),
+    "WebGPU (WebGL2 fallback) · 30 draws",
   );
 });
 
-test("the stats line names the backend and the frame time", () => {
+test("the status label names the backend that actually started", () => {
   assert.equal(
-    formatStats({
-      backend: "WebGPU",
-      rendering: true,
-      fps: 58,
-      frameMs: 17.24,
-      draws: 40,
-      instances: 4000,
-      culled: 900,
-      separate: 10553,
-      tris: 80000,
-    }),
-    "WebGPU · 58 fps · 17.2 ms · 40 draws · 4000 inst · 900 culled · 10553 separate · 80k tris",
+    formatStatusLabel({ backend: "WebGPU", build: "abcdef1", draws: 40 }),
+    "WebGPU · abcdef1 · 40 draws",
   );
   assert.equal(
-    formatStats({ backend: "WebGL", rendering: false, fps: 60, frameMs: 16.6, draws: 240, separate: 10553, tris: 1600000 }),
-    "WebGL · idle · 16.6 ms · 240 draws · 10553 separate · 1.6M tris",
+    formatStatusLabel({ backend: "WebGL", draws: 240 }),
+    "WebGL · 240 draws",
   );
 });
 
@@ -157,7 +137,8 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   assert.doesNotMatch(html, /id="use-webgpu"/);
   assert.doesNotMatch(html, /data-nav=/);
   assert.match(html, /id="shortcuts-open"/);
-  assert.match(html, /id="show-stats" type="checkbox" checked/);
+  assert.doesNotMatch(html, /id="show-stats"/);
+  assert.match(html, /id="show-profile"/);
   assert.match(html, /id="renderer-notice"/);
   assert.match(html, /troubleshooting\.html/);
   const boot = readFileSync(new URL("./boot.js", import.meta.url), "utf8");
@@ -359,16 +340,11 @@ test("the stats line carries the page revision and a skew warning names the olde
   dismissBuildNotice(box, id);
   assert.equal(buildNoticeVisible(box, id), false);
   assert.equal(
-    formatStats({
+    formatStatusLabel({
       backend: "WebGL (WebGPU unavailable: adapter is null)",
-      rendering: true,
-      fps: 60,
-      frameMs: 16.6,
-      draws: 10,
-      separate: 10,
-      tris: 1000,
       build: "abcdef1",
+      draws: 10,
     }),
-    "WebGL (WebGPU unavailable: adapter is null) · 60 fps · 16.6 ms · 10 draws · 10 separate · 1k tris · abcdef1",
+    "WebGL (WebGPU unavailable: adapter is null) · abcdef1 · 10 draws",
   );
 });

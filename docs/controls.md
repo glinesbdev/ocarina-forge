@@ -46,7 +46,7 @@ The editor shows this same list with ? or the Shortcuts button.
 ## View toggles
 
 - Esc: Close a dialog, release mouse look, or clear the selection
-- Stats: The overlay starts on. The toolbar checkbox hides it. The Stats panel shows the same line
+- Status: The viewport label stays on. It names the backend, including a WebGPU fallback reason, the page revision, and the draw count
 - P: Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open
 
 ## Behavior graph
@@ -65,7 +65,7 @@ The editor shows this same list with ? or the Shortcuts button.
 
 ## Windows
 
-- Window menu: Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, Problems, and Stats
+- Window menu: Show or hide Viewport, Scenes, Actors, Inspector, Behavior, Details, Edits, and Problems
 - Drag a tab: Dock that panel beside another, or drop it on a tab to share the group
 - Drag a split: Resize the panels
 - Double-click a tab, or Max: Fill the window with that group. Do it again to restore

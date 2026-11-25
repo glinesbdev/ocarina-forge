@@ -57,7 +57,7 @@ export function drawTotal(info, webgpu, extra = 0) {
 }
 
 /**
- * Stats label. A WebGPURenderer on the WebGL2 backend must not read as real WebGPU.
+ * Status label. A WebGPURenderer on the WebGL2 backend must not read as real WebGPU.
  * Plain "WebGL" is only a session that asked for WebGL. When WebGPU was the choice
  * and a classic WebGLRenderer is what started, name the reason.
  */
