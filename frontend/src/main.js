@@ -36,6 +36,7 @@ let sceneOpenToken = 0;
 let sceneVisualLoad = 0;
 let sceneVisualBoxes = 0;
 let sceneVisualDeferred = 0;
+let sceneVisualResidentCapped = false;
 let sceneActorsReady = false;
 let sceneTerrainReady = true;
 const dock = createDock(document.getElementById("dock"), {
@@ -1056,6 +1057,7 @@ function updateSceneViewerProgress(info) {
   if (!info) return;
   sceneVisualBoxes = info.boxes || 0;
   sceneVisualDeferred = info.deferred || 0;
+  sceneVisualResidentCapped = Boolean(info.residentCapped);
   const extra = info.boxes ? ` · ${info.boxes} box actors` : "";
   setScenePreparation(
     "Loading scene in viewer",
@@ -1078,7 +1080,8 @@ function finishSceneViewerLoad(result = {}) {
     return;
   }
   let message = "All scene models are loaded.";
-  if (sceneVisualDeferred) message = "Visible detail is ready. The rest of the scene is loading in the background.";
+  if (sceneVisualResidentCapped) message = "Visible detail is ready. Distant models load as you move.";
+  else if (sceneVisualDeferred) message = "Visible detail is ready. The rest of the scene is loading in the background.";
   else if (sceneVisualBoxes) message = `Scene loaded with ${sceneVisualBoxes} box actor${sceneVisualBoxes === 1 ? "" : "s"}.`;
   setScenePreparation("Scene ready", message, 1, 1);
   window.setTimeout(() => {
@@ -1094,6 +1097,7 @@ async function openScene(banc, options = {}) {
   sceneVisualLoad = 0;
   sceneVisualBoxes = 0;
   sceneVisualDeferred = 0;
+  sceneVisualResidentCapped = false;
   sceneActorsReady = false;
   sceneTerrainReady = terrainAlreadyReady;
   setScenePreparation(`Preparing ${banc.split("/").pop()}`, "Reading scene and companion assets…");

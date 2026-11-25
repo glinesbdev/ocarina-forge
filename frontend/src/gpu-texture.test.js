@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chooseTexture, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport, VK_FORMAT } from "./gpu-texture.js";
+import { chooseTexture, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
+  releaseTextureCpu,
+  repairCompressedTexture, VK_FORMAT } from "./gpu-texture.js";
 
 function makePacked() {
   const ktx = new Uint8Array(104);
@@ -74,4 +76,42 @@ test("textureSupport reads WebGPU compression features from the renderer backend
     },
   };
   assert.deepEqual(textureSupport({}, renderer), { s3tc: true, bptc: true, astc: false, webgpu: true });
+});
+
+
+test("releaseTextureCpu drops mip and image buffers in place and is idempotent", () => {
+  const data = new Uint8Array(16).fill(7);
+  const image = { width: 4, height: 4, data: new Uint8Array(8).fill(3) };
+  const level = { width: 4, height: 4, data };
+  const mipmaps = [level];
+  const texture = {
+    userData: {},
+    source: { userData: {}, data: null },
+    mipmaps,
+    image,
+    needsUpdate: false,
+  };
+  assert.equal(releaseTextureCpu(texture), true);
+  assert.equal(texture.mipmaps, mipmaps);
+  assert.equal(texture.mipmaps[0], level);
+  assert.equal(texture.image, image);
+  assert.equal(texture.mipmaps[0].data.byteLength, 0);
+  assert.equal(texture.image.data.byteLength, 0);
+  assert.equal(texture.needsUpdate, false);
+  assert.equal(texture.userData.forgeCpuReleased, true);
+  assert.equal(texture.source.userData.forgeCpuReleased, true);
+  assert.equal(data.byteLength, 16);
+  assert.equal(releaseTextureCpu(texture), false);
+});
+
+test("repairCompressedTexture does not dirty a texture after CPU release", () => {
+  const texture = {
+    isCompressedTexture: true,
+    userData: { forgeCpuReleased: true },
+    mipmaps: [{ width: 4, height: 4, data: new Uint8Array(0) }],
+    image: { width: 4, height: 4 },
+    needsUpdate: false,
+  };
+  repairCompressedTexture(texture);
+  assert.equal(texture.needsUpdate, false);
 });

@@ -6,6 +6,10 @@
  *
  * Optional env: FORGE_WASM_URL, CHROME_PATH, FORGE_WASM_MEASURE_OUT, FORGE_WASM_LABEL,
  * FORGE_WASM_SCREENSHOT, FORGE_WASM_LOAD_MS (default 720000).
+ * FORGE_WASM_MAX_WS_MB (default 10240) kills the Chrome tree at that working set.
+ * FORGE_WASM_MIN_FREE_MB (default 4096) also stops if system free RAM falls this low.
+ * FORGE_WASM_MIN_FREE_START_MB (default 10240) refuses to launch if free RAM is below it.
+ * Only talks to 47241/47242. Does not start or stop 47231/47232.
  */
 import { writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -23,26 +27,38 @@ const label = process.env.FORGE_WASM_LABEL || "run";
 const out = process.env.FORGE_WASM_MEASURE_OUT || path.join(root, `measure-field-memory-${label}.json`);
 const shot = process.env.FORGE_WASM_SCREENSHOT || path.join(root, `measure-field-memory-${label}.png`);
 const loadMs = Number(process.env.FORGE_WASM_LOAD_MS || 720000);
+const maxWsMB = Number(process.env.FORGE_WASM_MAX_WS_MB || 10240);
+const minFreeMB = Number(process.env.FORGE_WASM_MIN_FREE_MB || 4096);
+const minFreeStartMB = Number(process.env.FORGE_WASM_MIN_FREE_START_MB || 10240);
 const POINTS = [
   { name: "island tree", x: -192.39, z: 506.95, want: 131.353 },
   { name: "field", x: 0, z: 0, want: 147.441 },
 ];
 
-function chromeMemoryMB(pid) {
+function systemAndChromeMemory(pid) {
+  const processId = Number(pid) || 0;
   const script = `
-    $procs = @(); $q = [System.Collections.Generic.Queue[int]]::new(); $q.Enqueue(${pid})
-    $seen = @{}
-    while ($q.Count) {
-      $id = $q.Dequeue(); if ($seen.ContainsKey($id)) { continue }; $seen[$id] = $true
-      $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$id" -ErrorAction SilentlyContinue
-      if (-not $proc) { continue }
-      $procs += $proc
-      Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $id } | ForEach-Object { $q.Enqueue([int]\$_.ProcessId) }
+    $os = Get-CimInstance Win32_OperatingSystem
+    $freeMB = [math]::Round($os.FreePhysicalMemory / 1KB, 1)
+    $totalMB = [math]::Round($os.TotalVisibleMemorySize / 1KB, 1)
+    $ws = 0; $pb = 0; $count = 0
+    if (${processId} -gt 0) {
+      $q = [System.Collections.Generic.Queue[int]]::new(); $q.Enqueue(${processId})
+      $seen = @{}
+      $ids = @()
+      while ($q.Count) {
+        $id = $q.Dequeue(); if ($seen.ContainsKey($id)) { continue }; $seen[$id] = $true
+        $ids += $id
+        Get-CimInstance Win32_Process -Filter "ParentProcessId=$id" -ErrorAction SilentlyContinue | ForEach-Object { $q.Enqueue([int]$_.ProcessId) }
+      }
+      $procs = Get-Process -Id $ids -ErrorAction SilentlyContinue
+      if ($procs) {
+        $count = @($procs).Count
+        $ws = [math]::Round((($procs | Measure-Object WorkingSet64 -Sum).Sum) / 1MB, 1)
+        $pb = [math]::Round((($procs | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB, 1)
+      }
     }
-    if (-not $procs.Count) { "{}" ; exit }
-    $ws = ($procs | Measure-Object WorkingSetSize -Sum).Sum
-    $pb = ($procs | Measure-Object PageFileUsage -Sum).Sum * 1024
-    @{ pid = ${pid}; processes = $procs.Count; workingSetMB = [math]::Round($ws / 1MB, 1); privateMB = [math]::Round($pb / 1MB, 1) } | ConvertTo-Json -Compress
+    @{ freeMB = $freeMB; totalMB = $totalMB; pid = ${processId}; processes = $count; workingSetMB = $ws; privateMB = $pb } | ConvertTo-Json -Compress
   `;
   try {
     const text = execFileSync("powershell.exe", ["-NoProfile", "-Command", script], { encoding: "utf8" });
@@ -50,6 +66,23 @@ function chromeMemoryMB(pid) {
   } catch {
     return null;
   }
+}
+
+function chromeMemoryMB(pid) {
+  const mem = systemAndChromeMemory(pid);
+  if (!mem) return null;
+  return { pid: mem.pid, processes: mem.processes, workingSetMB: mem.workingSetMB, privateMB: mem.privateMB, freeMB: mem.freeMB, totalMB: mem.totalMB };
+}
+
+function budgetBreach(mem) {
+  if (!mem) return null;
+  if (maxWsMB && mem.workingSetMB >= maxWsMB) {
+    return `Chrome working set ${mem.workingSetMB} MB reached the ${maxWsMB} MB cap`;
+  }
+  if (minFreeMB && mem.freeMB != null && mem.freeMB < minFreeMB) {
+    return `System free RAM ${mem.freeMB} MB fell below the ${minFreeMB} MB floor`;
+  }
+  return null;
 }
 
 async function heap(page) {
@@ -141,13 +174,14 @@ function parseLoadState() {
     queued: numberAfter("queued"),
     loading: numberAfter("loading"),
     background: numberAfter("background remaining"),
+    backgroundLoading: numberAfter("background loading"),
     loaded: numberAfter("loaded"),
     modelsDone: models ? Number(models[1]) : null,
     modelsTotal: models ? Number(models[2]) : null,
   };
 }
 
-async function waitForBackgroundIdle(page, timeout) {
+async function waitForBackgroundIdle(page, timeout, browser) {
   const deadline = Date.now() + timeout;
   let last = "";
   let stable = 0;
@@ -155,9 +189,21 @@ async function waitForBackgroundIdle(page, timeout) {
   while (Date.now() < deadline) {
     const state = await page.evaluate(parseLoadState);
     last = `${state.title} | ${state.prepare} | ${state.stats} | q=${state.queued} load=${state.loading} bg=${state.background} loaded=${state.loaded}`;
+    if (browser) {
+      const mem = chromeMemoryMB(browser.process()?.pid);
+      const reason = budgetBreach(mem);
+      if (reason) {
+        console.warn("memory cap", reason, JSON.stringify(mem));
+        return { ...state, last, capped: true, capReason: reason, capMemory: mem };
+      }
+    }
     const modelsDone = state.modelsTotal && state.modelsDone === state.modelsTotal;
-    const queuesClear = state.queued === 0 && state.loading === 0 && state.background === 0;
-    const done = state.live && state.loaded > 0 && queuesClear && (modelsDone || state.hidden || /scene ready/i.test(state.title) || /all scene models are loaded/i.test(state.prepare));
+    const foregroundIdle = state.queued === 0 && state.loading === 0 && !state.backgroundLoading;
+    const queuesClear = foregroundIdle && state.background === 0;
+    const residentIdle = foregroundIdle && (state.hidden || /scene ready/i.test(state.title)
+      || /visible detail is ready/i.test(state.prepare) || /all scene models are loaded/i.test(state.prepare)
+      || (state.background > 0 && state.loaded > 0));
+    const done = state.live && state.loaded > 0 && (queuesClear || residentIdle) && (modelsDone || residentIdle || state.hidden);
     if (done) {
       if (previous === last) stable += 1;
       else stable = 0;
@@ -217,6 +263,15 @@ async function samplePoints(page) {
     }
     return { ready: hook.ready(), meta: hook.meta(), rows };
   }, POINTS);
+}
+
+const bootMem = systemAndChromeMemory(0);
+console.log("boot memory", JSON.stringify(bootMem));
+if (!bootMem || bootMem.freeMB < minFreeStartMB) {
+  const message = `Refusing to launch Chrome: free RAM ${bootMem && bootMem.freeMB} MB is below the ${minFreeStartMB} MB start floor.`;
+  console.error(message);
+  await writeFile(out, JSON.stringify({ url, label, error: message, bootMem, started: new Date().toISOString() }, null, 2));
+  process.exit(2);
 }
 
 const browser = await puppeteer.launch({
@@ -283,10 +338,34 @@ try {
     }
   }, 60000);
 
-  const load = await waitForBackgroundIdle(page, loadMs);
+  const load = await waitForBackgroundIdle(page, loadMs, browser);
   clearInterval(midTimer);
   result.load = load;
   result.loadMs = Date.now() - started;
+  if (load && load.capped) {
+    result.capped = true;
+    result.capReason = load.capReason;
+    try {
+      result.moving = await measureMovingFrame(page);
+    } catch (error) {
+      result.movingError = String(error);
+    }
+    const ready = await snapshot(page, browser, "field-capped");
+    result.snapshots.push(ready);
+    try {
+      result.samples = await samplePoints(page);
+      await page.screenshot({ path: shot, type: "png" });
+      result.screenshot = shot;
+    } catch (error) {
+      result.capSampleError = String(error);
+    }
+    result.finished = new Date().toISOString();
+    await writeFile(out, JSON.stringify(result, null, 2));
+    console.log("capped", load.capReason);
+    console.log("wrote", out);
+    await browser.close();
+    process.exit(2);
+  }
   await page.evaluate(() => {
     if (typeof gc === "function") gc();
   });
@@ -302,7 +381,7 @@ try {
   const kokiri = await clickScene(page, "kokiri.*child|child.*kokiri");
   console.log("clicked kokiri", kokiri);
   if (kokiri) {
-    const kokiriLoad = await waitForBackgroundIdle(page, 180000);
+    const kokiriLoad = await waitForBackgroundIdle(page, 180000, browser);
     await measureMovingFrame(page);
     result.kokiri = { scene: await currentScene(page), load: kokiriLoad, ...(await snapshot(page, browser, "kokiri-ready")) };
     console.log("kokiri", JSON.stringify({ scene: result.kokiri.scene, stats: result.kokiri.stats, heap: result.kokiri.heap, chrome: result.kokiri.chrome }));

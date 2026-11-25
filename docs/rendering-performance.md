@@ -16,7 +16,7 @@ The largest cause on WebGPU was that packed KTX2 textures never actually uploade
 - **Template geometry.** After `partsFromTemplate` clones and bakes a mesh, the source template geometries are disposed. Actors keep their part geometries for picking; `BatchedMesh.addGeometry` still has its own copy. That drops one of the three CPU vertex copies per unique mesh.
 - **Instrumentation.** In development, `window.__forgeMemory()` (and `viewport.getMemoryReport()`) returns a per-category breakdown: textures by format (unique sources, not clones), geometries by role, unique models vs instances, draw counts, and frame time.
 
-CPU mip/ImageBitmap data for shared textures is not cleared after upload. Clones share the same source, and a later material would re-upload empty mips. Compressed mips are small once RGBA is gone.
+CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTextureCpu`). The source is marked so clones do not re-upload emptied mips. `repairCompressedTexture` will not set `needsUpdate` on a released texture.
 
 ## Techniques already in the viewer
 
@@ -53,7 +53,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Compressed GPU textures (BC7/BC1) | **4–8×** texture memory vs RGBA; often the difference between a Field tab surviving and OOM | Implemented this pass |
 | Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented this pass |
 | Frustum culling | Already removing off-screen instance draws | Already present |
-| Distance streaming / unload far unique models | Caps the working set to a budget; already has background fill, template prune, and first-mip then detail | Expand only if the compressed path is still over budget; screenshots must stay comparable |
+| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented this pass: background fill stops at 240 unique meshes (or 2.2 GB JS heap). Far meshes evict past 280 unique or 2.8 GB heap |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
 | Texture arrays / atlases | Fewer binds, more meshes in one batch; needs authoring or a pack step | Not implemented |
@@ -68,11 +68,11 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 3. In the devtools console, `copy(__forgeMemory())` after the background load finishes. The report includes texture format counts, geometry roles, unique models vs instances, draws, and frame time.
 4. Chrome's task manager (or a headless script using `--enable-precise-memory-info`) is the working-set number. JS heap alone under-reports GPU textures.
 
-`tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the stats line, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone.
+`tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the stats line, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone. Defaults: `FORGE_WASM_MAX_WS_MB=10240` (kill the Chrome tree at that working set), `FORGE_WASM_MIN_FREE_MB=4096` (stop if system free RAM falls this low), `FORGE_WASM_MIN_FREE_START_MB=10240` (refuse to launch below that floor).
 
 ## Measured numbers
 
-Dates and clock times are America/New_York, 25 Nov 2026, headless Chrome against `http://127.0.0.1:47241/` and the `ray-test` dump. The stats overlay stays `idle` until the camera moves, so frame time was not on the line during streaming. Draw counts below are from that overlay. A later full-load remasure (after shared-v3 rebuilds extras as BC7) is still needed for the under-4 GB goal.
+Dates and clock times are America/New_York, 25 Nov 2026, headless Chrome against `http://127.0.0.1:47241/` and the `ray-test` dump. The stats overlay stays `idle` until the camera moves, so frame time was not on the line during streaming. Draw counts below are from that overlay. The under-4 GB working-set goal is met at the 240 unique-mesh resident cap; see the last section.
 
 ### Before (WebGPU, every packed map decoded to RGBA; extras already PNG)
 
@@ -101,6 +101,34 @@ The RGBA column over-counts clones; unique-source accounting was added after thi
 
 ### After packing extras as BC7 (`shared-v3` / `models-53`)
 
-Not remasured in this session. First load after this change reconverts models into the new cache, then unique normals and ORM should upload as BC7 instead of decoded PNG. That is the remaining large memory win. Recheck with `tools/measure-field-memory.mjs` and `copy(__forgeMemory())` once convert finishes. Kokiri Forest Child and local Snap should still be checked after that rebuild.
+25 Nov 2026, America/New_York. The convert cache was rebuilt on a restarted 47242, then a headless Chrome run with a 10 GB working-set cap and a 4 GB free-RAM floor launched against 47241. Packed extras did upload as BC7 (caps `webgpu`/`bptc` true; no `bc7-rgba-srgb` fallback). That was not enough to finish the Field: the run stopped at **388 of 852** unique models when free RAM dropped below 4 GB (Chrome working set 8.97 GB, private 14.41 GB). JS heap was **4.67 GB**, already over the 4.19 GB V8 limit, so a full 852-model resident set would OOM the tab.
 
-Visuals: albedo should be unchanged. Data maps stay linear via `asDataMap`. Compare a Field screenshot from the same camera after the cache rebuild.
+| Checkpoint | Unique models | JS heap | Chrome working set | Private | Unique tex GPU (BC7 / RGBA / BC1) | Geo CPU | Draws | Frame |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Mid-load | 157 / 852 | 1.54 GB | 3.71 GB | 6.58 GB | 576 MB (601 / 167 / 17) | 239 MB | 7340 | — |
+| Mid-load | 260 / 852 | 2.05 GB | 4.60 GB | 8.30 GB | 977 MB | 424 MB | 5638 | — |
+| Mid-load | 310 / 852 | 3.53 GB | 7.31 GB | 11.85 GB | 1.43 GB | 605 MB | 5278 | — |
+| Mid-load | 370 / 852 | 4.11 GB | 8.27 GB | 13.43 GB | 1.75 GB | 777 MB | 4995 | — |
+| Capped (free RAM floor) | **388 / 852** | **4.67 GB** (limit 4.19) | **8.97 GB** | **14.41 GB** | **1.88 GB** (1226 / 646 / 9 MB; 2142 BC7 / 456 RGBA / 43 BC1) | **889 MB** | **5029** | **52.4 ms (~18 fps)** |
+
+`__forgeMemory()` at the cap: unique textures 2641 with **1.87 GB of CPU-side copies** still held in JS; geometries 888.8 MB (part and template-part were the same 2087 geometries counted twice, plus 446.8 MB in `BatchedMesh`). Snap still sampled (island tree y=131.35319, field y=147.44118).
+
+### After CPU texture release and a resident mesh budget
+
+The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. Unique meshes now have a residency budget: **240** (or **2.2 GB** JS heap) stops further loads. A farther resident is evicted only when a closer model needs the slot. A hard cap (**280** unique or **2.8 GB** heap) is the emergency brake. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
+
+Remeasured 25 Nov 2026, 10:13–10:23 AM America/New_York, same 10 GB working-set cap, 4 GB free-RAM floor, and 10 GB start-floor, only against 47241/47242. The headless wait stayed on the prepare banner until the 7-minute timeout because `foregroundSettled` still treated leftover deferred names as in-flight; the scene itself was idle at the cap after about 2.5 minutes (259 listed models, 241 unique meshes, 0 queued). Orbit, Snap, and a Field screenshot ran after that. A follow-up change marks the cap as settled so the "Scene ready" banner can hide.
+
+| Checkpoint | Unique meshes (listed) | JS heap | Chrome working set | Private | Unique tex GPU (BC7 / RGBA / BC1) | Tex CPU | Geo CPU | Draws | Frame |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Mid-load | 147 (154 / 852, 7 boxes) | 0.61 GB | 2.77 GB | 5.52 GB | 380 MB (315 / 63 / 2) | 70 MB | 216 MB | 7372 | — |
+| Resident cap, idle | **241** (259 / 852, 18 boxes) | **0.61 GB** | **3.18 GB** | 6.85 GB | **700 MB** (575 / 121 / 4) | **136 MB** | 426 MB | 5632 | — |
+| After orbit (field-ready) | **241** (259 / 852) | **0.62 GB** | **3.23 GB** | 6.93 GB | **700 MB** (575 / 121 / 4) | **136 MB** | 426 MB | **5632** | **50.3 ms (~19 fps)** |
+
+Compared with the models-53 cap at 388/852 (JS heap **4.67 GB**, working set **8.97 GB**, texture CPU **1.87 GB**): heap is about **7.5×** lower, working set is about **2.8×** lower and under 4 GB, and CPU texture copies fell from 1.87 GB to 136 MB. The tab no longer crosses the 4.19 GB V8 heap limit. Not every unique model stays resident; the other 593 stay queued as background and stream in when you get closer.
+
+Snap still sampled: island tree y=131.35319 (err 0.00019, median ~15 µs), field y=147.44118 (err 0.00018, median ~5 µs).
+
+Kokiri Forest Child switched and began loading (195 of 482 unique models when the 3-minute wait ended; the same "Scene ready" hang). Mid-load: JS heap 1.11 GB, working set 4.27 GB, private 8.01 GB, 2653 draws, 31.1 ms, texture CPU 89 MB / GPU 749 MB. A handful of `GLTFLoader: Couldn't load texture blob:` messages appeared at the scene switch; they did not crash the tab. Re-check the forest visually after the settled-banner fix.
+
+`tools/measure-field-memory.mjs` also gained a 10 GB Chrome working-set cap, a 4 GB free-RAM floor, and a 10 GB start-floor so a failed run cannot again knock down other servers on the machine. It treats a resident-capped idle load (`0 queued`, `0 loading`, leftover background remaining) as finished.

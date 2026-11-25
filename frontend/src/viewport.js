@@ -7,9 +7,17 @@ import { KTX2Loader } from "three/addons/loaders/KTX2Loader.js";
 import {
   createGpuTextureLoader,
   gpuTexturesEnabled,
+  releaseTextureCpu,
   repairCompressedTexture,
   textureSupport,
 } from "./gpu-texture.js";
+import {
+  overResidentHardCap,
+  overResidentSoftCap,
+  modelsToEvict,
+  uniqueResidentNames,
+  isWorsePriority,
+} from "./resident-budget.js";
 import { collectMemoryReport } from "./memory-report.js";
 import { geometryDecoder } from "./geometry-decoder.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
@@ -278,6 +286,7 @@ let convertSlots = 8;
   let scenePreview = null;
   let modelStage = null;
   const foregroundModelNames = new Set();
+  let modelPriority = new Map();
   const lastLoadDirection = new THREE.Vector3();
   const modelFrustum = new THREE.Frustum();
   const modelProjection = new THREE.Matrix4();
@@ -325,6 +334,78 @@ let convertSlots = 8;
     entry.material.dispose();
     entry.edgeMaterial.dispose();
     if (entry.label) entry.label.element.remove();
+  }
+
+  let textureCpuReleaseDirty = true;
+  let textureCpuReleaseInFlight = false;
+  const textureCpuReleaseFrames = new Map();
+
+  function collectLiveTextures() {
+    const textures = new Set();
+    for (const batch of batches) collectMaterialTextures(batch.mesh.material, textures);
+    for (const parsed of parsedTemplates.values()) {
+      for (const part of parsed.parts || []) collectMaterialTextures(part.material, textures);
+    }
+    if (terrainRoot) {
+      terrainRoot.traverse((child) => {
+        const materials = child.material ? (Array.isArray(child.material) ? child.material : [child.material]) : [];
+        for (const material of materials) collectMaterialTextures(material, textures);
+      });
+    }
+    return textures;
+  }
+
+  function sourceKey(texture) {
+    return (texture.source && (texture.source.uuid || texture.source.id)) || texture.uuid || texture.id;
+  }
+
+  function flushTextureCpuRelease() {
+    if (!textureCpuReleaseDirty || textureCpuReleaseInFlight) return;
+    const live = [...collectLiveTextures()];
+    const groups = new Map();
+    for (const texture of live) {
+      if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
+      const key = sourceKey(texture);
+      const group = groups.get(key) || [];
+      group.push(texture);
+      groups.set(key, group);
+    }
+    const ready = [];
+    for (const [key, group] of groups) {
+      if (group.some((texture) => texture.needsUpdate || texture.source?.needsUpdate)) {
+        textureCpuReleaseFrames.delete(key);
+        continue;
+      }
+      const frames = (textureCpuReleaseFrames.get(key) || 0) + 1;
+      textureCpuReleaseFrames.set(key, frames);
+      if (frames >= 3) ready.push(group[0]);
+    }
+    for (const key of [...textureCpuReleaseFrames.keys()]) {
+      if (!groups.has(key)) textureCpuReleaseFrames.delete(key);
+    }
+    if (!ready.length) {
+      textureCpuReleaseDirty = groups.size > 0;
+      // Keep drawing a couple of extra frames so new uploads can retire.
+      if ([...textureCpuReleaseFrames.values()].some((frames) => frames > 0 && frames < 3)) requestRender();
+      return;
+    }
+    textureCpuReleaseInFlight = true;
+    const device = renderer.backend && renderer.backend.device;
+    const wait = device && device.queue && typeof device.queue.onSubmittedWorkDone === "function"
+      ? device.queue.onSubmittedWorkDone()
+      : Promise.resolve();
+    void Promise.resolve(wait).catch(() => {}).then(() => {
+      for (const texture of ready) {
+        if (texture.needsUpdate || texture.source?.needsUpdate) continue;
+        releaseTextureCpu(texture);
+        textureCpuReleaseFrames.delete(sourceKey(texture));
+      }
+    }).finally(() => {
+      textureCpuReleaseInFlight = false;
+      textureCpuReleaseDirty = collectLiveTextures().size > 0
+        && [...collectLiveTextures()].some((texture) => !texture.userData?.forgeCpuReleased && !texture.source?.userData?.forgeCpuReleased);
+      if (textureCpuReleaseDirty) requestRender();
+    });
   }
 
   const TEXTURE_KEYS = [
@@ -1172,6 +1253,7 @@ let convertSlots = 8;
         || Number(needsConversion.has(a)) - Number(needsConversion.has(b))
         || left.distance - right.distance;
     });
+    if (updateForeground) modelPriority = priority;
   }
 
   function needsModelGeometry(gyaml) {
@@ -1208,6 +1290,103 @@ let convertSlots = 8;
     return pending;
   }
 
+  function heapBytes() {
+    return (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || 0;
+  }
+
+  function residentMeshNames() {
+    return uniqueResidentNames(entries.values());
+  }
+
+  function templateStillInUse(url) {
+    if (!url) return false;
+    for (const entry of entries.values()) {
+      if (entry.templateUrl === url && entry.parts && entry.parts.length) return true;
+    }
+    return false;
+  }
+
+  function unloadResidentModel(gyaml) {
+    const urls = new Set();
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml) continue;
+      if (entry.templateUrl) urls.add(entry.templateUrl);
+      hideSlots(entry);
+      entry.slots = [];
+      entry.parts = null;
+      entry.farNames = null;
+    }
+    modelLoads?.requeue(gyaml);
+    const keepUrls = [...parsedTemplates.keys()].filter((url) => templateStillInUse(url));
+    const keepTextures = liveTemplateTextures(keepUrls);
+    for (const url of urls) {
+      if (templateStillInUse(url)) continue;
+      // A parse that has not produced parts yet still owns this url.
+      if (templateCache.has(url) && !parsedTemplates.has(url)) continue;
+      disposeParsedTemplate(parsedTemplates.get(url), keepTextures);
+      parsedTemplates.delete(url);
+      templateCache.delete(url);
+      const at = templateOrder.indexOf(url);
+      if (at >= 0) templateOrder.splice(at, 1);
+    }
+  }
+
+  function proposeEvictForIncoming(incoming) {
+    if (!incoming) return [];
+    const names = residentMeshNames();
+    const heap = heapBytes();
+    if (!overResidentSoftCap(names.size, heap)) return [];
+    const incomingPri = modelPriority.get(incoming) || { tier: 5, distance: Infinity };
+    const selectedModel = entries.get(selected)?.gyaml;
+    const candidates = [];
+    for (const entry of entries.values()) {
+      if (!entry.parts || !entry.parts.length || !entry.gyaml) continue;
+      if (entry.gyaml === incoming || entry.gyaml === selectedModel) continue;
+      const pri = modelPriority.get(entry.gyaml) || { tier: 0, distance: 0 };
+      if (!isWorsePriority(pri, incomingPri)) continue;
+      const distance = Number.isFinite(pri.distance) ? pri.distance : entry.pivot.position.distanceToSquared(camera.position);
+      candidates.push({ name: entry.gyaml, distance });
+    }
+    return modelsToEvict(candidates, {
+      keep: new Set(),
+      count: names.size,
+      heapBytes: heap,
+      targetCount: names.size - 1,
+      maxEvict: 1,
+    });
+  }
+
+  function evictFarResidentModels() {
+    const names = residentMeshNames();
+    const heap = heapBytes();
+    // Count is enforced when launching. This path is the heap emergency brake.
+    if (heap < 1 || !overResidentHardCap(names.size, heap)) return 0;
+    const keep = new Set(foregroundModelNames);
+    const selectedModel = entries.get(selected)?.gyaml;
+    if (selectedModel) keep.add(selectedModel);
+    const nearest = new Map();
+    for (const entry of entries.values()) {
+      if (!entry.parts || !entry.parts.length || !entry.gyaml) continue;
+      const distance = entry.pivot.position.distanceToSquared(camera.position);
+      const prev = nearest.get(entry.gyaml);
+      if (prev == null || distance < prev) nearest.set(entry.gyaml, distance);
+    }
+    const candidates = [...nearest.entries()].map(([name, distance]) => ({ name, distance }));
+    let evict = modelsToEvict(candidates, { keep, count: names.size, heapBytes: heap });
+    if (!evict.length && overResidentHardCap(names.size, heap)) {
+      const pinned = new Set();
+      if (selectedModel) pinned.add(selectedModel);
+      evict = modelsToEvict(candidates, { keep: pinned, count: names.size, heapBytes: heap });
+    }
+    for (const name of evict) unloadResidentModel(name);
+    if (evict.length) {
+      queueRebuild();
+      textureCpuReleaseDirty = true;
+      requestRender();
+    }
+    return evict.length;
+  }
+
   function loadModels(token, actors, previewReady) {
     let names = new Set(actors.map((actor) => actor.gyaml).filter(Boolean));
     const queue = [...names];
@@ -1235,7 +1414,13 @@ let convertSlots = 8;
     const backgroundInFlight = () => Number(backgroundName !== null && !eligible(backgroundName));
     const foregroundInFlight = () => active.size - backgroundInFlight();
     const publish = (foregroundSettled) => {
-      const queued = demand ? queue.filter(eligible).length : queue.length;
+      const atCap = overResidentSoftCap(residentMeshNames().size, heapBytes());
+      let queued = 0;
+      for (const name of queue) {
+        if (!eligible(name)) continue;
+        if (atCap && !proposeEvictForIncoming(name).length) break;
+        queued += 1;
+      }
       const loading = foregroundInFlight();
       const deferred = queue.length - queued;
       const backgroundLoading = backgroundInFlight();
@@ -1253,6 +1438,8 @@ let convertSlots = 8;
         deferred: statDeferred + statBackgroundLoading,
         finished: idle,
         label: names.size ? `Models ${resolved.size} of ${names.size}` : "No actors",
+        resident: residentMeshNames().size,
+        residentCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()) && queue.length > 0,
       }, foregroundSettled);
       requestRender();
     };
@@ -1319,7 +1506,8 @@ let convertSlots = 8;
     function canFillMap() {
       return token === generation && demand && !previewPending && queue.length > 0
         && !streamInteractive && !scenePreview?.terrainPending && !active.size
-        && !eligible(queue[0]) && !modelStage?.pending.size;
+        && !eligible(queue[0]) && !modelStage?.pending.size
+        && !overResidentSoftCap(residentMeshNames().size, heapBytes());
     }
 
     function background() {
@@ -1356,15 +1544,26 @@ let convertSlots = 8;
       if (!started || token !== generation) return;
       const limit = Math.min(2, convertSlots);
       while (foregroundInFlight() < limit && eligible(queue[0])) {
+        const incoming = queue[0];
+        if (overResidentSoftCap(residentMeshNames().size, heapBytes())) {
+          const evict = proposeEvictForIncoming(incoming);
+          if (!evict.length) break;
+          for (const name of evict) unloadResidentModel(name);
+          queueRebuild();
+        }
+        if (overResidentSoftCap(residentMeshNames().size, heapBytes())) break;
         launch(queue.shift());
       }
-      const settled = !foregroundInFlight() && !eligible(queue[0]);
+      const cannotLaunchMore = !eligible(queue[0])
+        || (overResidentSoftCap(residentMeshNames().size, heapBytes()) && !proposeEvictForIncoming(queue[0]).length);
+      const settled = !foregroundInFlight() && cannotLaunchMore;
       const foregroundSettled = settled && !idle;
       idle = settled;
       publish(foregroundSettled);
       background();
+      evictFarResidentModels();
       if (modelStage) {
-        const keepPreview = previewPending || (demand && (queue.length > 0 || active.size > 0));
+        const keepPreview = previewPending || (demand && (!cannotLaunchMore || active.size > 0));
         if (settled && (!modelStage.done || modelStage.keepPreview !== keepPreview)) scheduleModelStage();
         modelStage.done = settled;
         modelStage.keepPreview = keepPreview;
@@ -1378,6 +1577,13 @@ let convertSlots = 8;
       background,
       get backgroundName() { return backgroundName; },
       dispose: pauseBackground,
+      requeue(gyaml) {
+        if (!gyaml) return;
+        resolved.delete(gyaml);
+        boxes.delete(gyaml);
+        if (names.has(gyaml) && !active.has(gyaml) && !queue.includes(gyaml)) queue.push(gyaml);
+        idle = false;
+      },
       update(nextActors, loading) {
         names = new Set(nextActors.map((actor) => actor.gyaml).filter(Boolean));
         for (let i = queue.length - 1; i >= 0; i -= 1) {
@@ -1476,6 +1682,7 @@ let convertSlots = 8;
 
   function asDataMap(map) {
     if (!map) return;
+    if (map.userData?.forgeCpuReleased || map.source?.userData?.forgeCpuReleased) return;
     map.colorSpace = THREE.LinearSRGBColorSpace;
     map.wrapS = THREE.RepeatWrapping;
     map.wrapT = THREE.RepeatWrapping;
@@ -2193,6 +2400,7 @@ let convertSlots = 8;
     entry.farNames = parsed.farNames;
     entry.templateUrl = url;
     entry.volume = false;
+    textureCpuReleaseDirty = true;
     stageModel(entry);
   }
 
@@ -2716,6 +2924,7 @@ uniform float terrainLayerMissing;`
     if (nextRoot) {
       scene.add(nextRoot);
       applyTerrainUniforms();
+      textureCpuReleaseDirty = true;
     }
     clearGround();
     applyGround();
@@ -3576,6 +3785,7 @@ uniform float terrainLayerMissing;`
       texture.needsUpdate = true;
     }
     delete texture.userData.forgeFullTexture;
+    textureCpuReleaseDirty = true;
   }
 
   function updateTextureDetail(now, parsedDetail) {
@@ -3775,6 +3985,7 @@ uniform float terrainLayerMissing;`
     }
     if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
     renderer.render(scene, camera);
+    flushTextureCpuRelease();
     if (gpuProfile) {
       const materials = [];
       for (const batch of batches) materials.push(batch.mesh.material);
@@ -3859,6 +4070,12 @@ uniform float terrainLayerMissing;`
     };
     report.backend = backendName;
     report.gpuCaps = gpuCaps;
+    report.resident = {
+      uniqueMeshes: residentMeshNames().size,
+      heapBytes: heapBytes(),
+      softCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()),
+      hardCapped: overResidentHardCap(residentMeshNames().size, heapBytes()),
+    };
     return report;
   }
 

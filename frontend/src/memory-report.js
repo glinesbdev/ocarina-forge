@@ -33,6 +33,7 @@ function textureExtent(texture) {
 }
 
 function mipCpuBytes(texture) {
+  if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) return 0;
   if (texture.isCompressedTexture && Array.isArray(texture.mipmaps)) {
     let total = 0;
     for (const level of texture.mipmaps) {

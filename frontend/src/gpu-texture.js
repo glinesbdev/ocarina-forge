@@ -75,6 +75,8 @@ export function minFilterFor(uploaded, width, height) {
 
 export function repairCompressedTexture(texture) {
   if (!texture || !texture.isCompressedTexture) return;
+  // Do not mark the texture dirty after the CPU copies have been dropped.
+  if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) return;
   const uploaded = (texture.mipmaps && texture.mipmaps.length) || 1;
   const width = (texture.image && texture.image.width) || 0;
   const height = (texture.image && texture.image.height) || 0;
@@ -82,6 +84,53 @@ export function repairCompressedTexture(texture) {
   texture.minFilter = minFilterFor(uploaded, width, height);
   texture.magFilter = 1006;
   texture.needsUpdate = true;
+}
+
+
+function emptyTexelData(data) {
+  if (!data) return data;
+  if (typeof data.byteLength === "number" && data.byteLength === 0) return data;
+  if (ArrayBuffer.isView(data)) return new data.constructor(0);
+  return data;
+}
+
+/**
+ * Drop CPU-side texel copies after the GPU has the allocation.
+ * Clones that share a Source or the same mipmaps array are marked together so
+ * a later material does not try to re-upload emptied mips.
+ */
+export function releaseTextureCpu(texture) {
+  if (!texture) return false;
+  const source = texture.source;
+  if (texture.userData?.forgeCpuReleased || source?.userData?.forgeCpuReleased) {
+    if (texture.userData) texture.userData.forgeCpuReleased = true;
+    return false;
+  }
+  // Mutate in place. Replacing texture.image or texture.mipmaps can bump
+  // three's version and cause a second upload of the emptied buffers.
+  const mipmaps = texture.mipmaps;
+  if (Array.isArray(mipmaps)) {
+    for (const level of mipmaps) {
+      if (level && level.data && level.data.byteLength) level.data = emptyTexelData(level.data);
+    }
+  }
+  const image = texture.image || (source && source.data);
+  if (image && typeof image.close === "function") {
+    try {
+      image.close();
+    } catch {
+      /* ImageBitmap already closed */
+    }
+  } else if (image && image.data && image.data.byteLength) {
+    image.data = emptyTexelData(image.data);
+  }
+  texture.userData = texture.userData || {};
+  texture.userData.forgeCpuReleased = true;
+  if (source) {
+    source.userData = source.userData || {};
+    source.userData.forgeCpuReleased = true;
+  }
+  return true;
 }
 
 export function gpuTexturesEnabled(search, stored) {
