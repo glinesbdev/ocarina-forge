@@ -353,8 +353,8 @@ def _decode_block(block: bytes, log2: int) -> list[float] | None:
 def _fill_isolated_zeros(values: list[float]) -> list[float]:
     """Copy a horizontal neighbour into an exact 0 that sits between real heights.
 
-    A dashed column is one sample wide. A broad patch of zeros is left alone,
-    so a tile that is actually flat at the origin stays flat.
+    A dashed column is one sample wide. A broad patch of zeros is left for
+    ``_uncover_sentinel_zeros``: those samples are missing, not ground at the origin.
     """
     out = list(values)
     for _pass in range(2):
@@ -376,10 +376,14 @@ def _fill_isolated_zeros(values: list[float]) -> list[float]:
     return out
 
 
+def _uncover_sentinel_zeros(values: list[float]) -> list[float]:
+    """Exact 0 left after dashed-column repair is uncovered, not a height at the origin."""
+    return [float("nan") if value == 0.0 else value for value in values]
+
 def _as_floats(block: bytes) -> list[float] | None:
     tight = SIZE * SIZE * 4
     if len(block) == tight:
-        return list(struct.unpack_from(f"<{SIZE * SIZE}f", block))
+        return _uncover_sentinel_zeros(_fill_isolated_zeros(list(struct.unpack_from(f"<{SIZE * SIZE}f", block))))
     chosen = _decode_block(block, _HEIGHT_LOG2)
     if chosen is None:
         return None
@@ -399,7 +403,7 @@ def _as_floats(block: bytes) -> list[float] | None:
                 best_zeros = alt_zeros
                 best_rough = alt_rough
         chosen = best
-    return _fill_isolated_zeros(chosen)
+    return _uncover_sentinel_zeros(_fill_isolated_zeros(chosen))
 
 
 def _accept_layers(values: list[int]) -> list[int] | None:

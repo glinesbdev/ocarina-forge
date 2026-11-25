@@ -16,9 +16,9 @@ from pathlib import Path
 from ocarina_forge.actors import ROLLING_ROCK_LAND
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats import terrain as heightmap
-from ocarina_forge.formats.phive import read_mesh_shape
 from ocarina_forge.models import CacheMiss, _cached_glb, cache_dir, describe_actor, describe_terrain
 from ocarina_forge.scene import scene_view, sibling_bancs
+from ocarina_forge.world_surface import physical_triangles, rolling_rock_map, terrain_actor
 
 
 TERRAIN = "@terrain"
@@ -42,8 +42,7 @@ def preview_path(dump, banc: str) -> Path:
     return cache_dir() / "scene-preview-v2" / f"{key}.glb"
 
 
-def _rolling_rock_map(banc: str) -> bool:
-    return banc in {KOKIRI_CHILD + part + ".bcett.byml.zs" for part in ("Static", "Dynamic")}
+_rolling_rock_map = rolling_rock_map
 
 
 def corrected_terrain_path(dump, banc: str, digest: str) -> Path | None:
@@ -51,7 +50,7 @@ def corrected_terrain_path(dump, banc: str, digest: str) -> Path | None:
         return None
     scene = re.sub(r"_(?:Static|Dynamic)(?=\.bcett\.byml(?:\.zs)?$)", "", banc)
     key = hashlib.sha256(f"{dump.root}\0{scene}\0{digest}".encode()).hexdigest()
-    version = "scene-terrain-v9" if scene.startswith("Banc/HyruleField/HyruleField_") else "scene-terrain-v8"
+    version = "scene-terrain-v10" if scene.startswith("Banc/HyruleField/HyruleField_") else "scene-terrain-v9"
     return cache_dir() / version / f"{key}.glb"
 
 
@@ -62,12 +61,7 @@ def terrain_fit_pending(dump, banc: str, terrain: dict) -> bool:
     return bool(path and not path.is_file() and not path.with_suffix(".none").is_file())
 
 
-_SURFACE = re.compile(r"(?:ground|floor|road|path|terrain|rockarea)(?:_|$)", re.IGNORECASE)
-_SCENERY = re.compile(r"detail|scenery|interior|inside|underground|house|roof|bridge|foliage|tree|water", re.IGNORECASE)
-
-
-def _terrain_actor(name: str) -> bool:
-    return name.startswith("Land_") and bool(_SURFACE.search(name)) and not _SCENERY.search(name)
+_terrain_actor = terrain_actor
 
 
 def _scene_actors(dump, banc, known):
@@ -97,15 +91,8 @@ def _entrance_starts(actors: list[dict]) -> list[list[float]]:
     return starts
 
 
-def _entrance_collision(dump, name: str) -> list[list[float]]:
-    path = f"Phive/Shape/Dcc/{name}__Physical.Nin_Ounce_NVN2.bphsh"
-    for suffix in (".zs", ""):
-        try:
-            payload, _ = dump.read_file(path + suffix)
-        except (BancError, OSError):
-            continue
-        return read_mesh_shape(payload)
-    return []
+def _entrance_collision(dump, name: str) -> list:
+    return [list(item) for item in physical_triangles(dump, name)]
 
 
 def prepare_scene_terrain(dump, banc: str, terrain: dict, *, actors=None, prepare_missing: bool = True) -> Path | None:

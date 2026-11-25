@@ -3,10 +3,12 @@
 ``python -m ocarina_forge ground-debug Banc/HyruleCastle/HyruleCastle_Static.bcett.byml.zs --at 27.2,-55.5``
 
 The report names the GameBancParam and the TSCB, the world extent of every
-tile, and the height at each requested x,z. Actors whose name or gyaml
-contains fairy or gossip are sampled too. A second ``--at`` can be repeated.
-The Static or Dynamic sibling is included in that actor list. The tile clip
-is the one the opened banc uses.
+tile, and the composed world height at each requested x,z: the finest
+height tile, plus Land_* island, cliff, soil, and hill meshes, taking the
+highest surface. A remaining exact 0 on a tile is no height, not the origin.
+Actors whose name or gyaml contains fairy or gossip are sampled too. A
+second ``--at`` can be repeated. The Static or Dynamic sibling is included
+in that actor list. The tile clip is the one the opened banc uses.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from ocarina_forge.actors import format_hash, read_vec
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats import terrain as heightmap
 from ocarina_forge.modeldebug import scene_files
+from ocarina_forge.world_surface import collect_terrain_surfaces, compose_height, query_bounds
 
 
 def parse_at(text: str) -> tuple[float, float]:
@@ -87,7 +90,7 @@ def _bilinear(heights: list[float], fx: float, fz: float) -> float | None:
         return heights[z * size + x]
 
     samples = (at(z0, x0), at(z0, x1), at(z1, x0), at(z1, x1))
-    if not all(_finite(item) for item in samples):
+    if not all(_finite(item) and item != 0.0 for item in samples):
         return None
     h00, h10, h01, h11 = samples
     return h00 * (1 - tx) * (1 - tz) + h10 * tx * (1 - tz) + h01 * (1 - tx) * tz + h11 * tx * tz
@@ -285,7 +288,10 @@ def _sample(report: dict, x: float, z: float) -> dict:
         fx = (unit_x - x0) / edge * span
         fz = (unit_z - z0) / edge * span
         raw = _bilinear(heights, fx, fz)
-        world = None if raw is None else raw * height_scale + origin[1]
+        if raw is None or raw == 0.0:
+            world = None
+        else:
+            world = raw * height_scale + origin[1]
         hits.append(
             {
                 "layer": tile["layer"],
@@ -341,13 +347,25 @@ def inspect_ground(dump, banc: str, points: list[tuple[float, float]]) -> dict:
     samples = []
     if report.get("kind") == "heightmap":
         seen = set()
+        unique = []
         for x, z in queries:
             key = (round(x, 4), round(z, 4))
             if key in seen:
                 continue
             seen.add(key)
+            unique.append((x, z))
+        surfaces = collect_terrain_surfaces(dump, banc, bounds=query_bounds(unique, pad=250.0))
+        report["surfaceTriangles"] = surfaces.count
+        for x, z in unique:
             sample = _sample(report, x, z)
+            tile = sample.get("drawn")
+            tile_y = None if not tile else tile.get("worldY")
+            mesh = surfaces.sample(x, z)
+            world_y, source, mesh = compose_height(tile_y, mesh)
             sample["label"] = ""
+            sample["worldY"] = world_y
+            sample["source"] = source
+            sample["mesh"] = None if not mesh else {"gyaml": mesh.get("gyaml"), "worldY": mesh.get("worldY"), "source": mesh.get("source")}
             samples.append(sample)
         for sample, actor in _label_samples(samples, actors):
             sample["label"] = actor
@@ -443,13 +461,23 @@ def render_text(report: dict) -> str:
         label = f"  {sample['label']}" if sample.get("label") else ""
         lines.append(f"  xz {_fmt(sample['x'])} {_fmt(sample['z'])}{label}")
         drawn = sample.get("drawn")
-        if not drawn:
-            lines.append("    no height tile covers this point")
+        world_y = sample.get("worldY")
+        source = sample.get("source")
+        mesh = sample.get("mesh")
+        if world_y is None and not drawn and not mesh:
+            lines.append("    no height")
         else:
-            lines.append(
-                f"    drawn {drawn['layer']} {drawn['name']} edge {_fmt(drawn['edge'])}  "
-                f"raw {_fmt(drawn['raw'])}  worldY {_fmt(drawn['worldY'])}"
-            )
+            if source:
+                lines.append(f"    worldY {_fmt(world_y)}  from {source}")
+            if mesh:
+                lines.append(f"    mesh {mesh.get('gyaml')} {_fmt(mesh.get('worldY'))}  {mesh.get('source') or ''}".rstrip())
+            if drawn:
+                lines.append(
+                    f"    tile {drawn['layer']} {drawn['name']} edge {_fmt(drawn['edge'])}  "
+                    f"raw {_fmt(drawn['raw'])}  worldY {_fmt(drawn['worldY'])}"
+                )
+            elif not mesh:
+                lines.append("    no height tile covers this point")
         for hit in sample.get("hits") or []:
             if drawn and hit["name"] == drawn["name"] and hit["layer"] == drawn["layer"] and hit["edge"] == drawn["edge"]:
                 continue

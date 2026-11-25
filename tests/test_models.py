@@ -623,7 +623,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-51", "faa08674aa836b47b25b513825bf6ce88d5d31f33bde457a9e7913b43e836a5c")
+    pinned = ("models-52", "19e7045c1037a719bb30b20a43fd4527b661dc5423c600cdf2a8ebdadb766f0a")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -1124,16 +1124,11 @@ def test_heightmap_without_an_index_is_earth_and_a_failed_tscb_is_not_the_proxy(
     os.utime(flat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
     model_mod._FILE_SIG.clear()
     floor = describe_terrain(dump, KOKIRI_STATIC)
-    assert floor["status"] == "mesh"
+    assert floor["status"] == "none"
     assert "terrain proxy" not in (floor.get("reason") or "")
     floor_row = next(row for row in floor["tiles"] if row.get("name") == "Flat_00")
-    assert floor_row["status"] == "drawn"
-    assert floor_row["holes"] == 0
-    floor_glb = (tmp_path / "cache" / floor["digest"][:2] / f"{floor['digest']}.glb").read_bytes()
-    floor_doc, floor_blob = _glb_parts(floor_glb)
-    floor_prim = floor_doc["meshes"][0]["primitives"][0]
-    floor_y = _accessor_floats(floor_doc, floor_blob, floor_prim["attributes"]["POSITION"], 3)
-    assert any(abs(point[1]) < 1e-3 for point in floor_y)
+    assert floor_row["holes"] == SIZE * SIZE
+    assert any("non-finite" in (row.get("reason") or "") for row in floor["tiles"])
     flat.write_bytes(_hght([float("nan")] * (SIZE * SIZE)))
     stamp = flat.stat()
     os.utime(flat, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
@@ -1165,10 +1160,10 @@ def test_swizzled_heights_round_trip():
     assert abs(decoded[0] - 0.5) < 1e-5
 
 
-def test_zero_is_ground_and_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
+def test_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
     from ocarina_forge.formats.terrain import SIZE, build_scene
 
-    coarse = [0.0] * (SIZE * SIZE)
+    coarse = [0.1] * (SIZE * SIZE)
     hole = [float("nan")] * (SIZE * SIZE)
     parts, reports = build_scene(
         [
@@ -1186,7 +1181,7 @@ def test_zero_is_ground_and_a_hole_in_the_fine_tile_keeps_the_coarse_cell():
     assert by_name["Fine"].status != "drawn"
     assert by_name["Fine"].holes == SIZE * SIZE
     assert "non-finite" in by_name["Fine"].reason
-    assert any(abs(y - 2.0) < 1e-4 for part in parts for _x, y, _z in part.positions)
+    assert any(abs(y - 3.0) < 1e-4 for part in parts for _x, y, _z in part.positions)
 
     fine = [0.2] * (SIZE * SIZE)
     _punched, punched_reports = build_scene(

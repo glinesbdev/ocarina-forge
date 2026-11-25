@@ -3,10 +3,13 @@
 ``python -m ocarina_forge height-diff results.json --dump <dump>``
 
 Game points come from a height-check storage JSON (a ``heights`` summary plus
-``heights:<area>:<chunk>`` compact row arrays). Forge ground uses the same
-height-tile bilinear sample as ``ground-debug``. Forge water uses WaterPlane
-(and WaterSurface) actor placements: the model's surface-shape AABB, scaled
-and rotated the way the scene stores ``Rotate`` (extrinsic XYZ, ``Rz · Ry · Rx``).
+``heights:<area>:<chunk>`` compact row arrays). Forge ground is the composed
+world surface used by ``ground-debug``: the finest height tile (a leftover
+exact 0 is no height) plus Land_* island, cliff, soil, and hill meshes,
+taking the highest surface under the point. Forge water uses WaterPlane
+(and WaterSurface) Front/Surface mesh triangles with the actor transform
+(extrinsic XYZ, ``Rz · Ry · Rx``), not the surface AABB, and the highest
+real surface at that XZ wins.
 """
 
 from __future__ import annotations
@@ -16,13 +19,21 @@ import math
 import statistics
 from pathlib import Path
 
-from ocarina_forge.actors import read_vec
 from ocarina_forge.errors import BancError
-from ocarina_forge.formats import bfres as fres
 from ocarina_forge.formats.terrain import TerrainError
 from ocarina_forge.grounddebug import _load, _sample
-from ocarina_forge.modeldebug import scene_files
-from ocarina_forge.models import _actor_plan
+from ocarina_forge.world_surface import (
+    MeshIndex,
+    _euler_xyz,
+    collect_terrain_surfaces,
+    collect_water_surfaces,
+    compose_height,
+    inverse_euler_xyz,
+    is_water_plane,
+    local_to_world,
+    query_bounds,
+    world_to_local,
+)
 
 WORST_N = 10
 _FLAT = 0.02
@@ -46,9 +57,6 @@ _ROW_FIELDS = (
     "ground_hit",
     "skipped",
 )
-
-_SURFACE_MARK = ("surface", "front")
-_SKIP_WATER = ("eftloc",)
 
 
 def banc_for_map(map_name: str) -> str:
@@ -134,170 +142,42 @@ def _row_point(fields: list, row: list) -> dict:
     }
 
 
-def is_water_plane(gyaml: str) -> bool:
-    text = (gyaml or "").lower()
-    if not text or any(text.startswith(prefix) for prefix in _SKIP_WATER):
-        return False
-    return "waterplane" in text or "watersurface" in text
+def collect_water_planes(dump, banc: str, cache: dict | None = None, bounds=None):
+    """WaterPlane / WaterSurface Front/Surface meshes on a banc and its sibling.
+
+    Returns ``(MeshIndex, plane records)``. Callers that only need to query a
+    point can pass the index to ``sample_water``.
+    """
+    return collect_water_surfaces(dump, banc, cache, bounds=bounds)
 
 
-def _euler_xyz(rx: float, ry: float, rz: float, vx: float, vy: float, vz: float) -> tuple[float, float, float]:
-    """Apply extrinsic XYZ (Rz · Ry · Rx) to a vector."""
-    cx, sx = math.cos(rx), math.sin(rx)
-    cy, sy = math.cos(ry), math.sin(ry)
-    cz, sz = math.cos(rz), math.sin(rz)
-    x1, y1, z1 = vx, vy * cx - vz * sx, vy * sx + vz * cx
-    x2, y2, z2 = x1 * cy + z1 * sy, y1, -x1 * sy + z1 * cy
-    return x2 * cz - y2 * sz, x2 * sz + y2 * cz, z2
+def sample_water(planes, x: float, z: float) -> dict | None:
+    """Highest water surface whose mesh contains this XZ point.
 
-
-def inverse_euler_xyz(rx: float, ry: float, rz: float, vx: float, vy: float, vz: float) -> tuple[float, float, float]:
-    """Inverse of extrinsic XYZ: Rx^{-1} · Ry^{-1} · Rz^{-1}."""
-    cx, sx = math.cos(rx), math.sin(rx)
-    cy, sy = math.cos(ry), math.sin(ry)
-    cz, sz = math.cos(rz), math.sin(rz)
-    x1, y1, z1 = vx * cz + vy * sz, -vx * sz + vy * cz, vz
-    x2, y2, z2 = x1 * cy - z1 * sy, y1, x1 * sy + z1 * cy
-    return x2, y2 * cx + z2 * sx, -y2 * sx + z2 * cx
-
-
-def local_to_world(local, translate, rotate, scale) -> tuple[float, float, float]:
-    sx, sy, sz = scale
-    vx, vy, vz = local[0] * sx, local[1] * sy, local[2] * sz
-    rx, ry, rz = rotate
-    wx, wy, wz = _euler_xyz(rx, ry, rz, vx, vy, vz)
-    return wx + translate[0], wy + translate[1], wz + translate[2]
-
-
-def world_to_local(world, translate, rotate, scale) -> tuple[float, float, float]:
-    sx, sy, sz = (s if s else 1.0 for s in scale)
-    vx, vy, vz = world[0] - translate[0], world[1] - translate[1], world[2] - translate[2]
-    lx, ly, lz = inverse_euler_xyz(rotate[0], rotate[1], rotate[2], vx, vy, vz)
-    return lx / sx, ly / sy, lz / sz
-
-
-def _union_aabb(boxes: list[dict]) -> dict | None:
-    mins_x, mins_y, mins_z, maxs_x, maxs_y, maxs_z = [], [], [], [], [], []
-    for box in boxes:
-        lo = box.get("min")
-        hi = box.get("max")
-        if not lo or not hi or len(lo) < 3 or len(hi) < 3:
-            continue
-        mins_x.append(float(lo[0]))
-        mins_y.append(float(lo[1]))
-        mins_z.append(float(lo[2]))
-        maxs_x.append(float(hi[0]))
-        maxs_y.append(float(hi[1]))
-        maxs_z.append(float(hi[2]))
-    if not mins_x:
+    ``planes`` is a ``MeshIndex`` or an iterable of dicts with world-space
+    ``triangles``. Surface AABBs are not used.
+    """
+    if planes is None:
         return None
-    return {
-        "min": [min(mins_x), min(mins_y), min(mins_z)],
-        "max": [max(maxs_x), max(maxs_y), max(maxs_z)],
-    }
-
-
-def model_surface_bounds(dump, gyaml: str, cache: dict) -> dict | None:
-    """Local AABB of a water-plane model's surface (or front) shapes."""
-    if gyaml in cache:
-        return cache[gyaml]
-    bounds = None
-    try:
-        plan, _tried, referenced = _actor_plan(dump, gyaml)
-    except BancError:
-        cache[gyaml] = None
-        return None
-    if not referenced:
-        cache[gyaml] = None
-        return None
-    blob = None
-    for item in plan:
-        if item[0] == "file" and (dump.romfs / item[1]).is_file():
-            try:
-                blob, _ = dump.read_file(item[1])
-            except (BancError, OSError):
-                blob = None
-            if blob:
-                break
-        elif item[0] == "blob" and len(item) > 2:
-            blob = item[2]
-            break
-    if blob:
-        try:
-            report = fres.inspect(blob)
-        except (fres.FresError, ValueError, OSError):
-            report = {"models": []}
-        boxes = []
-        surface = []
-        for model in report.get("models") or []:
-            for shape in model.get("shapes") or []:
-                box = shape.get("after") or shape.get("before") or shape.get("fileBounds")
-                if not box:
-                    continue
-                boxes.append(box)
-                name = str(shape.get("name") or "").lower()
-                if any(mark in name for mark in _SURFACE_MARK) and "back" not in name.split("__")[0]:
-                    surface.append(box)
-        bounds = _union_aabb(surface or boxes)
-    cache[gyaml] = bounds
-    return bounds
-
-def collect_water_planes(dump, banc: str, cache: dict | None = None) -> list[dict]:
-    """WaterPlane / WaterSurface actors on a banc and its Static/Dynamic sibling."""
-    cache = cache if cache is not None else {}
-    planes = []
-    for relative in scene_files(dump, banc):
-        try:
-            document, _dict_id, _payload = dump.read_byml(relative)
-        except BancError:
-            continue
-        actors = document.get("Actors") if isinstance(document, dict) else None
-        if not isinstance(actors, list):
-            continue
-        for index, actor in enumerate(actors):
-            if not isinstance(actor, dict):
-                continue
-            gyaml = str(actor.get("Gyaml") or "")
-            if not is_water_plane(gyaml):
-                continue
-            bounds = model_surface_bounds(dump, gyaml, cache)
-            if not bounds:
-                continue
-            planes.append(
-                {
-                    "banc": relative,
-                    "index": index,
-                    "gyaml": gyaml,
-                    "translate": read_vec(actor, "Translate", [0.0, 0.0, 0.0]),
-                    "rotate": read_vec(actor, "Rotate", [0.0, 0.0, 0.0]),
-                    "scale": read_vec(actor, "Scale", [1.0, 1.0, 1.0]),
-                    "local": bounds,
-                }
-            )
-    return planes
-
-
-def sample_water(planes: list[dict], x: float, z: float) -> dict | None:
-    """Highest water surface whose local XZ box contains this point."""
-    hit = None
+    if isinstance(planes, MeshIndex):
+        return planes.sample(x, z)
+    index = MeshIndex()
     for plane in planes:
-        local = plane["local"]
-        lo, hi = local["min"], local["max"]
-        rotate = plane["rotate"]
-        mid_y = 0.5 * (lo[1] + hi[1])
-        world_y = plane["translate"][1] + plane["scale"][1] * mid_y
-        lx, ly, lz = world_to_local((x, world_y, z), plane["translate"], rotate, plane["scale"])
-        if not (lo[0] <= lx <= hi[0] and lo[2] <= lz <= hi[2]):
-            continue
-        _wx, surface_y, _wz = local_to_world((lx, hi[1], lz), plane["translate"], rotate, plane["scale"])
-        if hit is None or surface_y > hit["worldY"]:
-            hit = {"worldY": surface_y, "gyaml": plane["gyaml"], "banc": plane["banc"], "index": plane["index"]}
-    return hit
+        meta = {
+            "gyaml": plane.get("gyaml"),
+            "banc": plane.get("banc"),
+            "index": plane.get("index"),
+            "source": "visual",
+        }
+        for triangle in plane.get("triangles") or ():
+            index.add(tuple(triangle), meta)
+    return index.sample(x, z)
 
-
-def sample_ground_at(report: dict, x: float, z: float) -> dict:
+def sample_ground_at(report: dict, x: float, z: float, surfaces: MeshIndex | None = None) -> dict:
     if report.get("kind") != "heightmap":
-        return {"worldY": None, "drawn": None, "nearSeam": False}
+        mesh = None if surfaces is None else surfaces.sample(x, z)
+        world_y, source, mesh = compose_height(None, mesh)
+        return {"worldY": world_y, "drawn": None, "nearSeam": False, "source": source, "mesh": mesh}
     sample = _sample(report, x, z)
     drawn = sample.get("drawn")
     near = False
@@ -318,11 +198,16 @@ def sample_ground_at(report: dict, x: float, z: float) -> dict:
                     fz = (unit[1] - z0) / edge if edge else 0.5
                     near = fx <= _SEAM_EDGE or fx >= 1 - _SEAM_EDGE or fz <= _SEAM_EDGE or fz >= 1 - _SEAM_EDGE
                 break
+    tile_y = None if not drawn else drawn.get("worldY")
+    mesh = None if surfaces is None else surfaces.sample(x, z)
+    world_y, source, mesh = compose_height(tile_y, mesh)
     return {
-        "worldY": None if not drawn else drawn.get("worldY"),
+        "worldY": world_y,
         "drawn": drawn,
         "nearSeam": near,
         "hits": sample.get("hits") or [],
+        "source": source,
+        "mesh": None if not mesh else {"gyaml": mesh.get("gyaml"), "worldY": mesh.get("worldY"), "source": mesh.get("source")},
     }
 
 
@@ -450,15 +335,17 @@ def detect_patterns(entries: list[dict], ground_pairs: list[tuple[float, float]]
 def compare_area(dump, area: dict, banc: str, water_cache: dict) -> dict:
     points = area.get("points") or []
     ground_report = _load(dump, banc)
-    planes = collect_water_planes(dump, banc, water_cache)
+    bounds = query_bounds([(point["x"], point["z"]) for point in points], pad=80.0)
+    surfaces = collect_terrain_surfaces(dump, banc, water_cache, bounds=bounds)
+    water_index, planes = collect_water_planes(dump, banc, water_cache, bounds=bounds)
     entries = []
     ground_pairs = []
     water_pairs = []
     mismatches = []
     for point in points:
         x, z = point["x"], point["z"]
-        ground = sample_ground_at(ground_report, x, z)
-        water = sample_water(planes, x, z)
+        ground = sample_ground_at(ground_report, x, z, surfaces)
+        water = sample_water(water_index, x, z)
         game_ground = point.get("ground_y") if point.get("ground_hit") else None
         game_water = point.get("water_y") if point.get("water_hit") else None
         forge_ground = ground.get("worldY")
@@ -499,12 +386,14 @@ def compare_area(dump, area: dict, banc: str, water_cache: dict) -> dict:
                 "forgeHasWater": forge_has,
                 "nearSeam": ground.get("nearSeam"),
                 "tile": drawn.get("name"),
+                "groundSource": ground.get("source"),
+                "groundActor": None if not ground.get("mesh") else ground["mesh"].get("gyaml"),
                 "waterActor": None if not water else water.get("gyaml"),
             }
         )
 
     def resample(x: float, z: float):
-        sampled = sample_ground_at(ground_report, x, z).get("worldY")
+        sampled = sample_ground_at(ground_report, x, z, surfaces).get("worldY")
         return sampled if _finite(sampled) else None
 
     patterns = detect_patterns(entries, ground_pairs, resample)
@@ -528,15 +417,12 @@ def compare_area(dump, area: dict, banc: str, water_cache: dict) -> dict:
                 "gyaml": plane["gyaml"],
                 "banc": plane["banc"],
                 "translate": plane["translate"],
-                "surfaceY": local_to_world(
-                    (0.0, plane["local"]["max"][1], 0.0),
-                    plane["translate"],
-                    plane["rotate"],
-                    plane["scale"],
-                )[1],
+                "surfaceY": plane.get("surfaceY"),
             }
             for plane in planes
         ],
+        "surfaceTriangles": surfaces.count,
+        "waterTriangles": water_index.count,
         "pointCount": len(points),
         "ground": error_stats(ground_pairs),
         "water": error_stats(water_pairs),

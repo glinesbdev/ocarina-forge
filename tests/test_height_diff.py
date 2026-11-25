@@ -17,7 +17,15 @@ from ocarina_forge.heightdiff import (
     world_to_local,
     _euler_xyz,
 )
+from ocarina_forge.world_surface import MeshIndex
 
+
+
+def _quad(x0, z0, x1, z1, y):
+    return [
+        (x0, y, z0, x1, y, z0, x1, y, z1),
+        (x0, y, z0, x1, y, z1, x0, y, z1),
+    ]
 
 def test_banc_for_map_uses_static_sibling():
     assert banc_for_map("KokiriForest_Child") == "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs"
@@ -96,26 +104,20 @@ def test_euler_roundtrip_and_yaw_only_water_box():
     assert abs(inv[0] - vx) < 1e-9
 
 
-def test_sample_water_uses_scaled_aabb_and_picks_higher_surface():
+def test_sample_water_uses_mesh_triangles_and_picks_higher_surface():
     low = {
         "gyaml": "LowPlane",
         "banc": "a",
         "index": 0,
-        "translate": [0.0, 10.0, 0.0],
-        "rotate": [0.0, 0.0, 0.0],
-        "scale": [2.0, 1.0, 2.0],
-        "local": {"min": [-5.0, 0.0, -5.0], "max": [5.0, 0.0, 5.0]},
+        "triangles": _quad(-10.0, -10.0, 10.0, 10.0, 10.0),
     }
     high = {
         "gyaml": "HighPlane",
         "banc": "a",
         "index": 1,
-        "translate": [0.0, 12.5, 0.0],
-        "rotate": [0.0, 0.0, 0.0],
-        "scale": [1.0, 1.0, 1.0],
-        "local": {"min": [-1.0, 0.0, -1.0], "max": [1.0, 0.0, 1.0]},
+        "triangles": _quad(-1.0, -1.0, 1.0, 1.0, 12.5),
     }
-    # Scale 2 makes the low plane cover 10 m; a point at x=8 is inside low, outside high.
+    # A hole in the high mesh leaves the low surface; a gap in both is dry.
     inside_low = sample_water([low, high], 8.0, 0.0)
     assert inside_low["gyaml"] == "LowPlane"
     assert abs(inside_low["worldY"] - 10.0) < 1e-9
@@ -123,6 +125,15 @@ def test_sample_water_uses_scaled_aabb_and_picks_higher_surface():
     assert overlap["gyaml"] == "HighPlane"
     assert abs(overlap["worldY"] - 12.5) < 1e-9
     assert sample_water([low, high], 20.0, 0.0) is None
+    # An AABB would fill x=0,z=0 on a ring; the mesh does not.
+    ring = {
+        "gyaml": "Ring",
+        "banc": "a",
+        "index": 2,
+        "triangles": _quad(-5.0, -5.0, -1.0, 5.0, 11.0) + _quad(1.0, -5.0, 5.0, 5.0, 11.0),
+    }
+    assert sample_water([ring], 0.0, 0.0) is None
+    assert sample_water([ring], 3.0, 0.0)["gyaml"] == "Ring"
 
 
 def test_error_stats_and_constant_offset_pattern():
@@ -167,25 +178,28 @@ def test_water_mismatch_and_render(monkeypatch):
     def fake_load(_dump, _banc):
         return {"kind": "heightmap", "source": "TerrainArc/Field/Field.tscb", "tiles": [], "origin": [0, 0, 0], "scale": 1, "heightScale": 1}
 
-    def fake_ground(_report, x, z):
+    def fake_ground(_report, x, z, _surfaces=None):
         return {"worldY": 9.0 if x == 0 else 11.25, "drawn": {"name": "t0", "edge": 10, "layer": "main"}, "nearSeam": False}
 
-    def fake_planes(_dump, _banc, _cache):
-        return [
+    def fake_planes(_dump, _banc, _cache=None, bounds=None):
+        water = MeshIndex()
+        for triangle in _quad(-1.0, -1.0, 1.0, 1.0, 10.0):
+            water.add(triangle, {"gyaml": "Obj_LakeHrl_WaterPlane_A_05", "banc": "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs", "index": 0, "source": "visual"})
+        planes = [
             {
                 "gyaml": "Obj_LakeHrl_WaterPlane_A_05",
                 "banc": "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs",
                 "index": 0,
                 "translate": [0.0, 10.0, 0.0],
-                "rotate": [0.0, 0.0, 0.0],
-                "scale": [1.0, 1.0, 1.0],
-                "local": {"min": [-1.0, 0.0, -1.0], "max": [1.0, 0.0, 1.0]},
+                "surfaceY": 10.0,
             }
         ]
+        return water, planes
 
     monkeypatch.setattr("ocarina_forge.heightdiff._load", fake_load)
     monkeypatch.setattr("ocarina_forge.heightdiff.sample_ground_at", fake_ground)
     monkeypatch.setattr("ocarina_forge.heightdiff.collect_water_planes", fake_planes)
+    monkeypatch.setattr("ocarina_forge.heightdiff.collect_terrain_surfaces", lambda *_args, **_kwargs: MeshIndex())
 
     report = compare_area(None, area, "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs", {})
     assert report["ground"]["count"] == 2
