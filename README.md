@@ -12,30 +12,17 @@ The editor browses every banc scene in a dump, moves and edits actors in a 3D vi
 
 Ocarina Forge reads a dump you already own. It does not ship, and this repository must not contain, game files, models, textures, or Nintendo text.
 
-## Run it on Linux
+## Run it
 
-Python 3.11 or newer, Node 20 or newer, and a Rust toolchain with Cargo.
+Windows: double-click `build.bat`.
+
+Linux:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-./scripts/dev.sh
+./build.sh
 ```
 
-Then open http://127.0.0.1:47231.
-
-The development launcher builds and verifies the Rust extension before it starts the server.
-
-## Run it on Windows
-
-Install Python 3.11 or newer, Node 20 or newer, and a Rust toolchain with Cargo, then run:
-
-```bat
-scripts\dev.bat
-```
-
-The launcher creates the virtual environment and frontend dependencies when needed, builds the native extension, and starts the editor. It finds `libunwind.dll` on `PATH` and makes it available to the server and its worker processes. If the DLL is in a nonstandard directory, set `OCARINA_FORGE_NATIVE_DLL_DIR` to that directory before launching.
+Python 3.11 or newer and Node 20 or newer are the usual prerequisites. The builder creates the virtual environment, installs Python and frontend packages, builds the editor when its sources changed, and opens http://127.0.0.1:47231. The API listens on 127.0.0.1:47232. Rust is installed only when the committed wasm module is out of date with `native/`. The first run can ask for a game dump; later runs are one click. Flags, saved settings, and the per-OS installers are in [docs/builder.md](docs/builder.md).
 
 A project lives in `~/.local/share/ocarina-forge/projects/<name>/` unless `OCARINA_FORGE_PROJECTS` says otherwise. The mod id is `local/<name>`. Saving a Longshot mod installs it under the test game, `~/Games/Longshot/mod-test` unless `OCARINA_FORGE_GAME` is set.
 
@@ -50,7 +37,7 @@ python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 --model Land_K
 
 `edit` needs `--id`. That class is placed more than once in Kokiri child, and a match of several actors writes nothing and exits non-zero. The sign above is Static `KokiriForest_013`, hash `0x4a13f8880eb01a43`. Rotate is radians. Scale is `set` when the banc already has `Scale`, and `add` when it does not. An `add` grows the file and waits for the next process start. The export log says so. `mod-export` writes `build/mod` only when an actor still differs from the dump, and `--install` copies that folder to `<game>/mods/local/kokiri-sign/`. `profile` times one model in a private cache, so a cold `cache=miss` does not mean the key changed. A scene walk stays one model at a time unless you pass `--jobs`, and `--limit N` stops each scene early. It does not measure the browser.
 
-The API listens on 127.0.0.1:47232. Vite proxies `/api` to it. `scripts/dev.sh` starts both and stops the API when you quit.
+The API listens on 127.0.0.1:47232. The editor on 47231 proxies `/api` to it. `build.bat` and `./build.sh` start both and stop the API when you quit.
 
 The first screen asks for the dump folder, the one that contains `romfs`. On a typical Longshot install that is:
 
@@ -66,7 +53,7 @@ The dump path and the open project are stored in `./ocarina-forge.local.yaml` (g
 
 ## If the view stays on WebGL
 
-The viewport status label names the renderer. `WebGPU` is a real WebGPU device. `WebGL (WebGPU unavailable: …)` means WebGPU was the choice and the view fell back; the reason is in the line and in a dismissible notice. Plain `WebGL` means this session asked for WebGL (`?renderer=webgl`), or the page is older than that label. The short git revision on that label is the page. If it does not match the API, or a banner says the server is older, restart `scripts/dev.sh` and hard-reload. A cached `frontend/dist` (including `npm run build:webgl`) stays on the bundle that was last built. `?renderer=webgpu-strict` shows the reason and does not fall back. Details, Brave Shields, and the Linux Vulkan flags are in [docs/troubleshooting.md](docs/troubleshooting.md).
+The viewport status label names the renderer. `WebGPU` is a real WebGPU device. `WebGL (WebGPU unavailable: …)` means WebGPU was the choice and the view fell back; the reason is in the line and in a dismissible notice. Plain `WebGL` means this session asked for WebGL (`?renderer=webgl`), or the page is older than that label. The short git revision on that label is the page. If it does not match the API, or a banner says the server is older, restart `build.bat` or `./build.sh` and hard-reload. A cached `frontend/dist` (including `npm run build:webgl`) stays on the bundle that was last built. `?renderer=webgpu-strict` shows the reason and does not fall back. Details, Brave Shields, and the Linux Vulkan flags are in [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## What you can do
 
@@ -123,7 +110,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | --- | --- |
 | `ocarina_forge/` | Python library and FastAPI server. Parsers, validation, and exporters. This is the maintained data side. |
 | `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL, BFRES, and BNTX. |
-| `native/` | BC7 mode 6, BC1, block decode, deswizzle, the per-pixel loops, BFRES vertex and index decode, bind pose, UV seams, bounds, and glb float packing. The development launchers build it automatically; direct Python use can still fall back when it is not built. |
+| `native/` | BC7 mode 6, BC1, block decode, deswizzle, the per-pixel loops, BFRES vertex and index decode, bind pose, UV seams, bounds, and glb float packing. The browser uses the committed wasm build. Python falls back when the optional native extension is not built. |
 | `ocarina_forge/domains.py` | Where a dialog, event, or table exporter plugs into the build. |
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. New renderer work follows [docs/design/mod-editor.md](docs/design/mod-editor.md). |
 | `docs/design/mod-editor.md` | How an edit becomes a Longshot mod, and the milestone plan. |
