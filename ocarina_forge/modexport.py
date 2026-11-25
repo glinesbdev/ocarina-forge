@@ -168,6 +168,9 @@ def _manifest_json(project, original: dict | None = None) -> dict:
         body["license"] = license_name[:128]
     elif original is None:
         body.pop("license", None)
+    from ocarina_forge.permissions import overlay_manifest
+
+    overlay_manifest(body, project)
     return body
 
 
@@ -292,6 +295,11 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         if written:
             (out / "romfs").mkdir(parents=True, exist_ok=True)
         written.insert(0, "mod.json")
+        from ocarina_forge.permissions import permission_warnings
+
+        for problem in permission_warnings(json.loads((out / "mod.json").read_text(encoding="utf-8"))):
+            warnings.append(problem)
+            log.append({"level": "warn", "message": problem})
         if source_mod.is_dir():
             log.append({
                 "level": "info",

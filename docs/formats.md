@@ -313,3 +313,68 @@ The capture mod and the Windows steps are in [testing-on-real-dump.md](testing-o
 BRTI `textureLayout` is the u32 at `+0x34`. Its low 3 bits are the block-height log2, and that field is the height the decoder uses. The next u32 (`+0x38`, `sizeRange` in some notes) begins with `0xC9` on these files and is not a log2. A mip-0 size that matches a different log2 does not replace the field. `tex-audit` lists every texture where the size's log2 is not the usual height for that image. Pitch is the block row rounded up to 64 bytes. ASTC 8×5 is 8 pixels wide and 5 tall, 6×6 is square, and 10×5 is 10 wide; the block row is padded up to the GOB height (`block_height * 8` block-rows), not to the ASTC block's pixel height. The surface is that pitch times those padded rows.
 
 ASTC format ids `0x37`, `0x38`, `0x39`, and `0x3A` (UNORM `xx01` and sRGB `xx06`) are 10×8, 10×10, 12×10, and 12×12. BC1 blocks with color0 ≤ color1 use index 3 as alpha 0 when the whole block is index 3. A block that also uses another index stores the endpoint average there, opaque, which is the castle stone rather than a black dot. An ASTC block that is all zeros on a trailing GOB row (the height in blocks is not a multiple of 8) is filled from the block above it. A compressed block that is all zeros in the last partial GOB (the width or height in blocks is not a multiple of a GOB) is filled from the last full GOB block. A 455-wide BC1 image is 114 blocks, pitched to 120, so blocks 112 and 113 are that edge. `texture_layer` reads one array slice: the count is BRTI+0x30, the image byte size is BRTI+0x50, and layer N is mip 0 at `image_offset + N * (image_size / count)`. The retail `MaterialAlb` array is ASTC 8×8, 1365×1365, 90 layers, 657920 bytes each, mip 0 of 484352 bytes. That whole stack is not decoded as one image.
+
+## Longshot mod permissions
+
+The table below is the Longshot `Permission` type at upstream commit `563ca4e5` (`563ca4e55b1306dd93ad57377020c463dd524c7f` on `mod-api`). The source files are `assets/modding/docs/permissions.md` (generated from the API schema) and `assets/modding/packages/api/longshot.d.ts`. Forge keeps the same rows in `ocarina_forge/permissions.py`. `GET /api/permissions` serves them to the editor. Refresh that module when the upstream file changes.
+
+A mod's `mod.json` has two lists. `permissions` is what the game must grant before the mod can be enabled. `optionalPermissions` is what the mod may ask for later with `longshot/permissions` `request()`. A name in `permissions` is not also listed in `optionalPermissions`. Unknown names and duplicates are refused. `mods.inspect`, `mods.control`, and `ipc` are system-mod only. A player mod (`local/...`) that names them is refused.
+
+`net` entries are `"wss://host[:port]"`, `"https://host[:port]"`, or `"*"`. Each one is the permission `net:<origin>` (`net:*` when the entry is `*`). That permission is required unless it is in `optionalPermissions`. Hosts are lower case. `:443` and the same host without a port are one origin, and the game grants the string as written. The two lists together name at most 64 origins.
+
+`content` is read only when `runtime` is set, and only when `permissions` includes `content.add`, or `content.patch` when that module is typed patches and nothing else. Putting either name only in `optionalPermissions` does not satisfy this.
+
+`multiplayer` cannot be `"local"` when `state.write`, `items.grant`, `content.add`, `actors.spawn`, or `actors.remove` is in either list. Those change the shared game, so the manifest says `"all"` or `"host"`.
+
+`romfs.read` and `memory.read` cannot be held, in either list, together with a way off this PC: a `net` origin, `net:*`, `net.lan`, `session`, `ipc`, or `discord.status`.
+
+These calls need no permission: `longshot` `has()`, `longshot/log`, `longshot/settings` `get` / `set` / `changed`, `longshot/permissions` `has` / `request` / `changed`, `longshot/dev`, `longshot/time`, `longshot/files`, `longshot/game` `frame.on`, `longshot/lifecycle` `stopping`, and every handle's `release()`. `longshot/mods` needs nothing except `inspect` / `logs` (`mods.inspect`) and `restart` / `setEnabled` / `reload` (`mods.control`).
+
+| Permission | Player is told | Risk | Needed by |
+| --- | --- | --- | --- |
+| `state.read` | Can see what happens in your game | low | `longshot/game` state, after, flags.get, flags.has, and the update, mapLoading, mapLoaded, saveWriting, flagChanged, paused events; `longshot/player` state; `longshot/camera` state; `longshot/world` ray, destinations, states, state |
+| `state.write` | Can change your game and what gets saved | medium | `longshot/game` flags.set, textShown; `longshot/player` set, setPosition, setAge; `longshot/rules` remove and the rewards, skips, actorLife, prices, heals, falls, rupees, bottles, damageTaken, damageDealt adds; `longshot/world` travel, setState |
+| `camera.write` | Can move the camera, pause the game and hide its HUD | low | `longshot/game` pause; `longshot/camera` override, follow, and CameraOverride methods |
+| `storage` | Can keep its own data on this PC | low | `longshot/storage` (any call): save.slot, flags, saves, Store global, profile, save, save.loaded |
+| `save.flags` | Can change what your game saves and how | high | A content module's saved flags. No script call asks for this yet |
+| `actors.read` | Can see the characters and enemies around you | low | `longshot/actors` list, info, alive, attached, and the removed, spawned, died, damaged, lifted, thrown, dropped events; `longshot/behaviour` (any call) |
+| `actors.write` | Can change the characters, enemies and things around you: their health, where they are, which way they face, how they move, whether they are seen, what they hold on to and what their behaviour is told | high | `longshot/actors` damage, setLife, setPosition, setRotation, setVelocity, setVisible, light, attach, detach, answer |
+| `actors.spawn` | Can make characters, enemies and things appear in your game, and take away the ones it made | high | `longshot/actors` spawn, remove |
+| `actors.remove` | Can take away characters, enemies and things that are in your game | high | `longshot/actors` despawn |
+| `items.read` | Can see the items you find and the places you take them from | low | `longshot/items` held, checked, granted |
+| `items.grant` | Can give you items, and keeps a list of what it gave | medium | `longshot/items` grant, pending, remove |
+| `input.read` | Can see the buttons you press on your controller | low | `longshot/input` action, pad.state, pointer.capture |
+| `input.write` | Can press buttons for you, and change what your controller does | medium | `longshot/input` press, rumble, pad.intercept |
+| `content.add` | Can add new items, characters and places to your game | medium | `longshot/content` item, actor, model, modelOf, place, change, changeActor, text, flag, tree, messages, sound |
+| `content.read` | Can read the names and data of the game's actors and texts | low | `longshot/content` read.row, read.text, read.actorName, read.mapName, read.component, read.placements |
+| `content.patch` | Can change the game's data in checked ways | low | `longshot/content` patch |
+| `audio` | Can play its own sounds | low | `longshot/audio` load, play, playAt, playOn, and Sound and Voice handles |
+| `audio.game` | Can change how loud the game's own music, sounds and voices are | low | `longshot/audio` setGroupVolume, duck |
+| `ui.hud` | Can draw on your screen over the game | low | `longshot/ui` Hud and World |
+| `ui.window` | Can open its own windows | low | `longshot/ui` Window; `longshot/capture` thumbnail, load, saved, remove |
+| `ui.settings` | Can show its own page in the Mods tab | low | `longshot/ui` SettingsPage and DebugPage |
+| `gfx.world` | Can draw its own shapes and labels in the game's world | low | `longshot/gfx` model, world.line, world.box, world.circle, world.billboard, world.model, and WorldShape methods |
+| `gfx.shader` | Can run its own graphics effects on your GPU | medium | `longshot/gfx` effect, and Effect.set, setEnabled |
+| `gfx.textures` | Can change how the game looks with its own pictures | low | A textures folder. No script call asks for this |
+| `net:<origin>` | Can talk to that origin | medium | `longshot/net` connect and fetch. One permission per `net` entry |
+| `net:*` | Can talk to any server on the internet | high | `longshot/net` when `net` is `*` |
+| `net.lan` | Can talk to devices on your home network | high | `longshot/net` to home-network addresses |
+| `romfs.read` | Can read the game's own files on this PC (never with the network) | high | `longshot/romfs` read, size. Never together with a way off this PC |
+| `romfs.provide` | Can make game files while the game runs | high | No script call asks for this yet |
+| `memory.read` | Can read all of the running game's memory. Full access to the running game: only for mods you trust | unsafe | `longshot/memory` read, regions. Never together with a way off this PC |
+| `memory.write` | Can change the running game's memory directly, which can run any code on your PC, as you, with full access to your files: only for mods whose source you trust | unsafe | `longshot/memory` write |
+| `hooks.unsafe` | Hooks the game's own code where Longshot never named a place. Full access to the running game: only for mods you trust | unsafe | `longshot/hooks` listen, sites, setValue |
+| `session` | Can send messages to the players in your room | medium | No script call asks for this yet |
+| `discord.status` | Can change your Discord status, which your Discord friends see | medium | No script call asks for this |
+| `exefs` | Changes the game's own code. Full access to the running game: only for mods you trust | unsafe | The mod's own exefs patches. No script call asks for this |
+| `mods.inspect` | Can see how your other mods run: their time, memory, faults and log | medium, system mods only | `longshot/mods` inspect, logs |
+| `mods.control` | Can restart your other mods and switch them on and off | high, system mods only | `longshot/mods` restart, setEnabled, reload |
+| `ipc` | Can talk to other programs on this PC through the local sockets or pipes it names | unsafe, system mods only | `longshot/ipc` (any call) |
+
+The editor's **Mod permissions** panel (the header, the project dialog, the build dialog, and the search command of the same name) is this table. Each row is off, required, or optional. System-only rows stay disabled for a player mod. The network field is the `net` list. Errors from the rules above are shown before the file is written. Saving writes `permissions`, `optionalPermissions`, `net`, and `multiplayer` (only when it is not `local`) into the project's `manifest.yaml`. Export copies those fields into `mod.json`. A patch-only project that never set them keeps an imported manifest's lists, and an empty saved list clears them.
+
+The panel also scans the mod's `entry` and `content` scripts and the static relative imports they reach. A static `longshot/...` import's calls are mapped with the table above. A call with no matching row is a hint, not a required permission. An imported module with no mapped call is a hint naming the permissions that module's calls use. `import()` is flagged. Spec 7.2: dynamic import is not supported, and a mod's modules are its static imports. A missing permission has an Add button that puts it in `permissions`.
+
+Player grants are not `mod.json`. Spec 12.4 keeps them on the mod entry's `"granted"` array in the game's mod list. A missing grant raises `PermissionError` and the message names `mods.json`. The list sits beside the settings file: `mods.json` next to `longshot_options.ini`, or `user/mods.json`. A profile file is `profile.json` and its switch is `"on"`, not `"enabled"`. On the modding-with-editor build used for local testing, `longshot mod allow` writes `<game>/dev/mods.json`. Forge's **Pre-grant in mods.json** writes the declared permissions (required and optional, plus each `net` origin) into that entry, only for the folder named in the panel. It copies the existing file to `<name>.bak` first. It does not create or edit a folder that has no `mods/`, `dev/`, or `longshot_options.ini`, and it does not follow a link. Changing `mod.json` permissions may need the mod turned off and on again, or the game restarted, before the new manifest is read. `longshot mod restart` starts the runtime again and does not re-read `mod.json`.
+
+The lighting-capture mod's manifest is checked against this table when it is installed. Its permissions stay `state.read`, `actors.read`, `storage`, and `gfx.world`. The first three are the calls in `capture.js`. `gfx.world` is the permission the spec attaches to `longshot/gfx`, which the gfx-probe entry imports and does not call.

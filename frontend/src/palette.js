@@ -16,6 +16,7 @@ export const EDITOR_COMMANDS = [
   { id: "behavior", label: "Show behavior", detail: "B", fields: ["behavior", "ai", "ainb", "schedule", "event", "graph"] },
   { id: "project", label: "Project settings", detail: "", fields: ["project", "dump", "open"] },
   { id: "build", label: "Build the mod", detail: "", fields: ["build", "export", "install"] },
+  { id: "permissions", label: "Mod permissions", detail: "", fields: ["permissions", "mods.json", "grant", "optional"] },
   { id: "ground", label: "Toggle ground", detail: "", fields: ["ground", "terrain", "heightmap"] },
   { id: "profile", label: "Toggle frame profile", detail: "P", fields: ["profile", "profiler", "stats", "cpu", "gpu", "hud", "frame time"] },
 ];
