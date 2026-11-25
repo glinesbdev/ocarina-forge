@@ -41,6 +41,8 @@ function basisTranscoder() {
 
 const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js").replaceAll("\\", "/");
 
+const apiPort = process.env.BANCWRIGHT_PORT || "47232";
+
 export default defineConfig(({ mode }) => ({
   plugins: [
     ...(mode === "webgl"
@@ -63,7 +65,7 @@ export default defineConfig(({ mode }) => ({
     strictPort: true,
     headers: isolationHeaders,
     proxy: {
-      "/api": "http://127.0.0.1:47232",
+      "/api": `http://127.0.0.1:${apiPort}`,
     },
   },
   preview: {
@@ -72,7 +74,7 @@ export default defineConfig(({ mode }) => ({
     strictPort: true,
     headers: isolationHeaders,
     proxy: {
-      "/api": "http://127.0.0.1:47232",
+      "/api": `http://127.0.0.1:${apiPort}`,
     },
   },
 }));

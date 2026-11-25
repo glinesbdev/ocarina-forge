@@ -3,6 +3,7 @@ mod bfres;
 mod decode;
 mod image;
 mod mesh;
+mod ground;
 mod surface;
 mod swizzle;
 mod verts;

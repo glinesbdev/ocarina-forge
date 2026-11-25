@@ -42,6 +42,7 @@ from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
 from ocarina_forge.grounddebug import query_ground
+from ocarina_forge.surface_pack import load_or_build_surface
 from ocarina_forge.scene_preview import corrected_terrain_path, prepare_scene_terrain, preview_bank, preview_path, terrain_fit_pending
 from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, shared_model_path, shared_texture_path
 from ocarina_forge.warm import scene_warm_queue
@@ -1112,6 +1113,24 @@ async def ground_batch(body: dict):
     dump = _open_dump()
     samples = await asyncio.to_thread(query_ground_cached, dump, banc, points, _exclude_ids(body.get("exclude")))
     return {"samples": samples}
+
+
+@app.get("/api/ground/surface")
+async def ground_surface(banc: str):
+    """Gzipped walkable-surface pack for local Snap in the viewer."""
+    if not banc or ".." in banc or banc.startswith("/"):
+        raise BancError("That scene path is not in the dump.", "not_found")
+    dump = _open_dump()
+    path, meta = await asyncio.to_thread(load_or_build_surface, dump, banc)
+    headers = {
+        "Content-Encoding": "gzip",
+        "Cache-Control": "public, max-age=31536000",
+        "X-Forge-Surface-Triangles": str(meta.get("triangles") or 0),
+        "X-Forge-Surface-Bytes": str(meta.get("gzipBytes") or path.stat().st_size),
+    }
+    if meta.get("digest"):
+        headers["ETag"] = meta["digest"]
+    return FileResponse(path, media_type="application/octet-stream", headers=headers, filename="surface.ofgs.gz")
 
 
 @app.get("/api/terrain")

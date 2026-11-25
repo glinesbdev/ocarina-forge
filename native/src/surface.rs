@@ -134,6 +134,33 @@ impl MeshIndex {
             out[i] = self.sample(points[i * 2], points[i * 2 + 1]).unwrap_or(f64::NAN);
         }
     }
+
+    /// Highest triangle under (x, z) whose id passes `keep`.
+    pub fn sample_filtered(&self, x: f64, z: f64, keep: impl Fn(u32) -> bool) -> Option<f64> {
+        let step = self.step;
+        let key = ((x / step).floor() as i32, (z / step).floor() as i32);
+        let mut best = None;
+        let Some(ids) = self.cells.get(&key) else {
+            return None;
+        };
+        for &id in ids {
+            if !keep(id) {
+                continue;
+            }
+            let start = id as usize * 9;
+            if let Some(y) = triangle_height(x, z, &self.triangles[start..start + 9]) {
+                if best.map(|prev| y > prev).unwrap_or(true) {
+                    best = Some(y);
+                }
+            }
+        }
+        best
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        let cells: usize = self.cells.values().map(|ids| ids.len() * 4 + 16).sum();
+        self.triangles.len() * 8 + cells
+    }
 }
 
 fn min3(a: f64, b: f64, c: f64) -> f64 {

@@ -57,6 +57,7 @@ export const api = {
     request("/api/models/batch", { method: "POST", body: JSON.stringify({ names, prefetch }) }).then((data) => data.models || {}),
   terrain: (banc, refine = false) => request(`/api/terrain?banc=${encodeURIComponent(banc)}${refine ? "&refine=true" : ""}`),
   ground: (banc, x, z, exclude) => request(`/api/ground?banc=${encodeURIComponent(banc)}&x=${encodeURIComponent(x)}&z=${encodeURIComponent(z)}${exclude ? `&exclude=${encodeURIComponent(exclude)}` : ""}`),
+  groundSurface: (banc) => `/api/ground/surface?banc=${encodeURIComponent(banc)}`,
   exportMod: (body) => request("/api/export", { method: "POST", body: JSON.stringify(body) }),
   importAto: (path) => request("/api/import/ato", { method: "POST", body: JSON.stringify({ path }) }),
 };

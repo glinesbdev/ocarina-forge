@@ -104,6 +104,7 @@ viewport = await createViewport($("viewport"), {
   fetchModels: (names, prefetch) => api.models(names, prefetch),
   fetchTerrain: api.terrain,
   fetchGround: (banc, x, z, exclude) => api.ground(banc, x, z, exclude),
+  fetchSurface: (banc) => api.groundSurface(banc),
   onProgress: (info) => {
     const box = $("model-progress");
     if (!box) return;

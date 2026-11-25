@@ -27,6 +27,7 @@ import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
 import { chooseSnap, GROUND_SNAP_RADIUS, isMovedTerrainActor, nearestGroundSample, shouldApplyGroundReply } from "./snap.js";
+import { disposeGroundSurface, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
 import { resolveTextureIndex } from "./problems.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
@@ -325,12 +326,110 @@ let convertSlots = 8;
     if (entry.label) entry.label.element.remove();
   }
 
-  function disposeTerrainObject(root) {
+  const TEXTURE_KEYS = [
+    "map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap", "alphaMap",
+    "bumpMap", "displacementMap", "envMap", "lightMap", "specularMap", "anisotropyMap",
+    "clearcoatMap", "clearcoatNormalMap", "clearcoatRoughnessMap", "sheenRoughnessMap",
+    "sheenColorMap", "specularIntensityMap", "specularColorMap", "iridescenceMap",
+    "iridescenceThicknessMap", "transmissionMap", "thicknessMap",
+  ];
+
+  function disposeCachedTexture(texture) {
+    if (!texture || texture.userData?.forgeSharedLive) return;
+    const image = texture.image;
+    try {
+      texture.dispose();
+    } catch {
+      /* already disposed */
+    }
+    if (image && typeof image.close === "function") {
+      try {
+        image.close();
+      } catch {
+        /* ImageBitmap already closed */
+      }
+    }
+  }
+
+  function collectMaterialTextures(material, into) {
+    if (!material) return;
+    for (const key of TEXTURE_KEYS) {
+      if (material[key]) into.add(material[key]);
+    }
+    const extra = material.userData || {};
+    for (const key of ["mossMap", "orm1Map", "normal1Map"]) {
+      if (extra[key]) into.add(extra[key]);
+    }
+  }
+
+  function disposeGeometry(geometry) {
+    if (!geometry) return;
+    if (geometry.boundsTree) {
+      try {
+        if (typeof geometry.disposeBoundsTree === "function") geometry.disposeBoundsTree();
+        else disposeBoundsTree.call(geometry);
+      } catch {
+        geometry.boundsTree = undefined;
+      }
+    }
+    geometry.dispose();
+  }
+
+  function disposeMaterial(material, { textures = false, keepTextures = null } = {}) {
+    if (!material) return;
+    if (textures) {
+      const maps = new Set();
+      collectMaterialTextures(material, maps);
+      for (const texture of maps) {
+        if (keepTextures && keepTextures.has(texture)) continue;
+        disposeCachedTexture(texture);
+      }
+    }
+    material.dispose();
+  }
+
+  function disposeObject3D(root, { textures = false, keepTextures = null } = {}) {
     if (!root) return;
-    root.traverse((child) => {
-      if (child.geometry) child.geometry.dispose();
+    root.traverse?.((child) => {
+      if (child.geometry) disposeGeometry(child.geometry);
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) disposeMaterial(material, { textures, keepTextures });
     });
-    root.removeFromParent();
+    root.removeFromParent?.();
+  }
+
+  function liveTemplateTextures(urls) {
+    const textures = new Set();
+    for (const url of urls) {
+      const parsed = parsedTemplates.get(url);
+      if (!parsed?.parts) continue;
+      for (const part of parsed.parts) collectMaterialTextures(part.material, textures);
+      if (parsed.source) {
+        parsed.source.traverse?.((child) => {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          for (const material of materials) collectMaterialTextures(material, textures);
+        });
+      }
+    }
+    return textures;
+  }
+
+  function disposeParsedTemplate(parsed, keepTextures) {
+    if (!parsed) return;
+    const parts = parsed.parts || [];
+    for (const part of parts) {
+      disposeGeometry(part.geometry);
+      disposeMaterial(part.material, { textures: true, keepTextures });
+    }
+    if (parsed.source) {
+      parsed.source.traverse?.((child) => {
+        if (child.geometry) disposeGeometry(child.geometry);
+      });
+    }
+  }
+
+  function disposeTerrainObject(root) {
+    disposeObject3D(root, { textures: true });
   }
 
   function clearTerrain() {
@@ -341,6 +440,7 @@ let convertSlots = 8;
     terrainBanc = null;
     groundHits.length = 0;
     groundWanted = null;
+    disposeGroundSurface();
   }
 
   function clearGround() {
@@ -372,6 +472,7 @@ let convertSlots = 8;
     clearScenePreview();
     foregroundModelNames.clear();
     detailCandidates.clear();
+    for (const texture of textureDetailReady.values()) disposeCachedTexture(texture);
     textureDetailReady.clear();
     sceneStreamStats = null;
     nextDetailScan = 0;
@@ -1548,13 +1649,16 @@ let convertSlots = 8;
     const pinned = new Set([...recentSceneTemplates.values()].flat());
     const spare = new Set(templateOrder.filter((url) => !pinned.has(url)).slice(-48));
     const keep = [];
+    const evicted = [];
     for (const url of templateOrder) {
-      if (pinned.has(url) || spare.has(url)) {
-        keep.push(url);
-      } else {
-        parsedTemplates.delete(url);
-        templateCache.delete(url);
-      }
+      if (pinned.has(url) || spare.has(url)) keep.push(url);
+      else evicted.push(url);
+    }
+    const keepTextures = liveTemplateTextures(keep);
+    for (const url of evicted) {
+      disposeParsedTemplate(parsedTemplates.get(url), keepTextures);
+      parsedTemplates.delete(url);
+      templateCache.delete(url);
     }
     templateOrder.length = 0;
     for (const url of keep) templateOrder.push(url);
@@ -2069,6 +2173,7 @@ let convertSlots = 8;
     let parsed = parsedTemplates.get(url);
     if (!parsed) {
       parsed = partsFromTemplate(template, url);
+      parsed.source = template;
       rememberTemplate(url, parsed);
     }
     entry.parts = parsed.parts;
@@ -2649,7 +2754,27 @@ uniform float terrainLayerMissing;`
     }
     await installTerrainModel(token, meta);
     if (terrainCurrent(token) && meta.fitPending) void refineTerrain(token, banc, meta.url);
+    if (hooks.fetchSurface) void loadLocalGround(token, banc);
     if (terrainCurrent(token)) void requestGround(orbit.target.x, orbit.target.z);
+  }
+
+  async function loadLocalGround(token, banc) {
+    if (!hooks.fetchSurface || !banc) return;
+    const before = performance.memory ? performance.memory.usedJSHeapSize : 0;
+    const started = performance.now();
+    try {
+      const meta = await loadGroundSurface(hooks.fetchSurface(banc));
+      if (!terrainCurrent(token) || !meta) return;
+      const after = performance.memory ? performance.memory.usedJSHeapSize : 0;
+      console.info("Local ground surface ready", {
+        ...meta,
+        loadMs: performance.now() - started,
+        jsHeapDeltaMB: (after - before) / 1048576,
+      });
+      requestRender();
+    } catch (error) {
+      console.warn("Could not load the local ground surface", error);
+    }
   }
 
   async function refineTerrain(token, banc, previousUrl) {
@@ -3004,6 +3129,7 @@ uniform float terrainLayerMissing;`
   }
 
   function requestGround(x, z, entry) {
+    if (groundSurfaceReady()) return null;
     if (!hooks.fetchGround || !terrainBanc) return null;
     groundWanted = { x, z, banc: terrainBanc, exclude: excludeGroundActor(entry), entry };
     if (!groundPump) groundPump = pumpGround();
@@ -3041,10 +3167,13 @@ uniform float terrainLayerMissing;`
     const hits = [];
     snapRay.ray.origin.set(x, y + 80, z);
     snapRay.ray.direction.set(0, -1, 0);
-    // When Snap uses /api/ground, do not raycast the visible heightmap. That
-    // mesh misses island floors, and chooseSnap will then prefer the lower
+    const entry = ignoreId ? entries.get(ignoreId) : null;
+    const local = sampleGroundSurface(x, z, excludeGroundActor(entry));
+    if (local != null) hits.push({ y: local });
+    // When Snap uses a composed sampler, do not raycast the visible heightmap.
+    // That mesh misses island floors, and chooseSnap will then prefer the lower
     // slope once Y has dropped, which also shifts the gizmo XZ plane.
-    if (terrainRoot && !hooks.fetchGround) {
+    if (local == null && terrainRoot && !hooks.fetchGround) {
       terrainRoot.traverse((child) => {
         if (!child.isMesh || !child.visible || !child.geometry || child.userData.subTerrain) return;
         const found = [];
@@ -3062,8 +3191,10 @@ uniform float terrainLayerMissing;`
       const top = volumeSurfaceY(entry, snapRay);
       if (top != null) hits.push({ y: top });
     }
-    const remembered = rememberedGround(x, z);
-    if (remembered) hits.push({ y: remembered.y });
+    if (local == null) {
+      const remembered = rememberedGround(x, z);
+      if (remembered) hits.push({ y: remembered.y });
+    }
     return chooseSnap(y, hits);
   }
 
@@ -3463,7 +3594,12 @@ uniform float terrainLayerMissing;`
       textureDetailPending.add(uri);
       sharedImage(uri, () => loadDetailImage(uri, imageLoader, true)).then((texture) => {
         textureDetailReady.set(uri, texture);
-        if (textureDetailReady.size > 64) textureDetailReady.delete(textureDetailReady.keys().next().value);
+        if (textureDetailReady.size > 64) {
+          const first = textureDetailReady.keys().next().value;
+          const evicted = textureDetailReady.get(first);
+          textureDetailReady.delete(first);
+          if (first !== uri) disposeCachedTexture(evicted);
+        }
       }).catch(() => {
         textureDetailFailed.add(uri);
       }).finally(() => {
