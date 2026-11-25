@@ -99,6 +99,14 @@ function emptyTexelData(data) {
  * Clones that share a Source or the same mipmaps array are marked together so
  * a later material does not try to re-upload emptied mips.
  */
+export function textureImageSize(texture) {
+  const image = (texture && (texture.image || (texture.source && texture.source.data))) || {};
+  const mip = texture && texture.mipmaps && texture.mipmaps[0];
+  const width = Number(image.width || (mip && mip.width) || 0) || 0;
+  const height = Number(image.height || (mip && mip.height) || 0) || 0;
+  return { width, height };
+}
+
 export function releaseTextureCpu(texture) {
   if (!texture) return false;
   const source = texture.source;
@@ -106,8 +114,10 @@ export function releaseTextureCpu(texture) {
     if (texture.userData) texture.userData.forgeCpuReleased = true;
     return false;
   }
-  // Mutate in place. Replacing texture.image or texture.mipmaps can bump
-  // three's version and cause a second upload of the emptied buffers.
+  // Read size first. close() on an ImageBitmap makes width/height 0, and
+  // three's WebGPU path then does log2(0)+1 = -Infinity for mipLevelCount.
+  const { width, height } = textureImageSize(texture);
+  // Mutate in place. Do not set needsUpdate: that retriggers an empty upload.
   const mipmaps = texture.mipmaps;
   if (Array.isArray(mipmaps)) {
     for (const level of mipmaps) {
@@ -121,11 +131,20 @@ export function releaseTextureCpu(texture) {
     } catch {
       /* ImageBitmap already closed */
     }
+    // Leave a size stub so a later GPU recreate (dispose + new clone, or a
+    // scene change that rebuilds the binding) cannot see a 0x0 image.
+    if (source) source.data = { width, height };
   } else if (image && image.data && image.data.byteLength) {
     image.data = emptyTexelData(image.data);
   }
+  texture.generateMipmaps = false;
+  // three uploads when source.dataReady is true. The CPU pixels are gone, so
+  // a later createTexture (scene switch dispose + rebuild) must not try to
+  // copyExternalImageToTexture from the size stub.
+  if (source) source.dataReady = false;
   texture.userData = texture.userData || {};
   texture.userData.forgeCpuReleased = true;
+  texture.userData.forgeCpuSize = { width, height };
   if (source) {
     source.userData = source.userData || {};
     source.userData.forgeCpuReleased = true;

@@ -12,6 +12,7 @@ import {
   textureSupport,
 } from "./gpu-texture.js";
 import { loadForgeImageSource } from "./gltf-image-source.js";
+import { createSharedImageCache } from "./shared-image-cache.js";
 import {
   overResidentHardCap,
   overResidentSoftCap,
@@ -173,7 +174,7 @@ export async function createViewport(host, hooks) {
   let frameHandle = 0;
   const loader = new GLTFLoader();
   loader.setMeshoptDecoder(geometryDecoder);
-  const sharedImages = new Map();
+  const sharedImageCache = createSharedImageCache({ limit: 128 });
   const textureDetailLoaders = new Map();
   const textureDetailFailed = new Set();
   const textureDetailReady = new Map();
@@ -183,18 +184,7 @@ export async function createViewport(host, hooks) {
   let nextDetailScan = 0;
 
   function sharedImage(uri, load) {
-    let pending = sharedImages.get(uri);
-    if (pending) {
-      sharedImages.delete(uri);
-    } else {
-      pending = load().catch((error) => {
-        if (sharedImages.get(uri) === pending) sharedImages.delete(uri);
-        throw error;
-      });
-    }
-    sharedImages.set(uri, pending);
-    if (sharedImages.size > 128) sharedImages.delete(sharedImages.keys().next().value);
-    return pending;
+    return sharedImageCache.get(uri, load);
   }
 
   function loadDetailImage(uri, imageLoader, deferred = false) {

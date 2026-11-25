@@ -98,6 +98,7 @@ test("releaseTextureCpu drops mip and image buffers in place and is idempotent",
   assert.equal(texture.mipmaps[0].data.byteLength, 0);
   assert.equal(texture.image.data.byteLength, 0);
   assert.equal(texture.needsUpdate, false);
+  assert.equal(texture.generateMipmaps, false);
   assert.equal(texture.userData.forgeCpuReleased, true);
   assert.equal(texture.source.userData.forgeCpuReleased, true);
   assert.equal(data.byteLength, 16);
@@ -177,4 +178,36 @@ test("parse settles without handing non-basis bytes to the Basis loader", async 
     if (originalBitmap) globalThis.createImageBitmap = originalBitmap;
   }
   assert.equal(basisCalls, 0);
+});
+
+test("releaseTextureCpu leaves a size stub after closing an ImageBitmap so mipLevelCount stays finite", () => {
+  const image = {
+    width: 64,
+    height: 32,
+    close() {
+      this.width = 0;
+      this.height = 0;
+    },
+  };
+  const source = { userData: {}, data: image };
+  const texture = {
+    userData: {},
+    source,
+    get image() { return this.source.data; },
+    generateMipmaps: true,
+    needsUpdate: false,
+    version: 1,
+    mipmaps: [],
+  };
+  assert.equal(releaseTextureCpu(texture), true);
+  assert.equal(image.width, 0);
+  assert.equal(texture.image.width, 64);
+  assert.equal(texture.image.height, 32);
+  assert.equal(texture.generateMipmaps, false);
+  assert.equal(texture.needsUpdate, false);
+  assert.equal(texture.version, 1);
+  assert.equal(source.dataReady, false);
+  const levels = Math.floor(Math.log2(Math.max(texture.image.width, texture.image.height))) + 1;
+  assert.equal(Number.isFinite(levels) && levels >= 1, true);
+  assert.equal(levels, 7);
 });
