@@ -16,62 +16,83 @@ function formatMs(value) {
 }
 
 /**
- * Stats line. `instances` and `culled` are omitted until that pass records them.
- * A frame that will not be followed by another one is `idle`, even if fps was just measured.
- * `backend` and `frameMs` are included when the caller has them.
- * `build` is the page's short git revision, when the caller has one.
+ * Always-visible viewport label. The backend includes a WebGPU fallback reason
+ * when one was recorded. `build` is the page's short git revision.
+ * Queued, loading, and background counts appear only while they are non-zero.
  */
-export function formatStats({
-  rendering,
-  fps,
-  frameMs,
-  backend,
-  draws,
-  instances,
-  culled,
-  separate,
-  tris,
-  queued,
-  loading,
-  loaded,
-  deferred,
-  backgroundLoading,
-  convertMs,
-  textureMs,
-  downloadMs,
-  uploadMs,
-  warmDone,
-  warmTotal,
-  sceneStream,
-  build,
-}) {
-  const rate = rendering ? (fps ? `${fps} fps` : "…") : "idle";
+export function formatStatusLabel({
+  backend = "",
+  build = "",
+  draws = 0,
+  queued = 0,
+  loading = 0,
+  background = 0,
+} = {}) {
   const parts = [];
   if (backend) parts.push(backend);
-  parts.push(rate);
-  if (frameMs != null) parts.push(`${formatMs(frameMs)} ms`);
-  parts.push(`${draws} draws`);
-  if (instances != null) parts.push(`${instances} inst`);
-  if (culled != null) parts.push(`${culled} culled`);
-  parts.push(`${separate} separate`, `${formatTris(tris)} tris`);
-  if (queued != null) parts.push(`${queued} queued`);
-  if (loading != null) parts.push(`${loading} loading`);
-  if (loaded != null) parts.push(`${loaded} loaded`);
-  if (deferred || backgroundLoading) {
-    const remaining = (deferred || 0) + (backgroundLoading || 0);
-    parts.push(`${remaining} background remaining`);
-    if (backgroundLoading) parts.push(`${backgroundLoading} background loading`);
-  }
-  if (convertMs != null) parts.push(`conv ${formatMs(convertMs)} ms`);
-  if (textureMs != null) parts.push(`tex ${formatMs(textureMs)} ms`);
-  if (downloadMs != null) parts.push(`dl ${formatMs(downloadMs)} ms`);
-  if (uploadMs != null) parts.push(`up ${formatMs(uploadMs)} ms`);
-  if (warmTotal != null) parts.push(`warm ${warmDone || 0}/${warmTotal}`);
-  if (sceneStream) {
-    if (sceneStream.firstDetail != null) parts.push(`detail ${formatMs(sceneStream.firstDetail)} ms`);
-    parts.push(`${sceneStream.slowFrames} streaming frames >25 ms`);
-    if (sceneStream.editBytes != null) parts.push(`first edit ${formatMs(sceneStream.editBytes / 1048576)} MiB`);
-  }
   if (build) parts.push(build);
+  parts.push(`${Number(draws) || 0} draws`);
+  if (queued) parts.push(`${queued} queued`);
+  if (loading) parts.push(`${loading} loading`);
+  if (background) parts.push(`${background} background`);
   return parts.join(" · ");
+}
+
+/**
+ * The rest of the old stats line, shown inside the Profile HUD.
+ * A frame that will not be followed by another one is `idle`.
+ */
+export function formatProfileDetail({
+  rendering = false,
+  fps = 0,
+  instances = null,
+  culled = null,
+  separate = null,
+  queued = null,
+  loading = null,
+  loaded = null,
+  deferred = 0,
+  backgroundLoading = 0,
+  convertMs = null,
+  textureMs = null,
+  downloadMs = null,
+  uploadMs = null,
+  warmDone = null,
+  warmTotal = null,
+  sceneStream = null,
+  server = "",
+} = {}) {
+  const lines = [];
+  lines.push(rendering ? (fps ? `${fps} fps` : "…") : "idle");
+  const counts = [];
+  if (instances != null) counts.push(`${instances} inst`);
+  if (culled != null) counts.push(`${culled} culled`);
+  if (separate != null) counts.push(`${separate} separate`);
+  if (counts.length) lines.push(counts.join(" · "));
+  const stream = [];
+  if (queued != null) stream.push(`${queued} queued`);
+  if (loading != null) stream.push(`${loading} loading`);
+  if (loaded != null) stream.push(`${loaded} loaded`);
+  const background = (Number(deferred) || 0) + (Number(backgroundLoading) || 0);
+  if (background) {
+    stream.push(`${background} background`);
+    if (backgroundLoading) stream.push(`${backgroundLoading} background loading`);
+  }
+  if (stream.length) lines.push(stream.join(" · "));
+  const times = [];
+  if (convertMs != null) times.push(`conv ${formatMs(convertMs)} ms`);
+  if (textureMs != null) times.push(`tex ${formatMs(textureMs)} ms`);
+  if (downloadMs != null) times.push(`dl ${formatMs(downloadMs)} ms`);
+  if (uploadMs != null) times.push(`up ${formatMs(uploadMs)} ms`);
+  if (times.length) lines.push(times.join(" · "));
+  if (warmTotal != null) lines.push(`warm ${warmDone || 0}/${warmTotal}`);
+  if (sceneStream) {
+    const note = [];
+    if (sceneStream.firstDetail != null) note.push(`detail ${formatMs(sceneStream.firstDetail)} ms`);
+    note.push(`${sceneStream.slowFrames} streaming frames >25 ms`);
+    if (sceneStream.editBytes != null) note.push(`first edit ${formatMs(sceneStream.editBytes / 1048576)} MiB`);
+    lines.push(note.join(" · "));
+  }
+  if (server) lines.push(server);
+  return lines;
 }

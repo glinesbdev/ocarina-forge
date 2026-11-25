@@ -5,7 +5,8 @@
 import { createDockview } from "dockview-core";
 
 export const LAYOUT_KEY = "ocarinaforge.layout";
-export const LAYOUT_VERSION = 1;
+/** Version 2 drops the Stats panel. A saved version 1 layout is ignored. */
+export const LAYOUT_VERSION = 2;
 
 export const PANELS = [
   { id: "scenes", title: "Scenes", elementId: "scene-pane" },
@@ -16,7 +17,6 @@ export const PANELS = [
   { id: "details", title: "Details", elementId: "details-panel" },
   { id: "edits", title: "Edits", elementId: "changes-panel" },
   { id: "problems", title: "Problems", elementId: "problems-panel" },
-  { id: "stats", title: "Stats", elementId: "stats-panel" },
 ];
 
 const TAB_TO_PANEL = {
@@ -31,7 +31,6 @@ const TAB_TO_PANEL = {
   viewport: "viewport",
   inspector: "inspector",
   edits: "edits",
-  stats: "stats",
 };
 
 const PANEL_TO_TAB = {
@@ -48,7 +47,6 @@ const PLACEMENTS = {
   inspector: { referencePanel: "viewport", direction: "right" },
   edits: { referencePanel: "behavior", direction: "below" },
   problems: { referencePanel: "edits", direction: "within" },
-  stats: { referencePanel: "edits", direction: "within" },
 };
 
 export function panelIdForTab(name) {
@@ -263,7 +261,6 @@ export function createDock(host, hooks = {}) {
     add("inspector", { position: { referencePanel: "viewport", direction: "right" }, initialWidth: 340 });
     add("edits", { position: { referencePanel: "behavior", direction: "below" }, initialHeight: 168 });
     add("problems", { position: { referencePanel: "edits", direction: "within" } });
-    add("stats", { position: { referencePanel: "edits", direction: "within" } });
     const edits = api.getPanel("edits");
     if (edits) edits.api.setActive();
     const viewport = api.getPanel("viewport");

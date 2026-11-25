@@ -5,17 +5,17 @@ import { LAYOUT_KEY, LAYOUT_VERSION, PANELS, panelIdForTab, readSavedLayout, tab
 
 test("the layout is stored under ocarinaforge.layout", () => {
   assert.equal(LAYOUT_KEY, "ocarinaforge.layout");
-  assert.equal(LAYOUT_VERSION, 1);
+  assert.equal(LAYOUT_VERSION, 2);
 });
 
 test("a saved layout must be this version", () => {
   assert.equal(readSavedLayout(null), null);
   assert.equal(readSavedLayout(""), null);
   assert.equal(readSavedLayout("{"), null);
-  assert.equal(readSavedLayout(JSON.stringify({ version: 2, dock: { grid: {} } })), null);
-  assert.equal(readSavedLayout(JSON.stringify({ version: 1 })), null);
+  assert.equal(readSavedLayout(JSON.stringify({ version: 1, dock: { grid: {} } })), null);
+  assert.equal(readSavedLayout(JSON.stringify({ version: 2 })), null);
   const dock = { grid: { root: { type: "branch" } } };
-  assert.deepEqual(readSavedLayout(JSON.stringify({ version: 1, dock })), dock);
+  assert.deepEqual(readSavedLayout(JSON.stringify({ version: 2, dock })), dock);
 });
 
 test("the old side tabs open the docked panels", () => {
@@ -33,7 +33,8 @@ test("the old side tabs open the docked panels", () => {
 
 test("the default panels cover the workbench", () => {
   const ids = PANELS.map((panel) => panel.id);
-  for (const id of ["viewport", "inspector", "behavior", "details", "edits", "problems", "scenes", "actors", "stats"]) {
+  for (const id of ["viewport", "inspector", "behavior", "details", "edits", "problems", "scenes", "actors"]) {
     assert.ok(ids.includes(id), id);
   }
+  assert.equal(ids.includes("stats"), false);
 });

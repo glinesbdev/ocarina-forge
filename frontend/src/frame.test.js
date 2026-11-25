@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatStats, keepRendering } from "./frame.js";
+import { formatProfileDetail, formatStatusLabel, keepRendering } from "./frame.js";
 
 test("the view only redraws continuously during interaction", () => {
   assert.equal(keepRendering({}), false);
@@ -13,44 +13,70 @@ test("the view only redraws continuously during interaction", () => {
   assert.equal(keepRendering({ flying: false, loading: false }), false);
 });
 
-test("a stopped view says idle and keeps the last counts", () => {
+test("the status label keeps the backend, the revision, and the draw count", () => {
   assert.equal(
-    formatStats({ rendering: false, fps: 60, draws: 240, separate: 10553, tris: 1600000 }),
-    "idle · 240 draws · 10553 separate · 1.6M tris"
+    formatStatusLabel({ backend: "WebGPU", build: "abcdef1", draws: 5600 }),
+    "WebGPU · abcdef1 · 5600 draws",
   );
   assert.equal(
-    formatStats({ rendering: true, fps: 0, draws: 12, separate: 12, tris: 800 }),
-    "… · 12 draws · 12 separate · 800 tris"
+    formatStatusLabel({
+      backend: "WebGL (WebGPU unavailable: adapter is null)",
+      build: "abcdef1",
+      draws: 10,
+    }),
+    "WebGL (WebGPU unavailable: adapter is null) · abcdef1 · 10 draws",
   );
   assert.equal(
-    formatStats({ rendering: true, fps: 58, draws: 220, instances: 4000, culled: 900, separate: 10553, tris: 1400000 }),
-    "58 fps · 220 draws · 4000 inst · 900 culled · 10553 separate · 1.4M tris"
+    formatStatusLabel({ backend: "WebGPU", draws: 240, queued: 40, loading: 8, background: 3 }),
+    "WebGPU · 240 draws · 40 queued · 8 loading · 3 background",
   );
-  assert.equal(
-    formatStats({ rendering: false, fps: 60, draws: 240, separate: 10553, tris: 1600000, queued: 40, loading: 8, loaded: 12 }),
-    "idle · 240 draws · 10553 separate · 1.6M tris · 40 queued · 8 loading · 12 loaded"
+  assert.equal(formatStatusLabel({ draws: 0 }), "0 draws");
+});
+
+test("the profile detail keeps the counters that used to sit on the stats line", () => {
+  assert.deepEqual(
+    formatProfileDetail({ rendering: false, fps: 60, instances: null, separate: 10553 }),
+    ["idle", "10553 separate"],
   );
-  assert.equal(
-    formatStats({
+  assert.deepEqual(
+    formatProfileDetail({ rendering: true, fps: 0, separate: 12 }),
+    ["…", "12 separate"],
+  );
+  assert.deepEqual(
+    formatProfileDetail({ rendering: true, fps: 58, instances: 4000, culled: 900, separate: 10553 }),
+    ["58 fps", "4000 inst · 900 culled · 10553 separate"],
+  );
+  assert.deepEqual(
+    formatProfileDetail({
       rendering: false,
-      fps: 60,
-      draws: 240,
-      separate: 12,
-      tris: 800,
+      queued: 40,
+      loading: 8,
+      loaded: 12,
       convertMs: 1200.2,
       textureMs: 800,
       downloadMs: 40.4,
       uploadMs: 90,
       warmDone: 3,
       warmTotal: 11,
+      server: "server 1 converted",
     }),
-    "idle · 240 draws · 12 separate · 800 tris · conv 1200.2 ms · tex 800 ms · dl 40.4 ms · up 90 ms · warm 3/11"
+    [
+      "idle",
+      "40 queued · 8 loading · 12 loaded",
+      "conv 1200.2 ms · tex 800 ms · dl 40.4 ms · up 90 ms",
+      "warm 3/11",
+      "server 1 converted",
+    ],
   );
-});
-
-test("background models are counted separately from active view loads", () => {
-  assert.equal(
-    formatStats({ draws: 2, separate: 0, tris: 20, queued: 0, loading: 0, loaded: 5, deferred: 2, backgroundLoading: 1 }),
-    "idle · 2 draws · 0 separate · 20 tris · 0 queued · 0 loading · 5 loaded · 3 background remaining · 1 background loading"
+  assert.deepEqual(
+    formatProfileDetail({
+      rendering: false,
+      queued: 0,
+      loading: 0,
+      loaded: 5,
+      deferred: 2,
+      backgroundLoading: 1,
+    }),
+    ["idle", "0 queued · 0 loading · 5 loaded · 3 background · 1 background loading"],
   );
 });

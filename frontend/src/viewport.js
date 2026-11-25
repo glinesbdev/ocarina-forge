@@ -33,7 +33,9 @@ import { shouldReloadTerrain } from "./terrain.js";
 import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
 import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { frontendBuild, shortRevision } from "./build-info.js";
-import { formatStats, keepRendering } from "./frame.js";
+import { formatStatusLabel, keepRendering } from "./frame.js";
+import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
+import { createFrameTimer } from "./gpu-timer.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
@@ -109,6 +111,9 @@ export async function createViewport(host, hooks) {
   if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
   const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
+  const frameTimer = createFrameTimer(renderer);
+  const profileWindow = createProfileWindow();
+  let lastCpu = null;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x141b16);
@@ -244,10 +249,30 @@ export async function createViewport(host, hooks) {
   const templateOrder = [];
   const recentSceneTemplates = new Map();
   const recentTerrain = new Map();
-  const statsEl = document.createElement("div");
-  statsEl.className = "view-stats";
-  host.appendChild(statsEl);
-  let showStats = true;
+  const statusEl = document.createElement("div");
+  statusEl.className = "view-status";
+  host.appendChild(statusEl);
+  const profileEl = document.createElement("div");
+  profileEl.className = "view-profile";
+  profileEl.hidden = true;
+  const profileText = document.createElement("pre");
+  const profileDump = document.createElement("button");
+  profileDump.type = "button";
+  profileDump.className = "ghost";
+  profileDump.textContent = "Dump JSON";
+  profileDump.title = "Copy a JSON capture of the recent frames and print it in the console";
+  profileEl.append(profileText, profileDump);
+  host.appendChild(profileEl);
+  profileDump.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    publishProfile();
+  });
+  let showProfile = false;
+  let lastRendering = false;
+  let serverHead = "";
+  let serverLines = [];
+  let gpuPoll = 0;
   let naiveDraws = 0;
   let running = true;
   let frameHandle = 0;
@@ -4128,35 +4153,97 @@ uniform float terrainLayerMissing;`
     frameHandle = requestAnimationFrame(tick);
   }
 
-  function writeStats(rendering) {
-    const now = performance.now();
-    frameTimes.push(now);
-    while (frameTimes.length && now - frameTimes[0] > 500) frameTimes.shift();
-    if (frameTimes.length >= 4) {
-      fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
+  function profileCounters() {
+    const info = (renderer.info && renderer.info.render) || {};
+    const webgpu = Boolean(renderer.isWebGPURenderer);
+    const subDraws = renderer.backend && renderer.backend.isWebGPUBackend === true
+      ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+      : 0;
+    const drawCalls = webgpu ? Number(info.drawCalls) || 0 : Number(info.calls) || 0;
+    const batchCount = batches.length;
+    return {
+      objects: webgpu ? Math.max(0, drawCalls - batchCount) : drawCalls,
+      batches: batchCount,
+      subDraws,
+      draws: drawTotal(info, webgpu, subDraws),
+      triangles: Number(info.triangles) || 0,
+    };
+  }
+
+  function profileTextureCount() {
+    const materials = [];
+    for (const batch of batches) {
+      const material = batch.mesh && batch.mesh.material;
+      if (Array.isArray(material)) materials.push(...material);
+      else materials.push(material);
     }
-    const info = renderer.info && renderer.info.render;
-    const text = formatStats({
+    if (terrainRoot) {
+      terrainRoot.traverse((child) => {
+        if (!child.material) return;
+        if (Array.isArray(child.material)) materials.push(...child.material);
+        else materials.push(child.material);
+      });
+    }
+    return countTextures(materials);
+  }
+
+  function profileGpuState() {
+    if (!frameTimer.supported || frameTimer.mode === "none") return "unsupported";
+    if (frameTimer.disjoint()) return "disjoint";
+    if (frameTimer.latest() == null) return "pending";
+    return "ready";
+  }
+
+  function profileSnapshot() {
+    const summary = profileWindow.summary();
+    const gpuState = profileGpuState();
+    const latest = profileWindow.latest();
+    return {
+      enabled: showProfile,
+      gpuTiming: frameTimer.mode,
+      gpuState,
+      cpuMs: lastCpu ? lastCpu.cpuMs : null,
+      updateMs: lastCpu ? lastCpu.updateMs : null,
+      cullMs: lastCpu ? lastCpu.cullMs : null,
+      submitMs: lastCpu ? lastCpu.submitMs : null,
+      gpuMs: frameTimer.latest(),
+      objects: latest ? latest.objects : null,
+      batches: latest ? latest.batches : null,
+      subDraws: latest ? latest.subDraws : null,
+      summary,
+      recommendation: recommendNext(summary, { gpuState }),
+    };
+  }
+
+  function paintProfile() {
+    if (!showProfile) return;
+    const snapshot = profileSnapshot();
+    const latest = profileWindow.latest() || {};
+    profileText.textContent = formatProfileHud({
       backend: backendName,
-      rendering,
+      revision: buildStamp,
+      mode: frameTimer.mode,
+      gpuState: snapshot.gpuState,
+      latest: { ...latest, gpuMs: frameTimer.latest() },
+      summary: snapshot.summary,
+      recommendation: snapshot.recommendation,
+      detail: profileDetail(),
+    });
+  }
+
+  function profileDetail() {
+    const backgroundLoading = statBackgroundLoading;
+    return {
+      rendering: lastRendering,
       fps,
-      frameMs,
-      draws: drawTotal(
-        info,
-        Boolean(renderer.isWebGPURenderer),
-        renderer.backend && renderer.backend.isWebGPUBackend === true
-          ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
-          : 0,
-      ),
       instances: statInstances,
       culled: statCulled,
       separate: naiveDraws,
-      tris: info.triangles,
       queued: statQueued,
       loading: statLoading,
       loaded: statLoaded,
       deferred: statDeferred,
-      backgroundLoading: statBackgroundLoading,
+      backgroundLoading,
       convertMs: statConvert,
       textureMs: statTexture,
       downloadMs: statDownload,
@@ -4164,10 +4251,95 @@ uniform float terrainLayerMissing;`
       warmDone: statWarmDone,
       warmTotal: statWarmTotal,
       sceneStream: sceneStreamStats,
-      build: buildStamp,
+      server: serverHead,
+    };
+  }
+
+  function dumpProfile() {
+    return buildCapture({
+      backend: backendName,
+      revision: buildStamp,
+      gpuMode: frameTimer.mode,
+      gpuState: profileGpuState(),
+      samples: profileWindow.samples(),
+      server: serverHead ? { head: serverHead, lines: serverLines.slice() } : null,
     });
-    if (showStats) statsEl.textContent = text;
-    if (hooks.onStats) hooks.onStats(text);
+  }
+
+  function publishProfile() {
+    const capture = dumpProfile();
+    const json = JSON.stringify(capture, null, 2);
+    console.info(json);
+    const clipboard = globalThis.navigator && navigator.clipboard;
+    if (clipboard && typeof clipboard.writeText === "function") {
+      clipboard.writeText(json).catch(() => {});
+    }
+    return capture;
+  }
+
+  frameTimer.onResult((ms) => {
+    const list = profileWindow.samples();
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      if (list[index].gpuMs == null) {
+        list[index].gpuMs = ms;
+        break;
+      }
+    }
+    if (showProfile) paintFrame(false, false);
+  });
+
+  function pushProfileSample() {
+    const counters = profileCounters();
+    const heapBytes = (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || null;
+    profileWindow.push({
+      cpuMs: lastCpu.cpuMs,
+      updateMs: lastCpu.updateMs,
+      cullMs: lastCpu.cullMs,
+      submitMs: lastCpu.submitMs,
+      gpuMs: null,
+      frameMs,
+      fps,
+      objects: counters.objects,
+      batches: counters.batches,
+      subDraws: counters.subDraws,
+      draws: counters.draws,
+      triangles: counters.triangles,
+      meshes: residentMeshNames().size,
+      textures: profileTextureCount(),
+      heapBytes,
+    });
+  }
+
+  function paintFrame(rendering, record = true) {
+    lastRendering = Boolean(rendering);
+    if (record) {
+      const now = performance.now();
+      frameTimes.push(now);
+      while (frameTimes.length && now - frameTimes[0] > 500) frameTimes.shift();
+      if (frameTimes.length >= 4) {
+        fps = Math.round(((frameTimes.length - 1) * 1000) / (now - frameTimes[0]));
+      }
+      if (showProfile && lastCpu) pushProfileSample();
+    }
+    const info = renderer.info && renderer.info.render;
+    const draws = drawTotal(
+      info,
+      Boolean(renderer.isWebGPURenderer),
+      renderer.backend && renderer.backend.isWebGPUBackend === true
+        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        : 0,
+    );
+    const background = (statDeferred || 0) + (statBackgroundLoading || 0);
+    statusEl.textContent = formatStatusLabel({
+      backend: backendName,
+      build: buildStamp,
+      draws,
+      queued: statQueued,
+      loading: statLoading,
+      background,
+    });
+    if (showProfile) paintProfile();
+    if (hooks.onFrame) hooks.onFrame();
   }
 
   function tick() {
@@ -4196,7 +4368,11 @@ uniform float terrainLayerMissing;`
       prioritizeLoad();
       syncLabels();
     }
+    const updateMs = performance.now() - tickAt;
+    const cullStart = performance.now();
     syncBatchVisibility();
+    const cullMs = performance.now() - cullStart;
+    const tailStart = performance.now();
     const parseDetail = detailParses.shift();
     if (parseDetail) parseDetail();
     if (detailParses.length) requestRender();
@@ -4207,8 +4383,19 @@ uniform float terrainLayerMissing;`
       const distance = camera.position.distanceTo(entry.pivot.position);
       transform.size = THREE.MathUtils.clamp(distance / 14, 0.55, 2.4);
     }
+    const updateTail = performance.now() - tailStart;
     if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
-    renderer.render(scene, camera);
+    const profiling = showProfile;
+    let submitMs = 0;
+    const submitStart = performance.now();
+    if (profiling) frameTimer.beginFrame();
+    try {
+      renderer.render(scene, camera);
+    } finally {
+      if (profiling) frameTimer.endFrame();
+      submitMs = performance.now() - submitStart;
+    }
+    const afterStart = performance.now();
     flushTextureCpuRelease();
     if (gpuProfile) {
       const materials = [];
@@ -4227,6 +4414,14 @@ uniform float terrainLayerMissing;`
       });
     }
     labels.render(scene, camera);
+    const extra = performance.now() - afterStart;
+    const roundMs = (value) => Math.max(0, Math.round(value * 100) / 100);
+    lastCpu = {
+      updateMs: roundMs(updateMs + updateTail + extra),
+      cullMs: roundMs(cullMs),
+      submitMs: roundMs(submitMs),
+      cpuMs: roundMs(updateMs + updateTail + cullMs + submitMs + extra),
+    };
     const again = keepRendering({
       flying,
       damped,
@@ -4234,8 +4429,22 @@ uniform float terrainLayerMissing;`
       dragging: transform.dragging,
     });
     if (again && gap > 0 && gap < 250) frameMs = Math.round(gap * 10) / 10;
-    writeStats(again);
+    paintFrame(again);
     if (again) requestRender();
+    else if (showProfile && frameTimer.mode === "webgl" && frameTimer.latest() == null) scheduleGpuPoll();
+  }
+
+  function scheduleGpuPoll() {
+    if (gpuPoll || !running || !showProfile) return;
+    let left = 8;
+    const step = () => {
+      gpuPoll = 0;
+      if (!running || !showProfile) return;
+      frameTimer.poll();
+      left -= 1;
+      if (left > 0 && frameTimer.latest() == null) gpuPoll = requestAnimationFrame(step);
+    };
+    gpuPoll = requestAnimationFrame(step);
   }
   renderer.domElement.addEventListener(
     "wheel",
@@ -4283,6 +4492,15 @@ uniform float terrainLayerMissing;`
         draws: currentDraws(),
         instances: statInstances,
         culled: statCulled,
+        cpuMs: lastCpu ? lastCpu.cpuMs : null,
+        updateMs: lastCpu ? lastCpu.updateMs : null,
+        cullMs: lastCpu ? lastCpu.cullMs : null,
+        submitMs: lastCpu ? lastCpu.submitMs : null,
+        gpuMs: frameTimer.latest(),
+        objects: profileWindow.latest() ? profileWindow.latest().objects : null,
+        batchCount: profileWindow.latest() ? profileWindow.latest().batches : null,
+        subDraws: profileWindow.latest() ? profileWindow.latest().subDraws : null,
+        profile: profileSnapshot(),
       },
     });
     report.load = {
@@ -4303,6 +4521,7 @@ uniform float terrainLayerMissing;`
     return report;
   }
 
+  globalThis.__forgeProfile = dumpProfile;
   if (import.meta.env && import.meta.env.DEV) {
     globalThis.__forgeMemory = getMemoryReport;
   }
@@ -4340,10 +4559,25 @@ uniform float terrainLayerMissing;`
       requestRender();
     },
     getMemoryReport,
-    setShowStats(on) {
-      showStats = Boolean(on);
-      statsEl.hidden = !showStats;
-      requestRender();
+    setServerStatus(status) {
+      serverHead = status && status.head ? String(status.head) : "";
+      serverLines = status && Array.isArray(status.lines) ? status.lines.slice() : [];
+      if (showProfile) paintProfile();
+    },
+    setShowProfile(on) {
+      const next = Boolean(on);
+      if (next && !showProfile) profileWindow.clear();
+      showProfile = next;
+      frameTimer.setEnabled(next);
+      profileEl.hidden = !next;
+      if (!next && gpuPoll) {
+        cancelAnimationFrame(gpuPoll);
+        gpuPoll = 0;
+      }
+      if (next) {
+        paintProfile();
+        requestRender();
+      }
     },
     destroy() {
       running = false;
@@ -4352,13 +4586,16 @@ uniform float terrainLayerMissing;`
       if (rebuildTimer) clearTimeout(rebuildTimer);
       if (frameHandle) cancelAnimationFrame(frameHandle);
       gpuPicker.dispose();
+      if (gpuPoll) cancelAnimationFrame(gpuPoll);
       if (keyWindow) {
         keyWindow.removeEventListener("keydown", onFlyKey);
         keyWindow.removeEventListener("keyup", onFlyUp);
         keyWindow.removeEventListener("blur", onFlyBlur);
       }
       observer.disconnect();
-      statsEl.remove();
+      frameTimer.dispose();
+      statusEl.remove();
+      profileEl.remove();
       generation += 1;
       observer.disconnect();
       clearActors();
@@ -4372,6 +4609,7 @@ uniform float terrainLayerMissing;`
       renderer.domElement.remove();
       labels.domElement.remove();
       if (globalThis.__forgeMemory === getMemoryReport) delete globalThis.__forgeMemory;
+      if (globalThis.__forgeProfile === dumpProfile) delete globalThis.__forgeProfile;
     },
   };
 }

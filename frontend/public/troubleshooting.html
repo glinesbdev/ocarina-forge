@@ -21,9 +21,9 @@
     <main>
       <p><a href="/">Back to Forge</a></p>
       <h1>Renderer troubleshooting</h1>
-      <p>The same notes are in <code>docs/troubleshooting.md</code> in the repo. The viewport <strong>Stats</strong> line names the backend that actually started. The short git revision at the end of that line is this page's build. <code>GET /api/health</code> returns the API's <code>build.revision</code>.</p>
+      <p>The same notes are in <code>docs/troubleshooting.md</code> in the repo. The viewport status label names the backend that actually started. The short git revision on that label is this page's build. <code>GET /api/health</code> returns the API's <code>build.revision</code>.</p>
 
-      <h2>What the stats line means</h2>
+      <h2>What the status label means</h2>
       <table>
         <tr><th>Starts with</th><th>Meaning</th></tr>
         <tr><td><code>WebGPU</code></td><td>Real WebGPU device</td></tr>
@@ -35,7 +35,7 @@
 
       <h2>Plain WebGL that cleared after a restart</h2>
       <p>A stale bundle constructs <code>WebGLRenderer</code> and the old label was the literal <code>WebGL</code>, even when the adapter was fine. That is a cached module, an old <code>frontend/dist</code>, a <code>build:webgl</code> bundle, or a Vite prebundle of <code>three</code> (that file is <code>three.module.js</code>, which exports <code>WebGLRenderer</code>). <code>three.webgpu.js</code> does not.</p>
-      <p>Starlette used to serve <code>frontend/dist</code> with <code>ETag</code> and <code>Last-Modified</code> and no <code>Cache-Control</code>, so the browser could keep <code>index.html</code>. Restarting the API does not rebuild <code>dist</code>. Hard-reload, then compare the stats stamp with <code>/api/health</code>. A banner that says the server is older means restart <code>scripts/dev.sh</code> (API and Vite). A banner that says this page is older means the bundle is stale: hard-reload, and rebuild <code>frontend/dist</code> if the Python server is what you opened. <code>index.html</code> is now <code>no-cache</code>. Fingerprinted files under <code>assets/</code> stay cached.</p>
+      <p>Starlette used to serve <code>frontend/dist</code> with <code>ETag</code> and <code>Last-Modified</code> and no <code>Cache-Control</code>, so the browser could keep <code>index.html</code>. Restarting the API does not rebuild <code>dist</code>. Hard-reload, then compare the status revision with <code>/api/health</code>. A banner that says the server is older means restart <code>scripts/dev.sh</code> (API and Vite). A banner that says this page is older means the bundle is stale: hard-reload, and rebuild <code>frontend/dist</code> if the Python server is what you opened. <code>index.html</code> is now <code>no-cache</code>. Fingerprinted files under <code>assets/</code> stay cached.</p>
       <p>three r170 also hides the original WebGPU error. A null adapter or a failed <code>requestDevice</code> makes it swap in a WebGL2 backend and continue. Forge records that reason instead of leaving the line as plain WebGL. Missing <code>texture-compression-bc</code> does not block startup. A device lost after WebGPU has started leaves the line on <code>WebGPU</code> and shows a toast.</p>
 
       <h2>Brave Shields and the WebGPU flag</h2>
@@ -53,7 +53,7 @@
 const adapter = await navigator.gpu.requestAdapter()
 adapter &amp;&amp; (adapter.info || await adapter.requestAdapterInfo())
 const device = await adapter.requestDevice()</pre>
-      <p><code>navigator.gpu</code> undefined means the API is hidden. <code>requestAdapter()</code> returning <code>null</code> is the no-adapter / Shields case. A throw from <code>requestDevice()</code> is the message on the stats line. Forge also logs <code>code</code>, <code>adapterInfo</code>, and limits.</p>
+      <p><code>navigator.gpu</code> undefined means the API is hidden. <code>requestAdapter()</code> returning <code>null</code> is the no-adapter / Shields case. A throw from <code>requestDevice()</code> is the message on the status label. Forge also logs <code>code</code>, <code>adapterInfo</code>, and limits.</p>
     </main>
   </body>
 </html>

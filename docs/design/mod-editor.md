@@ -245,7 +245,7 @@ The Rust port below is part of this direction. It is not one of the ten, and it 
 
 ### R1. Profile a cold load before any port
 
-`python -m ocarina_forge profile --dump <dump> --model <gyaml> --cprofile out.prof` times one actor, cold then warm, and writes a cProfile of the cold convert. The stage lines split file decompress, BFRES parse, vertex decode, index decode, meshopt or the Python lod fallback, JPEG/PNG/GPU encode, glTF pack, deswizzle, and block decode. A scene walk takes `--limit N` and `--jobs N`. The default is one model at a time and every model. It does not measure browser `dl` or GPU `up`. Those stay on **Stats**. The house profile that picked R2 is in [performance.md](../performance.md).
+`python -m ocarina_forge profile --dump <dump> --model <gyaml> --cprofile out.prof` times one actor, cold then warm, and writes a cProfile of the cold convert. The stage lines split file decompress, BFRES parse, vertex decode, index decode, meshopt or the Python lod fallback, JPEG/PNG/GPU encode, glTF pack, deswizzle, and block decode. A scene walk takes `--limit N` and `--jobs N`. The default is one model at a time and every model. It does not measure browser `dl` or GPU `up`. Those stay on **Profile**. The house profile that picked R2 is in [performance.md](../performance.md).
 
 The command uses a private cache directory unless `--home-cache` is set. A cold `cache=miss` is that directory. The glb key is `models-55`. The private profile cache is `~/.cache/ocarina-forge/profile-tmp` and is deleted on exit unless `--keep-cache` is set. Profile does not change it by itself. [performance.md](../performance.md) has the command and the house numbers. Retail numbers are measured on Bradyn's machine, not in this note.
 
@@ -294,4 +294,4 @@ November 22, answered by Bradyn:
 8. Teleport, then walking out and back, is enough preview for milestone 1.
 9. Patch-only saves do not write `src/main.ts`.
 10. The After the Ocarina romfs build stays beside the mod exporter.
-11. Stop the Rust port when download and GPU upload dominate the cold time. The Python profile does not measure those. Compare it with **Stats** `dl` and `up` on a real open.
+11. Stop the Rust port when download and GPU upload dominate the cold time. The Python profile does not measure those. Compare it with **Profile** `dl` and `up` on a real open.
