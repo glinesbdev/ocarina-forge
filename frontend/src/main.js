@@ -4,6 +4,15 @@ import { api } from "./api.js";
 import { dismissWebgpuNotice, webgpuNoticeVisible } from "./backend.js";
 import { buildNoticeId, buildNoticeVisible, describeBuildMismatch, dismissBuildNotice, frontendBuild } from "./build-info.js";
 import { planActorRefresh } from "./actors.js";
+import {
+  buildOutlinerRows,
+  followSelection,
+  planViewportReveal,
+  revealHint,
+  shouldVirtualize,
+  virtualRevealTop,
+  virtualSlice,
+} from "./outliner.js";
 import { graphHistory, historyStep, renderBehavior } from "./behavior.js";
 import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
@@ -91,6 +100,7 @@ const state = {
   companionPick: true,
   categories: { area: "show", system: "show" },
   hideVolumes: false,
+  outlinerCollapsed: {},
   showGround: false,
   showWater: true,
   showSub: false,
@@ -163,7 +173,7 @@ viewport = await createViewport($("viewport"), {
   onSelect: (id) => {
     state.selected = id;
     viewport.select(id);
-    renderOutliner();
+    renderOutliner({ reveal: "viewport" });
     renderProps();
     noteCompanion();
     if (id && window.matchMedia("(max-width: 980px)").matches) showTab("props");
@@ -300,7 +310,7 @@ document.addEventListener("click", (event) => {
   root.open = false;
 });
 $("scene-search").addEventListener("input", renderScenes);
-$("actor-search").addEventListener("input", renderOutliner);
+$("actor-search").addEventListener("input", () => renderOutliner());
 $("add-actor").addEventListener("click", () => openAdd("add"));
 $("show-hidden").addEventListener("change", (event) => {
   state.showHidden = event.target.checked;
@@ -1589,24 +1599,171 @@ function updateHistoryButtons() {
   $("redo").disabled = state.history.redo.length === 0;
 }
 
-function renderOutliner() {
+let outlinerVirtualRows = null;
+let outlinerScrollLocked = false;
+let outlinerScrollFrame = 0;
+let outlinerScrollToken = 0;
+
+function outlinerScrollBehavior() {
+  try {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return "auto";
+  } catch {
+    /* smooth is the default */
+  }
+  return "smooth";
+}
+
+function setOutlinerHint(text) {
+  const hint = $("outliner-hint");
+  if (!hint) return;
+  const next = text || "";
+  if (hint.textContent === next && hint.hidden === !next) return;
+  hint.textContent = next;
+  hint.hidden = !next;
+}
+
+function bindOutlinerScroll(list) {
+  if (!list || list.dataset.outlinerScroll === "1") return;
+  list.dataset.outlinerScroll = "1";
+  list.addEventListener("scroll", onOutlinerScroll, { passive: true });
+}
+
+function onOutlinerScroll() {
+  if (outlinerScrollLocked || !outlinerVirtualRows) return;
+  const token = outlinerScrollToken;
+  if (outlinerScrollFrame) return;
+  outlinerScrollFrame = requestAnimationFrame(() => {
+    outlinerScrollFrame = 0;
+    if (token !== outlinerScrollToken || outlinerScrollLocked || !outlinerVirtualRows) return;
+    const list = $("outliner");
+    if (list) paintOutlinerVirtual(list, outlinerVirtualRows);
+  });
+}
+
+function renderOutliner({ reveal = null } = {}) {
   renderFilters();
   const list = $("outliner");
-  list.replaceChildren();
+  if (!list) return;
+  bindOutlinerScroll(list);
+  if (reveal === "viewport" && state.selected && dock.isOpen(panelIdForTab("outliner"))) {
+    dock.reveal(panelIdForTab("outliner"));
+  }
+  const savedScroll = list.scrollTop || 0;
+  const clientHeight = list.clientHeight || 0;
+  outlinerScrollToken += 1;
   if (!state.view) {
-    list.append(empty("Open a scene to see its actors."));
+    outlinerVirtualRows = null;
+    list.replaceChildren(empty("Open a scene to see its actors."));
+    setOutlinerHint("");
     return;
   }
   const query = $("actor-search").value.trim().toLowerCase();
-  const actors = state.view.actors.filter((actor) => {
-    const hay = `${actor.gyaml} ${actor.name || ""} ${actor.id || ""} ${actor.category}`.toLowerCase();
-    return !query || hay.includes(query);
+  if (!state.outlinerCollapsed) state.outlinerCollapsed = {};
+  const actors = state.view.actors || [];
+  let plan = { action: "none" };
+  if (reveal === "viewport") {
+    plan = planViewportReveal({
+      actors,
+      selectedId: state.selected,
+      source: "viewport",
+      query,
+      groups: CATEGORY_FILTERS,
+      collapsed: state.outlinerCollapsed,
+      scrollTop: savedScroll,
+      clientHeight,
+      behavior: outlinerScrollBehavior(),
+    });
+    for (const id of plan.expand || []) delete state.outlinerCollapsed[id];
+  }
+  const rows = plan.rows || buildOutlinerRows({
+    actors,
+    query,
+    groups: CATEGORY_FILTERS,
+    collapsed: state.outlinerCollapsed,
   });
-  const shown = actors.slice(0, 400);
-  if (!shown.length) list.append(empty(state.view.actors.length ? "No actors match." : "This scene has no actors."));
-  for (const actor of shown) list.append(actorRow(actor));
-  if (actors.length > shown.length) list.append(empty(`Showing 400 of ${actors.length}. Search to narrow the list.`));
-  for (const removed of state.view.removed || []) {
+  const selected = actors.find((actor) => actor && actor.id === state.selected) || null;
+  setOutlinerHint(plan.action === "hint" ? plan.hint : revealHint(selected, query));
+  outlinerScrollLocked = true;
+  try {
+    if (shouldVirtualize(rows)) {
+      outlinerVirtualRows = rows;
+      list.replaceChildren();
+      const host = document.createElement("div");
+      host.className = "outliner-virtual";
+      list.append(host);
+      appendOutlinerExtras(list);
+      // Height has to exist before scrollTop, or the browser clamps the reveal to 0.
+      paintOutlinerVirtual(list, rows);
+      list.scrollTop = savedScroll;
+      paintOutlinerVirtual(list, rows);
+    } else {
+      outlinerVirtualRows = null;
+      list.replaceChildren();
+      if (!rows.length) list.append(empty(actors.length ? "No actors match." : "This scene has no actors."));
+      for (const row of rows) list.append(row.kind === "group" ? groupRow(row) : actorRow(row.actor));
+      appendOutlinerExtras(list);
+      list.scrollTop = savedScroll;
+    }
+  } finally {
+    outlinerScrollLocked = false;
+  }
+  if (plan.action === "reveal") scheduleOutlinerReveal(plan, rows);
+}
+
+function scheduleOutlinerReveal(plan, rows, attempt = 0) {
+  const token = outlinerScrollToken;
+  requestAnimationFrame(() => {
+    if (token !== outlinerScrollToken) return;
+    const list = $("outliner");
+    if (!list) return;
+    if (!(list.clientHeight > 0) && attempt < 4) {
+      scheduleOutlinerReveal(plan, rows, attempt + 1);
+      return;
+    }
+    outlinerScrollLocked = true;
+    try {
+      if (plan.virtual) {
+        const top = virtualRevealTop(rows, plan.index, {
+          scrollTop: list.scrollTop || 0,
+          clientHeight: list.clientHeight || 0,
+        });
+        followSelection(list, { ...plan, scrollTop: top }, null);
+        paintOutlinerVirtual(list, rows);
+      } else {
+        followSelection(list, plan, findOutlinerActor(list, plan.actorId));
+      }
+    } finally {
+      outlinerScrollLocked = false;
+    }
+  });
+}
+
+function paintOutlinerVirtual(list, rows) {
+  const host = list.querySelector(":scope > .outliner-virtual");
+  if (!host) return;
+  const slice = virtualSlice(rows, { scrollTop: list.scrollTop || 0, clientHeight: list.clientHeight || 0 });
+  host.style.height = `${slice.total}px`;
+  const fragment = document.createDocumentFragment();
+  for (const item of slice.items) {
+    const el = item.row.kind === "group" ? groupRow(item.row) : actorRow(item.row.actor);
+    el.style.top = `${item.top}px`;
+    el.style.height = `${item.height}px`;
+    fragment.append(el);
+  }
+  host.replaceChildren(fragment);
+}
+
+function findOutlinerActor(list, id) {
+  if (!list || id == null) return null;
+  const want = String(id);
+  for (const node of list.querySelectorAll("[data-actor-id]")) {
+    if (node.getAttribute("data-actor-id") === want) return node;
+  }
+  return null;
+}
+
+function appendOutlinerExtras(list) {
+  for (const removed of (state.view && state.view.removed) || []) {
     const row = document.createElement("div");
     row.className = "actor-row";
     const text = document.createElement("span");
@@ -1652,6 +1809,7 @@ function actorRow(actor) {
   button.className = "actor-row";
   button.setAttribute("role", "option");
   button.setAttribute("aria-selected", actor.id && actor.id === state.selected ? "true" : "false");
+  if (actor.id) button.setAttribute("data-actor-id", String(actor.id));
   const swatch = document.createElement("i");
   swatch.className = `swatch ${actor.category}`;
   const text = document.createElement("span");
@@ -1673,12 +1831,37 @@ function actorRow(actor) {
   button.addEventListener("click", () => {
     state.selected = actor.id;
     viewport.select(actor.id);
-    renderOutliner();
+    renderOutliner({ reveal: "panel" });
     renderProps();
     noteCompanion();
     showTab("props");
   });
   button.addEventListener("dblclick", () => viewport.frame(actor.id));
+  return button;
+}
+
+function groupRow(group) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = group.collapsed ? "outliner-group is-shut" : "outliner-group";
+  button.setAttribute("aria-expanded", group.collapsed ? "false" : "true");
+  button.dataset.group = group.id;
+  button.title = group.collapsed ? `Expand ${group.label}` : `Collapse ${group.label}`;
+  const caret = document.createElement("i");
+  caret.className = "outliner-caret";
+  caret.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = group.label;
+  const count = document.createElement("span");
+  count.className = "count";
+  count.textContent = String(group.count);
+  button.append(caret, label, count);
+  button.addEventListener("click", () => {
+    if (!state.outlinerCollapsed) state.outlinerCollapsed = {};
+    if (group.collapsed) delete state.outlinerCollapsed[group.id];
+    else state.outlinerCollapsed[group.id] = true;
+    renderOutliner({ reveal: "panel" });
+  });
   return button;
 }
 
