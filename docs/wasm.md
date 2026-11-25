@@ -11,6 +11,11 @@ JavaScript copy in `tools/wasm-bench/src/surface.js` and with the Python path
 the fixture exporter uses. Those copies stay: the bench compares them, and
 `GET /api/ground` still samples in Python.
 
+Whether the rest of the editor can leave that server is
+[wasm-in-browser.md](wasm-in-browser.md). The recommendation there is to keep
+the local server as the default. The sampler and decode path on this page
+stay as they are.
+
 ## What moved
 
 1. **Walkable-surface sampling** (`MeshIndex`, `triangle_height`,
