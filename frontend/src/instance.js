@@ -20,11 +20,12 @@ export function presentByDefault(params) {
   return flag !== negation;
 }
 
-export function actorShown({ status, present = true, category, volume, showHidden, categories, hideVolumes }) {
+export function actorShown({ status, present = true, category, volume, showHidden, categories, hideVolumes, layer, layersVisible }) {
   const hiddenByStatus = (status === "hidden" || !present) && !showHidden;
   const hiddenByCategory = categories?.[category] === "hide";
   const hiddenByVolume = Boolean(volume) && Boolean(hideVolumes);
-  return !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
+  const hiddenByLayer = Boolean(layer) && layersVisible?.[layer] === false;
+  return !hiddenByStatus && !hiddenByCategory && !hiddenByVolume && !hiddenByLayer;
 }
 
 export function actorLocked({ category, categories, companion, pickable }) {

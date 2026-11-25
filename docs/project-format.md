@@ -11,6 +11,7 @@ my-mod/
   text/          # reserved
   events/        # reserved
   behaviors/     # set-field ops for one actor graph
+  load-filters.yaml
   tables/        # reserved
   build/         # export output, not part of the source
 ```
@@ -24,6 +25,30 @@ project or import a mod whose `patches/*.json` files contain placement `set` ope
 `Scale`. Other local mods are shown as **Not editable**. Import creates a project in the Forge library and keeps the
 original mod tree, including its runtime entry and manifest fields, in `.longshot-source/`; export and install preserve
 those files while regenerating the placement patches. The game’s Ocarina Forge page can open a local mod directly.
+
+## Load filters
+
+The Actors panel has a load preset and a checkbox per layer (Models, Terrain, Water, Collision, Behavior, Effects, Decorations, Lights) plus Textures. A checked layer is fetched. The eye hides a layer that is already loaded, and the Ground and Water checkboxes on the stage bar do the same for those two. `?load=terrain,models` or `?load=layout` sets the filter for the session and saves it on the open project. Full clears the query.
+
+`load-filters.yaml` sits next to `manifest.yaml`. It is editor state. Format 1. Save, Save Longshot mod, and Build mod do not read it.
+
+```yaml
+format: 1
+preset: layout
+textures: false
+layers:
+  models: true
+  terrain: true
+  water: true
+  collision: true
+  behavior: false
+  effects: false
+  decorations: true
+  lights: true
+visible:
+  models: true
+  terrain: false
+```
 
 ## manifest.yaml
 

@@ -218,6 +218,24 @@ class Project:
                 found.append(str(data["gyaml"]))
         return found
 
+    def load_filters(self) -> dict:
+        from ocarina_forge.layers import default_filters, normalize_filters
+
+        path = self.root / "load-filters.yaml"
+        if not path.is_file():
+            return default_filters()
+        data = load_yaml(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            return default_filters()
+        return normalize_filters(data)
+
+    def write_load_filters(self, data: dict) -> dict:
+        from ocarina_forge.layers import normalize_filters
+
+        normal = normalize_filters(data)
+        atomic_write(self.root / "load-filters.yaml", dump_yaml(normal))
+        return normal
+
     def save_scene_diff(self, diff: dict) -> None:
         banc = diff["banc"]
         path = self.scene_path(banc)

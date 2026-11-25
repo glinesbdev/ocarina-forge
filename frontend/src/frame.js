@@ -27,6 +27,7 @@ export function formatStatusLabel({
   queued = 0,
   loading = 0,
   background = 0,
+  layersOff = null,
 } = {}) {
   const parts = [];
   if (backend) parts.push(backend);
@@ -35,6 +36,7 @@ export function formatStatusLabel({
   if (queued) parts.push(`${queued} queued`);
   if (loading) parts.push(`${loading} loading`);
   if (background) parts.push(`${background} background`);
+  if (layersOff && layersOff.length) parts.push(`off: ${layersOff.join(", ")}`);
   return parts.join(" · ");
 }
 

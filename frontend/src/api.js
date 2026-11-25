@@ -36,29 +36,84 @@ export const api = {
   openProject: (directory) => request("/api/project/open", { method: "POST", body: JSON.stringify({ directory }) }),
   exportLongshot: (body) => request("/api/mod-export", { method: "POST", body: JSON.stringify(body) }),
   scenes: () => request("/api/scenes"),
-  scene: (banc) => request(`/api/scene?banc=${encodeURIComponent(banc)}`),
+  scene: (banc, load) => {
+    const params = new URLSearchParams({ banc });
+    if (load && load.query) params.set("load", load.query);
+    if (load && load.textures != null && load.textures !== "") params.set("textures", String(load.textures));
+    return request(`/api/scene?${params}`);
+  },
   sceneChanges: (banc) => request(`/api/scene/changes?banc=${encodeURIComponent(banc)}`),
   problems: (banc) => request(`/api/scene/problems?banc=${encodeURIComponent(banc)}`),
   meshAudit: (banc) => request(`/api/scene/mesh-audit?banc=${encodeURIComponent(banc)}`),
   hotReload: () => request("/api/hot-reload"),
   saveHotReload: (body) => request("/api/hot-reload", { method: "PUT", body: JSON.stringify(body) }),
   projectChanges: () => request("/api/changes"),
-  edit: (banc, command) => request("/api/scene/edit", { method: "POST", body: JSON.stringify({ banc, command }) }),
-  putDiff: (banc, actors) => request("/api/scene/diff", { method: "PUT", body: JSON.stringify({ banc, actors }) }),
+  edit: (banc, command, load) => request("/api/scene/edit", {
+    method: "POST",
+    body: JSON.stringify({ banc, command, ...(load || {}) }),
+  }),
+  putDiff: (banc, actors, load) => request("/api/scene/diff", {
+    method: "PUT",
+    body: JSON.stringify({ banc, actors, ...(load || {}) }),
+  }),
   putRecipes: (banc, recipes) => request("/api/scene/recipes", { method: "PUT", body: JSON.stringify({ banc, recipes }) }),
+  loadFilters: () => request("/api/load-filters"),
+  putLoadFilters: (body) => request("/api/load-filters", { method: "PUT", body: JSON.stringify(body) }),
   actors: (q) => request(`/api/actors?q=${encodeURIComponent(q)}`),
-  behavior: ({ banc = "", id = "", gyaml = "" } = {}) =>
-    request(`/api/behavior?banc=${encodeURIComponent(banc)}&id=${encodeURIComponent(id)}&gyaml=${encodeURIComponent(gyaml)}`),
+  behavior: ({ banc = "", id = "", gyaml = "", load = "" } = {}) => {
+    const params = new URLSearchParams({ banc, id, gyaml });
+    if (load) params.set("load", load);
+    return request(`/api/behavior?${params}`);
+  },
   setBehaviorField: (body) => request("/api/behavior/field", { method: "POST", body: JSON.stringify(body) }),
   putBehaviorOps: (body) => request("/api/behavior/ops", { method: "PUT", body: JSON.stringify(body) }),
   exportBehavior: (gyaml) => request("/api/behavior/export", { method: "POST", body: JSON.stringify({ gyaml }) }),
   flags: (q) => request(`/api/flags?q=${encodeURIComponent(q)}`),
-  model: (gyaml, options) => request(`/api/models/${encodeURIComponent(gyaml)}`, options),
-  models: (names, prefetch = true) =>
-    request("/api/models/batch", { method: "POST", body: JSON.stringify({ names, prefetch }) }).then((data) => data.models || {}),
-  terrain: (banc, refine = false) => request(`/api/terrain?banc=${encodeURIComponent(banc)}${refine ? "&refine=true" : ""}`),
-  ground: (banc, x, z, exclude) => request(`/api/ground?banc=${encodeURIComponent(banc)}&x=${encodeURIComponent(x)}&z=${encodeURIComponent(z)}${exclude ? `&exclude=${encodeURIComponent(exclude)}` : ""}`),
-  groundSurface: (banc) => `/api/ground/surface?banc=${encodeURIComponent(banc)}`,
+  actorTextures: (gyaml, options = {}) => {
+    const params = new URLSearchParams();
+    if (options.load) params.set("load", options.load);
+    const query = params.toString();
+    return request(`/api/models/${encodeURIComponent(gyaml)}/textures${query ? `?${query}` : ""}`);
+  },
+  model: (gyaml, options = {}) => {
+    const params = new URLSearchParams();
+    if (options.load) params.set("load", options.load);
+    if (options.textures != null && options.textures !== "") params.set("textures", String(options.textures));
+    if (options.flat) params.set("flat", "1");
+    const query = params.toString();
+    const init = {};
+    if (options.priority) init.priority = options.priority;
+    return request(`/api/models/${encodeURIComponent(gyaml)}${query ? `?${query}` : ""}`, init);
+  },
+  models: (names, prefetch = true, options = {}) =>
+    request("/api/models/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        names,
+        prefetch,
+        load: options.load || "",
+        textures: options.textures,
+        flat: options.flat ? 1 : 0,
+      }),
+    }).then((data) => data.models || {}),
+  terrain: (banc, refine = false, options = {}) => {
+    const params = new URLSearchParams({ banc });
+    if (refine) params.set("refine", "true");
+    if (options.load) params.set("load", options.load);
+    if (options.textures != null && options.textures !== "") params.set("textures", String(options.textures));
+    return request(`/api/terrain?${params}`);
+  },
+  ground: (banc, x, z, exclude, options = {}) => {
+    const params = new URLSearchParams({ banc, x: String(x), z: String(z) });
+    if (exclude) params.set("exclude", exclude);
+    if (options.load) params.set("load", options.load);
+    return request(`/api/ground?${params}`);
+  },
+  groundSurface: (banc, options = {}) => {
+    const params = new URLSearchParams({ banc });
+    if (options.load) params.set("load", options.load);
+    return `/api/ground/surface?${params}`;
+  },
   exportMod: (body) => request("/api/export", { method: "POST", body: JSON.stringify(body) }),
   importAto: (path) => request("/api/import/ato", { method: "POST", body: JSON.stringify({ path }) }),
 };

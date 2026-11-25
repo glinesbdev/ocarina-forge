@@ -68,7 +68,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-55\0"
+_CACHE_VERSION = b"models-56\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -186,7 +186,7 @@ def cache_dir() -> Path:
     return root
 
 
-def describe_actor(dump, gyaml: str, *, convert: bool = True) -> dict:
+def describe_actor(dump, gyaml: str, *, convert: bool = True, flat: bool = False) -> dict:
     if not _NAME.fullmatch(gyaml or ""):
         return _box(gyaml, "That is not an actor pack name.")
     try:
@@ -197,7 +197,137 @@ def describe_actor(dump, gyaml: str, *, convert: bool = True) -> dict:
         return _box(gyaml, "No mesh.")
     if not any(item[0] == "blob" or (dump.romfs / item[1]).is_file() for item in plan):
         return _box(gyaml, _missing(gyaml, tried))
-    return _first_mesh(gyaml, plan, f"/api/models/{gyaml}/model.glb", dump, tried, convert=convert)
+    url = f"/api/models/{gyaml}/model.glb"
+    if flat:
+        url += "?flat=1"
+    return _first_mesh(gyaml, plan, url, dump, tried, convert=convert, flat=flat)
+
+
+def describe_actor_textures(dump, gyaml: str) -> dict:
+    """Images for one actor, keyed by material. This does not write or read a glb.
+
+    The editor keeps one geometry file (`?flat=1`) and asks for this manifest
+    only when textures are on. A second call reads `texman/` and does not
+    decode BNTX again.
+    """
+    empty = {"gyaml": gyaml or "", "materials": {}}
+    if not _NAME.fullmatch(gyaml or ""):
+        return empty
+    try:
+        plan, _tried, referenced = _actor_plan(dump, gyaml)
+    except BancError:
+        return empty
+    if not referenced:
+        return empty
+    errors: list[str] = []
+    for _source, blob in _realize(dump, plan, errors):
+        try:
+            return _textures_for_blob(dump, gyaml, blob)
+        except (FresError, BntxError, ValueError, struct.error, IndexError, OSError):
+            continue
+    return empty
+
+
+def _textures_for_blob(dump, gyaml: str, blob: bytes) -> dict:
+    digest = hashlib.sha256(_cache_prefix() + b"texman-1\0" + blob).hexdigest()
+    path = cache_dir() / "texman" / digest[:2] / f"{digest}.json"
+    if path.is_file():
+        note_access(path)
+        return json.loads(path.read_text(encoding="utf-8"))
+    models = parse(blob)
+    files: list[dict] = []
+    token = _FILES.set(files)
+    try:
+        _fill_texture_names(models, dump)
+        external, _log, _raws = _resolve_materials(dump, models, gyaml, False)
+    finally:
+        _FILES.reset(token)
+    manifest = _texture_manifest(gyaml, models, external)
+    encoded = json.dumps(manifest, sort_keys=True)
+    with _LOCK:
+        if not path.is_file():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(encoded, encoding="utf-8")
+            note_written(path)
+        else:
+            note_access(path)
+    return manifest
+
+
+def _published_image(image, alpha: str, urls: dict[int, str]) -> str | None:
+    if image is None or not getattr(image, "rgba", None):
+        return None
+    key = id(image)
+    cached = urls.get(key)
+    if cached:
+        return cached
+    encoded = _encode_cached(image, alpha, gpu=True)
+    from ocarina_forge.shared_models import publish_texture_bytes
+
+    url = publish_texture_bytes(bytes(encoded))
+    urls[key] = url
+    return url
+
+
+def _texture_manifest(gyaml: str, models, external: dict) -> dict:
+    _mark_omitted(models)
+    materials: dict[str, dict] = {}
+    urls: dict[int, str] = {}
+
+    def taken(model, name: str):
+        if not name:
+            return None
+        image = model.images.get(name) or external.get(name) or external.get(name.lower())
+        if image is None or not getattr(image, "rgba", None):
+            return None
+        return image
+
+    for model in models:
+        for part in model.parts:
+            if part.omit:
+                continue
+            image = taken(model, part.texture)
+            albedo = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
+            normal = _published_image(taken(model, part.normal_texture), "mask", urls)
+            normal1 = _published_image(taken(model, getattr(part, "normal1_texture", "")), "mask", urls)
+            orm = _published_image(getattr(part, "orm_image", None), "png", urls)
+            orm1 = _published_image(getattr(part, "orm1_image", None), "png", urls)
+            emissive = _published_image(getattr(part, "emission_image", None), "png", urls) or _published_image(
+                taken(model, part.emission_texture), "mask", urls
+            )
+            moss = None
+            if part.blend and part.overlay_texture:
+                moss = _published_image(taken(model, part.overlay_texture), "mask", urls)
+            if not any((albedo, normal, normal1, orm, orm1, emissive, moss)):
+                continue
+            if part.stand_in == "water":
+                color = _WATER if part.texture == _WATER_TEX or image is None else (0.35, 0.55, 0.55, 0.2)
+                alpha = "blend"
+            elif part.proxy and image is None:
+                color = _TERRAIN
+                alpha = "opaque"
+            else:
+                color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
+                alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
+            slot = {
+                "map": albedo,
+                "normalMap": normal,
+                "normal1Map": normal1,
+                "orm": orm,
+                "orm1": orm1,
+                "emissiveMap": emissive,
+                "moss": moss,
+                "alpha": alpha,
+                "cutoff": part.cutoff,
+                "color": [float(channel) for channel in color[:4]],
+            }
+            if moss and part.blend:
+                slot["blend"] = {
+                    "channel": part.blend.get("channel") or "r",
+                    "uv": part.blend.get("uv") or "_u0",
+                }
+            materials[f"{part.name}:{part.material_index}"] = slot
+    return {"gyaml": gyaml, "materials": materials}
 
 
 def describe_terrain(dump, banc: str, *, convert: bool = True) -> dict:
@@ -258,14 +388,14 @@ def _missing(gyaml: str, tried: list[str]) -> str:
     )
 
 
-def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrain: bool = False, convert: bool = True) -> dict:
+def _first_mesh(label: str, plan: list, url: str, dump, tried: list[str], terrain: bool = False, convert: bool = True, flat: bool = False) -> dict:
     errors = []
     first = ""
     for source, blob in _realize(dump, plan, errors):
         if not first:
             first = source
         try:
-            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}", terrain=terrain, convert=convert)
+            digest, info = _convert_cached(blob, dump, hint=f"{label} {source}", terrain=terrain, convert=convert, flat=flat)
         except CacheMiss:
             raise
         except UndecodedGeometry as exc:
@@ -322,11 +452,11 @@ def _cached_glb(digest: str) -> Path | None:
     return path
 
 
-def describe_actor_at(root: str, gyaml: str) -> dict:
+def describe_actor_at(root: str, gyaml: str, flat: bool = False) -> dict:
     """Worker entry. Rebuilds the dump from its root so a child process can convert."""
     from ocarina_forge.dump import Dump
 
-    return describe_actor(Dump(Path(root)), gyaml)
+    return describe_actor(Dump(Path(root)), gyaml, flat=bool(flat))
 
 
 def describe_terrain_at(root: str, banc: str) -> dict:
@@ -341,19 +471,19 @@ def _with_timing(info: dict, cache: str, clock: ConvertClock) -> dict:
     return reported
 
 
-def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, convert: bool = True) -> tuple[str, dict]:
+def _convert_cached(blob: bytes, dump, hint: str = "", terrain: bool = False, convert: bool = True, flat: bool = False) -> tuple[str, dict]:
     if blob[:4] in (b"MCPK", b"FMSH"):
         raise FresError("this is a mesh-codec .bfres.mc stream, which this viewer does not decode")
     clock = ConvertClock()
     token = bind_clock(clock)
     try:
-        return _convert_cached_timed(blob, dump, hint, terrain, convert, clock)
+        return _convert_cached_timed(blob, dump, hint, terrain, convert, clock, flat)
     finally:
         reset_clock(token)
 
 
-def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: bool, clock: ConvertClock) -> tuple[str, dict]:
-    source = _source_id(blob, hint, terrain)
+def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: bool, clock: ConvertClock, flat: bool = False) -> tuple[str, dict]:
+    source = _source_id(blob, hint, terrain, flat)
     pointer = cache_dir() / "src" / source[:2] / f"{source}.json"
     cached = _read_pointer(pointer, dump)
     if cached is not None:
@@ -365,13 +495,26 @@ def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: 
     load_token = _LOAD_MEM.set({})
     read_token = _READ_MEM.set({})
     try:
-        return _convert_uncached(blob, dump, hint, terrain, clock, pointer)
+        return _convert_uncached(blob, dump, hint, terrain, clock, pointer, flat)
     finally:
         _LOAD_MEM.reset(load_token)
         _READ_MEM.reset(read_token)
 
 
-def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: ConvertClock, pointer: Path) -> tuple[str, dict]:
+def _drop_textures(models) -> None:
+    """Layout loads the mesh and does not decode BNTX."""
+    for model in models:
+        for material in model.materials or []:
+            material.binds = []
+        for part in model.parts:
+            part.texture = ""
+            part.candidates = []
+            part.normal_texture = ""
+            part.emission_texture = ""
+            part.overlay_texture = ""
+
+
+def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: ConvertClock, pointer: Path, flat: bool = False) -> tuple[str, dict]:
     models = parse(blob)
     if models and not any(model.parts for model in models):
         flagged = [model for model in models if any(note.startswith("geometry format not decoded") for note in model.notes)]
@@ -382,11 +525,15 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
     files: list[dict] = []
     token = _FILES.set(files)
     try:
-        _fill_texture_names(models, dump)
-        external, log, raws = _resolve_materials(dump, models, hint, terrain)
+        if flat:
+            _drop_textures(models)
+            external, log, raws = {}, [], []
+        else:
+            _fill_texture_names(models, dump)
+            external, log, raws = _resolve_materials(dump, models, hint, terrain)
     finally:
         _FILES.reset(token)
-    digest = hashlib.sha256(_cache_prefix() + blob + _texture_key(raws)).hexdigest()
+    digest = hashlib.sha256(_cache_prefix() + (b"flat\0" if flat else b"") + blob + _texture_key(raws)).hexdigest()
     folder = cache_dir() / digest[:2]
     glb_path = folder / f"{digest}.glb"
     meta_path = folder / f"{digest}.json"
@@ -414,8 +561,8 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
     return digest, info
 
 
-def _source_id(blob: bytes, hint: str, terrain: bool) -> str:
-    flag = b"t" if terrain else b"a"
+def _source_id(blob: bytes, hint: str, terrain: bool, flat: bool = False) -> str:
+    flag = b"f" if flat else (b"t" if terrain else b"a")
     return hashlib.sha256(_cache_prefix() + flag + hint.encode("utf-8", "replace") + b"\0" + blob).hexdigest()
 
 

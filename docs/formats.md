@@ -87,6 +87,27 @@ These root keys are group lists, not actors: `AiGroups`, `FarDeleteGroups`, `Sim
 
 Category colors use the pack-name prefix: `Npc_` / `Shop_`, `Enemy_`, `Animal_`, `Eft`, `Land_`, `Area_` / `Area`, `Obj_` / `FldObj_` / `Item_` / `Weapon_` / `Dm_`, and system names (`StartPos`, `Player`, `Sound`, `AirWall`, `Ground`, anything with `Anchor` or ending in `Actor`).
 
+### Load layers
+
+One banc file holds every actor. There is no decoration list, light list, or water list in the placement BYML. Forge splits the editor payload by `Gyaml`, and skips the separate files those layers decode:
+
+| Layer | What it is |
+| --- | --- |
+| models | Actor BFRES for `Npc_`, `Enemy_`, `Animal_`, `Shop_`, and everything that is not one of the layers below. `Land_*` is an actor mesh, not the heightmap |
+| terrain | The static-map TSCB (`TerrainArc`) and the walkable surface pack. Not a Gyaml |
+| water | Actor BFRES whose name has a water token (`water`, `lake`, `waterfall`, `ocean`, `pond`, `sea`, `river`, `stream`, `moat`, `aqua`, `mizu`, `brook`), including a camel-case piece such as `WaterPlane` or `LakeHrl`. An `npc` token stays a model. The material reader splits only on underscores, so `WaterPlane` is one token there and is not how this layer is chosen. Surveyed TSCB indexes have no water type |
+| collision | `AirWall`, `collision`, `collider`, or `navmesh` in the Gyaml. Drawn as a gizmo. Collision, navmesh, and occluder shapes inside a BFRES are already left out of the drawn glb |
+| behavior | The per-class AINB graph, plus link gizmos. Not a slice of the banc |
+| effects | Gyaml starts with `Eft` (`Eft_` and `EftLoc_`) |
+| decorations | Dressing tokens: grass, flower, bush, weed, ivy, fern, mushroom, moss, vine, shrub, plant, clover, herb, petal. `Obj_Tree` stays a model |
+| lights | `light`, `lamp`, `torch`, `candle`, `lantern`, `chandelier`. `bake0` / `bake1` are not this layer |
+
+`textures` is not an actor layer and it is not a second glb. The editor always fetches one geometry file, `/api/models/<Gyaml>/model.glb?flat=1`. That file has the mesh and a plain material. It does not embed images, and its cache key does not include texture bytes. Images are `GET /api/models/<Gyaml>/textures`. The manifest is keyed by `partName:materialIndex`, which is the glTF node name with the `lodN:` prefix removed. Each image is a content-addressed file in the shared texture store (`shared-v1`, `/api/model-textures/<sha256>.ktx2`, or `.png` / `.jpg`). The manifest itself is cached under `texman/` (`texman-1` plus the converter prefix and the bfres bytes). A second request reads that file and does not decode the BNTX again.
+
+Turning textures on fetches that manifest and assigns the maps onto the materials already on the mesh. It does not request `model.glb` again and it does not rebuild the mesh. Turning textures off disposes those GPU and CPU copies and restores the plain material. Turning models on while textures are on fetches the geometry file once and the manifest once. The geometry cache key is `models-56`.
+
+`Links` is described above. A load filter does not strip `Phive`, and `Phive.Placement.ID` still mirrors `Hash`. Save, Save Longshot mod, and Build mod read the source banc plus the project diff. They do not drop an actor because its layer was not fetched.
+
 Actor meshes are Switch BFRES plus embedded BNTX. The reader, the cache, and what still falls back to a box are in [models.md](models.md). The pack, the model, and the texture are global files. The banc only stores the placement. What has to be copied when a placement moves to another banc is [research/asset-library.md](research/asset-library.md).
 
 ## Phive shapes

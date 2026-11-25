@@ -36,6 +36,12 @@ test("undo can patch every moved actor without rebuilding an untouched copy", ()
   assert.deepEqual(plan.actors.map((item) => item.id), ["grass-a", "rock"]);
 });
 
+test("a logic-only actor becoming a model rebuilds so the mesh is fetched", () => {
+  const before = [{ ...actor("npc", "Npc_Kokiri_F_01", [0, 0, 0]), logicOnly: true, fetchModel: false, layer: "behavior" }];
+  const after = [{ ...actor("npc", "Npc_Kokiri_F_01", [0, 0, 0]), logicOnly: false, fetchModel: true, layer: "models" }];
+  assert.equal(planActorRefresh(before, after).mode, "rebuild");
+});
+
 test("an identical refresh keeps the batches", () => {
   const actors = [actor("tree", "Obj_Tree", [2, 0, 1])];
   assert.deepEqual(planActorRefresh(actors, actors.map((item) => ({ ...item }))), { mode: "keep" });

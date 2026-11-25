@@ -2,7 +2,9 @@
 
 Changed placement files are re-encoded with the dictionary the dump used
 (id 3 for .bcett.byml.zs) and the resource size table entry is raised.
-The dump itself is only read.
+The dump itself is only read. Load filters are ignored: every actor comes
+from the source banc plus the project diff, including layers the editor
+did not fetch.
 """
 
 from __future__ import annotations

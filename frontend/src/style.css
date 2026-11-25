@@ -351,6 +351,11 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .hint { color: var(--faint); font-size: 12px; margin-left: auto; }
 .cat-toggle span { padding: 0 8px; color: var(--muted); font-size: 12px; align-self: center; }
 .filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+.load-filters { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px 0; }
+.load-filters select { width: 100%; }
+.load-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.load-row label { display: flex; align-items: center; gap: 6px; flex: 1; }
+.load-row .eye { margin-left: auto; }
 .filters button { background: #243029; color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; min-height: 28px; font-size: 12px; }
 .filters button.is-off { opacity: 0.45; text-decoration: line-through; }
 .model-progress {

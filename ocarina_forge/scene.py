@@ -258,6 +258,12 @@ def scene_view(document: dict, diff: dict) -> dict:
 
 
 def export_document(document: dict, diff: dict) -> tuple[dict, list[str]]:
+    """Rebuild a banc from the source document.
+
+    Load filters must not be applied here. Actors the editor did not fetch
+    stay the source objects, and a later encode of an untouched actor matches
+    the source actor's bytes.
+    """
     actors, _statuses, _removed, warnings, gone = compose(document, diff, drop_hidden=True)
     exported = deepcopy(document)
     exported["Actors"] = actors
@@ -548,3 +554,16 @@ def replace_diff(document: dict, banc: str, actors: dict) -> dict:
             raise BancError(f"Edit for {key} has an unknown state {record['state']!r}.", "project")
         cleaned[format_hash(parse_hash(key))] = record
     return {"format": 1, "banc": banc, "actors": cleaned}
+
+
+def keep_unloaded_diff(document: dict, banc: str, incoming: dict, stored: dict, loaded_layers) -> dict:
+    """Apply ``incoming`` and put back stored edits whose layer was not loaded.
+
+    The stored record object is the one that is kept, so a round trip does not
+    rewrite that actor's edit.
+    """
+    from ocarina_forge.layers import keep_unloaded_edits
+
+    cleaned = replace_diff(document, banc, incoming)
+    actors = keep_unloaded_edits(cleaned["actors"], (stored or {}).get("actors") or {}, loaded_layers)
+    return {"format": 1, "banc": banc, "actors": actors}

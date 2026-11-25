@@ -22,6 +22,14 @@ The editor shows this same list with ? or the Shortcuts button.
 - Delete: Delete the selection
 - B: Open the behavior graph for the selection. It sits in the large panel under the view
 
+## Load filters
+
+- Actors panel, top: Choose Full, Visual only, Layout, Terrain + water, or Logic. Custom appears when the checkboxes do not match a preset
+- Layer checkbox: Fetch that layer. Turning one on loads it without reopening the scene
+- Show / Hide: Hide a loaded layer. The Ground and Water stage-bar boxes stay in step with Terrain and Water
+- Textures: Layout leaves this off, so model geometry loads and BNTX does not
+- ?load=terrain,models: Open with those layers. ?load=logic uses a preset. textures=0 skips images
+
 ## Gizmo
 
 - G: Move
@@ -46,7 +54,7 @@ The editor shows this same list with ? or the Shortcuts button.
 ## View toggles
 
 - Esc: Close a dialog, release mouse look, or clear the selection
-- Status: The viewport label stays on. It names the backend, including a WebGPU fallback reason, the page revision, and the draw count
+- Status: The viewport label stays on. It names the backend, including a WebGPU fallback reason, the page revision, the draw count, and layers that were not loaded
 - P: Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open
 
 ## Behavior graph

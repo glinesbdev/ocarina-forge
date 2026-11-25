@@ -22,6 +22,22 @@ import { sceneEntries } from "./scene-list.js";
 import { groupModelErrors, isMarker } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
+import {
+  LAYERS,
+  LAYER_LABELS,
+  PRESETS,
+  enabledLayers,
+  filterActors,
+  fullLoad,
+  fullVisual,
+  layersOff,
+  linkPairs,
+  loadFromLayers,
+  loadQuery,
+  normalizeLoad,
+  parseLoadParam,
+  presetLoad,
+} from "./layers.js";
 
 function $(id) {
   const local = document.getElementById(id);
@@ -110,14 +126,28 @@ const state = {
   gizmo: "translate",
   tab: "outliner",
   addMode: "add",
+  load: fullLoad(),
 };
 
+function loadRequest() {
+  const load = state.load || fullLoad();
+  return { load: loadQuery(load), textures: load.textures ? "1" : "0" };
+}
+
+// Geometry only. The URL does not change when textures toggle, so a texture
+// switch cannot be a second model fetch. Images come from fetchTextures.
+function geometryRequest() {
+  const load = state.load || fullLoad();
+  return { load: loadQuery(load), flat: "1" };
+}
+
 viewport = await createViewport($("viewport"), {
-  fetchModel: api.model,
-  fetchModels: (names, prefetch) => api.models(names, prefetch),
-  fetchTerrain: api.terrain,
-  fetchGround: (banc, x, z, exclude) => api.ground(banc, x, z, exclude),
-  fetchSurface: (banc) => api.groundSurface(banc),
+  fetchModel: (gyaml, options) => api.model(gyaml, { ...(options || {}), ...geometryRequest() }),
+  fetchModels: (names, prefetch) => api.models(names, prefetch, geometryRequest()),
+  fetchTextures: (gyaml) => api.actorTextures(gyaml, { load: loadQuery(state.load || fullLoad()) }),
+  fetchTerrain: (banc, refine) => api.terrain(banc, refine, loadRequest()),
+  fetchGround: (banc, x, z, exclude) => api.ground(banc, x, z, exclude, loadRequest()),
+  fetchSurface: (banc) => api.groundSurface(banc, loadRequest()),
   onProgress: (info) => {
     const box = $("model-progress");
     if (!box) return;
@@ -357,11 +387,15 @@ $("draw-distance").addEventListener("change", (event) => {
 });
 $("show-ground").addEventListener("change", (event) => {
   state.showGround = event.target.checked;
-  viewport.setFlags({ ground: state.showGround });
+  if (state.load) state.load.visible.terrain = event.target.checked;
+  viewport.setFlags({ ground: state.showGround, visibleLayers: state.load && state.load.visible });
+  persistLoad();
 });
 $("show-water").addEventListener("change", (event) => {
   state.showWater = event.target.checked;
-  viewport.setFlags({ water: state.showWater });
+  if (state.load) state.load.visible.water = event.target.checked;
+  viewport.setFlags({ water: state.showWater, visibleLayers: state.load && state.load.visible });
+  persistLoad();
 });
 $("show-sub").addEventListener("change", (event) => {
   state.showSub = event.target.checked;
@@ -506,9 +540,12 @@ async function boot() {
     $("gate").replaceChildren(gateMessage("Ocarina Forge could not reach its server.", error.message));
     return;
   }
-  const selectedMod = new URLSearchParams(window.location.search).get("mod");
+  const params = new URLSearchParams(window.location.search);
+  const selectedMod = params.get("mod");
   if (selectedMod) {
-    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+    params.delete("mod");
+    const search = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
     try {
       await api.openLocalMod(selectedMod);
       state.status = await api.status();
@@ -532,6 +569,7 @@ async function boot() {
   viewport.resize();
   syncPanes();
   if (startupError) toast(startupError);
+  await loadFiltersFromProject();
   await refreshScenes();
 }
 
@@ -664,6 +702,7 @@ async function useSample() {
     $("workspace").hidden = false;
     viewport.resize();
     state.banc = null;
+    await loadFiltersFromProject();
     await refreshScenes();
     toast("Sample dump and sample project are open.");
   } catch (error) {
@@ -904,6 +943,7 @@ async function createProject() {
     state.status = await api.status();
     closeDialogs();
     renderChrome();
+    await loadFiltersFromProject();
     await refreshScenes();
   } catch (error) {
     toast(error.message);
@@ -916,6 +956,7 @@ async function openProject() {
     state.status = await api.status();
     closeDialogs();
     renderChrome();
+    await loadFiltersFromProject();
     await refreshScenes();
   } catch (error) {
     toast(error.message);
@@ -928,8 +969,10 @@ async function openLocalMod(id) {
     state.status = await api.status();
     closeDialogs();
     renderChrome();
-    if (dumpReady()) await refreshScenes();
-    else showGate();
+    if (dumpReady()) {
+      await loadFiltersFromProject();
+      await refreshScenes();
+    } else showGate();
   } catch (error) {
     toast(error.message);
   }
@@ -1105,6 +1148,231 @@ function finishSceneViewerLoad(result = {}) {
   }, 350);
 }
 
+function viewForLoad(view) {
+  if (!view) return view;
+  const load = state.load || fullLoad();
+  const next = { ...view, actors: filterActors(view.actors, load) };
+  if (Array.isArray(view.companions)) {
+    next.companions = view.companions.map((extra) => ({
+      ...extra,
+      actors: filterActors(extra.actors, load),
+    }));
+  }
+  return next;
+}
+
+function mergeActor(current, incoming) {
+  if (!current) return incoming;
+  if (incoming && incoming.logicOnly && !current.logicOnly) {
+    return { ...current, links: incoming.links || current.links };
+  }
+  return incoming || current;
+}
+
+function mergeViews(current, incoming) {
+  const byId = new Map();
+  for (const actor of (current && current.actors) || []) byId.set(actor.id, actor);
+  for (const actor of (incoming && incoming.actors) || []) byId.set(actor.id, mergeActor(byId.get(actor.id), actor));
+  const companions = ((current && current.companions) || []).map((extra) => {
+    const add = ((incoming && incoming.companions) || []).find((item) => item.banc === extra.banc);
+    if (!add) return extra;
+    const rows = new Map((extra.actors || []).map((actor) => [actor.id, actor]));
+    for (const actor of add.actors || []) rows.set(actor.id, mergeActor(rows.get(actor.id), actor));
+    return { ...extra, actors: [...rows.values()] };
+  });
+  return { ...(current || {}), actors: [...byId.values()], companions, diff: (current && current.diff) || (incoming && incoming.diff) };
+}
+
+function publishLoad() {
+  const load = state.load || fullLoad();
+  viewport.setLoadState({ off: layersOff(load) });
+  if (viewport.setTextures) viewport.setTextures(Boolean(load.textures));
+  const ground = $("show-ground");
+  const water = $("show-water");
+  state.showGround = Boolean(load.layers.terrain && load.visible.terrain !== false);
+  state.showWater = Boolean(load.layers.water && load.visible.water !== false);
+  if (ground) {
+    ground.checked = state.showGround;
+    ground.disabled = !load.layers.terrain;
+  }
+  if (water) {
+    water.checked = state.showWater;
+    water.disabled = !load.layers.water;
+  }
+  viewport.setFlags({ ground: state.showGround, water: state.showWater, visibleLayers: load.visible });
+  renderLoadFilters();
+  refreshLinkGizmos();
+}
+
+function writeLoadUrl(load) {
+  const url = new URL(window.location.href);
+  if (!load || load.preset === "full") {
+    url.searchParams.delete("load");
+    url.searchParams.delete("textures");
+  } else if (load.preset && load.preset !== "custom" && PRESETS[load.preset]) {
+    url.searchParams.set("load", load.preset);
+    url.searchParams.delete("textures");
+  } else {
+    url.searchParams.set("load", enabledLayers(load).join(","));
+    if (load.textures === false) url.searchParams.set("textures", "0");
+    else url.searchParams.delete("textures");
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+let loadSave = 0;
+function persistLoad() {
+  const token = ++loadSave;
+  const body = state.load;
+  if (!projectReady() || !body) return;
+  api.putLoadFilters(body).catch(() => {
+    if (token === loadSave) toast("Load filters were not saved.");
+  });
+}
+
+async function loadFiltersFromProject() {
+  const params = new URLSearchParams(window.location.search);
+  const fromUrl = parseLoadParam(params.get("load"), params.get("textures"));
+  let saved = null;
+  if (projectReady()) {
+    try {
+      saved = normalizeLoad(await api.loadFilters());
+    } catch {
+      saved = fullLoad();
+    }
+  }
+  const base = saved || fullLoad();
+  state.load = fromUrl ? { ...fromUrl, visible: base.visible } : base;
+  publishLoad();
+  if (fromUrl && projectReady()) {
+    try {
+      await api.putLoadFilters(state.load);
+    } catch {
+      /* the session still has the URL filters */
+    }
+  }
+}
+
+function refreshLinkGizmos() {
+  const load = state.load || fullLoad();
+  if (!load.layers.behavior) {
+    viewport.setLinks([]);
+    return;
+  }
+  viewport.setLinks(linkPairs((state.view && state.view.actors) || []));
+}
+
+function renderLoadFilters() {
+  const host = $("load-filters");
+  if (!host) return;
+  const load = state.load || fullLoad();
+  host.replaceChildren();
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "Load preset");
+  for (const [id, preset] of Object.entries(PRESETS)) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = preset.label;
+    select.append(option);
+  }
+  if (load.preset === "custom") {
+    const option = document.createElement("option");
+    option.value = "custom";
+    option.textContent = "Custom";
+    select.append(option);
+  }
+  select.value = PRESETS[load.preset] || load.preset === "custom" ? load.preset : "full";
+  select.addEventListener("change", () => {
+    if (!PRESETS[select.value]) return;
+    void applyLoadChange(presetLoad(select.value, load.visible));
+  });
+  host.append(select);
+  for (const id of LAYERS) host.append(loadRow(id, load));
+  host.append(textureRow(load));
+}
+
+function loadRow(id, load) {
+  const row = document.createElement("div");
+  row.className = "load-row";
+  const label = document.createElement("label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = Boolean(load.layers[id]);
+  box.addEventListener("change", () => {
+    const layers = { ...load.layers, [id]: box.checked };
+    void applyLoadChange(loadFromLayers(layers, load.textures, load.visible));
+  });
+  const name = document.createElement("span");
+  name.textContent = LAYER_LABELS[id];
+  label.append(box, name);
+  const eye = document.createElement("button");
+  eye.type = "button";
+  eye.className = "eye";
+  const shown = load.visible[id] !== false;
+  eye.textContent = shown ? "Hide" : "Show";
+  eye.disabled = !load.layers[id];
+  eye.title = shown ? "Hide this layer" : "Show this layer";
+  eye.addEventListener("click", () => {
+    setLayerVisible(id, load.visible[id] === false);
+  });
+  row.append(label, eye);
+  return row;
+}
+
+function textureRow(load) {
+  const row = document.createElement("label");
+  row.className = "load-row";
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = load.textures !== false;
+  const meshes = load.layers.models || load.layers.water || load.layers.decorations || load.layers.lights;
+  box.disabled = !meshes;
+  box.addEventListener("change", () => {
+    void applyLoadChange(loadFromLayers(load.layers, box.checked, load.visible));
+  });
+  const name = document.createElement("span");
+  name.textContent = "Textures";
+  row.append(box, name);
+  return row;
+}
+
+function setLayerVisible(id, on) {
+  state.load = { ...state.load, visible: { ...state.load.visible, [id]: on } };
+  publishLoad();
+  persistLoad();
+}
+
+async function applyLoadChange(next) {
+  const previous = state.load || fullLoad();
+  state.load = next;
+  publishLoad();
+  writeLoadUrl(next);
+  persistLoad();
+  if (!state.raw || !state.banc) return;
+  const gained = LAYERS.filter((id) => next.layers[id] && !previous.layers[id]);
+  const lost = LAYERS.filter((id) => previous.layers[id] && !next.layers[id]);
+  if (lost.includes("terrain")) viewport.dropTerrain();
+  if (gained.includes("terrain")) viewport.ensureTerrain();
+  // Textures are applied onto the resident materials in publishLoad. A
+  // texture change is not a scene reload and not a model fetch.
+  if (!gained.length && !lost.length) return;
+  if (!gained.length) {
+    applyView(viewForLoad(state.raw));
+    return;
+  }
+  const partial = loadFromLayers(
+    Object.fromEntries(LAYERS.map((id) => [id, gained.includes(id)])),
+    next.textures,
+    next.visible,
+  );
+  try {
+    const incoming = await api.scene(state.banc, { query: loadQuery(partial), textures: next.textures ? "1" : "0" });
+    applyView(mergeViews(state.raw, incoming));
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function openScene(banc, options = {}) {
   const token = ++sceneOpenToken;
   const terrainAlreadyReady = state.banc === banc && sceneTerrainReady;
@@ -1113,10 +1381,10 @@ async function openScene(banc, options = {}) {
   sceneVisualDeferred = 0;
   sceneVisualResidentCapped = false;
   sceneActorsReady = false;
-  sceneTerrainReady = terrainAlreadyReady;
+  sceneTerrainReady = (state.load && state.load.layers.terrain === false) ? true : terrainAlreadyReady;
   setScenePreparation(`Preparing ${banc.split("/").pop()}`, "Reading scene and companion assets…");
   try {
-    const view = await api.scene(banc);
+    const view = await api.scene(banc, { query: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
     if (token !== sceneOpenToken) return;
     sceneVisualLoad = token;
     setScenePreparation("Loading scene in viewer", "Preparing and streaming scene models…", 0, 1);
@@ -1213,24 +1481,26 @@ function noteCompanion() {
 
 function applyView(view, { frame = false, select, forceSceneLoad = false } = {}) {
   const previousActors = state.view ? state.view.actors : null;
-  state.raw = view;
-  const composed = composeView(view);
+  const filtered = viewForLoad(view);
+  state.raw = filtered;
+  const composed = composeView(filtered);
   state.view = composed;
   if (select !== undefined) state.selected = select;
-  else if (view.focus) state.selected = view.focus;
+  else if (filtered.focus) state.selected = filtered.focus;
   if (state.selected && !composed.actors.some((actor) => actor.id === state.selected)) state.selected = null;
   const plan = frame ? { mode: "rebuild" } : planActorRefresh(previousActors, composed.actors);
   const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
-  // A new or deleted actor joins the batches that are already on screen.
-  // Opening a scene still goes through setActors, which is the one full load.
+  const previewUrl = fullVisual(state.load) ? filtered.previewUrl : null;
+  const terrain = Boolean(state.load && state.load.layers.terrain);
   if (forceSceneLoad || (!patched && (frame || !viewport.reconcileActors(composed.actors)))) {
     state.modelErrors = [];
     state.meshAudit = null;
     state.terrainNotes = [];
-    viewport.setActors(composed.actors, { frame, banc: view.banc, previewUrl: view.previewUrl });
+    viewport.setActors(composed.actors, { frame, banc: filtered.banc, previewUrl, terrain });
   }
   viewport.select(state.selected);
-  viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
+  viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels, visibleLayers: state.load && state.load.visible });
+  refreshLinkGizmos();
   renderOutliner();
   renderProps();
   loadChanges(view.banc || state.banc);
@@ -1321,11 +1591,12 @@ function shotHasRecipes(shot) {
 
 async function writeShot(banc, shot, writeRecipes) {
   if (!banc || !shot) return;
-  await api.putDiff(banc, shot.actors || {});
+  const loaded = { loaded: enabledLayers(state.load), ...loadRequest() };
+  await api.putDiff(banc, shot.actors || {}, loaded);
   if (writeRecipes) await api.putRecipes(banc, shot.recipes || []);
   for (const item of shot.companions || []) {
     if (!item.banc || item.banc === banc) continue;
-    await api.putDiff(item.banc, item.actors || {});
+    await api.putDiff(item.banc, item.actors || {}, loaded);
     if (writeRecipes && Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
   }
   if (state.banc === banc) {
@@ -1404,7 +1675,7 @@ async function edit(command) {
   const label = editLabel(command, subject, { gizmo: state.gizmo });
   await persistChain;
   try {
-    const view = await api.edit(target.banc, target.command);
+    const view = await api.edit(target.banc, target.command, { load: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
     if (target.banc !== state.banc && state.raw) {
       const companions = (state.raw.companions || []).map((item) =>
         item.banc === target.banc
@@ -3280,6 +3551,14 @@ async function popOutPanel(id) {
 function refreshBehavior() {
   const host = $("behavior-panel");
   if (!host) return;
+  if (!state.load || !state.load.layers.behavior) {
+    host.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "Behavior is not loaded. Turn the Behavior layer on to read the graph.";
+    host.append(note);
+    return;
+  }
   const actor = selectedActor();
   const banc = actor?.banc || state.banc || "";
   const id = actor?.placementId || actor?.id || "";
@@ -3299,7 +3578,7 @@ function refreshBehavior() {
     if (actor) {
       const requestKey = key;
       api
-        .behavior({ banc, id, gyaml: actor.gyaml || "" })
+        .behavior({ banc, id, gyaml: actor.gyaml || "", load: loadQuery(state.load) })
         .then((graph) => {
           if (state.behaviorKey !== requestKey) return;
           state.behavior = graph;

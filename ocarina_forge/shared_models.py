@@ -34,6 +34,32 @@ def shared_texture_path(name: str) -> Path | None:
     return cache_dir() / TEXTURE_STORE / "textures" / name[:2] / name
 
 
+def publish_texture_bytes(data: bytes) -> str:
+    """Store one encoded image and return the URL the editor assigns to a material.
+
+    GPU packs (``OCFG`` / KTX2) use the ``.ktx2`` suffix. JPEG and PNG keep
+    their own. The bytes are content-addressed, so a second model that shares
+    the image does not write it again.
+    """
+    blob = bytes(data)
+    if blob.startswith(b"\xff\xd8"):
+        suffix = "jpg"
+    elif blob.startswith(b"\x89PNG"):
+        suffix = "png"
+    else:
+        suffix = "ktx2"
+    name = f"{sha256(blob).hexdigest()}.{suffix}"
+    path = shared_texture_path(name)
+    if path is None:
+        raise ValueError("texture name was rejected")
+    if not path.is_file():
+        _atomic_write(path, blob)
+        note_written(path)
+    else:
+        note_access(path)
+    return f"/api/model-textures/{name}"
+
+
 def _atomic_write(path: Path, data: bytes | bytearray | memoryview) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as out:
