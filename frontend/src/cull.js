@@ -55,12 +55,36 @@ export function resolveLod(desired, levels) {
   return have.length ? have[0] : null;
 }
 
+/** Use the original glTF node name. Three removes colons from animation binding names. */
+export function modelLod(object) {
+  for (let current = object; current; current = current.parent) {
+    const match = /^lod(\d+):(.*)$/.exec(current.userData?.name || current.name || "");
+    if (match) return { lod: Number(match[1]), family: match[2] || current.uuid };
+  }
+  return { lod: 0, family: object.uuid };
+}
+
 /** Metres from the camera to the sphere surface. A sphere that reaches the camera is 0. */
 export function boundsGap(distanceToCenter, radius) {
   const away = Number.isFinite(distanceToCenter) ? Math.max(distanceToCenter, 0) : Infinity;
   const reach = Number.isFinite(radius) ? Math.max(radius, 0) : 0;
   if (!Number.isFinite(away)) return Infinity;
   return Math.max(0, away - reach);
+}
+
+/** Lower tiers load first. Keep small distant props behind useful detail in the view. */
+export function modelLoadTier({ selected, inFrustum, gap, radius, hasPreview }) {
+  if (selected) return 0;
+  if (inFrustum) {
+    if (gap < 80 || (hasPreview && radius >= (radius + gap) * 0.12)) return 1;
+    if (radius >= (radius + gap) * 0.008) return 2;
+  }
+  if (gap < 28) return 3;
+  return inFrustum ? 4 : 5;
+}
+
+export function isForegroundModel(tier) {
+  return tier < 4;
 }
 
 /**

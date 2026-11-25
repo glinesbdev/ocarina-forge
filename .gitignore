@@ -13,5 +13,6 @@ frontend/node_modules/
 frontend/dist/
 build/
 native/target/
+tools/wgsl/target/
 *.zip
 .DS_Store

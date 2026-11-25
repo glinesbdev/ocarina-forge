@@ -48,7 +48,7 @@ The field is one atlas: up to 16 MaterialAlb layers plus an earth cell, each res
 
 Before: every terrain rebuild packed the cells. A 17-cell solid atlas took 16 ms. After: the same cells read back in 0.7 ms. The sample scene has no MaterialAlb, so this shows up on a real dump when the glb cache misses and the layers have not changed.
 
-Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene keeps the old field up until the new one's shader and atlas are ready, then swaps.
+Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene detaches the old field before showing the new scene. The two most recently assembled fields can be reused when switching maps. Preview packs include the main terrain layer only.
 
 ## Shared texture cache
 
@@ -87,6 +87,12 @@ Search over 8,000 actors took 0.16 ms to list and 0.02 ms for a query. That stay
 
 BC and ASTC decode, zstd, and pack reads run in the server process when a model or a scene is built. Albedo arrives as a GPU block image (see GPU textures) with a JPEG or PNG behind it. Normals, ORM, and the terrain atlas stay PNG or JPEG. Meshopt glbs are unchanged. Terrain atlases and LOD meshes are built at import and cached.
 
+## Prepared scene streaming
+
+A prepared scene packs a low-detail mesh for every drawable actor type in the map. Copies share the same geometry and are drawn in spatial batches. The model queue serves the selection and nearby geometry while the preview loads. Once the preview is on screen and nearby work has drained, a web worker fetches one distant model at a time at low priority. Moving the camera or requesting nearby detail pauses that work. The browser can reuse the downloaded GLBs from its HTTP cache. Forge parses and uploads a detailed model when the camera approaches it or an actor using it is selected. The viewer assembles model batches over successive frames. Textures with a reduced tier load at up to 256 pixels on their longest edge. Visible nearby models and the selection request higher-resolution textures as needed.
+
+Stats reports `detail` from viewport setup to the first nearby visible detailed batch, active streaming frames over 25 ms, and browser-reported model and texture transfer bytes before the first gizmo move. Browser-cache hits contribute zero transfer bytes. Use the same map, view, and cache state when comparing runs.
+
 ## Stream timings
 
 Every model convert records two server times. `convertMs` is the whole conversion. `textureMs` is only the texture decode that missed the decoded-image cache, so a warm open stays near zero on that number. The glb meta keeps the cold timing. A later open replaces the timing it returns with `cache=hit` and does not add those milliseconds to the server totals.
@@ -108,11 +114,33 @@ Those are the placement files. The Static files in the same folders have no Acto
 
 ## Background warm-up
 
-Opening a scene queues that scene's models, nearest to the camera first. Neighboring scenes are markers until those models have started, and a file with no Actors array is skipped. The queue runs one model at a time and waits while an interactive convert is in flight, so it does not take a worker from the view. **Stats** shows `warm 12/80`. The same queue is `POST /api/warm`. `ocarina-forge warm <scene|--all>` does the walk in the foreground and prints each model as it finishes. `warm --scene-only <scene>` does not walk neighbors.
+Longshot's `--with-editor` build runs `scene-preview --all --prepare-missing --share-textures`. Forge prepares one coarse preview per map variant and converts each distinct actor type once per run. It reuses valid converted models, content-addressed shared textures, and preview packs with matching inputs. Large maps get up to 160 coarse model types. The browser keeps that scenery visible while it brings in full models near the camera or on selection. Without a preview, it streams the full scene at up to two simultaneous model loads.
+
+### TSCB resource inspection
+
+`ground-debug --resources-only` parses resource metadata on demand. It adds no work to editor boot, normal terrain loading, or `--with-editor` scene preparation. On the installed OoT build, the Hyrule Field resource parser took a median 3.6 ms across 80 runs on an in-memory index, compared with 0.85 ms for the existing tile-only reader. Parsing all 25 indexes and 9,304 tiles took a median 36.4 ms across 16 passes. These timings exclude disk reads, command startup, and report serialization.
+
+### Longshot shader reference
+
+Build the local converter with `cargo build --locked --release --manifest-path tools/wgsl/Cargo.toml`. Set `OCARINA_FORGE_SHADER_SELECTION` to a JSON file containing `translator` (the executable's absolute path), `cache` (a local output directory), and `stages` (32-digit hexadecimal stage hashes, first Longshot hash word followed by the second). Set `sample` to a positive number for an evenly spaced audit of the index. An optional `store` overrides the Longshot shader store directory. Use `node frontend/tools/prepare-longshot-shaders.mjs path/to/selection.json` for per-stage results.
+
+Longshot already calls Forge's frontend build after preparing its Vulkan shaders. The Forge build reads only the configured selection, verifies each stage against Longshot's content hash, translates it with Naga, and caches WGSL that passes core validation. Keep the selection and output outside the checkout. Translated stages are reference data for a future draw comparison. Connecting them to an editor material still requires matching vertex inputs, resource bindings, fixed render state, and vertex and fragment interfaces.
+
+Longshot's retired WebGPU renderer emitted WGSL from shader IR using Suyu's `EmitWGSL` and the draw's state. In the renderer before `df1d607d`, `RX_DUMP_WGSL` writes stage files into the specified directory. The Suyu emitter is still in the checkout. Vulkan-specific execution modes and draw parameters can prevent translation from the existing SPIR-V store.
+
+Add a `wgsl` array of explicit dump paths to the selection file to import direct output through the same `--with-editor` build. Paths are relative to the selection file or absolute. Forge caches each validated source alongside its entry points, used resource bindings, vertex inputs, stage outputs, and any NVN constant-bank annotations in the dump. `forge-wgsl --inspect shader.wgsl` reports the WGSL interface by itself. Keep dumps and inspection output local. The old NVN stage keys name captured shader code, and a renderer can specialize the same code more than once for different draw state.
+
+For a matched-view investigation, select the actor in Forge and run **Problems → Audit meshes → Mesh audit JSON** from the camera pose under investigation. The snapshot records the camera matrices, selected preview and detail surfaces, vertex attributes, index counts and LODs. In a separate Longshot capture of the same view, `RX_VK_DUMP` and `RX_VK_DUMP_ARGS=1` record the Vulkan draw arguments. Run `node frontend/tools/compare-longshot-draws.mjs <mesh-audit.json> <Longshot-log> [program-key]` to shortlist indexed triangle-list draws with matching index counts. Confirm candidates against the frame and the actual vertex and material data. An unmatched count can reflect a topology or LOD conversion; the command does not compare meshlet or indirect draws.
+
+Forge creates WebGPU render pipelines on first draw. Three.js r170 can expose a pending pipeline to a live draw during asynchronous warm-up. Terrain texture preparation still runs before the terrain swap. **Problems → Audit meshes → Mesh audit JSON** includes WebGPU compiler errors recorded in the viewport session.
+
+Opening a scene starts the viewer's model requests and terrain preparation together. Model cache misses use the interactive conversion pool. The previous actor batches remain visible until the new batches are assembled. A progress card leaves the camera controls available and clears when terrain is ready. Browser download, glTF parsing, and GPU upload remain separate from server conversion and are measured by `dl` and `up` in **Stats**.
+
+Automatic scene opens no longer walk neighboring scenes or the full dump. The foreground command remains available for intentional broader warming: `ocarina-forge warm <scene|--all>` prints each model as it finishes, and `warm --scene-only <scene>` skips neighbors.
 
 ## Model loading
 
-Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`). When the process pool is on (the default is one less than the core count), that batch starts every miss on the pool. The page then pulls up to 16 glbs at once, and never more than the worker count, nearest to the camera first. `GLTFLoader.parse` stays on the main thread, which is why the page does not ask for every model at once. The pool keeps converting the rest. With one worker the batch is only a lookup, and the GET starts the convert. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Settings or `OCARINA_FORGE_WORKERS` still sets the pool size, and 1 stays in the server process. The handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.
+Opening a scene sends one `POST /api/models/batch` with every actor name. Cache hits come back with a glb URL that includes the cache digest (`?v=`). When the process pool is on (the default is one less than the core count), that batch starts every miss on the pool. The page then pulls up to 16 glbs at once, and never more than the worker count, nearest to the camera first. `GLTFLoader.parse` stays on the main thread, which is why the page does not ask for every model at once. Moving the camera re-sorts the queue that has not started. The same actor is not converted twice, and the same glb URL is not fetched twice. Settings or `OCARINA_FORGE_WORKERS` still sets the pool size, and 1 stays in the server process. The handlers are async, so a convert does not freeze the API. A versioned glb response sends `Cache-Control: public, max-age=31536000, immutable` and an `ETag` of the digest, so a reload is a browser cache hit. HTTP/2 is not enabled; localhost uses those parallel connections instead.
 
 **Stats** adds `queued`, `loading`, and `loaded`. While a scene is streaming, `loading` sits near that slot count and `queued` falls. After it settles, `loading` is 0 and `loaded` is the number of distinct models.
 
@@ -273,7 +301,7 @@ Without the extension, the same commands run the Python fallback and the house s
 
 ## WebGPU trial (shelved)
 
-WebGL stays the default. The stage-bar checkbox is gone. `?webgpu=1` or `?renderer=webgpu` still reloads on `WebGPURenderer`. `?gpu=0` / `?renderer=webgl` force WebGL. A saved `?gpu=1` link, the old checkbox flag, is stripped on boot and loads WebGL. There is no further work on this path. It can be revisited when three is newer than r170 (`0.170.0`).
+Forge now tries WebGPU before opening the workspace. If no usable adapter starts, Forge opens its WebGL2 renderer. `?renderer=webgl` selects WebGL2 directly. The measurements below describe the earlier opt-in trial on Three.js r170 (`0.170.0`).
 
 Bradyn's Kokiri pass on `515cd10`, real WebGPU, same spot the earlier passes used:
 
@@ -290,4 +318,4 @@ What r170 cannot do, and what is still unresolved:
 - **Render-call loop.** `info.render.calls` is how many times `render()` ran, not the draw count. A quiet editor frame is one call. The Kokiri console reached about 80 calls in a frame. That loop is not fixed.
 - **Cutouts.** Some grass cards still drew as solid sheets after the colour-node discard. The mask path is not reliable on this three.
 
-The `?webgpu=1` path remains so a later three can be compared without rebuilding the opt-in. On Linux Chrome, hardware WebGPU needs Unsafe WebGPU and Vulkan (`chrome://flags`, or `--enable-unsafe-webgpu --enable-features=Vulkan`). `chrome://gpu` should say WebGPU is hardware accelerated. No adapter keeps `WebGPURenderer` on its WebGL2 backend, and **Stats** then starts with `WebGPU (WebGL2 fallback)`. Do not use that line, or a WebGPU line, as a performance target until the trial is reopened.
+Use the viewport **Stats** to confirm the backend. A WebGPU run starts with `WebGPU`, and the WebGL2 fallback starts with `WebGL`. For renderer comparisons, keep the scene, camera, and texture settings the same across both runs.

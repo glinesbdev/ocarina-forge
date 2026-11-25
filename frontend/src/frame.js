@@ -1,6 +1,6 @@
 /** Whether the view should schedule another frame. An idle editor does not redraw. */
-export function keepRendering({ flying, damped, looking, dragging, loading }) {
-  return Boolean(flying || damped || looking || dragging || loading);
+export function keepRendering({ flying, damped, looking, dragging }) {
+  return Boolean(flying || damped || looking || dragging);
 }
 
 export function formatTris(tris) {
@@ -33,12 +33,15 @@ export function formatStats({
   queued,
   loading,
   loaded,
+  deferred,
+  backgroundLoading,
   convertMs,
   textureMs,
   downloadMs,
   uploadMs,
   warmDone,
   warmTotal,
+  sceneStream,
 }) {
   const rate = rendering ? (fps ? `${fps} fps` : "…") : "idle";
   const parts = [];
@@ -52,10 +55,20 @@ export function formatStats({
   if (queued != null) parts.push(`${queued} queued`);
   if (loading != null) parts.push(`${loading} loading`);
   if (loaded != null) parts.push(`${loaded} loaded`);
+  if (deferred || backgroundLoading) {
+    const remaining = (deferred || 0) + (backgroundLoading || 0);
+    parts.push(`${remaining} background remaining`);
+    if (backgroundLoading) parts.push(`${backgroundLoading} background loading`);
+  }
   if (convertMs != null) parts.push(`conv ${formatMs(convertMs)} ms`);
   if (textureMs != null) parts.push(`tex ${formatMs(textureMs)} ms`);
   if (downloadMs != null) parts.push(`dl ${formatMs(downloadMs)} ms`);
   if (uploadMs != null) parts.push(`up ${formatMs(uploadMs)} ms`);
   if (warmTotal != null) parts.push(`warm ${warmDone || 0}/${warmTotal}`);
+  if (sceneStream) {
+    if (sceneStream.firstDetail != null) parts.push(`detail ${formatMs(sceneStream.firstDetail)} ms`);
+    parts.push(`${sceneStream.slowFrames} streaming frames >25 ms`);
+    if (sceneStream.editBytes != null) parts.push(`first edit ${formatMs(sceneStream.editBytes / 1048576)} MiB`);
+  }
   return parts.join(" · ");
 }

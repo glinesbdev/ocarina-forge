@@ -9,7 +9,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "Right-drag", action: "Look around" },
       { keys: "W A S D", action: "Move" },
       { keys: "Q / E", action: "Down / up" },
-      { keys: "Shift", action: "Move faster" },
+      { keys: "Shift or X", action: "Move faster. Use X while right-dragging in Firefox" },
       { keys: "Alt+left-drag", action: "Orbit the point under the cursor, or the selection" },
       { keys: "Middle-drag", action: "Pan" },
       { keys: "Scroll", action: "Zoom" },

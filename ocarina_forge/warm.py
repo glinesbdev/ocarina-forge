@@ -9,7 +9,7 @@ next name.
 
 from __future__ import annotations
 
-from ocarina_forge.scene import scene_view
+from ocarina_forge.scene import scene_view, sibling_bancs
 
 
 def model_names(view: dict) -> list[str]:
@@ -79,6 +79,25 @@ def queue_warm(dump, target: str, nearest: list[str] | None = None, *, neighbors
         raise SystemExit(f"No scene {target}. Pass a banc path or --all.")
     extra = neighbor_bancs(target, scenes) if neighbors and target else []
     return warm_queue(list(nearest or []), scene_model_names(dump, target) if target else [], extra)
+
+
+def scene_warm_queue(dump, target: str, names: list[str] | None = None) -> list[str]:
+    """Return a fixed, deduplicated model list for one scene and its Static/Dynamic sibling."""
+    scenes = [item["path"] for item in dump.list_scenes()]
+    if target not in scenes:
+        raise ValueError(f"No scene {target}.")
+    scene_names = scene_model_names(dump, target)
+    companion_names = [
+        name
+        for path in sibling_bancs(target, set(scenes))
+        for name in scene_model_names(dump, path)
+    ]
+    ordered = warm_queue(
+        list(names or []),
+        scene_names + companion_names,
+        [],
+    )
+    return [name for kind, name in ordered if kind == "model"]
 
 
 def run_warm(dump, target: str, *, log=print, neighbors: bool = True) -> dict:

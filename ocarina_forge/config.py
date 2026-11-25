@@ -54,6 +54,13 @@ def load_config() -> dict:
     dump = setting("DUMP")
     if dump:
         data["dump"] = dump
+    elif not data.get("dump"):
+        game = setting("GAME")
+        if game:
+            root = Path(game).expanduser()
+            candidates = (root, root.parent) if root.name.lower() == "bin" else (root,)
+            data["dump"] = next((str(candidate) for candidate in candidates
+                                 if (candidate / "romfs" / "Banc").is_dir()), "")
     project = setting("PROJECT")
     if project:
         data["project"] = project

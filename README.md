@@ -10,23 +10,28 @@ Ocarina Forge reads a dump you already own. It does not ship, and this repositor
 
 ## Run it on Linux
 
-Python 3.11 or newer, and Node 20 or newer.
+Python 3.11 or newer, Node 20 or newer, and a Rust toolchain with Cargo.
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install maturin
-maturin develop --release --manifest-path native/Cargo.toml
-
-cd frontend
-npm install
-cd ..
-
 ./scripts/dev.sh
 ```
 
 Then open http://127.0.0.1:47231.
+
+The development launcher builds and verifies the Rust extension before it starts the server.
+
+## Run it on Windows
+
+Install Python 3.11 or newer, Node 20 or newer, and a Rust toolchain with Cargo, then run:
+
+```bat
+scripts\dev.bat
+```
+
+The launcher creates the virtual environment and frontend dependencies when needed, builds the native extension, and starts the editor. It finds `libunwind.dll` on `PATH` and makes it available to the server and its worker processes. If the DLL is in a nonstandard directory, set `OCARINA_FORGE_NATIVE_DLL_DIR` to that directory before launching.
 
 A project lives in `~/.local/share/ocarina-forge/projects/<name>/` unless `OCARINA_FORGE_PROJECTS` says otherwise. The mod id is `local/<name>`. Saving a Longshot mod installs it under the test game, `~/Games/Longshot/mod-test` unless `OCARINA_FORGE_GAME` is set.
 
@@ -57,7 +62,7 @@ The dump path and the open project are stored in `./ocarina-forge.local.yaml` (g
 
 ## What you can do
 
-- Browse `romfs/Banc/<Area>/*.bcett.byml.zs`, grouped by area.
+- Browse scenes by area and variant. Each matching Static and Dynamic pair appears once, with both banks visible when **Companion banc** is on. Each actor's edits go to its own bank. The viewport's bank selector switches the target for new actors and the bank shown when viewing a single bank.
 - See each actor as a labeled box at its translate, rotate, and scale. Color is the actor category (NPC, enemy, object, land, effect, animal, system).
 - Fly the camera: hover the view to focus it (a click is not required, and a text field or an open dialog keeps focus). Right-drag looks, WASD moves, Q and E go down and up, Shift is faster. Alt+left-drag orbits the point under the cursor (or the selection). Middle-drag pans. Scroll zooms. **Shortcuts**, or `?`, lists every binding. The same list is [docs/controls.md](docs/controls.md).
 - Select an actor by clicking it or its row. Move and rotate with the gizmo, or type metres and degrees. Y is up. Yaw is the Y rotation. The file stores radians.
@@ -82,7 +87,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | --- | --- |
 | `ocarina_forge/` | Python library and FastAPI server. Parsers, validation, and exporters. This is the maintained data side. |
 | `ocarina_forge/formats/` | BYML, SARC, zstd dictionaries, RESTBL, BFRES, and BNTX. |
-| `native/` | BC7 mode 6, BC1, block decode, deswizzle, the per-pixel loops, BFRES vertex and index decode, bind pose, UV seams, bounds, and glb float packing. Optional. Without `maturin develop`, those paths stay Python. |
+| `native/` | BC7 mode 6, BC1, block decode, deswizzle, the per-pixel loops, BFRES vertex and index decode, bind pose, UV seams, bounds, and glb float packing. The development launchers build it automatically; direct Python use can still fall back when it is not built. |
 | `ocarina_forge/domains.py` | Where a dialog, event, or table exporter plugs into the build. |
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. New renderer work follows [docs/design/mod-editor.md](docs/design/mod-editor.md). |
 | `docs/design/mod-editor.md` | How an edit becomes a Longshot mod, and the milestone plan. |

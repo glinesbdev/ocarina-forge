@@ -28,6 +28,12 @@ The first milestone is the Kokiri sign, as one project and one mod: create the p
 
 The performance pass is in this build: redraw on change, instanced repeats, frustum culling, the game's LOD meshes where the file has them, a generated mesh otherwise, low-mip textures at distance, a glTF meshopt and KTX2 cache, nearest-first streaming, and prebaked terrain atlases. The terrain overlay split (main floor and `_sub` as separate layers) is in this build. The WebGPU trial is shelved; see Later.
 
+### Longshot developer integration
+
+Longshot's `--with-editor` build prepares this app's WebGL-only frontend after Longshot's game-shader preparation, then serves that bundle and the Python API together on `127.0.0.1:47231`. The `system/ocarina-forge` mod owns the in-game launch page; the trusted broker accepts only its fixed launch request, starts this checkout's `scripts/serve_editor.py`, and opens the fixed local URL. This does not compile WebGL shaders to Vulkan SPIR-V: the browser compiles Three.js' WebGL shader programs at runtime.
+
+The Modding API documents the in-game `DebugPage` in Mods > Built in > Ocarina Forge. It does not let a mod inject an entry into Longshot's native developer menu or launch desktop applications, so those remain outside the mod: only the constrained broker launch is native. The editor itself stays a separate Forge app and continues to export Longshot mods.
+
 BC7 mode 6, ASTC/BC/RGBA decode, deswizzle, the per-pixel loops, and BFRES vertex and index decode are in `native/`, called from Python. The Python functions remain when the extension is not built. PNG is zlib level 1. On `dcaac45` the house was 5.5 s and the four scenes were 280 s of cold convert at `jobs=1`. Face normals are in the crate. Decompressed Tex files are reused across models in one process. Skin indices, bones, and meshopt stay in Python. A scene open starts the misses on the process pool. The same crate builds for wasm32 without PyO3. That host is not scheduled. Numbers and the re-profile commands are in [performance.md](performance.md). The steps are [design/mod-editor.md](design/mod-editor.md).
 
 Editing that already shipped stays: undo and redo, ground snap, Ctrl+K search, live validation, opt-in hot reload, docked panels, and field edits on existing behavior nodes. **Behavior** draws the selected actor's AINB graph, its schedule rows, and its event-flow hooks. Export writes a behavior file only after a round trip. A schedule that lives in another actor's pack is labeled shared.

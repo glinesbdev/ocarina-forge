@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node tools/prepare-longshot-shaders.mjs",
     "build": "vite build",
+    "build:webgl": "vite build --mode webgl",
     "preview": "vite preview --host 127.0.0.1 --port 47231 --strictPort"
   },
   "dependencies": {

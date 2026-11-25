@@ -231,6 +231,7 @@ class Part:
     surface_note: str = ""
     emission_image: object | None = None
     emission_note: str = ""
+    normals: list[tuple[float, float, float]] | None = None
 
 
 @dataclass
@@ -1474,13 +1475,37 @@ class _File:
         cursor += 1  # target attributes
         cursor += 2 if self.major <= 3 or self.major >= 9 else 6
         end = cursor
-        # Flag 0x10 (seen as flags 0x12) is a meshlet/mesh-codec shape. The
-        # FVTX pointer does not land on an FVTX, and the mesh-count byte is 0.
-        # Public Switch 1 notes have no layout for that payload.
+        # Packed meshlet shapes can have an empty FVTX and zero ordinary meshes.
         standard = bool(vtx and mesh_count and vtx + 4 <= len(self.data) and self.data[vtx : vtx + 4] == b"FVTX")
         if not standard:
+            meshlet_error = ""
             if flags & 0x10:
                 info["bounds"] = self._shape_bounds(at)
+                from ocarina_forge.formats.meshlet import MeshletError, decode
+
+                try:
+                    if skin_count:
+                        raise MeshletError("skinned meshlets are unsupported")
+                    levels = decode(self.data, at, self.buffer_base)
+                except MeshletError as exc:
+                    meshlet_error = str(exc)
+                else:
+                    material = materials[material_index] if 0 <= material_index < len(materials) else None
+                    made = []
+                    for level in levels:
+                        positions = _rigid(level.positions, bones, bone_index)
+                        uv = level.uv_sets[0] if level.uv_sets else None
+                        extra = {f"_u{i}": channel for i, channel in enumerate(level.uv_sets) if i}
+                        normals = _rigid_normals(level.normals, bones, bone_index)
+                        made.append(_part_from(name, positions, level.indices, uv, material, material_index,
+                                               level.number, level.colors, extra, normals=normals))
+                        if self.capture is not None:
+                            report = _shape_report(name, level.number, skin_count, bone_index, None, bones,
+                                                   palette, self._debug_worlds, _point_bounds(level.positions),
+                                                   _point_bounds(positions), material_index, materials, flags)
+                            report["meshlet"] = {"vertices": len(level.positions), "triangles": len(level.indices) // 3}
+                            self.capture.append(report)
+                    return made, end, info
             if self.capture is not None:
                 self.capture.append(
                     {
@@ -1491,6 +1516,7 @@ class _File:
                         "skinCount": skin_count,
                         "boneIndex": bone_index,
                         "reason": "shape is not a standard vertex buffer",
+                        **({"meshlet": {"error": meshlet_error}} if meshlet_error else {}),
                         "fileBounds": _bounds_json(info.get("bounds")),
                     }
                 )
@@ -2302,6 +2328,30 @@ def _rigid(positions, bones, bone_index: int) -> list[tuple[float, float, float]
     return _bind_pose(positions, bones, [], bone_index, None)
 
 
+def _rigid_normals(normals, bones, bone_index: int):
+    if not 0 <= bone_index < len(bones):
+        return normals
+    matrix = _worlds(bones)[bone_index]
+    a, b, c = (tuple(matrix[row][col] for row in range(3)) for col in range(3))
+
+    def cross(u, v):
+        return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+    # Cofactor columns give the inverse transpose up to a scalar.
+    cofactors = cross(b, c), cross(c, a), cross(a, b)
+    determinant = sum(left * right for left, right in zip(a, cofactors[0]))
+    if abs(determinant) < 1e-12:
+        return None
+    if (a, b, c) == ((1, 0, 0), (0, 1, 0), (0, 0, 1)):
+        return normals
+    out = []
+    for normal in normals:
+        direction = tuple(sum(value * weight for value, weight in zip(row, normal)) for row in zip(*cofactors))
+        length = math.copysign(math.hypot(*direction), determinant)
+        out.append(tuple(value / length for value in direction))
+    return out
+
+
 def _bind_pose(positions, bones, palette, bone_index: int, slots: list[int] | None):
     """Bake skin count 0 or 1 into model space. Smooth skin is left where it is.
 
@@ -3034,6 +3084,8 @@ def _part_from(
     lod: int = 0,
     colors: list[tuple[float, float, float, float]] | None = None,
     uv_extra: dict | None = None,
+    *,
+    normals: list[tuple[float, float, float]] | None = None,
 ) -> Part:
     sampler, texture = ("", "")
     if material and material.albedo:
@@ -3048,6 +3100,8 @@ def _part_from(
         if len(channel) == len(positions):
             extra_names.append(channel_name)
             carried.append(channel if isinstance(channel, Vecs) else list(channel))
+    if normals:
+        carried.append(normals)
     if uvs and indices:
         positions, uvs, indices = _close_uv_seams(positions, uvs, indices, carried or None)
     cursor = 0
@@ -3076,6 +3130,7 @@ def _part_from(
         lod=lod,
         colors=colors,
         uv_extra=kept_extra,
+        normals=carried[-1] if normals else None,
     )
 
 

@@ -8,7 +8,7 @@ The editor shows this same list with ? or the Shortcuts button.
 - Right-drag: Look around
 - W A S D: Move
 - Q / E: Down / up
-- Shift: Move faster
+- Shift or X: Move faster. Use X while right-dragging in Firefox
 - Alt+left-drag: Orbit the point under the cursor, or the selection
 - Middle-drag: Pan
 - Scroll: Zoom

@@ -1,6 +1,8 @@
 """The native extension matches the Python encoder and decoder, and falls back."""
 
 import math
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 import pytest
 
@@ -35,6 +37,53 @@ def _psnr(left: bytes, right: bytes) -> float:
     if mse <= 0:
         return 99.0
     return 10 * math.log10((255 * 255) / mse)
+
+
+def _native_available_in_worker() -> bool:
+    return extension.module() is not None
+
+
+def test_native_dll_directory_is_discovered_and_retained(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    (runtime / "libunwind.dll").touch()
+    handle = object()
+    registered = []
+    monkeypatch.setattr(extension, "_WINDOWS", True)
+    monkeypatch.setattr(extension, "_DLL_DIRECTORY_HANDLES", [])
+    monkeypatch.setattr(
+        extension.os,
+        "add_dll_directory",
+        lambda path: registered.append(path) or handle,
+        raising=False,
+    )
+    monkeypatch.setenv("PATH", str(runtime))
+    monkeypatch.delenv("OCARINA_FORGE_NATIVE_DLL_DIR", raising=False)
+
+    extension._register_native_dll_directory()
+
+    assert registered == [str(runtime)]
+    assert extension._DLL_DIRECTORY_HANDLES == [handle]
+
+
+def test_native_dll_directory_environment_override_precedes_path(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    override = tmp_path / "override"
+    runtime.mkdir()
+    override.mkdir()
+    (runtime / "libunwind.dll").touch()
+    monkeypatch.setattr(extension, "_WINDOWS", True)
+    monkeypatch.setenv("PATH", str(runtime))
+    monkeypatch.setenv("OCARINA_FORGE_NATIVE_DLL_DIR", str(override))
+
+    assert extension._native_dll_directory() == str(override)
+
+
+def test_native_extension_loads_in_spawned_worker():
+    if extension.module() is None:
+        pytest.skip("ocarina_forge_native is not built")
+    with ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn")) as pool:
+        assert pool.submit(_native_available_in_worker).result(timeout=30)
 
 
 def test_python_bc7_fallback_matches_the_pure_python_encoder():

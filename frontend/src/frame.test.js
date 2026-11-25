@@ -3,13 +3,13 @@ import test from "node:test";
 
 import { formatStats, keepRendering } from "./frame.js";
 
-test("the view keeps drawing only while something is moving or loading", () => {
+test("the view only redraws continuously during interaction", () => {
   assert.equal(keepRendering({}), false);
   assert.equal(keepRendering({ flying: true }), true);
   assert.equal(keepRendering({ damped: true }), true);
   assert.equal(keepRendering({ looking: true }), true);
   assert.equal(keepRendering({ dragging: true }), true);
-  assert.equal(keepRendering({ loading: true }), true);
+  assert.equal(keepRendering({ loading: true }), false);
   assert.equal(keepRendering({ flying: false, loading: false }), false);
 });
 
@@ -45,5 +45,12 @@ test("a stopped view says idle and keeps the last counts", () => {
       warmTotal: 11,
     }),
     "idle · 240 draws · 12 separate · 800 tris · conv 1200.2 ms · tex 800 ms · dl 40.4 ms · up 90 ms · warm 3/11"
+  );
+});
+
+test("background models are counted separately from active view loads", () => {
+  assert.equal(
+    formatStats({ draws: 2, separate: 0, tris: 20, queued: 0, loading: 0, loaded: 5, deferred: 2, backgroundLoading: 1 }),
+    "idle · 2 draws · 0 separate · 20 tris · 0 queued · 0 loading · 5 loaded · 3 background remaining · 1 background loading"
   );
 });

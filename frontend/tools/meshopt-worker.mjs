@@ -1,10 +1,11 @@
 /**
- * One JSON request per line on stdin, one JSON response per line on stdout.
+ * Length-prefixed JSON requests on stdin and responses on stdout.
  * The Python converter keeps this process alive so a scene does not start Node once per mesh.
  */
 import { NodeIO } from "@gltf-transform/core";
 import { EXTMeshoptCompression, KHRMaterialsUnlit, KHRTextureBasisu } from "@gltf-transform/extensions";
 import { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } from "meshoptimizer";
+import { LengthPrefixedFrameReader } from "./length-prefixed.mjs";
 
 await MeshoptSimplifier.ready;
 await MeshoptEncoder.ready;
@@ -154,42 +155,36 @@ process.on("unhandledRejection", (error) => {
   console.error(error && error.stack ? error.stack : error);
 });
 
-let buffer = Buffer.alloc(0);
 let pending = Promise.resolve();
 
-function takeFrames() {
-  while (buffer.length >= 4) {
-    const size = buffer.readUInt32LE(0);
-    if (size <= 0 || size > 512 * 1024 * 1024) {
-      console.error(`meshopt frame ${size} is not usable`);
-      process.exit(1);
+const frameReader = new LengthPrefixedFrameReader(512 * 1024 * 1024, (frame) => {
+  const text = frame.toString("utf8");
+  pending = pending.then(async () => {
+    let response;
+    try {
+      const body = JSON.parse(text);
+      if (body.op === "simplify") response = simplify(body);
+      else if (body.op === "pack") response = await pack(body);
+      else if (body.op === "plain") response = await plain(body);
+      else response = { ok: false, reason: "unknown op" };
+    } catch (error) {
+      response = { ok: false, reason: error.message || "meshopt failed" };
     }
-    if (buffer.length < 4 + size) return;
-    const text = buffer.subarray(4, 4 + size).toString("utf8");
-    buffer = Buffer.from(buffer.subarray(4 + size));
-    pending = pending.then(async () => {
-      let response;
-      try {
-        const body = JSON.parse(text);
-        if (body.op === "simplify") response = simplify(body);
-        else if (body.op === "pack") response = await pack(body);
-        else if (body.op === "plain") response = await plain(body);
-        else response = { ok: false, reason: "unknown op" };
-      } catch (error) {
-        response = { ok: false, reason: error.message || "meshopt failed" };
-      }
-      try {
-        writeFrame(response);
-      } catch (error) {
-        console.error(error && error.stack ? error.stack : error);
-      }
-    });
-  }
-}
+    try {
+      writeFrame(response);
+    } catch (error) {
+      console.error(error && error.stack ? error.stack : error);
+    }
+  });
+});
 
 process.stdin.on("data", (chunk) => {
-  buffer = Buffer.concat([buffer, chunk]);
-  takeFrames();
+  try {
+    frameReader.push(chunk);
+  } catch (error) {
+    console.error(`meshopt frame: ${error.message}`);
+    process.exit(1);
+  }
 });
 process.stdin.on("error", (error) => {
   console.error(`stdin: ${error.message}`);

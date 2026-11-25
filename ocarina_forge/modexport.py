@@ -1,9 +1,8 @@
 """Write a Longshot mod folder from a Forge project.
 
-The project YAML stays the source. This writer emits only files the game
-uses: mod.json, an empty romfs directory when there is at least one patch,
-and one patch file per banc that still differs from the dump. A value equal
-to the base is dropped. Editor state never leaves the project folder.
+The project YAML stays the source. New patch-only projects emit minimal game
+files; imported projects also retain their original runtime tree and manifest
+fields. A value equal to the base is dropped. Editor state stays in the project.
 """
 
 from __future__ import annotations
@@ -72,7 +71,7 @@ def _patch_name(banc: str) -> str:
     return leaf + ".json"
 
 
-def placement_ops(document: dict, diff: dict) -> tuple[list[dict], list[str]]:
+def placement_ops(document: dict, diff: dict, imported_ids: set[str] | None = None) -> tuple[list[dict], list[str]]:
     """Ops that still differ from the dump, plus warnings for edits with no op yet."""
     warnings: list[str] = []
     ops: list[dict] = []
@@ -95,6 +94,11 @@ def placement_ops(document: dict, diff: dict) -> tuple[list[dict], list[str]]:
                 "It stays visible in Forge and is not written. "
                 "The placements patch format has a remove op; this export does not emit it yet."
             )
+            continue
+        if actor is None and hashed in (imported_ids or set()) and state != "added" and "actor" not in record:
+            for field, path in (("translate", "Translate"), ("rotate", "Rotate"), ("scale", "Scale")):
+                if record.get(field) is not None:
+                    ops.append({"op": "set", "hash": hashed, "path": path, "value": _nums(record[field])})
             continue
         if actor is None or state == "added" or "actor" in record:
             label = record.get("actor") or record.get("gyaml") or hashed
@@ -137,7 +141,7 @@ def _pose(ops, hashed, label, actor, record, field, path, default, warnings) -> 
         )
 
 
-def _manifest_json(project) -> dict:
+def _manifest_json(project, original: dict | None = None) -> dict:
     manifest = project.manifest
     version = str(manifest.get("version") or "0.1.0")
     if not _VERSION.fullmatch(version):
@@ -145,36 +149,108 @@ def _manifest_json(project) -> dict:
             f"Mod version {version!r} is not major.minor.patch. Longshot refuses any other shape.",
             "project",
         )
-    body = {
+    body = dict(original or {})
+    body.update({
         "id": mod_id(manifest["name"]),
         "name": str(manifest.get("title") or manifest["name"])[:128],
         "version": version,
-    }
+    })
     author = str(manifest.get("author") or "").strip()
     if author:
         body["author"] = author[:128]
+    else:
+        body.pop("author", None)
     license_name = str(manifest.get("license") or "").strip()
     if license_name:
         body["license"] = license_name[:128]
+    elif original is None:
+        body.pop("license", None)
     return body
+
+
+def _preserve_imported_patches(project, out: Path, source_info: dict, written: list[str],
+                               generated: set[tuple[str, str, str]], log: list[dict],
+                               warnings: list[str]) -> None:
+    fields = {"translate": "Translate", "rotate": "Rotate", "scale": "Scale"}
+    fallback: dict[str, list[dict]] = {}
+    for banc, actors in source_info["patches"]:
+        diff = project.load_scene_diff(banc)["actors"]
+        for ident in actors:
+            record = diff.get(ident)
+            if not isinstance(record, dict):
+                continue
+            for field, path in fields.items():
+                if field not in record or (banc, ident, path) in generated:
+                    continue
+                fallback.setdefault(banc, []).append({
+                    "op": "set",
+                    "hash": ident,
+                    "path": path,
+                    "value": _nums(record[field]),
+                })
+                if record.get("state") in ("hidden", "removed"):
+                    note = (
+                        f"{banc}: {ident} is {record['state']}; its imported {path} patch stays because "
+                        "placement removal is not supported."
+                    )
+                    warnings.append(note)
+                    log.append({"level": "warn", "message": note})
+
+    for banc, ops in fallback.items():
+        destination = out / "patches" / _patch_name(banc)
+        if destination.is_file():
+            payload = json.loads(destination.read_text(encoding="utf-8"))
+        else:
+            payload = {"target": banc, "description": _describe(ops), "placements": []}
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            written.append(destination.relative_to(out).as_posix())
+        payload["placements"].extend(ops)
+        payload["description"] = _describe(payload["placements"])
+        destination.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        log.append({
+            "level": "info",
+            "message": f"Preserved {len(ops)} imported placement operation(s) for {banc}.",
+        })
 
 
 def export_mod(project, dump, *, install: bool = False, game: Path | None = None) -> dict:
     """Write ``<project>/build/mod``. Install copies it to ``<game>/mods/local/<slug>``.
 
-    An unchanged project writes no files. Installing that result removes a
-    previously installed copy, so a move that was undone does not stay in the game.
+    An unchanged new project writes no files. Imported mods retain their source
+    files even when their placement patches have been removed.
     """
     from ocarina_forge.projects import game_root, install_dir
 
     out = project.root / "build" / "mod"
+    source_mod = project.root / ".longshot-source"
+    source_info = None
+    if source_mod.is_dir():
+        from ocarina_forge.importers.longshot_mod import inspect_local_mod
+
+        try:
+            original_manifest = json.loads((source_mod / "mod.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise BancError(f"Imported mod manifest is unreadable: {exc}", "mod_export") from exc
+        if not isinstance(original_manifest, dict) or not isinstance(original_manifest.get("id"), str):
+            raise BancError("Imported mod manifest has no string id.", "mod_export")
+        source_info = inspect_local_mod(source_mod, original_manifest["id"])
     if out.exists():
         shutil.rmtree(out)
+    if source_mod.is_dir():
+        shutil.copytree(source_mod, out)
+        old_patches = out / "patches"
+        if old_patches.exists():
+            shutil.rmtree(old_patches)
 
     log: list[dict] = []
     written: list[str] = []
     warnings: list[str] = []
+    generated: set[tuple[str, str, str]] = set()
     slug = mod_slug(project.manifest["name"])
+    imported_ids: dict[str, set[str]] = {}
+    if source_info:
+        for banc, actors in source_info["patches"]:
+            imported_ids.setdefault(banc, set()).update(actors)
 
     for banc in project.modified_scenes():
         diff = project.load_scene_diff(banc)
@@ -182,13 +258,15 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
             document, _dict_id, _raw = dump.read_byml(banc)
         except BancError as exc:
             raise BancError(f"{banc}: {exc.message}", exc.code) from exc
-        ops, notes = placement_ops(document, diff)
+        ops, notes = placement_ops(document, diff, imported_ids.get(banc, set()))
         for note in notes:
             warnings.append(f"{banc}: {note}")
             log.append({"level": "warn", "message": f"{banc}: {note}"})
         if not ops:
-            log.append({"level": "info", "message": f"{banc}: no placement op differs from the dump, so no patch was written."})
+            if banc not in imported_ids:
+                log.append({"level": "info", "message": f"{banc}: no placement op differs from the dump, so no patch was written."})
             continue
+        generated.update((banc, op["hash"], op["path"]) for op in ops)
         destination = out / "patches" / _patch_name(banc)
         destination.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -200,25 +278,40 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         written.append(destination.relative_to(out).as_posix())
         log.append({"level": "info", "message": f"Wrote {destination.name} with {len(ops)} op{'s' if len(ops) != 1 else ''}."})
 
-    if written:
-        (out / "mod.json").write_text(json.dumps(_manifest_json(project), indent=2) + "\n", encoding="utf-8")
-        (out / "romfs").mkdir(parents=True, exist_ok=True)
+    if source_info is not None:
+        _preserve_imported_patches(project, out, source_info, written, generated, log, warnings)
+
+    if written or source_mod.is_dir():
+        (out / "mod.json").write_text(
+            json.dumps(_manifest_json(project, source_info["manifest"] if source_info else None), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if written:
+            (out / "romfs").mkdir(parents=True, exist_ok=True)
         written.insert(0, "mod.json")
-        log.append({
-            "level": "info",
-            "message": (
-                "romfs/ is an empty directory. The game indexes a manifest mod's patches only when that "
-                "directory exists. romfs/.keep is not written: the loader would serve it as a RomFS file, "
-                "and longshot mod check does not require the file. No src/main.ts: a patch-only mod has no runtime."
-            ),
-        })
-        log.append({
-            "level": "info",
-            "message": (
-                "The first save in an area can need a full game restart. The size table is read once at "
-                "process start, and a shared Translate container grows the banc."
-            ),
-        })
+        if source_mod.is_dir():
+            log.append({
+                "level": "info",
+                "message": "Preserved the imported mod's runtime files and original manifest fields.",
+            })
+        elif written:
+            (out / "romfs").mkdir(parents=True, exist_ok=True)
+            log.append({
+                "level": "info",
+                "message": (
+                    "romfs/ is an empty directory. The game indexes a manifest mod's patches only when that "
+                    "directory exists. romfs/.keep is not written: the loader would serve it as a RomFS file, "
+                    "and longshot mod check does not require the file. No src/main.ts: a patch-only mod has no runtime."
+                ),
+            })
+        if written:
+            log.append({
+                "level": "info",
+                "message": (
+                    "The first save in an area can need a full game restart. The size table is read once at "
+                    "process start, and a shared Translate container grows the banc."
+                ),
+            })
     else:
         log.append({"level": "info", "message": "No patch files. The mod folder was not written."})
 
@@ -228,7 +321,7 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         dest = install_dir(config_game, slug, game=game if game is not None else game_root(config_game))
         if dest.exists():
             shutil.rmtree(dest)
-        if written:
+        if written or source_mod.is_dir():
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(out, dest)
             installed = str(dest)

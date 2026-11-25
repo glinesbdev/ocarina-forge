@@ -2,24 +2,65 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, drawCount, drawTotal, rendererChoice, rendererSearch, stripLegacyGpu } from "./backend.js";
+import { backendLabel, createBackendRenderer, drawCount, drawTotal, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms } from "./backend.js";
 import { formatStats } from "./frame.js";
 
-test("WebGL is the default and WebGPU is opt-in", () => {
-  assert.equal(rendererChoice(""), "webgl");
-  assert.equal(rendererChoice("?gpu=1"), "webgl");
+test("WebGPU is the default and WebGL2 can be forced", () => {
+  assert.equal(rendererChoice(""), "webgpu");
+  assert.equal(rendererChoice("?gpu=1"), "webgpu");
   assert.equal(rendererChoice("?webgpu=1"), "webgpu");
   assert.equal(rendererChoice("?renderer=webgpu"), "webgpu");
   assert.equal(rendererChoice("?gpu=0"), "webgl");
   assert.equal(rendererChoice("?webgpu=0"), "webgl");
   assert.equal(rendererChoice("?renderer=webgl&webgpu=1"), "webgl");
   assert.equal(rendererSearch("?scene=kokiri", "webgpu"), "?scene=kokiri&webgpu=1");
-  assert.equal(rendererSearch("?gpu=1&scene=kokiri", "webgl"), "?scene=kokiri");
-  assert.equal(rendererSearch("?webgpu=1&scene=kokiri", "webgl"), "?scene=kokiri");
+  assert.equal(rendererSearch("?gpu=1&scene=kokiri", "webgl"), "?scene=kokiri&renderer=webgl");
+  assert.equal(rendererSearch("?webgpu=1&scene=kokiri", "webgl"), "?scene=kokiri&renderer=webgl");
   assert.equal(stripLegacyGpu("?gpu=1"), "");
   assert.equal(stripLegacyGpu("?scene=kokiri&gpu=1"), "?scene=kokiri");
   assert.equal(stripLegacyGpu("?webgpu=1"), null);
   assert.equal(stripLegacyGpu(""), null);
+});
+
+test("terrain warm-up never publishes a pending pipeline in the live WebGPU renderer", async () => {
+  const args = [{}, {}, {}];
+  const compileAsync = (...received) => calls.push(received);
+  const calls = [];
+  await warmWebGLPrograms({ isWebGPURenderer: true, compileAsync }, ...args);
+  assert.deepEqual(calls, []);
+  await warmWebGLPrograms({ isWebGLRenderer: true, compileAsync }, ...args);
+  assert.deepEqual(calls, [args]);
+});
+
+test("each module graph creates its own renderer", async () => {
+  class WebGLRenderer {}
+  class WebGPURenderer {
+    isWebGPURenderer = true;
+    backend = { isWebGPUBackend: true };
+    async init() {}
+  }
+  const webgl = await createBackendRenderer({ WebGLRenderer });
+  assert.ok(webgl.renderer instanceof WebGLRenderer);
+  assert.equal(webgl.nodes, false);
+  const webgpu = await createBackendRenderer({ WebGPURenderer });
+  assert.ok(webgpu.renderer instanceof WebGPURenderer);
+  assert.equal(webgpu.nodes, true);
+});
+
+test("a missing adapter or failed initialization is returned to the boot module", async () => {
+  let disposed = 0;
+  class NoAdapter {
+    isWebGPURenderer = true;
+    backend = { isWebGLBackend: true };
+    async init() {}
+    dispose() { disposed++; }
+  }
+  class BrokenDevice extends NoAdapter {
+    async init() { throw new Error("Device initialization rejected"); }
+  }
+  await assert.rejects(createBackendRenderer({ WebGPURenderer: NoAdapter }), /No usable WebGPU adapter/);
+  await assert.rejects(createBackendRenderer({ WebGPURenderer: BrokenDevice }), /Device initialization rejected/);
+  assert.equal(disposed, 2);
 });
 
 test("draw counts come from the backend that actually records them", () => {
@@ -72,11 +113,10 @@ test("the stats line names the backend and the frame time", () => {
   );
 });
 
-test("the default viewport still builds a WebGLRenderer", () => {
+test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   const backend = readFileSync(new URL("./backend.js", import.meta.url), "utf8");
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
-  assert.match(backend, /choice !== "webgpu"|rendererChoice\(search\) !== "webgpu"/);
   assert.match(backend, /new THREE\.WebGLRenderer\(\{ antialias: true \}\)/);
   assert.match(backend, /WebGPU \(WebGL2 fallback\)/);
   assert.match(backend, /backendLabel\(gpuRenderer\)/);
@@ -101,7 +141,7 @@ test("the default viewport still builds a WebGLRenderer", () => {
   assert.match(node, /attribute\("uv1", "vec2"\)/);
   assert.match(node, /attribute\("uv2", "vec2"\)/);
   assert.match(node, /attribute\("uv3", "vec2"\)/);
-  assert.match(node, /\.discard\(\)/);
+  assert.doesNotMatch(node, /\.discard\(\)/);
   assert.match(node, /material\.colorNode/);
   assert.match(node, /pow\(max\(abs\(normal\), vec3\(0\.0001\)\), vec3\(4\)\)/);
   assert.doesNotMatch(node, /(?<!\.)\bnormalize\s*\(/);

@@ -10,18 +10,21 @@ import {
   repairCompressedTexture,
   textureSupport,
 } from "./gpu-texture.js";
-import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { geometryDecoder } from "./geometry-decoder.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree } from "three-mesh-bvh";
+import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, MeshBVH } from "three-mesh-bvh";
 
-import { boundsGap, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
+import { boundsGap, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, transformSphere } from "./cull.js";
 import { isMarker } from "./problems.js";
 import { canHoverFocus } from "./focus.js";
+import { guardPointerCapture } from "./pointer-capture.js";
 import { shouldReloadTerrain } from "./terrain.js";
-import { createBackendRenderer, drawTotal } from "./backend.js";
+import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
+import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { formatStats, keepRendering } from "./frame.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
+import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
 import { chooseSnap } from "./snap.js";
 import { resolveTextureIndex } from "./problems.js";
@@ -29,6 +32,12 @@ import { resolveTextureIndex } from "./problems.js";
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+let preparedRenderer = null;
+
+export async function prepareViewportRenderer(note = "") {
+  preparedRenderer = { ...await createBackendRenderer(THREE), note };
+}
 
 export const CATEGORY_COLOR = {
   npc: 0xe0b15a,
@@ -49,7 +58,9 @@ export const CATEGORY_COLOR = {
  * the scene. Picks prefer a solid mesh over a volume.
  */
 export async function createViewport(host, hooks) {
-  const created = await createBackendRenderer(THREE, globalThis.location ? globalThis.location.search : "");
+  const prepared = preparedRenderer;
+  preparedRenderer = null;
+  const created = prepared ?? await createBackendRenderer(THREE);
   const renderer = created.renderer;
   const backendName = created.backend;
   const backendNote = created.note;
@@ -62,6 +73,7 @@ export async function createViewport(host, hooks) {
     blendNodes = await import("./blend-node.js");
   }
   if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
+  const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
 
   const scene = new THREE.Scene();
@@ -79,11 +91,12 @@ export async function createViewport(host, hooks) {
     const previousLost = renderer.onDeviceLost.bind(renderer);
     renderer.onDeviceLost = (info) => {
       previousLost(info);
-      if (hooks.onDeviceLost) hooks.onDeviceLost("The WebGPU device was lost. Reload without ?webgpu=1 to use WebGL.");
+      if (hooks.onDeviceLost) hooks.onDeviceLost("The WebGPU device was lost. Finish any pending edits, then open Forge with ?renderer=webgl to use WebGL2.");
     };
   }
   host.appendChild(renderer.domElement);
   const canvas = renderer.domElement;
+  guardPointerCapture(canvas);
   canvas.tabIndex = 0;
   canvas.setAttribute("aria-label", "Scene view");
   let hoverTookFocus = false;
@@ -138,6 +151,8 @@ export async function createViewport(host, hooks) {
   const batches = [];
   const parsedTemplates = new Map();
   const templateOrder = [];
+  const recentSceneTemplates = new Map();
+  const recentTerrain = new Map();
   const statsEl = document.createElement("div");
   statsEl.className = "view-stats";
   host.appendChild(statsEl);
@@ -146,7 +161,63 @@ export async function createViewport(host, hooks) {
   let running = true;
   let frameHandle = 0;
   const loader = new GLTFLoader();
-  loader.setMeshoptDecoder(MeshoptDecoder);
+  loader.setMeshoptDecoder(geometryDecoder);
+  const sharedImages = new Map();
+  const textureDetailLoaders = new Map();
+  const textureDetailFailed = new Set();
+  const textureDetailReady = new Map();
+  const textureDetailPending = new Set();
+  const detailParses = [];
+  let detailCandidates = new Map();
+  let nextDetailScan = 0;
+
+  function sharedImage(uri, load) {
+    let pending = sharedImages.get(uri);
+    if (pending) {
+      sharedImages.delete(uri);
+    } else {
+      pending = load().catch((error) => {
+        if (sharedImages.get(uri) === pending) sharedImages.delete(uri);
+        throw error;
+      });
+    }
+    sharedImages.set(uri, pending);
+    if (sharedImages.size > 128) sharedImages.delete(sharedImages.keys().next().value);
+    return pending;
+  }
+
+  function loadDetailImage(uri, imageLoader, deferred = false) {
+    return new Promise((resolve, reject) => {
+      const load = deferred && imageLoader.loadDeferred ? imageLoader.loadDeferred : imageLoader.load;
+      load.call(imageLoader, uri, (image) => {
+        resolve(imageLoader.isImageBitmapLoader ? new THREE.Texture(image) : image);
+      }, undefined, reject);
+    });
+  }
+
+  loader.register((parser) => ({
+    name: "ForgeSharedModelImages",
+    beforeRoot() {
+      const load = parser.loadImageSource.bind(parser);
+      parser.loadImageSource = (index, imageLoader) => {
+        const image = parser.json.images?.[index];
+        const uri = image?.uri;
+        if (!uri?.startsWith("/api/model-textures/")) return load(index, imageLoader);
+        const firstMip = image.extras?.forgeLowTexture;
+        if (!firstMip?.startsWith("/api/model-textures/")) {
+          return sharedImage(uri, () => load(index, imageLoader)).then((texture) => texture.clone());
+        }
+        textureDetailLoaders.set(uri, imageLoader);
+        return sharedImage(firstMip, () => loadDetailImage(firstMip, imageLoader))
+          .then((texture) => {
+            const reduced = texture.clone();
+            reduced.userData.forgeFullTexture = uri;
+            return reduced;
+          })
+          .catch(() => sharedImage(uri, () => load(index, imageLoader)).then((texture) => texture.clone()));
+      };
+    },
+  }));
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
   ktx2Loader.detectSupport(renderer);
   const gpuCaps = textureSupport(renderer.getContext());
@@ -162,6 +233,10 @@ export async function createViewport(host, hooks) {
     caps: gpuCaps,
     enabled: () => gpuTexturesEnabled(window.location.search, window.localStorage.getItem("ocarinaforge.gpuTextures")),
     onFallback: reportGpuFallback,
+    scheduleDetailParse: (apply) => {
+      detailParses.push(apply);
+      requestRender();
+    },
     // vkFormat 0 is Basis. three's transcoder is the retry for that file.
     basisParse: (buffer, onLoad, onError) => ktx2Loader.parse(buffer, onLoad, onError),
   }));
@@ -193,12 +268,25 @@ let convertSlots = 8;
   let generation = 0;
   let rebuildTimer = 0;
   let loadQueue = null;
+  let modelLoads = null;
   let pendingLoads = 0;
   const loadDelta = new THREE.Vector3();
   const loadForward = new THREE.Vector3();
   let terrainRoot = null;
+  let scenePreview = null;
+  let modelStage = null;
+  const foregroundModelNames = new Set();
+  const lastLoadDirection = new THREE.Vector3();
+  const modelFrustum = new THREE.Frustum();
+  const modelProjection = new THREE.Matrix4();
+  const modelBounds = new THREE.Sphere();
+  let streamInteractive = false;
+  let sceneStreamStats = null;
   let snapOn = false;
   let terrainBanc = null;
+  const subTerrainMaterial = new THREE.MeshBasicMaterial({
+    color: 0xa5c9bd, wireframe: true, transparent: true, opacity: 0.28, depthWrite: false,
+  });
   let terrainToken = 0;
   let groundGrid = null;
   let lastClick = null;
@@ -244,8 +332,9 @@ let convertSlots = 8;
 
   function clearTerrain() {
     terrainToken += 1;
-    disposeTerrainObject(terrainRoot);
-    terrainRoot = null;
+    showTerrain(null);
+    for (const root of recentTerrain.values()) disposeTerrainObject(root);
+    recentTerrain.clear();
     terrainBanc = null;
   }
 
@@ -265,11 +354,22 @@ let convertSlots = 8;
 
   function applyWater() {
     for (const batch of batches) {
-      if (batch.water) batch.mesh.visible = showWater;
+      if (batch.water) batch.mesh.visible = showWater && !scenePreview?.hidden.includes(batch.mesh);
     }
+    for (const mesh of scenePreview?.waterMeshes ?? []) mesh.visible = showWater;
   }
 
   function clearActors(options = {}) {
+    loadQueue = null;
+    modelLoads?.dispose();
+    modelLoads = null;
+    cancelModelStage();
+    clearScenePreview();
+    foregroundModelNames.clear();
+    detailCandidates.clear();
+    textureDetailReady.clear();
+    sceneStreamStats = null;
+    nextDetailScan = 0;
     transform.detach();
     if (rebuildTimer) {
       clearTimeout(rebuildTimer);
@@ -287,6 +387,7 @@ let convertSlots = 8;
   function helperVisible(entry) {
     if (!entry.pivot.visible) return false;
     if (entry.key === selected || entry.key === hovered) return true;
+    if (scenePreview?.root.parent) return false;
     if (boxCategories[entry.category] === false) return false;
     return !entry.parts || !entry.parts.length;
   }
@@ -423,6 +524,7 @@ let convertSlots = 8;
     pivot.userData.actorId = actor.id;
     const gate = {
       status: actor.status,
+      present: presentByDefault(actor.params),
       category: actor.category,
       volume,
       showHidden,
@@ -439,6 +541,7 @@ let convertSlots = 8;
       gyaml: actor.gyaml,
       category: actor.category,
       status: actor.status,
+      present: gate.present,
       volume,
       region,
       companion: Boolean(actor.companion),
@@ -467,9 +570,15 @@ let convertSlots = 8;
   }
 
   function setActors(actors, options = {}) {
-    clearActors({ keepBatches: true });
-    // The field is not part of the actor diff. Clearing it here is what turned
-    // the ground black for a couple of seconds after POST /api/scene/edit.
+    const reloadTerrain = shouldReloadTerrain(terrainBanc, options.banc);
+    if (reloadTerrain && terrainBanc) rememberSceneTemplates(terrainBanc);
+    clearActors({ keepBatches: !reloadTerrain });
+    // Actor edits keep the current terrain. On a map switch, detach the
+    // previous terrain before the camera and actor placements change.
+    if (reloadTerrain) {
+      showTerrain(null);
+      pruneTemplates();
+    }
     const token = ++generation;
     actors.forEach((actor, index) => mountActor(actor, index));
     if (selected && !entries.has(selected)) selected = null;
@@ -483,18 +592,221 @@ let convertSlots = 8;
     }
     syncLabels();
     requestRender();
-    loadModels(token, actors);
-    if (shouldReloadTerrain(terrainBanc, options.banc)) {
+    performance.setResourceTimingBufferSize?.(4096);
+    sceneStreamStats = { start: performance.now(), firstDetail: null, slowFrames: 0, editBytes: null };
+    modelStage = { previous: batches.slice(), pending: new Map(), timer: 0, done: false, failed: false };
+    const previewReady = options.previewUrl ? loadScenePreview(options.previewUrl, reloadTerrain) : null;
+    loadModels(token, actors, previewReady);
+    if (reloadTerrain) {
       const banc = options.banc;
       const next = ++terrainToken;
       terrainBanc = banc;
-      // The static map can be hundreds of thousands of triangles. Let the
-      // actor requests start first, and never raycast the map, so picking
-      // stays on the actors while the terrain converts. A later actor edit
-      // does not reach this branch: the banc has not changed.
-      setTimeout(() => {
-        if (next === terrainToken) loadTerrain(next, banc);
-      }, 300);
+      void loadTerrain(next, banc);
+    }
+  }
+
+  function shadeScenePreview(asset) {
+    const originals = new Set();
+    const materials = new Map();
+    for (const group of asset.children) {
+      const name = group.userData.forgePreview || "";
+      group.traverse((part) => {
+        if (!part.isMesh) return;
+        const original = part.material;
+        originals.add(original);
+        const water = name !== "@terrain" && isPreviewWater(original, part.userData.name || part.name, name);
+        part.userData.previewWater = water;
+        const label = `${part.name} ${name}`;
+        let color = original.color.getHex();
+        if (color === 0xffffff) {
+          if (name === "@terrain" || /grass|leaf|leaves|bush|moss/i.test(label)) color = 0x677b48;
+          else if (/trunk|branch|tree|wood/i.test(label)) color = 0x866b50;
+          else if (/stone|rock|cliff/i.test(label)) color = 0x848275;
+          else if (/water|river|pond/i.test(label)) color = 0x527e84;
+          else color = 0xa79d83;
+        }
+        const key = `${color}:${original.side}:${original.opacity}:${original.transparent}:${name === "@terrain"}:${water}`;
+        if (!materials.has(key)) {
+          const properties = { color, opacity: original.opacity };
+          materials.set(key, water
+            ? new THREE.MeshBasicMaterial({ ...properties, transparent: true, depthWrite: false, side: THREE.DoubleSide })
+            : new THREE.MeshLambertMaterial({
+                ...properties, flatShading: true, side: original.side,
+                transparent: original.transparent, depthWrite: !original.transparent,
+              }));
+        }
+        part.material = materials.get(key);
+      });
+    }
+    for (const material of originals) material.dispose();
+  }
+
+  function disposeScenePreview(asset, root) {
+    root.removeFromParent();
+    for (const mesh of root.children) mesh.dispose?.();
+    const geometries = new Set();
+    const materials = new Set();
+    asset.traverse((node) => {
+      if (!node.isMesh) return;
+      geometries.add(node.geometry);
+      materials.add(node.material);
+    });
+    for (const geometry of geometries) geometry.dispose();
+    for (const material of materials) material.dispose();
+  }
+
+  function clearScenePreview() {
+    if (!scenePreview) return;
+    const { controller, asset, root, hidden } = scenePreview;
+    scenePreview = null;
+    controller.abort();
+    if (!asset) return;
+    disposeScenePreview(asset, root);
+    for (const object of hidden) object.visible = true;
+    applyWater();
+    for (const entry of entries.values()) syncGhost(entry);
+    requestRender();
+  }
+
+  async function loadScenePreview(url, terrainPending) {
+    const controller = new AbortController();
+    const preview = {
+      controller, terrainPending, terrain: null, asset: null, root: new THREE.Group(), hidden: [],
+      models: new Map(), placements: new Map(), bounds: new Map(), waterMeshes: new Set(),
+    };
+    scenePreview = preview;
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error(`Scene preview request failed (${response.status}).`);
+      const data = await response.arrayBuffer();
+      if (scenePreview !== preview) return;
+      const { scene: asset } = await loader.parseAsync(data, "");
+      const root = preview.root;
+      if (scenePreview !== preview) {
+        disposeScenePreview(asset, root);
+        return;
+      }
+      preview.asset = asset;
+      shadeScenePreview(asset);
+      asset.updateMatrixWorld(true);
+      const actorGroups = new Map();
+      for (const entry of entries.values()) {
+        if (entry.region || entry.slots.length) continue;
+        const group = actorGroups.get(entry.gyaml) || [];
+        group.push(entry);
+        actorGroups.set(entry.gyaml, group);
+      }
+      const matrix = new THREE.Matrix4();
+      let deadline = performance.now() + 8;
+      for (const group of asset.children) {
+        if (performance.now() >= deadline) {
+          await new Promise((resolve) => window.setTimeout(resolve, 0));
+          if (scenePreview !== preview) return;
+          deadline = performance.now() + 8;
+        }
+        const name = group.userData.forgePreview;
+        if (name === "@terrain") {
+          if (preview.terrainPending) {
+            preview.terrain = group.clone(true);
+            root.add(preview.terrain);
+            if (terrainRoot?.visible) {
+              terrainRoot.visible = false;
+              preview.hidden.push(terrainRoot);
+            }
+          }
+          continue;
+        }
+        const placements = actorGroups.get(name)?.filter((entry) =>
+          entries.get(entry.key) === entry && entry.gyaml === name && !entry.slots.length);
+        if (!placements?.length) continue;
+        preview.bounds.set(name, new THREE.Box3().setFromObject(group).getBoundingSphere(new THREE.Sphere()));
+        const cells = new Map();
+        for (const entry of placements) {
+          entry.pivot.updateWorldMatrix(true, false);
+          const { x, y, z } = entry.pivot.position;
+          const cell = [x, y, z].map((value) => Math.floor(value / 96)).join("/");
+          if (!cells.has(cell)) cells.set(cell, []);
+          cells.get(cell).push(entry);
+        }
+        const meshes = [];
+        preview.models.set(name, meshes);
+        group.traverse((part) => {
+          if (!part.isMesh) return;
+          const local = part.matrixWorld.clone();
+          for (const placements of cells.values()) {
+            // Spatial bounds let Three cull whole batches of distant copies.
+            const mesh = new THREE.InstancedMesh(part.geometry, part.material, placements.length);
+            const keys = placements.map((entry) => entry.key);
+            mesh.userData.previewIds = keys.slice();
+            mesh.userData.previewKeys = keys;
+            mesh.userData.previewName = name;
+            mesh.userData.previewSurface = part.userData.name || part.name;
+            if (part.userData.previewWater) {
+              mesh.renderOrder = 2;
+              mesh.visible = showWater;
+              preview.waterMeshes.add(mesh);
+            }
+            placements.forEach((entry, index) => {
+              displayedActorMatrix(entry, matrix).multiply(local);
+              if (!entry.pivot.visible) matrix.scale(hiddenPreviewScale);
+              mesh.setMatrixAt(index, matrix);
+              const slots = preview.placements.get(entry.key) || [];
+              slots.push({ mesh, index, local });
+              preview.placements.set(entry.key, slots);
+            });
+            meshes.push(mesh);
+            root.add(mesh);
+          }
+        });
+      }
+      if (!root.children.length) {
+        clearScenePreview();
+        return;
+      }
+      for (const { mesh, water } of modelStage?.previous || batches) {
+        if (!mesh.visible && !water) continue;
+        mesh.visible = false;
+        preview.hidden.push(mesh);
+      }
+      scene.add(root);
+      refreshPondFish();
+      for (const entry of entries.values()) syncGhost(entry);
+      requestRender();
+      return preview.models.size > 0;
+    } catch (error) {
+      if (scenePreview === preview) {
+        clearScenePreview();
+        console.warn(error);
+      }
+    }
+  }
+
+  const hiddenPreviewScale = new THREE.Vector3(0, 0, 0);
+
+  function syncPreviewPlacement(entry) {
+    const slots = scenePreview?.placements.get(entry.key);
+    if (!slots?.length || slots[0].mesh.userData.previewName !== entry.gyaml) return;
+    entry.pivot.updateWorldMatrix(true, false);
+    const matrix = new THREE.Matrix4();
+    for (const { mesh, index, local } of slots) {
+      displayedActorMatrix(entry, matrix).multiply(local);
+      if (!entry.pivot.visible) matrix.scale(hiddenPreviewScale);
+      mesh.userData.previewIds[index] = entry.key;
+      mesh.setMatrixAt(index, matrix);
+      mesh.boundingSphere = null;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  function removePreviewPlacement(entry) {
+    const slots = scenePreview?.placements.get(entry.key);
+    if (!slots) return;
+    const matrix = new THREE.Matrix4();
+    for (const { mesh, index } of slots) {
+      mesh.getMatrixAt(index, matrix);
+      mesh.setMatrixAt(index, matrix.scale(hiddenPreviewScale));
+      mesh.userData.previewIds[index] = null;
+      mesh.instanceMatrix.needsUpdate = true;
     }
   }
 
@@ -548,6 +860,7 @@ let convertSlots = 8;
     placeRotate(entry.pivot, [rx, ry, rz]);
     entry.pivot.scale.set(sx || 1, sy || 1, sz || 1);
     entry.status = actor.status;
+    entry.present = presentByDefault(actor.params);
     entry.category = actor.category;
     entry.gyaml = actor.gyaml;
     entry.name = actor.name || "";
@@ -567,6 +880,7 @@ let convertSlots = 8;
     });
     entry.pivot.visible = actorShown({
       status: actor.status,
+      present: entry.present,
       category: actor.category,
       volume: entry.volume,
       showHidden,
@@ -586,7 +900,12 @@ let convertSlots = 8;
       if (!entry) return false;
       rows.push([entry, actor]);
     }
-    for (const [entry, actor] of rows) applyActorRecord(entry, actor);
+    for (const [entry, actor] of rows) {
+      applyActorRecord(entry, actor);
+      syncPreviewPlacement(entry);
+    }
+    if (rows.some(([entry]) => fishingPondFish(entry.gyaml) || entry.gyaml === FISHING_POND_WATER)) refreshPondFish();
+    prioritizeLoad();
     syncBatchVisibility();
     syncLabels();
     attach();
@@ -626,7 +945,8 @@ let convertSlots = 8;
     entry.modelMeta = sibling.modelMeta;
     entry.volume = false;
     entry.mesh.visible = false;
-    queueRebuild();
+    if (modelStage) stageModel(entry);
+    else queueRebuild();
     return true;
   }
 
@@ -637,6 +957,7 @@ let convertSlots = 8;
     for (const [key, entry] of [...entries.entries()]) {
       if (wanted.has(key)) continue;
       hideSlots(entry);
+      removePreviewPlacement(entry);
       disposeEntry(entry);
       entries.delete(key);
     }
@@ -645,10 +966,12 @@ let convertSlots = 8;
       const entry = entries.get(key);
       if (entry && entry.gyaml === item.actor.gyaml) {
         applyActorRecord(entry, item.actor);
+        syncPreviewPlacement(entry);
         continue;
       }
       if (entry) {
         hideSlots(entry);
+        removePreviewPlacement(entry);
         disposeEntry(entry);
         entries.delete(key);
       }
@@ -657,9 +980,11 @@ let convertSlots = 8;
     const loading = [];
     for (const item of fresh) {
       paint(item.entry);
+      syncPreviewPlacement(item.entry);
       if (!adoptModel(item.entry)) loading.push(item.actor);
     }
-    if (loading.length) loadModels(generation, loading);
+    modelLoads?.update(actors, loading);
+    refreshPondFish();
     if (selected && !entries.has(selected)) selected = null;
     syncBatchVisibility();
     syncLabels();
@@ -668,24 +993,76 @@ let convertSlots = 8;
     return true;
   }
 
-  function report(info) {
+  function report(info, foregroundSettled) {
     if (hooks.onProgress) hooks.onProgress(info);
-    if (info.finished && hooks.onModels) hooks.onModels();
+    if (foregroundSettled && hooks.onModels) hooks.onModels();
   }
 
-  function gyamlScore(gyaml) {
-    camera.getWorldDirection(loadForward);
-    let best = Infinity;
+  function sortModelNames(names, cachedFirst = false, updateForeground = true, backgroundName = null) {
+    if (updateForeground) foregroundModelNames.clear();
+    if (!names.length && !backgroundName) return;
+    camera.updateMatrixWorld();
+    modelProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    modelFrustum.setFromProjectionMatrix(modelProjection, camera.coordinateSystem);
+    const priority = new Map(names.map((name) => [name, { tier: 5, distance: Infinity }]));
+    if (backgroundName) priority.set(backgroundName, { tier: 5, distance: Infinity });
+    const selectedModel = entries.get(selected)?.gyaml;
     for (const entry of entries.values()) {
-      if (entry.gyaml !== gyaml) continue;
+      const best = priority.get(entry.gyaml);
+      if (!best || !entry.pivot.visible || entry.region) continue;
       loadDelta.subVectors(entry.pivot.position, camera.position);
-      const dist = loadDelta.lengthSq();
-      const len = Math.sqrt(dist) || 1;
-      const ahead = loadDelta.dot(loadForward) / len;
-      const score = dist * (ahead > -0.15 ? 1 : 8);
-      if (score < best) best = score;
+      const distance = loadDelta.length();
+      const bounds = metaCache.get(entry.gyaml)?.bounds;
+      const coarse = scenePreview?.bounds.get(entry.gyaml);
+      if (bounds?.min && bounds.max) {
+        const [minX, minY, minZ] = bounds.min;
+        const [maxX, maxY, maxZ] = bounds.max;
+        modelBounds.center.set((minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5);
+        modelBounds.radius = Math.max(2, Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) * 0.5);
+        entry.pivot.updateWorldMatrix(true, false);
+        modelBounds.applyMatrix4(entry.pivot.matrixWorld);
+      } else if (coarse && coarse.radius > 0) {
+        entry.pivot.updateWorldMatrix(true, false);
+        modelBounds.copy(coarse).applyMatrix4(entry.pivot.matrixWorld);
+      } else {
+        modelBounds.center.copy(entry.pivot.position);
+        modelBounds.radius = 4;
+      }
+      const gap = Math.max(0, modelBounds.center.distanceTo(camera.position) - modelBounds.radius);
+      const tier = modelLoadTier({
+        selected: entry.gyaml === selectedModel,
+        inFrustum: modelFrustum.intersectsSphere(modelBounds),
+        hasPreview: Boolean(scenePreview?.placements.has(entry.key)),
+        radius: modelBounds.radius,
+        gap,
+      });
+      const priorityDistance = tier <= 2 || tier === 4 ? gap : distance;
+      if (tier < best.tier || (tier === best.tier && priorityDistance < best.distance)) {
+        priority.set(entry.gyaml, { tier, distance: priorityDistance });
+      }
+      if (updateForeground && isForegroundModel(tier)) foregroundModelNames.add(entry.gyaml);
     }
-    return best;
+    if (priority.has(selectedModel)) {
+      priority.set(selectedModel, { tier: 0, distance: 0 });
+      if (updateForeground) foregroundModelNames.add(selectedModel);
+    }
+    const needsConversion = new Set(cachedFirst
+      ? names.filter((name) => metaCache.get(name)?.status !== "mesh")
+      : []);
+    names.sort((a, b) => {
+      const left = priority.get(a);
+      const right = priority.get(b);
+      return left.tier - right.tier
+        || Number(needsConversion.has(a)) - Number(needsConversion.has(b))
+        || left.distance - right.distance;
+    });
+  }
+
+  function needsModelGeometry(gyaml) {
+    for (const entry of entries.values()) {
+      if (entry.gyaml === gyaml && !entry.region) return true;
+    }
+    return false;
   }
 
   function retainLoad() {
@@ -699,16 +1076,15 @@ let convertSlots = 8;
   }
 
   function prioritizeLoad() {
-    if (!loadQueue || loadQueue.length < 2) return;
-    camera.getWorldDirection(loadForward);
-    loadQueue.sort((a, b) => gyamlScore(a) - gyamlScore(b));
+    if (loadQueue) sortModelNames(loadQueue, true, true, modelLoads?.backgroundName);
+    modelLoads?.pump();
   }
 
-  function fetchModelOnce(gyaml) {
+  function fetchModelOnce(gyaml, priority) {
     const existing = modelRequests.get(gyaml);
     if (existing) return existing;
     const pending = (
-      hooks.fetchModel ? hooks.fetchModel(gyaml) : Promise.reject(new Error("Model loading is not connected."))
+      hooks.fetchModel ? hooks.fetchModel(gyaml, { priority }) : Promise.reject(new Error("Model loading is not connected."))
     ).finally(() => {
       if (modelRequests.get(gyaml) === pending) modelRequests.delete(gyaml);
     });
@@ -716,14 +1092,22 @@ let convertSlots = 8;
     return pending;
   }
 
-  function wantsGlb(meta) {
-    return Boolean(meta && (meta.status === "mesh" || meta.status === "queued") && meta.url);
-  }
-
-  function loadModels(token, actors) {
-    const names = [...new Set(actors.map((actor) => actor.gyaml).filter(Boolean))];
-    if (hooks.onWarm) hooks.onWarm(names.slice().sort((a, b) => gyamlScore(a) - gyamlScore(b)));
+  function loadModels(token, actors, previewReady) {
+    let names = new Set(actors.map((actor) => actor.gyaml).filter(Boolean));
+    const queue = [...names];
+    let backgroundTimer = 0;
+    let backgroundName = null;
+    const resolved = new Set();
+    const boxes = new Set();
+    const active = new Set();
+    let started = false;
+    let previewPending = Boolean(previewReady);
+    let demand = previewPending;
+    let idle = false;
+    loadQueue = queue;
     statQueued = 0;
+    statDeferred = 0;
+    statBackgroundLoading = 0;
     statLoading = 0;
     statLoaded = 0;
     statConvert = 0;
@@ -731,31 +1115,39 @@ let convertSlots = 8;
     statDownload = 0;
     statUpload = 0;
     timedModels.clear();
-    let done = 0;
-    let boxes = 0;
-    const progressLabel = (finished) => {
-      if (!names.length) return "No actors";
-      return finished ? `Models ${done} of ${names.length}` : `Models ${done} of ${names.length} · nearest first, view stays usable`;
-    };
-    const publish = (finished) => {
-      statQueued = loadQueue ? loadQueue.length : 0;
+    const eligible = (name) => Boolean(name) && (!demand || foregroundModelNames.has(name));
+    const backgroundInFlight = () => Number(backgroundName !== null && !eligible(backgroundName));
+    const foregroundInFlight = () => active.size - backgroundInFlight();
+    const publish = (foregroundSettled) => {
+      const queued = demand ? queue.filter(eligible).length : queue.length;
+      const loading = foregroundInFlight();
+      const deferred = queue.length - queued;
+      const backgroundLoading = backgroundInFlight();
+      if (!foregroundSettled && queued === statQueued && loading === statLoading
+          && deferred === statDeferred && backgroundLoading === statBackgroundLoading && resolved.size === statLoaded) return;
+      statQueued = queued;
+      statDeferred = deferred;
+      statLoading = loading;
+      statBackgroundLoading = backgroundLoading;
+      statLoaded = resolved.size;
       report({
-        done,
-        total: names.length,
-        boxes,
-        finished,
-        label: progressLabel(finished),
-      });
+        done: resolved.size,
+        total: names.size,
+        boxes: boxes.size,
+        deferred: statDeferred + statBackgroundLoading,
+        finished: idle,
+        label: names.size ? `Models ${resolved.size} of ${names.size}` : "No actors",
+      }, foregroundSettled);
       requestRender();
     };
     const failEntry = (entry, meta, message) => {
       entry.modelMeta = { ...(meta || entry.modelMeta || {}), status: "box", reason: message };
       paintLabel(entry);
-      entry.mesh.visible = true;
+      syncGhost(entry);
       fitBounds(entry, entry.modelMeta.bounds);
       if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
     };
-    async function deliver(gyaml, meta, template) {
+    function deliver(gyaml, meta, template) {
       for (const entry of entries.values()) {
         if (entry.gyaml !== gyaml) continue;
         entry.modelMeta = { ...meta, status: "mesh" };
@@ -770,119 +1162,156 @@ let convertSlots = 8;
         if (template) attachModel(entry, template, meta.url);
         else fitBounds(entry, meta.bounds);
       }
+      if (gyaml === FISHING_POND_WATER || fishingPondFish(gyaml)) refreshPondFish();
     }
-    async function glbWorker() {
-      while (loadQueue && loadQueue.length) {
-        if (token !== generation) return;
-        prioritizeLoad();
-        const gyaml = loadQueue.shift();
-        statQueued = loadQueue.length;
-        let meta = metaCache.get(gyaml);
-        statLoading += 1;
-        requestRender();
-        try {
-          if (!meta || meta.status === "queued") {
-            try {
-              meta = await fetchModelOnce(gyaml);
-            } catch (error) {
-              meta = { status: "box", reason: error.message || "The model request failed.", source: "" };
-            }
-            metaCache.set(gyaml, meta);
-          }
+    async function loadOne(gyaml, priority) {
+      let meta = metaCache.get(gyaml);
+      try {
+        if (!meta || meta.status === "queued") {
+          meta = await fetchModelOnce(gyaml, priority);
           if (token !== generation) return;
-          if (meta.status !== "mesh" || !meta.url) {
-            boxes += 1;
-            for (const entry of entries.values()) {
-              if (entry.gyaml !== gyaml) continue;
-              entry.modelMeta = meta;
-              paintLabel(entry);
-              fitBounds(entry, meta.bounds);
-            }
-          } else {
-            try {
-              const template = await ensureTemplate(meta.url, meta);
-              if (token !== generation) return;
-              await deliver(gyaml, meta, template);
-            } catch (error) {
-              const message = error.message || "The glTF did not load.";
-              if (!isMarker(gyaml)) console.error(`${gyaml}: ${message}`);
-              boxes += 1;
-              for (const entry of entries.values()) {
-                if (entry.gyaml === gyaml) failEntry(entry, meta, message);
-              }
-            }
-          }
-        } finally {
-          if (token !== generation) return;
-          statLoading = Math.max(0, statLoading - 1);
-          statLoaded += 1;
-          done += 1;
-          publish(done >= names.length && (!loadQueue || !loadQueue.length) && statLoading === 0);
+          metaCache.set(gyaml, meta);
         }
-      }
-    }
-    retainLoad();
-    const run = async () => {
-      const missing = names.filter((name) => !metaCache.has(name));
-      if (missing.length && hooks.fetchModels) {
-        try {
-          const batch = await hooks.fetchModels(missing);
-          if (token !== generation) return;
-          for (const name of missing) {
-            metaCache.set(
-              name,
-              (batch && batch[name]) || { status: "box", reason: "The model list did not include this actor.", source: "" }
-            );
-          }
-        } catch (error) {
-          console.error(error);
-        }
-      }
-      if (token !== generation) return;
-      const queue = [];
-      for (const name of names) {
-        const meta = metaCache.get(name);
-        if (!meta) {
-          queue.push(name);
-          continue;
-        }
-        if (!wantsGlb(meta)) {
-          boxes += meta.status === "box" ? 1 : 0;
-          statLoaded += 1;
-          done += 1;
+        if (meta.status !== "mesh" || !meta.url) {
+          if (meta.status === "box") boxes.add(gyaml);
           for (const entry of entries.values()) {
-            if (entry.gyaml !== name) continue;
+            if (entry.gyaml !== gyaml) continue;
             entry.modelMeta = meta;
+            paintLabel(entry);
             fitBounds(entry, meta.bounds);
           }
-          continue;
+          return;
         }
-        if (templateCache.has(meta.url)) {
-          try {
-            noteServerTiming(meta);
-            const template = await templateCache.get(meta.url);
-            if (token !== generation) return;
-            await deliver(name, meta, template);
-            statLoaded += 1;
-            done += 1;
-          } catch (error) {
-            queue.push(name);
-          }
-          continue;
+        const template = needsModelGeometry(gyaml) ? await ensureTemplate(meta.url, meta, priority) : null;
+        if (token === generation) deliver(gyaml, meta, template);
+      } catch (error) {
+        if (token !== generation) return;
+        const message = error.message || "The model did not load.";
+        if (!isMarker(gyaml)) console.error(`${gyaml}: ${message}`);
+        boxes.add(gyaml);
+        for (const entry of entries.values()) {
+          if (entry.gyaml === gyaml) failEntry(entry, meta, message);
         }
-        queue.push(name);
       }
-      loadQueue = queue;
-      statQueued = queue.length;
-      publish(queue.length === 0);
-      const workers = Math.min(convertSlots, queue.length);
-      if (workers) await Promise.all(Array.from({ length: workers }, () => glbWorker()));
-      if (token !== generation) return;
-      // Models that were already on screen stay until this rebuild swaps them.
-      // A box-only scene still has to run it, or the previous batches never leave.
-      queueRebuild();
+    }
+
+    function pauseBackground() {
+      window.clearTimeout(backgroundTimer);
+      backgroundTimer = 0;
+    }
+
+    function canFillMap() {
+      return token === generation && demand && !previewPending && queue.length > 0
+        && !streamInteractive && !scenePreview?.terrainPending && !active.size
+        && !eligible(queue[0]) && !modelStage?.pending.size;
+    }
+
+    function background() {
+      if (!canFillMap()) {
+        pauseBackground();
+        return;
+      }
+      if (backgroundTimer) return;
+      // Let the new detail render and wait out short pauses in camera movement.
+      backgroundTimer = window.setTimeout(() => {
+        backgroundTimer = 0;
+        if (!canFillMap()) return;
+        backgroundName = queue.shift();
+        launch(backgroundName, "low");
+        publish(false);
+      }, 125);
+    }
+
+    function launch(name, priority) {
+      active.add(name);
+      retainLoad();
+      void loadOne(name, priority).finally(() => {
+        releaseLoad();
+        if (token !== generation) return;
+        active.delete(name);
+        if (name === backgroundName) backgroundName = null;
+        if (names.has(name)) resolved.add(name);
+        else boxes.delete(name);
+        pump();
+      });
+    }
+
+    function pump() {
+      if (!started || token !== generation) return;
+      const limit = Math.min(2, convertSlots);
+      while (foregroundInFlight() < limit && eligible(queue[0])) {
+        launch(queue.shift());
+      }
+      const settled = !foregroundInFlight() && !eligible(queue[0]);
+      const foregroundSettled = settled && !idle;
+      idle = settled;
+      publish(foregroundSettled);
+      background();
+      if (modelStage) {
+        const keepPreview = previewPending || (demand && (queue.length > 0 || active.size > 0));
+        if (settled && (!modelStage.done || modelStage.keepPreview !== keepPreview)) scheduleModelStage();
+        modelStage.done = settled;
+        modelStage.keepPreview = keepPreview;
+      } else if (foregroundSettled) {
+        queueRebuild();
+      }
+    }
+
+    modelLoads = {
+      pump,
+      background,
+      get backgroundName() { return backgroundName; },
+      dispose: pauseBackground,
+      update(nextActors, loading) {
+        names = new Set(nextActors.map((actor) => actor.gyaml).filter(Boolean));
+        for (let i = queue.length - 1; i >= 0; i -= 1) {
+          if (!names.has(queue[i])) queue.splice(i, 1);
+        }
+        for (const name of resolved) {
+          if (names.has(name)) continue;
+          resolved.delete(name);
+          boxes.delete(name);
+        }
+        for (const { gyaml } of loading) {
+          if (!gyaml || active.has(gyaml) || queue.includes(gyaml)) continue;
+          queue.push(gyaml);
+        }
+        idle = false;
+        prioritizeLoad();
+      },
     };
-    run().finally(releaseLoad);
+
+    if (previewPending) {
+      // Let the coarse scene and nearby detail race. Until the preview is
+      // ready, request only models useful to the current camera or selection.
+      started = true;
+      prioritizeLoad();
+      retainLoad();
+      void previewReady.then((ready) => {
+        if (token !== generation) return;
+        previewPending = false;
+        demand = Boolean(ready);
+        idle = false;
+        prioritizeLoad();
+      }).finally(releaseLoad);
+    } else {
+      const missing = queue.filter((name) => !metaCache.has(name));
+      if (missing.length && missing.length <= 128 && hooks.fetchModels) {
+        retainLoad();
+        void hooks.fetchModels(missing, false).then((batch) => {
+          if (token !== generation) return;
+          for (const [name, meta] of Object.entries(batch || {})) metaCache.set(name, meta);
+        }).catch(console.error).finally(() => {
+          releaseLoad();
+          if (token !== generation) return;
+          started = true;
+          prioritizeLoad();
+        });
+      } else {
+        started = true;
+        prioritizeLoad();
+      }
+    }
   }
 
   function noteServerTiming(meta) {
@@ -895,13 +1324,13 @@ let convertSlots = 8;
     statTexture += Number(timing.textureMs) || 0;
   }
 
-  function ensureTemplate(url, meta) {
-    noteServerTiming(meta);
+  function ensureTemplate(url, meta, priority) {
     let pending = templateCache.get(url);
     if (!pending) {
+      noteServerTiming(meta);
       pending = (async () => {
         const started = performance.now();
-        const response = await fetch(url);
+        const response = await fetch(url, { priority });
         if (!response.ok) throw new Error(`The model download failed (${response.status}).`);
         const buffer = await response.arrayBuffer();
         const downloaded = performance.now();
@@ -980,16 +1409,6 @@ let convertSlots = 8;
     await Promise.all(surface);
   }
 
-  function lodOf(object) {
-    let current = object;
-    while (current) {
-      const match = /^lod(\d+):(.*)$/.exec(current.name || "");
-      if (match) return { lod: Number(match[1]) || 0, family: match[2] || current.uuid };
-      current = current.parent;
-    }
-    return { lod: 0, family: object.uuid };
-  }
-
   function prepareMaterial(material, role) {
     if (!material || material.userData.bancPrepared) return material;
     const hasSurface = Boolean(material.roughnessMap || material.metalnessMap || material.aoMap);
@@ -1050,7 +1469,7 @@ let convertSlots = 8;
     const local = new THREE.Matrix4();
     template.traverse((child) => {
       if (!child.isMesh || !child.geometry) return;
-      const identity = lodOf(child);
+      const identity = modelLod(child);
       // The glTF node transform belongs to the mesh, not to one placed actor.
       // Bake it into a clone so a later change to the template cannot slide
       // every copy, and so the instance matrix stays the actor matrix alone.
@@ -1058,12 +1477,17 @@ let convertSlots = 8;
       const geometry = child.geometry.clone();
       if (!isIdentityMatrix(local)) geometry.applyMatrix4(local);
       geometry.computeBoundingSphere();
-      if (!geometry.boundsTree) geometry.computeBoundsTree();
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
       let material = prepareMaterial(source);
+      if (material.map && (material.userData.banc || material.name) === "water") {
+        ensureWaterUv(geometry, material.map.channel);
+      }
       if (material.userData && material.userData.blend && geometry.getAttribute("color")) {
+        const { mossMap, orm1Map, normal1Map } = material.userData;
         material = material.clone();
+        // Three serializes userData on clone. Keep the live textures for the blend shader.
+        Object.assign(material.userData, { mossMap, orm1Map, normal1Map });
         geometry.setAttribute("blendMask", geometry.getAttribute("color"));
         geometry.deleteAttribute("color");
         const blendUv = material.userData.blend.uv;
@@ -1098,15 +1522,37 @@ let convertSlots = 8;
     const existing = templateOrder.indexOf(url);
     if (existing >= 0) templateOrder.splice(existing, 1);
     templateOrder.push(url);
-    while (templateOrder.length > 48) {
-      const old = templateOrder.shift();
-      if ([...entries.values()].some((entry) => entry.templateUrl === old)) {
-        templateOrder.push(old);
-        break;
-      }
-      parsedTemplates.delete(old);
-      templateCache.delete(old);
+  }
+
+  function rememberSceneTemplates(banc) {
+    const distances = new Map();
+    for (const entry of entries.values()) {
+      const url = entry.templateUrl;
+      if (!url || !entry.pivot.visible) continue;
+      const distance = entry.key === selected ? -1 : entry.pivot.position.distanceToSquared(camera.position);
+      if (distance < (distances.get(url) ?? Infinity)) distances.set(url, distance);
     }
+    if (!distances.size) return;
+    const nearby = [...distances].sort((a, b) => a[1] - b[1]).slice(0, 64).map(([url]) => url);
+    recentSceneTemplates.delete(banc);
+    recentSceneTemplates.set(banc, nearby);
+    if (recentSceneTemplates.size > 2) recentSceneTemplates.delete(recentSceneTemplates.keys().next().value);
+  }
+
+  function pruneTemplates() {
+    const pinned = new Set([...recentSceneTemplates.values()].flat());
+    const spare = new Set(templateOrder.filter((url) => !pinned.has(url)).slice(-48));
+    const keep = [];
+    for (const url of templateOrder) {
+      if (pinned.has(url) || spare.has(url)) {
+        keep.push(url);
+      } else {
+        parsedTemplates.delete(url);
+        templateCache.delete(url);
+      }
+    }
+    templateOrder.length = 0;
+    for (const url of keep) templateOrder.push(url);
   }
 
   function clearBatches() {
@@ -1141,8 +1587,54 @@ let convertSlots = 8;
     entry.pivot.updateWorldMatrix(true, false);
     // Copy first. The live matrixWorld is reused by the next object update, and
     // the write below must be this actor's 16 floats only.
-    actorMatrix.copy(entry.pivot.matrixWorld);
+    displayedActorMatrix(entry, actorMatrix);
     applyActorMatrix(entry.slots, entry.key, actorMatrix);
+  }
+
+  function displayedActorMatrix(entry, target) {
+    target.copy(entry.pivot.matrixWorld);
+    target.elements[13] += entry.fishPreviewOffset || 0;
+    return target;
+  }
+
+  function refreshPondFish() {
+    const pond = [...entries.values()].find((entry) => entry.gyaml === FISHING_POND_WATER);
+    if (!pond && !pondFishShown) return;
+    pondFishShown = Boolean(pond);
+    const surfaces = [];
+    if (pond) {
+      pond.pivot.updateWorldMatrix(true, false);
+      for (const part of pond.parts || []) {
+        if (part.lod || !isPreviewWater(part.material, part.name, pond.gyaml)) continue;
+        surfaces.push({ geometry: part.geometry, matrix: pond.pivot.matrixWorld });
+      }
+      if (!surfaces.length) {
+        for (const { mesh, index } of scenePreview?.placements.get(pond.key) || []) {
+          if (!scenePreview.waterMeshes.has(mesh)) continue;
+          const matrix = new THREE.Matrix4();
+          mesh.getMatrixAt(index, matrix);
+          surfaces.push({ geometry: mesh.geometry, matrix });
+        }
+      }
+    }
+    for (const entry of entries.values()) {
+      if (!fishingPondFish(entry.gyaml)) continue;
+      const { x, y, z } = entry.pivot.position;
+      const hits = [];
+      pondRay.ray.origin.set(x, y + 20, z);
+      for (const { geometry, matrix } of surfaces) {
+        pondProbe.geometry = geometry;
+        pondProbe.matrixWorld.copy(matrix);
+        pondProbe.raycast(pondRay, hits);
+      }
+      const height = Math.max(-Infinity, ...hits.map(({ point }) => point.y));
+      const top = (entry.modelMeta?.bounds?.max?.[1] || 0) * Math.abs(entry.pivot.scale.y);
+      const offset = fishingPondPreviewOffset(y, height, top);
+      if (offset === (entry.fishPreviewOffset || 0)) continue;
+      entry.fishPreviewOffset = offset;
+      syncPreviewPlacement(entry);
+      syncInstanceMatrix(entry);
+    }
   }
 
   function projectedPixels(radius, distance) {
@@ -1252,13 +1744,13 @@ let convertSlots = 8;
       camera.updateProjectionMatrix();
     }
     cullMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    cullFrustum.setFromProjectionMatrix(cullMatrix);
+    cullFrustum.setFromProjectionMatrix(cullMatrix, camera.coordinateSystem);
     let instances = 0;
     let visible = 0;
     for (const entry of entries.values()) {
       if (!entry.slots || !entry.slots.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
-      const elements = entry.pivot.matrixWorld.elements;
+      const elements = displayedActorMatrix(entry, actorMatrix).elements;
       const probes = [];
       const closest = new Map();
       for (const slot of entry.slots) {
@@ -1321,14 +1813,14 @@ let convertSlots = 8;
     return loose;
   }
 
-  function rebuildBatches() {
+  function rebuildBatches(stagedEntries = null) {
     uvDirty = true;
-    const previous = batches.slice();
+    const previous = stagedEntries ? [] : batches.slice();
     const nextBatches = [];
-    for (const entry of entries.values()) entry.slots = [];
+    const actors = stagedEntries || [...entries.values()];
+    for (const entry of actors) entry.slots = [];
     const groups = new Map();
-    naiveDraws = 0;
-    for (const entry of entries.values()) {
+    for (const entry of actors) {
       syncGhost(entry);
       if (!entry.parts || !entry.parts.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
@@ -1422,7 +1914,7 @@ let convertSlots = 8;
         const geometryId = geomIds.get(record.part.geometry.uuid);
         if (geometryId === undefined) continue;
         const instanceId = mesh.addInstance(geometryId);
-        const placed = new THREE.Matrix4().copy(record.entry.pivot.matrixWorld);
+        const placed = displayedActorMatrix(record.entry, new THREE.Matrix4());
         mesh.setMatrixAt(instanceId, placed);
         mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
         ids[instanceId] = record.entry.key;
@@ -1447,29 +1939,123 @@ let convertSlots = 8;
       scene.add(mesh);
       nextBatches.push({ mesh, ids, water });
     }
-    const expectMeshes = [...entries.values()].some((entry) => entry.parts && entry.parts.length);
+    if (stagedEntries) {
+      for (const batch of nextBatches) batches.push(batch);
+      return actors.every((entry) => !entry.parts?.length || entry.slots.length);
+    }
+    const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
     if (!nextBatches.length && expectMeshes && previous.length) {
       for (const entry of entries.values()) entry.slots = [];
       console.error("Actor batches failed to build; the meshes already on screen stay up.");
-      return;
+      return false;
     }
     batches.length = 0;
     for (const batch of nextBatches) batches.push(batch);
     naiveDraws = looseParts();
-    for (const batch of previous) {
-      batch.mesh.removeFromParent();
-      batch.mesh.dispose();
-    }
+    disposeBatches(previous);
     syncBatchVisibility();
     guardMissingUv();
+    return true;
+  }
+
+  function disposeBatches(oldBatches) {
+    for (const { mesh } of oldBatches) {
+      mesh.removeFromParent();
+      mesh.dispose();
+    }
+  }
+
+  function cancelModelStage() {
+    if (!modelStage) return;
+    window.cancelAnimationFrame(modelStage.timer);
+    modelStage = null;
+  }
+
+  function scheduleModelStage() {
+    const stage = modelStage;
+    if (!stage || stage.timer) return;
+    stage.timer = window.requestAnimationFrame(() => {
+      stage.timer = 0;
+      const ready = [];
+      const names = [];
+      const deadline = performance.now() + (streamInteractive ? 2 : 4);
+      const order = [...stage.pending.keys()];
+      sortModelNames(order, false, false);
+      for (const name of order) {
+        const actors = [...stage.pending.get(name)].filter((entry) => entries.get(entry.key) === entry);
+        stage.pending.delete(name);
+        names.push(name);
+        for (const actor of actors) ready.push(actor);
+        stage.failed = !rebuildBatches(actors) || stage.failed;
+        if (names.length >= (streamInteractive ? 1 : 3) || performance.now() >= deadline) break;
+      }
+      if (ready.length) {
+        if (ready.some((entry) => entry.slots.length) && stage.previous.length) {
+          const previous = new Set(stage.previous);
+          const kept = batches.filter((batch) => !previous.has(batch));
+          batches.length = 0;
+          for (const batch of kept) batches.push(batch);
+          disposeBatches(stage.previous);
+          stage.previous = [];
+        }
+        for (const name of names) {
+          if (ready.some((entry) => entry.gyaml === name && !entry.slots.length)) continue;
+          const meshes = scenePreview?.models.get(name) || [];
+          for (const mesh of meshes) {
+            mesh.removeFromParent();
+            mesh.dispose();
+            scenePreview.waterMeshes.delete(mesh);
+            for (const key of mesh.userData.previewKeys) scenePreview.placements.delete(key);
+          }
+          scenePreview?.models.delete(name);
+        }
+        syncBatchVisibility();
+        if (sceneStreamStats?.firstDetail === null && ready.some((entry) =>
+          entry.pivot.position.distanceToSquared(camera.position) < 80 * 80 && entry.slots.some((slot) => slot.shown))) {
+          sceneStreamStats.firstDetail = performance.now() - sceneStreamStats.start;
+        }
+        nextDetailScan = 0;
+        requestRender();
+      }
+      if (stage.pending.size) {
+        scheduleModelStage();
+      } else if (stage.done) {
+        modelLoads?.background();
+        if (stage.keepPreview) {
+          if (stage.previous.length) {
+            const previous = new Set(stage.previous);
+            const kept = batches.filter((batch) => !previous.has(batch));
+            batches.length = 0;
+            for (const batch of kept) batches.push(batch);
+            disposeBatches(stage.previous);
+            stage.previous = [];
+          }
+        } else {
+          modelStage = null;
+          if (stage.failed || stage.previous.length) {
+            queueRebuild();
+            return;
+          }
+          if (!scenePreview?.models.size) clearScenePreview();
+        }
+        naiveDraws = looseParts();
+        requestRender();
+        if (!stage.notified) {
+          stage.notified = true;
+          hooks.onModelsReady?.({ batchesBuilt: true });
+        }
+      }
+    });
   }
 
   function queueRebuild() {
     if (rebuildTimer) clearTimeout(rebuildTimer);
     rebuildTimer = window.setTimeout(() => {
       rebuildTimer = 0;
-      rebuildBatches();
+      clearScenePreview();
+      const ready = rebuildBatches();
       requestRender();
+      if (hooks.onModelsReady) hooks.onModelsReady({ batchesBuilt: ready });
     }, 100);
   }
 
@@ -1484,7 +2070,19 @@ let convertSlots = 8;
     entry.farNames = parsed.farNames;
     entry.templateUrl = url;
     entry.volume = false;
-    queueRebuild();
+    stageModel(entry);
+  }
+
+  function stageModel(entry) {
+    if (modelStage && entry.parts.length) {
+      let actors = modelStage.pending.get(entry.gyaml);
+      if (!actors) {
+        actors = new Set();
+        modelStage.pending.set(entry.gyaml, actors);
+      }
+      actors.add(entry);
+      scheduleModelStage();
+    }
   }
 
   const scratchMatrix = new THREE.Matrix4();
@@ -1493,6 +2091,9 @@ let convertSlots = 8;
   const scratchMesh = new THREE.Mesh();
   const scratchHits = [];
   scratchMesh.matrixAutoUpdate = false;
+  const pondRay = new THREE.Raycaster(new THREE.Vector3(), new THREE.Vector3(0, -1, 0));
+  const pondProbe = new THREE.Mesh(undefined, new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }));
+  let pondFishShown = false;
 
   function raycastBatch(raycaster, intersects) {
     const pick = this.userData.pick;
@@ -1504,7 +2105,12 @@ let convertSlots = 8;
       if (!source) continue;
       scratchSphere.copy(source).applyMatrix4(scratchMatrix);
       if (!raycaster.ray.intersectsSphere(scratchSphere)) continue;
-      scratchMesh.geometry = pick.geometries[i];
+      const geometry = pick.geometries[i];
+      // Only meshes hit by a picking ray need an acceleration structure.
+      // Keep index order intact because the batch already owns a copy.
+      const count = geometry.index?.count ?? geometry.attributes.position.count;
+      if (!geometry.boundsTree && count >= 1024) geometry.computeBoundsTree({ indirect: true });
+      scratchMesh.geometry = geometry;
       scratchMesh.material = this.material;
       scratchMesh.matrix.copy(scratchMatrix);
       scratchMesh.matrixWorld.copy(scratchMatrix);
@@ -1577,7 +2183,6 @@ let convertSlots = 8;
   `;
 
   const TERRAIN_MAP = `
-    if (terrainLayerMissing < 0.5 && terrainSub < 0.5 && vTerrainMark.y > 0.5) discard;
     vec4 sampledDiffuseColor = mix(
       terrainTri(vTerrainLayer.x),
       terrainTri(vTerrainLayer.y),
@@ -1594,7 +2199,6 @@ let convertSlots = 8;
           0.55 + 0.45 * cos(hue + 2.094395),
           0.55 + 0.45 * cos(hue + 4.188790)
         ), 0.0, 1.0);
-        if (vTerrainMark.y > 0.5) ink = mix(ink, vec3(1.0), 0.45);
         sampledDiffuseColor = vec4(ink, 1.0);
       }
     }
@@ -1770,9 +2374,6 @@ vec2 blendMossUv;`;
     if (!material.userData.terrainDebugUniform) {
       material.userData.terrainDebugUniform = { value: showTerrainDebug ? 1 : 0 };
     }
-    if (!material.userData.terrainSubUniform) {
-      material.userData.terrainSubUniform = { value: showSub ? 1 : 0 };
-    }
     if (!material.userData.terrainLayerUniform) {
       material.userData.terrainLayerUniform = { value: 0 };
     }
@@ -1789,7 +2390,6 @@ vec2 blendMossUv;`;
       shader.uniforms.terrainCols = material.userData.terrainColsUniform;
       shader.uniforms.terrainRepeat = material.userData.terrainRepeatUniform;
       shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
-      shader.uniforms.terrainSub = material.userData.terrainSubUniform;
       shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
       // A second compile (gizmo interaction can rebuild programs) must not
       // inject the helpers twice, and must not leave the stock map chunk in
@@ -1829,7 +2429,6 @@ varying vec2 vTerrainMark;
 uniform float terrainCols;
 uniform float terrainRepeat;
 uniform float terrainDebug;
-uniform float terrainSub;
 uniform float terrainLayerMissing;`
         )
         .replace("void main() {", `${TERRAIN_FUNCS}\nvoid main() {`)
@@ -1860,9 +2459,38 @@ uniform float terrainLayerMissing;`
       shader.uniforms.terrainCols = material.userData.terrainColsUniform;
       shader.uniforms.terrainRepeat = material.userData.terrainRepeatUniform;
       shader.uniforms.terrainDebug = material.userData.terrainDebugUniform;
-      shader.uniforms.terrainSub = material.userData.terrainSubUniform;
       shader.uniforms.terrainLayerMissing = material.userData.terrainLayerUniform;
     };
+  }
+
+  function addTerrainPart(root, geometry, material) {
+    const marks = geometry.getAttribute("uv3");
+    const indices = geometry.index?.array;
+    if (material.userData.terrainShader && marks && indices) {
+      const ground = [], sub = [];
+      for (let i = 0; i < indices.length; i += 3) {
+        const a = indices[i], b = indices[i + 1], c = indices[i + 2];
+        const isSub = marks.getY(a) > 0.5 || marks.getY(b) > 0.5 || marks.getY(c) > 0.5;
+        (isSub ? sub : ground).push(a, b, c);
+      }
+      if (sub.length) {
+        const outline = new THREE.BufferGeometry();
+        outline.setAttribute("position", geometry.getAttribute("position"));
+        outline.setIndex(new THREE.BufferAttribute(indices.constructor.from(sub), 1));
+        const mesh = new THREE.Mesh(outline, subTerrainMaterial);
+        mesh.userData.subTerrain = true;
+        mesh.visible = showSub;
+        root.add(mesh);
+        if (!ground.length) {
+          geometry.dispose();
+          return;
+        }
+        geometry.setIndex(new THREE.BufferAttribute(indices.constructor.from(ground), 1));
+      }
+    }
+    const mesh = new THREE.Mesh(geometry, material);
+    if (material.userData.terrainShader) bindTerrainMesh(mesh);
+    root.add(mesh);
   }
 
   function mergeStatic(template) {
@@ -1896,23 +2524,11 @@ uniform float terrainLayerMissing;`
           geometry = mergeGeometries(group.geometries, false);
           group.geometries.forEach((item) => item.dispose());
         } catch {
-          for (const item of group.geometries) {
-            const mesh = new THREE.Mesh(item, group.material);
-            mesh.raycast = () => {};
-            mesh.frustumCulled = false;
-            if (group.material.userData && group.material.userData.terrainShader) bindTerrainMesh(mesh);
-            root.add(mesh);
-          }
+          for (const item of group.geometries) addTerrainPart(root, item, group.material);
           continue;
         }
       }
-      if (!geometry) continue;
-      if (!geometry.boundsTree) geometry.computeBoundsTree();
-      const mesh = new THREE.Mesh(geometry, group.material);
-      mesh.raycast = () => {};
-      mesh.frustumCulled = false;
-      if (group.material.userData && group.material.userData.terrainShader) bindTerrainMesh(mesh);
-      root.add(mesh);
+      if (geometry) addTerrainPart(root, geometry, group.material);
     }
     return root;
   }
@@ -1921,15 +2537,30 @@ uniform float terrainLayerMissing;`
     return token === terrainToken;
   }
 
-  async function warmTerrain(root) {
-    // Compile against the lit scene before the mesh is visible, then upload the
-    // atlas. Swapping earlier draws the field with an empty program (solid black)
-    // until the shader and the texture finish.
-    if (typeof renderer.compileAsync === "function") {
-      await renderer.compileAsync(root, camera, scene);
-    } else if (typeof renderer.compile === "function") {
-      renderer.compile(root, camera, scene);
+  async function indexTerrain(root, token) {
+    const geometries = root.children.filter((child) => !child.userData.subTerrain).map((child) => child.geometry);
+    if (!geometries.length || typeof Worker === "undefined") return;
+    const worker = new Worker(new URL("./terrain-index-worker.js", import.meta.url), { type: "module" });
+    try {
+      for (const geometry of geometries) {
+        if (!terrainCurrent(token)) break;
+        const position = geometry.getAttribute("position");
+        const index = geometry.index;
+        if (position.isInterleavedBufferAttribute || index?.isInterleavedBufferAttribute) continue;
+        const result = await new Promise((resolve, reject) => {
+          worker.onmessage = ({ data }) => data.error ? reject(new Error(data.error)) : resolve(data);
+          worker.onerror = (event) => reject(new Error(event.message));
+          worker.postMessage({ position: position.array, index: index?.array });
+        });
+        if (terrainCurrent(token)) geometry.boundsTree = MeshBVH.deserialize(result, geometry, { setIndex: false });
+      }
+    } finally {
+      worker.terminate();
     }
+  }
+
+  async function warmTerrain(root) {
+    await warmWebGLPrograms(renderer, root, camera, scene);
     const maps = new Set();
     root.traverse((child) => {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
@@ -1955,10 +2586,29 @@ uniform float terrainLayerMissing;`
     uvDirty = true;
     const previous = terrainRoot;
     terrainRoot = nextRoot;
-    if (nextRoot) scene.add(nextRoot);
+    if (previous && previous !== nextRoot) {
+      previous.removeFromParent();
+      if (![...recentTerrain.values()].includes(previous)) disposeTerrainObject(previous);
+    }
+    if (nextRoot) {
+      scene.add(nextRoot);
+      applyTerrainUniforms();
+    }
     clearGround();
-    disposeTerrainObject(previous);
+    applyGround();
     requestRender();
+  }
+
+  function rememberTerrain(url, root) {
+    recentTerrain.delete(url);
+    recentTerrain.set(url, root);
+    if (recentTerrain.size > 2) {
+      const oldest = recentTerrain.keys().next().value;
+      const evicted = recentTerrain.get(oldest);
+      recentTerrain.delete(oldest);
+      templateCache.delete(oldest);
+      if (evicted !== terrainRoot) disposeTerrainObject(evicted);
+    }
   }
 
   async function loadTerrain(token, banc) {
@@ -1968,6 +2618,14 @@ uniform float terrainLayerMissing;`
       await loadTerrainBody(token, banc);
     } finally {
       releaseLoad();
+      if (terrainCurrent(token)) {
+        if (scenePreview) {
+          scenePreview.terrainPending = false;
+          scenePreview.terrain?.removeFromParent();
+        }
+        if (hooks.onTerrainReady) hooks.onTerrainReady();
+        modelLoads?.background();
+      }
     }
   }
 
@@ -1982,6 +2640,28 @@ uniform float terrainLayerMissing;`
     if (hooks.onTerrain) hooks.onTerrain(meta);
     if (meta.status !== "mesh" || !meta.url) {
       showTerrain(null);
+      return;
+    }
+    await installTerrainModel(token, meta);
+    if (terrainCurrent(token) && meta.fitPending) void refineTerrain(token, banc, meta.url);
+  }
+
+  async function refineTerrain(token, banc, previousUrl) {
+    try {
+      const meta = await hooks.fetchTerrain(banc, true);
+      if (terrainCurrent(token) && meta.status === "mesh" && meta.url && meta.url !== previousUrl) {
+        await installTerrainModel(token, meta);
+      }
+    } catch (error) {
+      if (terrainCurrent(token)) console.warn("Could not refine the scene terrain", error);
+    }
+  }
+
+  async function installTerrainModel(token, meta) {
+    const cachedTerrain = recentTerrain.get(meta.url);
+    if (cachedTerrain) {
+      rememberTerrain(meta.url, cachedTerrain);
+      showTerrain(cachedTerrain);
       return;
     }
     try {
@@ -2020,7 +2700,8 @@ uniform float terrainLayerMissing;`
         child.receiveShadow = false;
         child.frustumCulled = false;
         child.renderOrder = -1;
-        if (child.isMesh) bindTerrainMesh(child);
+        if (child.userData.subTerrain) return;
+        if (child.isMesh && child.material?.userData.terrainShader) bindTerrainMesh(child);
         const layered = Boolean(child.geometry && child.geometry.getAttribute("uv3"));
         if (child.isMesh && child.geometry && !layered) missingLayer = true;
         const materials = Array.isArray(child.material) ? child.material : [child.material];
@@ -2041,7 +2722,9 @@ uniform float terrainLayerMissing;`
         if (hooks.onTerrainWarn) hooks.onTerrainWarn(message);
       }
       try {
-        await warmTerrain(nextRoot);
+        await Promise.allSettled([indexTerrain(nextRoot, token), warmTerrain(nextRoot)]).then((results) => {
+          for (const result of results) if (result.status === "rejected") console.warn(result.reason);
+        });
       } catch (error) {
         console.warn(error);
       }
@@ -2049,6 +2732,7 @@ uniform float terrainLayerMissing;`
         disposeTerrainObject(nextRoot);
         return;
       }
+      rememberTerrain(meta.url, nextRoot);
       showTerrain(nextRoot);
     } catch (error) {
       if (terrainCurrent(token) && hooks.onTerrain) {
@@ -2068,6 +2752,8 @@ uniform float terrainLayerMissing;`
 
   function select(id) {
     selected = id;
+    nextDetailScan = 0;
+    prioritizeLoad();
     for (const entry of entries.values()) paint(entry);
     syncBatchVisibility();
     attach();
@@ -2139,13 +2825,12 @@ uniform float terrainLayerMissing;`
   function applyTerrainUniforms() {
     if (!terrainRoot) return;
     const debug = showTerrainDebug ? 1 : 0;
-    const sub = showSub ? 1 : 0;
     terrainRoot.traverse((child) => {
+      if (child.userData.subTerrain) child.visible = showSub;
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const material of materials) {
         if (!material || !material.userData) continue;
         if (material.userData.terrainDebugUniform) material.userData.terrainDebugUniform.value = debug;
-        if (material.userData.terrainSubUniform) material.userData.terrainSubUniform.value = sub;
       }
     });
   }
@@ -2165,6 +2850,7 @@ uniform float terrainLayerMissing;`
     for (const entry of entries.values()) {
       const gate = {
         status: entry.status,
+        present: entry.present,
         category: entry.category,
         volume: entry.volume,
         showHidden,
@@ -2175,6 +2861,7 @@ uniform float terrainLayerMissing;`
       };
       entry.locked = actorLocked(gate);
       entry.pivot.visible = actorShown(gate);
+      syncPreviewPlacement(entry);
       syncGhost(entry);
     }
     syncBatchVisibility();
@@ -2184,6 +2871,7 @@ uniform float terrainLayerMissing;`
     applyBlendUniforms();
     attach();
     syncLabels();
+    prioritizeLoad();
     requestRender();
   }
 
@@ -2191,6 +2879,104 @@ uniform float terrainLayerMissing;`
     const entry = entries.get(id);
     if (!entry) return null;
     return entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
+  }
+
+  function auditPlacements() {
+    const actual = new THREE.Matrix4();
+    const expected = new THREE.Matrix4();
+    const differed = () => actual.elements.some((value, i) => Math.abs(value - expected.elements[i]) > 0.01);
+    const placements = [];
+    for (const entry of entries.values()) {
+      if (!entry.id || entry.region || isMarker(entry.gyaml)) continue;
+      const preview = scenePreview?.placements.get(entry.key) || [];
+      const lods = [...new Set(entry.slots.filter((slot) => slot.shown).map((slot) => slot.lod))].sort((a, b) => a - b);
+      let mismatched = false;
+      if (entry.pivot.visible) {
+        entry.pivot.updateWorldMatrix(true, false);
+        displayedActorMatrix(entry, expected);
+        for (const slot of entry.slots) {
+          if (!slot.shown) continue;
+          slot.mesh.getMatrixAt(slot.index, actual);
+          mismatched ||= differed();
+        }
+        for (const slot of preview) {
+          if (slot.mesh.userData.previewIds[slot.index] !== entry.key) continue;
+          slot.mesh.getMatrixAt(slot.index, actual);
+          displayedActorMatrix(entry, expected).multiply(slot.local);
+          mismatched ||= differed();
+        }
+      }
+      const status = !entry.pivot.visible ? "hidden" : entry.slots.length ? "detail"
+        : preview.length ? "preview" : entry.modelMeta?.status === "box" ? "box" : "deferred";
+      placements.push({ id: entry.id, gyaml: entry.gyaml, source: entry.modelMeta?.source || "",
+        position: entry.pivot.position.toArray(), rotation: fileRotate(entry.pivot), scale: pivotScale(entry.pivot),
+        status, visibleLods: lods, mismatched,
+        ...(entry.fishPreviewOffset ? { previewY: entry.pivot.position.y + entry.fishPreviewOffset } : {}) });
+    }
+    return placements;
+  }
+
+  function auditView() {
+    camera.updateMatrixWorld();
+    const surface = (name, geometry, material, visible, lod) => ({
+      name,
+      lod,
+      indices: geometry.index?.count ?? null,
+      attributes: Object.fromEntries(Object.entries(geometry.attributes).map(([key, attribute]) =>
+        [key, { components: attribute.itemSize, count: attribute.count, normalized: attribute.normalized }])),
+      material: {
+        name: material.name || material.type, textured: Boolean(material.map),
+        alphaTest: material.alphaTest, transparent: material.transparent, side: material.side,
+      },
+      visible,
+    });
+    const entry = entries.get(selected);
+    const detail = (entry?.slots || []).map((slot) => surface(slot.family,
+      slot.mesh.userData.pick.geometries[slot.index], slot.mesh.material, slot.shown && slot.mesh.visible, slot.lod));
+    const preview = (scenePreview?.placements.get(selected) || []).map(({ mesh, index }) =>
+      surface(mesh.userData.previewSurface, mesh.geometry, mesh.material,
+        mesh.userData.previewIds[index] === selected && mesh.visible && Boolean(scenePreview.root.parent),
+        Number(/^lod(\d+):/.exec(mesh.userData.previewSurface)?.[1] ?? 0)));
+    return {
+      camera: {
+        position: camera.position.toArray(), target: orbit.target.toArray(),
+        viewMatrix: camera.matrixWorldInverse.toArray(), projectionMatrix: camera.projectionMatrix.toArray(),
+        viewport: [renderer.domElement.width, renderer.domElement.height],
+        fov: camera.fov, aspect: camera.aspect, near: camera.near, far: camera.far,
+      },
+      selected: entry ? { id: entry.id, gyaml: entry.gyaml, detail, preview } : null,
+      centerSurface: auditCenterSurface(),
+      streaming: { queued: statQueued, loading: statLoading, deferred: statDeferred, backgroundLoading: statBackgroundLoading },
+    };
+  }
+
+  function auditCenterSurface() {
+    const roots = batches.map(({ mesh }) => mesh).filter((mesh) => mesh.visible && mesh.parent);
+    if (scenePreview?.root.parent && scenePreview.root.visible) {
+      for (const meshes of scenePreview.models.values()) roots.push(...meshes.filter((mesh) => mesh.visible));
+    }
+    const centerRay = new THREE.Raycaster(undefined, undefined, camera.near, camera.far);
+    centerRay.firstHitOnly = true;
+    centerRay.setFromCamera(new THREE.Vector2(), camera);
+    for (const hit of centerRay.intersectObjects(roots, false)) {
+      const entry = entries.get(idOfHit(hit));
+      if (!entry?.pivot.visible) continue;
+      const preview = hit.object.userData.previewSurface;
+      const slot = entry.slots.find(({ mesh, index }) => mesh === hit.object && index === hit.batchId);
+      return {
+        id: entry.id,
+        gyaml: entry.gyaml,
+        source: entry.modelMeta?.source || "",
+        modelState: entry.modelMeta?.status || "pending",
+        reason: entry.modelMeta?.reason || "",
+        stage: preview !== undefined ? "preview" : "detail",
+        surface: preview ?? slot?.family ?? hit.object.name,
+        lod: preview !== undefined ? Number(/^lod(\d+):/.exec(preview)?.[1] ?? 0) : slot?.lod,
+        distance: hit.distance,
+        point: hit.point.toArray(),
+      };
+    }
+    return null;
   }
 
   function frame(id) {
@@ -2209,16 +2995,14 @@ uniform float terrainLayerMissing;`
     snapRay.ray.direction.set(0, -1, 0);
     if (terrainRoot) {
       terrainRoot.traverse((child) => {
-        if (!child.isMesh || !child.visible || !child.geometry) return;
+        if (!child.isMesh || !child.visible || !child.geometry || child.userData.subTerrain) return;
         const found = [];
         try {
           acceleratedRaycast.call(child, snapRay, found);
         } catch {
           return;
         }
-        for (const hit of found) {
-          if (hit.point) hits.push({ y: hit.point.y });
-        }
+        for (const hit of found) if (hit.point) hits.push({ y: hit.point.y });
       });
     }
     for (const entry of entries.values()) {
@@ -2263,13 +3047,16 @@ uniform float terrainLayerMissing;`
   const snapRay = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
 
-  function aimed(event) {
+  function aimed(event, includePreview = false) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
     const roots = [];
     for (const batch of batches) roots.push(batch.mesh);
+    if (includePreview && scenePreview?.root.parent) {
+      for (const meshes of scenePreview.models.values()) roots.push(...meshes);
+    }
     for (const entry of entries.values()) {
       if (canPick({ shown: entry.pivot.visible, locked: entry.locked }) && (!entry.parts || !entry.parts.length)) roots.push(entry.pivot);
     }
@@ -2317,6 +3104,7 @@ uniform float terrainLayerMissing;`
     if (index !== undefined) {
       const batch = batches.find((item) => item.mesh === hit.object);
       if (batch) return batch.ids[index] || null;
+      return hit.object.userData.previewIds?.[index] || null;
     }
     return idOf(hit.object);
   }
@@ -2351,7 +3139,7 @@ uniform float terrainLayerMissing;`
   }
 
   function pick(event) {
-    const groups = aimed(event);
+    const groups = aimed(event, true);
     const repeat = Boolean(
       lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
     );
@@ -2379,11 +3167,7 @@ uniform float terrainLayerMissing;`
     if (event.button === 2) {
       looking = true;
       lastPointer = { x: event.clientX, y: event.clientY };
-      try {
-        renderer.domElement.setPointerCapture(event.pointerId);
-      } catch {
-        /* capture is only the fallback when pointer lock is refused */
-      }
+      renderer.domElement.setPointerCapture(event.pointerId);
       requestLookLock();
       event.preventDefault();
       return;
@@ -2463,10 +3247,18 @@ uniform float terrainLayerMissing;`
   renderer.domElement.addEventListener("contextmenu", (event) => event.preventDefault());
 
   transform.addEventListener("objectChange", () => {
+    if (sceneStreamStats?.editBytes === null) {
+      sceneStreamStats.editBytes = performance.getEntriesByType("resource").reduce((bytes, resource) => {
+        const path = new URL(resource.name, location.href).pathname;
+        return bytes + (resource.startTime >= sceneStreamStats.start
+          && (path.startsWith("/api/models/") || path.startsWith("/api/model-textures/")) ? resource.transferSize : 0);
+      }, 0);
+    }
     const entry = selected ? entries.get(selected) : null;
     if (!entry) return;
     const axis = transform.axis;
     if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) maybeSnap(entry);
+    syncPreviewPlacement(entry);
     const p = entry.pivot.position;
     hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
     syncInstanceMatrix(entry);
@@ -2515,8 +3307,97 @@ uniform float terrainLayerMissing;`
   }
   bindFlyKeys();
 
+  function scanTextureDetail() {
+    const candidates = new Map();
+    const ordered = [];
+    for (const entry of entries.values()) {
+      if (!entry.parts?.length || !entry.slots.length || !entry.pivot.visible) continue;
+      const chosen = entry.key === selected;
+      const distance = entry.pivot.position.distanceToSquared(camera.position);
+      if (!chosen && (distance > 45 * 45 || !entry.slots.some((slot) => slot.shown))) continue;
+      ordered.push({ entry, distance: chosen ? -1 : distance });
+    }
+    ordered.sort((a, b) => a.distance - b.distance);
+    const seen = new Set();
+    const inspected = new Set();
+    for (const { entry } of ordered) {
+      if (inspected.has(entry.parts)) continue;
+      if (inspected.size >= 48) break;
+      inspected.add(entry.parts);
+      for (const { material } of entry.parts) {
+        if (seen.has(material)) continue;
+        seen.add(material);
+        for (const texture of [...Object.values(material), ...Object.values(material.userData)]) {
+          const uri = texture?.isTexture && texture.userData.forgeFullTexture;
+          if (!uri || textureDetailFailed.has(uri)) continue;
+          const targets = candidates.get(uri) || new Set();
+          targets.add(texture);
+          candidates.set(uri, targets);
+        }
+      }
+    }
+    detailCandidates = candidates;
+  }
+
+  function installTextureDetail(texture, full) {
+    // WebGL tracks allocations by Source. Release the low allocation first so
+    // replacing it with a larger Source cannot reuse a texture of the old size.
+    texture.dispose();
+    texture.source = full.source;
+    texture.mipmaps = full.mipmaps;
+    texture.format = full.format;
+    texture.type = full.type;
+    texture.isCompressedTexture = Boolean(full.isCompressedTexture);
+    if (texture.isCompressedTexture) {
+      repairCompressedTexture(texture);
+    } else {
+      texture.generateMipmaps = true;
+      texture.needsUpdate = true;
+    }
+    delete texture.userData.forgeFullTexture;
+  }
+
+  function updateTextureDetail(now, parsedDetail) {
+    // Keep the bandwidth and decode slots available to nearby geometry and
+    // its first texture tier. Sharpen the textures once that work drains.
+    const geometryBusy = Boolean(statQueued || statLoading || modelStage?.pending.size);
+    if (geometryBusy && !textureDetailReady.size) return;
+    if (now >= nextDetailScan) {
+      nextDetailScan = now + 160;
+      scanTextureDetail();
+    }
+    let applied = parsedDetail;
+    for (const [uri, textures] of detailCandidates) {
+      const ready = textureDetailReady.get(uri);
+      if (ready) {
+        if (applied) {
+          requestRender();
+          continue;
+        }
+        applied = true;
+        detailCandidates.delete(uri);
+        textureDetailReady.delete(uri);
+        for (const texture of textures) installTextureDetail(texture, ready);
+        continue;
+      }
+      if (geometryBusy || textureDetailPending.size >= 2 || textureDetailPending.has(uri) || textureDetailFailed.has(uri)) continue;
+      const imageLoader = textureDetailLoaders.get(uri);
+      if (!imageLoader) continue;
+      textureDetailPending.add(uri);
+      sharedImage(uri, () => loadDetailImage(uri, imageLoader, true)).then((texture) => {
+        textureDetailReady.set(uri, texture);
+        if (textureDetailReady.size > 64) textureDetailReady.delete(textureDetailReady.keys().next().value);
+      }).catch(() => {
+        textureDetailFailed.add(uri);
+      }).finally(() => {
+        textureDetailPending.delete(uri);
+        requestRender();
+      });
+    }
+  }
+
   function updateFly(dt) {
-    const speed = (keys.has("shift") ? 32 : 10) * dt;
+    const speed = (keys.has("shift") || keys.has("x") ? 32 : 10) * dt;
     const forward = new THREE.Vector3();
     camera.getWorldDirection(forward);
     const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
@@ -2564,6 +3445,8 @@ uniform float terrainLayerMissing;`
   let statInstances = 0;
   let statCulled = 0;
   let statQueued = 0;
+  let statDeferred = 0;
+  let statBackgroundLoading = 0;
   let statLoading = 0;
   let statLoaded = 0;
   let statConvert = 0;
@@ -2613,12 +3496,15 @@ uniform float terrainLayerMissing;`
       queued: statQueued,
       loading: statLoading,
       loaded: statLoaded,
+      deferred: statDeferred,
+      backgroundLoading: statBackgroundLoading,
       convertMs: statConvert,
       textureMs: statTexture,
       downloadMs: statDownload,
       uploadMs: statUpload,
       warmDone: statWarmDone,
       warmTotal: statWarmTotal,
+      sceneStream: sceneStreamStats,
     });
     if (showStats) statsEl.textContent = text;
     if (hooks.onStats) hooks.onStats(text);
@@ -2635,13 +3521,26 @@ uniform float terrainLayerMissing;`
     const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
     if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
     const now = performance.now();
-    if (now - lastCullAt > 120 && camera.position.distanceTo(lastCull) > 2) {
+    const wasInteractive = streamInteractive;
+    streamInteractive = Boolean(flying || damped || looking || orbitGesture || transform.dragging);
+    if (wasInteractive !== streamInteractive) modelLoads?.background();
+    if (sceneStreamStats && wasInteractive && streamInteractive && (statLoading || modelStage?.pending.size || textureDetailPending.size) && gap > 25) {
+      sceneStreamStats.slowFrames += 1;
+    }
+    camera.getWorldDirection(loadForward);
+    if (now - lastCullAt > 100
+        && (camera.position.distanceToSquared(lastCull) > 1 || lastLoadDirection.dot(loadForward) < 0.998)) {
       lastCullAt = now;
       lastCull.copy(camera.position);
+      lastLoadDirection.copy(loadForward);
       prioritizeLoad();
       syncLabels();
     }
     syncBatchVisibility();
+    const parseDetail = detailParses.shift();
+    if (parseDetail) parseDetail();
+    if (detailParses.length) requestRender();
+    updateTextureDetail(now, Boolean(parseDetail));
     guardMissingUv();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
@@ -2667,13 +3566,11 @@ uniform float terrainLayerMissing;`
       });
     }
     labels.render(scene, camera);
-    const loading = pendingLoads > 0;
     const again = keepRendering({
       flying,
       damped,
       looking,
       dragging: transform.dragging,
-      loading,
     });
     if (again && gap > 0 && gap < 250) frameMs = Math.round(gap * 10) / 10;
     writeStats(again);
@@ -2713,6 +3610,9 @@ uniform float terrainLayerMissing;`
     setGizmo,
     setFlags,
     modelInfo,
+    auditPlacements,
+    auditView,
+    shaderDiagnostics,
     frame,
     spawnPoint,
     resize,
@@ -2749,6 +3649,7 @@ uniform float terrainLayerMissing;`
       clearActors();
       clearTerrain();
       clearGround();
+      pondProbe.material.dispose();
       clearGrid();
       boxGeometry.dispose();
       edgesGeometry.dispose();

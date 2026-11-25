@@ -9,12 +9,28 @@ try {
   /* private mode has no storage */
 }
 
-const search = globalThis.location ? globalThis.location.search : "";
-const cleaned = stripLegacyGpu(search);
-if (cleaned !== null && globalThis.location && cleaned !== search) {
-  globalThis.location.replace(`${globalThis.location.pathname}${cleaned}${globalThis.location.hash || ""}`);
-} else if (rendererChoice(search) === "webgpu") {
-  await import("./main.js?three=webgpu");
-} else {
-  await import("./main.js");
+async function start() {
+  const search = location.search;
+  const cleaned = stripLegacyGpu(search);
+  if (cleaned !== null) history.replaceState(history.state, "", `${location.pathname}${cleaned}${location.hash}`);
+  if (import.meta.env.MODE !== "webgl" && rendererChoice(cleaned ?? search) === "webgpu") {
+    let note = "WebGPU is unavailable in this browser. Using WebGL2.";
+    let gpu = false;
+    if (navigator.gpu) {
+      try {
+        const viewport = await import("./viewport.js?three=webgpu");
+        await viewport.prepareViewportRenderer();
+        gpu = true;
+      } catch (error) {
+        console.warn("WebGPU could not start", error);
+        note = "WebGPU could not start. Using WebGL2.";
+      }
+    }
+    if (gpu) return import("./main.js?three=webgpu");
+    const viewport = await import("./viewport.js");
+    await viewport.prepareViewportRenderer(note);
+  }
+  return import("./main.js");
 }
+
+start().catch((error) => console.error("Could not load Ocarina Forge", error));

@@ -1,8 +1,8 @@
 /**
  * WebGPU and WebGL three builds each set `window.__THREE__`. Lights, materials,
  * and BatchedMesh only work when the renderer and the objects are the same copy.
- * `?webgpu=1` loads a second module graph in which every `three` import is the
- * WebGPU build. The default page keeps `three.module.js`.
+ * The WebGPU graph uses one build for every Three.js import. The WebGL2 graph
+ * uses `three.module.js` for its scene and renderer.
  *
  * Prebundled addons inline the WebGL build, so the WebGPU graph loads the raw
  * addon sources and points their `three` import at the WebGPU build.
@@ -54,10 +54,12 @@ export function oneThreePlugin(webgpuFile) {
     name: "one-three-on-webgpu",
     enforce: "pre",
     async resolveId(source, importer) {
+      if (source.startsWith("\0") || (importer && importer.startsWith("\0"))) return null;
       const fromMarked = Boolean(importer && importer.includes(WEBGPU_MARK));
       const sourceMarked = source.includes(WEBGPU_MARK);
       if (!fromMarked && !sourceMarked) return null;
       const bare = unmark(source);
+      if (bare === "three" || bare === "three/webgpu" || bare === "three/tsl") return webgpuFile;
       const raw = rawDependency(bare, webgpuFile);
       if (raw) return mark(raw);
       const importerFile = importer ? unmark(importer) : undefined;
@@ -70,7 +72,7 @@ export function oneThreePlugin(webgpuFile) {
       return mark(resolved.id);
     },
     load(id) {
-      if (!id.includes(WEBGPU_MARK)) return null;
+      if (!id.includes(WEBGPU_MARK) || id.includes("\0")) return null;
       return fs.readFileSync(unmark(id).split("?")[0], "utf8");
     },
   };

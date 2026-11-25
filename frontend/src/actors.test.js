@@ -57,7 +57,7 @@ test("a saved transform does not clear the actor batches", () => {
   assert.match(main, /viewport\.patchActors\(plan\.actors\)/);
   const clear = viewport.slice(viewport.indexOf("function clearActors"), viewport.indexOf("function helperVisible"));
   assert.match(clear, /keepBatches/);
-  assert.match(viewport, /clearActors\(\{ keepBatches: true \}\)/);
+  assert.match(viewport, /clearActors\(\{ keepBatches: !reloadTerrain \}\)/);
   const rebuild = viewport.slice(viewport.indexOf("function rebuildBatches"), viewport.indexOf("function queueRebuild"));
   assert.doesNotMatch(rebuild, /clearBatches\(\)/);
   assert.ok(rebuild.indexOf("scene.add(mesh)") < rebuild.lastIndexOf("removeFromParent"));

@@ -28,10 +28,24 @@ function basisTranscoder() {
   };
 }
 
-const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js");
+const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js").replaceAll("\\", "/");
 
-export default defineConfig({
-  plugins: [oneThreePlugin(threeWebgpu), basisTranscoder()],
+export default defineConfig(({ mode }) => ({
+  plugins: [
+    ...(mode === "webgl"
+      ? [{
+          name: "webgl-external-gpu-nodes",
+          enforce: "pre",
+          resolveId(source) {
+            if (source === "three/webgpu" || source === "three/tsl") return { id: source, external: true };
+          },
+        }]
+      : [oneThreePlugin(threeWebgpu)]),
+    basisTranscoder(),
+  ],
+  build: {
+    target: "es2022",
+  },
   server: {
     host: "0.0.0.0",
     port: 47231,
@@ -48,4 +62,4 @@ export default defineConfig({
       "/api": "http://127.0.0.1:47232",
     },
   },
-});
+}));

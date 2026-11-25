@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+
+test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
+  const params = (flag, negate) => ["dict", { Presence: ["dict", {
+    FlagName: ["str", flag], IsNegation: ["bool", negate],
+  }] }];
+  const gate = (negate) => ({ present: presentByDefault(params("IsHyruleFieldBridgeClose", negate)) });
+  assert.equal(actorShown(gate(true)), true);
+  assert.equal(actorShown(gate(false)), false);
+  assert.equal(actorShown({ ...gate(false), showHidden: true }), true);
+  assert.equal(presentByDefault(params("UnknownGameplayFlag", false)), true);
+  assert.equal(presentByDefault(undefined), true);
+});
 
 const open = { area: "show", system: "show", object: "show" };
 
@@ -148,6 +160,21 @@ test("consecutive geometries become one instanced draw each", () => {
   assert.equal(groupGeometryDraws(interleaved), 4);
 });
 
+test("culling a grouped draw down to one clears the discarded instances", () => {
+  const mesh = {
+    userData: {}, _multiDrawCount: 3,
+    _multiDrawStarts: new Int32Array([0, 0, 0]),
+    _multiDrawCounts: new Int32Array([6, 6, 6]),
+  };
+  assert.equal(groupGeometryDraws(mesh), 1);
+  assert.equal(mesh._multiDrawInstances[0], 3);
+  // Three rebuilt the ungrouped ranges after two copies were culled.
+  mesh._multiDrawCount = 1;
+  assert.equal(groupGeometryDraws(mesh), 1);
+  assert.equal(mesh._multiDrawInstances, null);
+  assert.equal(mesh.userData.batchFirst, null);
+});
+
 test("a later geometry run keeps its own first instance", () => {
   const calls = [];
   const pass = {
@@ -199,6 +226,14 @@ test("a mapped geometry without uv loses only its own map", () => {
   assert.equal(bare.material.map, null);
   assert.equal(textured.material.map.id, 1);
   assert.equal(shared.map.id, 1);
+});
+
+test("a map can use an authored UV channel other than uv", () => {
+  const map = { channel: 1 };
+  const material = { map };
+  const mesh = { geometry: { hasAttribute: (name) => name === "uv1" }, material };
+  assert.deepEqual(dropMapWithoutUv(mesh), []);
+  assert.equal(mesh.material.map, map);
 });
 
 test("copies that share an albedo share a batch key", () => {

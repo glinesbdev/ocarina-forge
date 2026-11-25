@@ -196,6 +196,43 @@ def _write_all(stream, data: bytes) -> bool:
 
 
 def _read_exact(stream, count: int, timeout: float) -> bytes | None:
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        available = wintypes.DWORD()
+        peek = ctypes.windll.kernel32.PeekNamedPipe
+        peek.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        peek.restype = wintypes.BOOL
+        out = bytearray()
+        deadline = time.monotonic() + timeout
+        while len(out) < count:
+            if not peek(handle, None, 0, None, ctypes.byref(available), None):
+                return None
+            if not available.value:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                time.sleep(min(0.01, remaining))
+                continue
+            try:
+                chunk = stream.read(min(count - len(out), available.value))
+            except OSError:
+                return None
+            if not chunk:
+                return None
+            out += chunk
+        return bytes(out)
+
     sel = selectors.DefaultSelector()
     try:
         sel.register(stream, selectors.EVENT_READ)

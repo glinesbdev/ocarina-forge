@@ -20,6 +20,8 @@ from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import U32, U64
 from ocarina_forge.values import tag
 
+ROLLING_ROCK_LAND = "Land_Kokiri_RollingRockArea_A_"
+
 HEADER_KEYS = ("Gyaml", "Hash", "SRTHash", "Translate", "Rotate", "Scale", "Name")
 
 # Prefixes are matched in order. They follow the actor-pack prefixes in the
@@ -70,8 +72,9 @@ def is_region(gyaml: str) -> bool:
     name = gyaml or ""
     if category(name) in ("area", "system"):
         return True
-    lowered = name.lower()
-    return any(word in lowered for word in _VOLUME_WORDS)
+    # The area name also appears on the authored road and rocks.
+    region_name = name.removeprefix(ROLLING_ROCK_LAND).lower()
+    return any(word in region_name for word in _VOLUME_WORDS)
 
 
 # Names that are regions, not props. They are drawn as outlines.
@@ -86,11 +89,7 @@ def is_volume(gyaml: str, scale: list[float] | None = None) -> bool:
     A real mesh still replaces the outline once it loads.
     """
     name = gyaml or ""
-    kind = category(name)
-    if kind in ("area", "system"):
-        return True
-    lowered = name.lower()
-    if any(word in lowered for word in _VOLUME_WORDS):
+    if is_region(name):
         return True
     axes = scale or [1.0, 1.0, 1.0]
     try:

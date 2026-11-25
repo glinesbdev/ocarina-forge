@@ -72,12 +72,10 @@ def _fres_bytes(raw: bytes, dump, label: str) -> bytes:
 
 
 def debug_bytes(label: str, blob: bytes) -> dict:
-    if blob[:4] == b"FRES":
-        report = inspect(blob)
-        report["source"] = label
-        return report
-    # A pack may embed the bfres. The actor plan already unwraps it.
-    raise FresError(f"{label} is not a BFRES file")
+    if blob[:4] != b"FRES":
+        # The actor plan unwraps packs before calling this function.
+        raise FresError(f"{label} is not a BFRES file")
+    return {"source": label, **inspect(blob)}
 
 
 def debug_actor(dump, target: str) -> dict:
@@ -329,6 +327,12 @@ def render_text(report: dict, placed: list[dict]) -> str:
                 )
                 if shape.get("reason"):
                     lines.append(f"    {shape['reason']}")
+                meshlet = shape.get("meshlet")
+                if meshlet:
+                    if meshlet.get("error"):
+                        lines.append(f"    meshlet inspection: {meshlet['error']}")
+                    else:
+                        lines.append(f"    meshlet geometry {meshlet['vertices']} vertices, {meshlet['triangles']} triangles")
                 lines.append(f"    before {_fmt_bounds(shape.get('before') or shape.get('fileBounds'))}")
                 lines.append(f"    after  {_fmt_bounds(shape.get('after'))}")
                 for used in shape.get("bones") or []:

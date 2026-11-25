@@ -7,6 +7,7 @@ import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { modelLine } from "./inspector.js";
 import { paletteRows } from "./palette.js";
+import { sceneEntries } from "./scene-list.js";
 import { groupModelErrors, isMarker } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
@@ -31,6 +32,12 @@ function $(id) {
 
 let onShortcut = () => {};
 let viewport = null;
+let sceneOpenToken = 0;
+let sceneVisualLoad = 0;
+let sceneVisualBoxes = 0;
+let sceneVisualDeferred = 0;
+let sceneActorsReady = false;
+let sceneTerrainReady = true;
 const dock = createDock(document.getElementById("dock"), {
   onWindow(popup) {
     popup.addEventListener("keydown", (event) => onShortcut(event));
@@ -53,6 +60,7 @@ const state = {
   changeToken: 0,
   problems: null,
   problemToken: 0,
+  meshAudit: null,
   modelErrors: [],
   terrainNotes: [],
   behavior: null,
@@ -92,12 +100,17 @@ const state = {
 };
 
 viewport = await createViewport($("viewport"), {
-  fetchModel: (gyaml) => api.model(gyaml),
-  fetchModels: (names) => api.models(names),
-  fetchTerrain: (banc) => api.terrain(banc),
+  fetchModel: api.model,
+  fetchModels: (names, prefetch) => api.models(names, prefetch),
+  fetchTerrain: api.terrain,
   onProgress: (info) => {
     const box = $("model-progress");
     if (!box) return;
+    if (sceneVisualLoad) {
+      updateSceneViewerProgress(info);
+      box.hidden = true;
+      return;
+    }
     if (!info || !info.total) {
       box.hidden = true;
       return;
@@ -107,6 +120,7 @@ viewport = await createViewport($("viewport"), {
     $("model-progress-bar").style.width = `${Math.round((100 * info.done) / Math.max(info.total, 1))}%`;
     box.hidden = Boolean(info.finished);
   },
+  onModelsReady: (result) => finishSceneViewerLoad(result),
   onModels: () => renderProps(),
   onModelError: (gyaml, message) => {
     noteModelError(gyaml, message);
@@ -136,6 +150,11 @@ viewport = await createViewport($("viewport"), {
     }
     viewport.setFlags({ ground: show });
   },
+  onTerrainReady: () => {
+    if (!sceneVisualLoad) return;
+    sceneTerrainReady = true;
+    if (sceneActorsReady) finishSceneViewerLoad();
+  },
   onSelect: (id) => {
     state.selected = id;
     viewport.select(id);
@@ -158,11 +177,7 @@ viewport = await createViewport($("viewport"), {
       fillNumber("sz", scale[2]);
     }
   },
-  onDeviceLost: (message) => toast(message),
-  onWarm(names) {
-    if (!state.banc || !names || !names.length) return;
-    api.warm({ banc: state.banc, names }).then((status) => viewport.setWarm(status)).catch(() => {});
-  },
+  onDeviceLost: (message) => toast(message, { persistent: true }),
   onStats(text) {
     const readout = $("stats-readout");
     if (readout && readout.textContent !== text) readout.textContent = text;
@@ -261,7 +276,9 @@ function refreshStreamLog() {
   api.stream()
     .then((data) => {
       if (data.warm) viewport.setWarm(data.warm);
-      const warm = data.warm && data.warm.total ? ` · warm ${data.warm.done || 0}/${data.warm.total}${data.warm.paused ? " paused" : ""}` : "";
+      const warm = data.warm && data.warm.total
+        ? ` · warm ${data.warm.phase} ${data.warm.done || 0}/${data.warm.total}${data.warm.failed ? ` · ${data.warm.failed} failed` : ""}${data.warm.paused ? " paused" : ""}`
+        : "";
       const head = `server ${data.misses || 0} converted · ${data.hits || 0} cache hits · conv ${data.convertMs || 0} ms · tex ${data.textureMs || 0} ms${warm}`;
       const lines = (data.lines || []).slice(-8);
       box.textContent = lines.length ? `${head}\n${lines.join("\n")}` : head;
@@ -292,6 +309,12 @@ $("show-hidden").addEventListener("change", (event) => {
 $("show-labels").addEventListener("change", (event) => {
   state.showLabels = event.target.checked;
   viewport.setFlags({ labels: state.showLabels });
+});
+$("active-bank").addEventListener("change", (event) => {
+  const active = event.target;
+  const other = (state.raw?.companions || []).find((item) => bancKind(item.banc) === active.value);
+  active.value = bancKind(state.banc);
+  if (other) openScene(other.banc);
 });
 $("show-companions").addEventListener("change", (event) => {
   state.showCompanions = event.target.checked;
@@ -458,6 +481,7 @@ window.addEventListener("keydown", (event) => onShortcut(event));
 boot();
 
 async function boot() {
+  let startupError = "";
   try {
     state.status = await api.status();
   } catch (error) {
@@ -465,11 +489,24 @@ async function boot() {
     $("gate").replaceChildren(gateMessage("Ocarina Forge could not reach its server.", error.message));
     return;
   }
+  const selectedMod = new URLSearchParams(window.location.search).get("mod");
+  if (selectedMod) {
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+    try {
+      await api.openLocalMod(selectedMod);
+      state.status = await api.status();
+    } catch (error) {
+      startupError = error.code === "mod_import"
+        ? `Not editable in Forge: ${error.message}`
+        : error.message;
+    }
+  }
   renderChrome();
   viewport.setConvertSlots(state.status.workers && state.status.workers.count);
   refreshHotReload();
   if (!dumpReady()) {
     showGate();
+    if (startupError) toast(startupError);
     return;
   }
   $("gate").hidden = true;
@@ -477,6 +514,7 @@ async function boot() {
   dock.fit();
   viewport.resize();
   syncPanes();
+  if (startupError) toast(startupError);
   await refreshScenes();
 }
 
@@ -785,25 +823,48 @@ async function fillLibrary() {
   if (!host) return;
   host.replaceChildren(empty("Loading projects…"));
   try {
-    const data = await api.projects();
+    const [data, local] = await Promise.all([api.projects(), api.localMods()]);
     host.replaceChildren();
     const note = document.createElement("p");
     note.className = "muted tight";
     note.textContent = data.root;
     host.append(note);
     if (!data.projects.length) {
-      host.append(empty("No projects there yet. Leave the folder blank to create one in it."));
-      return;
+      host.append(empty("No Forge projects there yet. Leave the folder blank to create one in it."));
+    } else {
+      for (const item of data.projects) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "name-row";
+        button.textContent = `${item.title} · ${item.modId}`;
+        button.addEventListener("click", () => {
+          $("open-dir").value = item.root;
+          openProject();
+        });
+        host.append(button);
+      }
     }
-    for (const item of data.projects) {
+    const heading = document.createElement("h3");
+    heading.textContent = "Local game mods";
+    host.append(heading);
+    const localRoot = document.createElement("p");
+    localRoot.className = "muted tight";
+    localRoot.textContent = local.root;
+    host.append(localRoot);
+    if (!local.mods.length) {
+      host.append(empty("No local mods found."));
+    }
+    for (const item of local.mods) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "name-row";
-      button.textContent = `${item.title} · ${item.modId}`;
-      button.addEventListener("click", () => {
-        $("open-dir").value = item.root;
-        openProject();
-      });
+      button.disabled = !item.editable;
+      const action = item.action === "open_project" ? "Open Forge project" : "Import and open";
+      button.textContent = item.editable
+        ? `${item.title} · ${item.id} · ${action}`
+        : `${item.title} · ${item.id} · Not editable`;
+      button.title = item.reason || "";
+      if (item.editable) button.addEventListener("click", () => openLocalMod(item.id));
       host.append(button);
     }
   } catch (error) {
@@ -844,6 +905,19 @@ async function openProject() {
   }
 }
 
+async function openLocalMod(id) {
+  try {
+    await api.openLocalMod(id);
+    state.status = await api.status();
+    closeDialogs();
+    renderChrome();
+    if (dumpReady()) await refreshScenes();
+    else showGate();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
 async function importAto(path) {
   if (!projectReady()) {
     toast("Open a project before importing.");
@@ -866,14 +940,14 @@ async function importAto(path) {
 
 async function refreshScenes() {
   const data = await api.scenes();
-  state.scenes = data.scenes;
+  state.scenes = sceneEntries(data.scenes);
   state.modified = new Set(data.modified || []);
   state.recipes = new Set(data.recipes || []);
   state.projectOnly = data.projectOnly || [];
   state.changeCounts = data.changes || {};
   $("scene-count").textContent = `${state.scenes.length} scenes`;
   renderScenes();
-  const preferred = [...state.modified][0] || (state.scenes[0] && state.scenes[0].path);
+  const preferred = state.scenes.flatMap((scene) => scene.banks).find((bank) => state.modified.has(bank)) || state.scenes[0]?.path;
   if (!state.banc && preferred) await openScene(preferred, { frame: true });
 }
 
@@ -883,7 +957,7 @@ function renderScenes() {
   list.replaceChildren();
   const groups = new Map();
   for (const scene of state.scenes) {
-    const hay = `${scene.area} ${scene.name} ${scene.path}`.toLowerCase();
+    const hay = `${scene.area} ${scene.name} ${scene.banks.join(" ")}`.toLowerCase();
     if (query && !hay.includes(query)) continue;
     if (!groups.has(scene.area)) groups.set(scene.area, []);
     groups.get(scene.area).push(scene);
@@ -921,27 +995,33 @@ function sceneButton(scene) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "scene-item";
-  button.setAttribute("aria-current", scene.path === state.banc ? "true" : "false");
+  button.setAttribute("aria-current", scene.banks.includes(state.banc) ? "true" : "false");
   const text = document.createElement("span");
   text.className = "grow";
   const strong = document.createElement("strong");
   strong.textContent = pretty(scene.name);
   const small = document.createElement("small");
-  small.textContent = scene.path;
+  small.textContent = scene.banks.length > 1 ? "Static + Dynamic" : scene.path;
+  small.title = scene.banks.join("\n");
   text.append(strong, small);
   button.append(text);
-  const counts = state.changeCounts[scene.path];
-  if (counts && counts.total) {
+  const counts = {};
+  for (const bank of scene.banks) {
+    for (const [key, count] of Object.entries(state.changeCounts[bank] || {})) {
+      counts[key] = (counts[key] || 0) + count;
+    }
+  }
+  if (counts.total) {
     const dot = document.createElement("i");
     dot.className = actorChange(counts) ? "dot" : "dot recipe";
     dot.title = changeSummary(counts);
     button.append(dot);
-  } else if (state.modified.has(scene.path)) {
+  } else if (scene.banks.some((bank) => state.modified.has(bank))) {
     const dot = document.createElement("i");
     dot.className = "dot";
     dot.title = "This scene has actor edits in the project";
     button.append(dot);
-  } else if (state.recipes.has(scene.path)) {
+  } else if (scene.banks.some((bank) => state.recipes.has(bank))) {
     const dot = document.createElement("i");
     dot.className = "dot recipe";
     dot.title = "An advanced patch in this project rewrites this scene at build time";
@@ -954,21 +1034,88 @@ function sceneButton(scene) {
   return button;
 }
 
+function setScenePreparation(title, message, done = 0, total = 0) {
+  const box = $("scene-prepare");
+  if (!box) return;
+  $("scene-prepare-title").textContent = title;
+  $("scene-prepare-text").textContent = message;
+  $("scene-prepare-bar").style.width = `${total ? Math.round((100 * done) / total) : 0}%`;
+  box.hidden = false;
+}
+
+function clearScenePreparation() {
+  const box = $("scene-prepare");
+  if (box) {
+    box.hidden = true;
+  }
+}
+
+function updateSceneViewerProgress(info) {
+  if (!info) return;
+  sceneVisualBoxes = info.boxes || 0;
+  sceneVisualDeferred = info.deferred || 0;
+  const extra = info.boxes ? ` · ${info.boxes} box actors` : "";
+  setScenePreparation(
+    "Loading scene in viewer",
+    `${info.done} of ${info.total} scene models loaded${extra}`,
+    info.done,
+    info.total,
+  );
+}
+
+function finishSceneViewerLoad(result = {}) {
+  const token = sceneVisualLoad;
+  if (!token || token !== sceneOpenToken) return;
+  if (result.batchesBuilt === false) {
+    setScenePreparation("Scene assembly failed", "The previous view is still visible. Choose another scene or retry.", 1, 1);
+    return;
+  }
+  sceneActorsReady = true;
+  if (!sceneTerrainReady) {
+    setScenePreparation("Loading terrain", "Preparing the terrain mesh…", 0, 1);
+    return;
+  }
+  let message = "All scene models are loaded.";
+  if (sceneVisualDeferred) message = "Visible detail is ready. The rest of the scene is loading in the background.";
+  else if (sceneVisualBoxes) message = `Scene loaded with ${sceneVisualBoxes} box actor${sceneVisualBoxes === 1 ? "" : "s"}.`;
+  setScenePreparation("Scene ready", message, 1, 1);
+  window.setTimeout(() => {
+    if (sceneVisualLoad !== token || sceneOpenToken !== token) return;
+    sceneVisualLoad = 0;
+    clearScenePreparation();
+  }, 350);
+}
+
 async function openScene(banc, options = {}) {
-  $("viewport-empty").hidden = true;
-  $("viewport").classList.add("is-live");
+  const token = ++sceneOpenToken;
+  const terrainAlreadyReady = state.banc === banc && sceneTerrainReady;
+  sceneVisualLoad = 0;
+  sceneVisualBoxes = 0;
+  sceneVisualDeferred = 0;
+  sceneActorsReady = false;
+  sceneTerrainReady = terrainAlreadyReady;
+  setScenePreparation(`Preparing ${banc.split("/").pop()}`, "Reading scene and companion assets…");
   try {
     const view = await api.scene(banc);
+    if (token !== sceneOpenToken) return;
+    sceneVisualLoad = token;
+    setScenePreparation("Loading scene in viewer", "Preparing and streaming scene models…", 0, 1);
+    $("viewport-empty").hidden = true;
+    $("viewport").classList.add("is-live");
     state.banc = banc;
     if (!options.keepHistory) state.history = blankHistory(null);
     const interesting = view.actors.find((actor) => actor.status === "edited" || actor.status === "added");
-    applyView(view, { frame: Boolean(options.frame), select: interesting ? interesting.id : null });
+    applyView(view, { frame: Boolean(options.frame), select: interesting ? interesting.id : null, forceSceneLoad: true });
     if (!options.keepHistory) state.history = blankHistory(captureShot());
     renderScenes();
     updateHistoryButtons();
     renderChanges();
   } catch (error) {
-    toast(error.message);
+    if (token === sceneOpenToken) {
+      sceneVisualLoad = 0;
+      clearScenePreparation();
+      toast(error.message);
+    }
   }
 }
 
@@ -1025,19 +1172,26 @@ function actorRecord(id) {
 }
 
 function noteCompanion() {
-  const scene = state.scenes.find((item) => item.path === state.banc);
+  const scene = state.scenes.find((item) => item.banks.includes(state.banc));
   const base = scene ? pretty(scene.name) : pretty((state.banc || "").split("/").pop() || "");
   const extras = (state.raw && state.raw.companions) || [];
   const kinds = extras.map((item) => bancKind(item.banc));
   const actor = actorRecord(state.selected);
   let suffix = "";
-  if (state.showCompanions !== false && kinds.length) suffix = ` · with ${kinds.join(", ")}`;
+  if (scene?.banks.length > 1 && kinds.length) {
+    suffix = state.showCompanions !== false ? " · Static + Dynamic" : ` · ${bancKind(state.banc)} only`;
+  } else if (state.showCompanions !== false && kinds.length) {
+    suffix = ` · with ${kinds.join(", ")}`;
+  }
   if (actor && actor.companion) suffix += ` · editing ${actor.companionLabel}`;
   const node = $("scene-name");
   if (node) node.textContent = base + suffix;
+  const active = $("active-bank");
+  active.hidden = !(scene?.banks.length > 1 && kinds.length);
+  active.value = bancKind(state.banc);
 }
 
-function applyView(view, { frame = false, select } = {}) {
+function applyView(view, { frame = false, select, forceSceneLoad = false } = {}) {
   const previousActors = state.view ? state.view.actors : null;
   state.raw = view;
   const composed = composeView(view);
@@ -1049,10 +1203,11 @@ function applyView(view, { frame = false, select } = {}) {
   const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
   // A new or deleted actor joins the batches that are already on screen.
   // Opening a scene still goes through setActors, which is the one full load.
-  if (!patched && (frame || !viewport.reconcileActors(composed.actors))) {
+  if (forceSceneLoad || (!patched && (frame || !viewport.reconcileActors(composed.actors)))) {
     state.modelErrors = [];
+    state.meshAudit = null;
     state.terrainNotes = [];
-    viewport.setActors(composed.actors, { frame, banc: view.banc });
+    viewport.setActors(composed.actors, { frame, banc: view.banc, previewUrl: view.previewUrl });
   }
   viewport.select(state.selected);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels });
@@ -2179,6 +2334,111 @@ async function loadProblems(banc) {
   if (state.selected) renderProps();
 }
 
+async function runMeshAudit() {
+  const audit = { banc: state.banc, loading: true };
+  const view = {
+    backend: viewport.backend,
+    placements: viewport.auditPlacements(),
+    shaderErrors: viewport.shaderDiagnostics(),
+    ...viewport.auditView(),
+  };
+  audit.viewport = view;
+  state.meshAudit = audit;
+  renderProblems();
+  try {
+    audit.report = await api.meshAudit(audit.banc);
+    if (state.meshAudit === audit && state.banc === audit.banc) {
+      audit.report.viewport = view;
+    }
+  } catch (error) {
+    audit.error = error.message;
+  } finally {
+    audit.loading = false;
+    if (state.meshAudit === audit && state.banc === audit.banc) renderProblems();
+  }
+}
+
+function renderMeshAudit(panel) {
+  const audit = state.meshAudit?.banc === state.banc ? state.meshAudit : null;
+  const tools = document.createElement("div");
+  tools.className = "problem-tools";
+  const run = document.createElement("button");
+  run.type = "button";
+  run.className = "ghost";
+  run.textContent = audit?.loading ? "Checking meshes…" : "Audit meshes";
+  run.disabled = Boolean(audit?.loading);
+  run.addEventListener("click", runMeshAudit);
+  tools.append(run);
+  panel.append(tools);
+  if (audit?.error) panel.append(empty(audit.error));
+  const report = audit?.report;
+  const center = audit?.viewport?.centerSurface;
+  if (center) {
+    const { queued, loading } = audit.viewport.streaming;
+    const stage = center.stage === "preview"
+      ? queued || loading ? "startup preview" : "startup preview still visible while model requests are idle"
+      : `model mesh${center.lod == null ? "" : ` (LOD ${center.lod})`}`;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "change-row";
+    row.disabled = !center.id || !state.view?.actors.some(({ id }) => id === center.id);
+    const content = document.createElement("span");
+    content.className = "grow";
+    const name = document.createElement("strong");
+    name.textContent = `Center of viewport · ${center.gyaml}`;
+    const detail = document.createElement("small");
+    detail.textContent = [stage, center.surface, `${Math.round(center.distance)} m`, center.stage === "preview" && center.reason]
+      .filter(Boolean).join(" · ");
+    detail.title = center.source;
+    content.append(name, detail);
+    row.append(content);
+    row.addEventListener("click", () => focusActor(center.id, { frame: false }));
+    panel.append(row);
+  }
+  if (!report) return;
+
+  const json = document.createElement("button");
+  json.type = "button";
+  json.className = "ghost";
+  json.textContent = "Mesh audit JSON";
+  json.addEventListener("click", () => downloadText("mesh-audit.json", `${JSON.stringify(report, null, 2)}\n`, "application/json"));
+  tools.append(json);
+  const labels = {
+    ready: "validated", no_mesh: "no mesh expected", uncached: "uncached",
+    unsupported: "unsupported geometry", partial: "partially decoded",
+    missing: "missing file", failed: "conversion failed", invalid: "invalid glTF",
+  };
+  const summary = Object.entries(report.counts).map(([status, count]) => `${count} ${labels[status]}`);
+  panel.append(empty(summary.join(" · ") || "No model placements to audit."));
+  const misplaced = (report.viewport?.placements || []).filter((placement) => placement.mismatched);
+  if (misplaced.length) panel.append(empty(`${misplaced.length} viewport placement${misplaced.length === 1 ? "" : "s"} differ from the actor transform. See Mesh audit JSON.`));
+  const shaderErrors = report.viewport?.shaderErrors?.length || 0;
+  if (shaderErrors) panel.append(empty(`${shaderErrors} WGSL compiler errors in this viewport session. See Mesh audit JSON.`));
+  const list = document.createElement("div");
+  list.className = "change-list";
+  const visible = new Set((state.view?.actors || []).map((actor) => actor.id));
+  for (const row of report.models) {
+    if (["ready", "no_mesh", "uncached"].includes(row.status)) continue;
+    const actor = row.actors.find((item) => visible.has(item.id));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "change-row";
+    button.disabled = !actor;
+    const text = document.createElement("span");
+    text.className = "grow";
+    const name = document.createElement("strong");
+    name.textContent = `${row.gyaml} · ${labels[row.status]} (${row.actors.length})`;
+    const detail = document.createElement("small");
+    detail.textContent = row.reason;
+    detail.title = row.source;
+    text.append(name, detail);
+    button.append(text);
+    if (actor) button.addEventListener("click", () => focusActor(actor.id));
+    list.append(button);
+  }
+  if (list.childElementCount) panel.append(list);
+}
+
 function renderProblems() {
   const panel = $("problems-panel");
   const badge = $("problem-count");
@@ -2200,6 +2460,7 @@ function renderProblems() {
     panel.append(empty("Open a scene to check it."));
     return;
   }
+  renderMeshAudit(panel);
   if (!report) {
     if (groups.length || sceneNotes.length) panel.append(modelProblemList(groups, sceneNotes));
     else panel.append(empty("Checking this scene…"));
@@ -2324,7 +2585,7 @@ function modelProblemList(groups, notes) {
   return root;
 }
 
-function focusActor(id) {
+function focusActor(id, { frame = true } = {}) {
   if (!id || !state.view) {
     toast("That actor is not in the open scene.");
     return;
@@ -2336,7 +2597,7 @@ function focusActor(id) {
   }
   state.selected = actor.id;
   viewport.select(actor.id);
-  viewport.frame(actor.id);
+  if (frame) viewport.frame(actor.id);
   renderOutliner();
   renderProps();
   noteCompanion();
@@ -2822,7 +3083,9 @@ function refreshBehavior() {
   const host = $("behavior-panel");
   if (!host) return;
   const actor = selectedActor();
-  const key = actor ? `${state.banc || ""}|${actor.id || ""}|${actor.gyaml || ""}` : "";
+  const banc = actor?.banc || state.banc || "";
+  const id = actor?.placementId || actor?.id || "";
+  const key = actor ? `${banc}|${id}|${actor.gyaml || ""}` : "";
   if (key !== state.behaviorKey) {
     state.behaviorKey = key;
     state.behavior = null;
@@ -2838,7 +3101,7 @@ function refreshBehavior() {
     if (actor) {
       const requestKey = key;
       api
-        .behavior({ banc: state.banc || "", id: actor.id || "", gyaml: actor.gyaml || "" })
+        .behavior({ banc, id, gyaml: actor.gyaml || "" })
         .then((graph) => {
           if (state.behaviorKey !== requestKey) return;
           state.behavior = graph;
@@ -3119,12 +3382,12 @@ function empty(text) {
   return p;
 }
 
-function toast(message) {
+function toast(message, { persistent = false } = {}) {
   const node = document.createElement("div");
   node.className = "toast";
   node.textContent = message;
   $("toasts").append(node);
-  setTimeout(() => node.remove(), 5200);
+  if (!persistent) setTimeout(() => node.remove(), 5200);
 }
 
 function closeDialogs() {

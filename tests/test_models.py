@@ -611,6 +611,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
         "models.py",
         "surface.py",
         "bfres.py",
+        "meshlet.py",
         "bntx.py",
         "swizzle.py",
         "terrain.py",
@@ -622,7 +623,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-49", "477ecb35ddecb06e57076780d1af2b9b5e05ef3446925751b93fb2b706febf53")
+    pinned = ("models-51", "faa08674aa836b47b25b513825bf6ce88d5d31f33bde457a9e7913b43e836a5c")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -2132,6 +2133,24 @@ def test_meshoptimizer_lod_shrinks_a_dense_mesh_and_keeps_the_border():
     ys = [point[1] for point in new_pos]
     assert min(xs) == 0 and max(xs) == 39
     assert min(ys) == 0 and max(ys) == 39
+
+
+def test_meshopt_reads_child_stdout_pipe():
+    import subprocess
+    import sys
+
+    from ocarina_forge.formats.meshopt import _read_exact
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ready\\n')"],
+        stdout=subprocess.PIPE,
+        bufsize=0,
+    )
+    try:
+        assert _read_exact(proc.stdout, 6, 2) == b"ready\n"
+    finally:
+        proc.stdout.close()
+        proc.wait(timeout=5)
 
 
 def test_ground_debug_height_and_extent(tmp_path, capsys):

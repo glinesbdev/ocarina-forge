@@ -322,6 +322,30 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
 .model-progress[hidden] { display: none; }
 .model-progress i { display: block; height: 3px; background: #2c3830; border-radius: 99px; overflow: hidden; }
 .model-progress b { display: block; height: 100%; width: 0%; background: #e0b15a; }
+.scene-prepare {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 4;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.scene-prepare[hidden] { display: none !important; }
+.scene-prepare-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 260px;
+  max-width: min(460px, calc(100vw - 32px));
+  padding: 10px 12px;
+  background: rgba(16, 22, 18, 0.94);
+  border: 1px solid rgba(224, 177, 90, 0.35);
+  border-radius: 8px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.3);
+  font-size: 12px;
+}
+.scene-prepare-card i { display: block; height: 3px; background: #2c3830; border-radius: 99px; overflow: hidden; }
+.scene-prepare-card b { display: block; height: 100%; width: 0%; background: #e0b15a; transition: width 120ms linear; }
 .model-note { margin: 4px 0 12px; }
 .model-note p { margin: 4px 0 0; font-size: 13px; line-height: 1.4; }
 .material-dump { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }

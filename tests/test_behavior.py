@@ -477,3 +477,20 @@ def test_set_field_saves_an_op_and_export_round_trips(tmp_path):
 
     cleared = set_field(dump, project, gyaml="Npc_Kokiri_F_01", node_id=flag["id"], field="DataBool", value="Kokiri_FadoMet")
     assert cleared["ops"] == []
+
+def test_behavior_resolves_companion_placement_keys(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from ocarina_forge import server
+    from ocarina_forge.fixtures import FIELD_STATIC, KOKIRI_DYNAMIC, KOKIRI_STATIC
+
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    monkeypatch.setattr(server, "_open_dump", lambda: dump)
+    client = TestClient(server.app)
+    actor = format_hash(FADO)
+    canonical = client.get("/api/behavior", params={"banc": KOKIRI_STATIC, "id": actor})
+    companion = client.get("/api/behavior", params={"banc": KOKIRI_DYNAMIC, "id": f"{KOKIRI_STATIC}::{actor}"})
+    assert canonical.status_code == companion.status_code == 200
+    assert companion.json() == canonical.json()
+    assert companion.json()["banc"] == KOKIRI_STATIC
+    unrelated = client.get("/api/behavior", params={"banc": FIELD_STATIC, "id": f"{KOKIRI_STATIC}::{actor}"})
+    assert unrelated.status_code == 400

@@ -80,7 +80,7 @@ export function paletteRows({ actors = [], scenes = [], commands = EDITOR_COMMAN
       id: scene.path || "",
       label: scene.name || scene.path || "Scene",
       detail: scene.area ? `${scene.area} · ${scene.path}` : scene.path || "",
-      fields: [scene.name, scene.area, scene.path],
+      fields: [scene.name, scene.area, ...(scene.banks || [scene.path])],
     });
   }
   for (const command of commands) {

@@ -131,6 +131,15 @@ Save installs into the test game:
 
 After the Ocarina is one project of this kind: `examples/after-the-ocarina`, format 2, `engine: after-ocarina`. Opening it opens that folder. Its romfs build stays the Build romfs action. A Longshot-mod save of that project exports only placement ops that differ from the dump. It does not replace the pipeline.
 
+## Importing local Longshot mods
+
+The project chooser scans `<game>/mods/local/`. It opens an existing Forge project with the same `local/<slug>` id, or
+imports a mod whose patch files contain placement `set` operations for `Translate`, `Rotate`, or `Scale` vectors. Other
+formats are marked not editable. The imported source tree lives at `.longshot-source/` inside the Forge project, separate
+from editor diffs. Export preserves its runtime files and original `mod.json` fields, then replaces its patch folder with
+the current Forge output. Imported placement operations whose actors are not in the configured dump are retained when
+their edits remain in the project; unsupported removals are warned about rather than silently dropped.
+
 ## Lean export
 
 A mod never ships a file that does not change the game. Export writes:
@@ -138,7 +147,9 @@ A mod never ships a file that does not change the game. Export writes:
 - nothing, when every edit matches the dump or was moved back
 - otherwise `mod.json`, `patches/<Scene>.json` for each banc that still has an op, and an empty `romfs/` directory
 
-No empty patch file. No `romfs/.keep`. No `src/`. No project YAML, undo history, or cache. Installing an empty result deletes `mods/local/<project-id>` so a previous move does not stay in the game.
+For a newly created patch-only project, no empty patch file, `romfs/.keep`, or `src/` is written. Imported local mods keep
+their source files and runtime manifest fields. No project YAML, undo history, or cache is installed. Installing an empty
+new project deletes `mods/local/<project-id>` so a previous move does not stay in the game.
 
 `content.change`'s placement id (no `0x`) and the patch `hash` (`0x` plus 16 hex digits) are the same integer. Forge stores `0x` and 16 lower-case hex digits. A 16-digit hex string and the decimal form normalize to that.
 

@@ -6,6 +6,8 @@ The container rules below were reconciled with After the Ocarina's `docs/game-fo
 
 Nothing in this repository is extracted from a game dump.
 
+Community format references used for cross-checking include [TSCB terrain research](https://github.com/TotkMods/Research/blob/main/Formats/TerrainSceneBinary/Readme.md), [AINB research](https://github.com/TotkMods/Research/blob/main/Formats/Ainb/Readme.md), and the [EventFlow format index](https://github.com/TotkMods/Research/blob/main/Readme.md). These are reverse-engineering notes, not an engine specification; check format versions and runtime behavior against the target game build.
+
 ## Where files live
 
 Dump root (the folder Ocarina Forge stores in config):
@@ -116,7 +118,7 @@ The render-state array is 31 fixed slots of string pointers, not the version-9 `
 
 Public Switch 1 notes give FSHP `+0x04` two bits that matter here: `0x02` means the shape has a vertex buffer. Kokiri and Deku files also set `0x10`, so the flags word is `0x12` (`Obj_Kokiri_Door_A_*`, `Fence_A_03`, `RoofFence_A_01`, `StoneGate_A_01`, `Stone_A_06`, `Land_Deku_CaveProp_A_*`, `ProceduralIvy_*`, `House_Outside_C_00`, and the rest of that set: 69 of 526 models in those two areas). On those shapes the FVTX pointer lands in zeroed memory and the mesh-count byte is 0. Bytes after the GPU buffer base (`0x7000` on the files that were inspected) include the u32s `0x40` and `0x7c`, which is the sort of header a meshlet or mesh-codec block would have.
 
-Wexos, BfresLibrary, and Switch Toolbox do not document that bit or a meshlet layout inside FSHP. `.bfres.mc` is a separate stream (`MCPK` / `FMSH`) and is still refused. There is not enough public structure to turn those bytes into indices, so this reader does not guess a decoder. The shape’s bounding record (center and extent, six floats at the pointer in FSHP `+0x38`) becomes the actor’s box, and the reason is `geometry format not decoded (FSHP flag 0x10)`. A file that also contains ordinary shapes still draws those. These shapes are not the missing field. The field is the TerrainArc heightmap below. `scripts/check_terrain.py` lists the ground-like actors that still have a 0x10 shape.
+The [ResMeshlet header](https://epd.zeldamods.org/wiki/Bfres#ResMeshlet) points to the GPU buffer. Forge uses the layout documented by [NUP Explorer](https://github.com/lunixxx37/NupExplorer/blob/main/nupx/clusters.py) to read the packed vertices and triangle indices, together with normals, UV sets, and the first vertex colour. Rigid single-buffer BFRES 10.4 shapes supply authored geometry for the near and far LODs. Unsupported shapes still use their bounding record, and `model-debug` reports the reason. `.bfres.mc` is a separate stream (`MCPK` / `FMSH`). The TerrainArc heightmap below handles the field.
 
 ## TerrainArc
 
@@ -136,6 +138,12 @@ The ground under a scene is not `Model/<Area>_01`. That bfres is a stand-in. The
 
 A relative u32 is `field + value`. A tile starts with three floats: centre x, centre z, edge length, in terrain units. `+0x60` is a relative offset to a NUL-terminated tile name. The quadtree names every tile; only some have a file.
 
+The [community TSCB notes](https://github.com/TotkMods/Research/blob/main/Formats/TerrainSceneBinary/Readme.md) describe version `0x70C`, including grass and water types. The 25 indexes checked in the installed OoT build use version `0x10D`. Its file-type count is at `+0x30` and its file-type offset table at `+0x70`. Type descriptors carry the type code, name, extension and an optional resource class. Each area has a resource count at `+0x20` and a table of relative u32 offsets at `+0x68`. Each referenced record starts with the type code and contains two raw height floats at `+0x20` and `+0x24`. Entries can vary by tile. A record declares metadata and does not prove a payload exists on disk or define how the game uses it.
+
+The installed OoT indexes declare `hght` (`0x0000`), `norm` (`0x0100`), `mate` (`0x2000`), `bake_ao.extm` (`0x5100`), `bake_gi.extm` (`0x5200`), and `custom.extm` (`0x5300`). The survey found no water type in those indexes and no `.water.extm` payload under the installed `TerrainArc`. The viewport draws water from actor BFRES models. The meaning of the `custom.extm` payload is still open.
+
+`python -m ocarina_forge ground-debug Banc/HyruleField/HyruleField_Child_Dynamic.bcett.byml.zs --resources-only --at=-72,510 --json` lists the records for tiles that cover a point. Omit `--at` for all tiles and `--json` for a text summary. The command parses the indexes without decoding payloads. Normal terrain loading uses the existing tile reader and filename lookups.
+
 `TerrainArc/<scene>/<name>.hght` starts with `TARB`. The u16 at file offset 10 is the header size. The bytes after that header are a zstd frame (dictionary id from the frame, usually the shared zs dictionary). Unpacked, offsets are relative the same way:
 
 | Offset | Field |
@@ -151,7 +159,11 @@ The material grid is `TerrainArc/<scene>/<name>.mate` for a main tile and `Terra
 
 `<name>.<child|adult>.bake_ao.extm` (the variant matching `Child` or `Adult` in the banc path) uses that same header. The image is a 1-byte or 4-byte block-linear grid; format byte 0x06 prefers 4 bytes, and the surface size decides. A 4-byte texel uses the first byte when the others are 0 or 0x7f. `<name>.custom.extm` is not decoded.
 
-A coarse cell is dropped only when its centre lies inside a quad a finer tile of the same scene actually emitted. A sub quad does not remove the main floor under it. A finer height that never became a triangle leaves the coarse ground in place. A tile whose edge is 24 m or less stays on step 8, and one of 80 m or less stays on step 16, so a small tile does not collapse to a 5×5 sheet. Every remaining tile that meets the placed actors, expanded by 200 m, is meshed. There is no fixed tile cap. Samples are about 2 m apart within 70 m of the actor centre (3 m when more than 24 tiles sit in that radius), about 5 m out to 180 m, and about 10 m in the rest of the margin. The step is 8, 16, 32, or 64, never 4, on that path. Each tile’s outer edge grows a vertical skirt (at least 4 m, or 2% of the tile) so two LOD steps meet without a crack. The ground is front-side. **Sub terrain** starts off and shows the overlay, which on Kokiri is a sheet above the actors. Actor LOD, the small-prop distance cull, and the InnerMesh / bake / fade / water-volume filters do not apply to this mesh.
+A coarse cell is dropped only when its centre lies inside a quad a finer tile of the same scene actually emitted. A sub quad does not remove the main floor under it. A finer height that never became a triangle leaves the coarse ground in place. A tile whose edge is 24 m or less stays on step 8, and one of 80 m or less stays on step 16, so a small tile does not collapse to a 5×5 sheet. Every remaining tile that meets the placed actors, expanded by 200 m, is meshed. There is no fixed tile cap. Samples are about 2 m apart within 70 m of the actor centre (3 m when more than 24 tiles sit in that radius), about 5 m out to 180 m, and about 10 m in the rest of the margin. The step is 8, 16, 32, or 64, never 4, on that path. Each tile’s outer edge grows a vertical skirt (at least 4 m, or 2% of the tile) so two LOD steps meet without a crack. The ground is front-side. **Sub terrain** starts off and shows a wireframe reference for the overlay, which on Kokiri sits above the actors. Actor LOD, the small-prop distance cull, and the InnerMesh / bake / fade / water-volume filters do not apply to this mesh.
+
+For a Child or Adult banc, Forge tries `<name>.<child|adult>.mate` in the tile's terrain directory before `<name>.mate`. The generic grid also covers unreadable age-specific grids. In the surveyed build, Hyrule Field has 186 adult material tiles. The material choice keeps the same height samples.
+
+The Lake Hylia fishing pond fit uses the placed `Obj_LakeHrl_WaterPlane_A_07` mesh to bound the underwater area. Where the coarse ground intersects that water sheet, the fit limits ground height to 0.12 m below the local surface. The fit runs in the existing terrain preparation worker. In the viewport, bass and loach spawn positions above the pond mesh have a separate submerged display pose. The saved placement and Inspector coordinates still identify the spawn point.
 
 ## BNTX
 

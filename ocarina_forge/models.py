@@ -58,7 +58,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-49\0"
+_CACHE_VERSION = b"models-51\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -98,6 +98,7 @@ def _converter_files() -> tuple[Path, ...]:
         root / "models.py",
         root / "surface.py",
         root / "formats" / "bfres.py",
+        root / "formats" / "meshlet.py",
         root / "formats" / "bntx.py",
         root / "formats" / "swizzle.py",
         root / "formats" / "terrain.py",
@@ -1174,6 +1175,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     part.positions,
                     part.indices,
                     part.uvs,
+                    normals=part.normals,
                     png=png,
                     alpha=alpha,
                     cutoff=part.cutoff,
@@ -2833,6 +2835,9 @@ def _read_height_tiles(dump, chosen, directories, multipliers, layer: str, varia
     """Load one scene's tiles. `.hght` and `.mate` come from that scene's folder only."""
     rows = []
     loaded = []
+    mate_extensions = (".mate", ".mate.zs")
+    if variant:
+        mate_extensions = (f".{variant}.mate", f".{variant}.mate.zs") + mate_extensions
     for center_x, center_z, edge, name in chosen:
         info = heightmap.TileInfo(name=name, center=(center_x, center_z), edge=edge)
         path, directory = _file_in_dirs(dump, directories, name, (".hght", ".hght.zs"))
@@ -2857,7 +2862,7 @@ def _read_height_tiles(dump, chosen, directories, multipliers, layer: str, varia
         mate_dirs = [directory] if directory else list(directories)
         mate_errors = []
         pairs = None
-        for mate_path, _mate_dir in _files_in_dirs(dump, mate_dirs, name, (".mate", ".mate.zs")):
+        for mate_path, _mate_dir in _files_in_dirs(dump, mate_dirs, name, mate_extensions):
             _track_file(dump, mate_path)
             try:
                 mate_blob, _dict_id = dump.read_file(mate_path)

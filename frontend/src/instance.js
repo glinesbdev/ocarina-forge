@@ -9,8 +9,19 @@
  * that buffer is what made the drag throw after the first slot.
  */
 
-export function actorShown({ status, category, volume, showHidden, categories, hideVolumes }) {
-  const hiddenByStatus = status === "hidden" && !showHidden;
+// Verified initial state from the shipped GameDataList. Forge has no live save flags.
+const PRESENCE_DEFAULTS = new Map([["IsHyruleFieldBridgeClose", false]]);
+
+export function presentByDefault(params) {
+  const presence = params?.[1]?.Presence?.[1];
+  const flag = PRESENCE_DEFAULTS.get(presence?.FlagName?.[1]);
+  const negation = presence?.IsNegation?.[1];
+  if (flag === undefined || typeof negation !== "boolean") return true;
+  return flag !== negation;
+}
+
+export function actorShown({ status, present = true, category, volume, showHidden, categories, hideVolumes }) {
+  const hiddenByStatus = (status === "hidden" || !present) && !showHidden;
   const hiddenByCategory = categories?.[category] === "hide";
   const hiddenByVolume = Boolean(volume) && Boolean(hideVolumes);
   return !hiddenByStatus && !hiddenByCategory && !hiddenByVolume;
@@ -44,12 +55,14 @@ export function groupGeometryDraws(mesh) {
   if (!mesh.userData) mesh.userData = {};
   if (count <= 1) {
     mesh.userData.batchFirst = null;
+    mesh._multiDrawInstances = null;
     return count;
   }
   const starts = mesh._multiDrawStarts;
   const counts = mesh._multiDrawCounts;
   if (!starts || !counts) {
     mesh.userData.batchFirst = null;
+    mesh._multiDrawInstances = null;
     return count;
   }
   const nextStarts = [];
@@ -117,7 +130,7 @@ export function patchBatchedDraw(backend) {
 const reportedMissingUv = new Set();
 
 /**
- * A mapped material on a geometry without `uv` makes the node builder warn
+ * A mapped material on a geometry without its UV channel makes the node builder warn
  * every compile. Clone that material and drop the map. The shared material
  * stays mapped for the meshes that do have uvs. Returns the object names.
  */
@@ -126,12 +139,13 @@ export function dropMapWithoutUv(root) {
   const visit = (node) => {
     if (!node) return;
     const geometry = node.geometry;
-    const missing = geometry && typeof geometry.hasAttribute === "function" && !geometry.hasAttribute("uv");
-    if (missing && node.material) {
+    if (typeof geometry?.hasAttribute === "function" && node.material) {
       const list = Array.isArray(node.material) ? node.material : [node.material];
       let next = null;
       list.forEach((material, index) => {
         if (!material || !material.map) return;
+        const channel = material.map.channel || 0;
+        if (geometry.hasAttribute(channel === 0 ? "uv" : `uv${channel}`)) return;
         if (material.colorNode || (material.userData && (material.userData.terrainNode || material.userData.cutoutNode))) return;
         const copy = typeof material.clone === "function" ? material.clone() : material;
         copy.map = null;

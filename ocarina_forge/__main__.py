@@ -3,6 +3,7 @@
 ``problems <banc>`` prints scene diagnostics. ``model-debug`` prints a bind-pose
 bake or the actors near a point. ``ground-debug <banc>`` prints the ground
 layer. ``material-debug`` prints the shader assign and the uniforms.
+``mesh-audit <banc>`` checks model conversion for the scene and its companion.
 ``material-audit`` groups every model material and lists what the viewer does not draw yet.
 ``tex-debug <name>`` prints a BNTX header and can write the current decode.
 ``tex-audit`` flags a mip-0 size that implies a different block height than usual, and scores the Tegra and Switch 2 GOB orders.
@@ -35,6 +36,7 @@ def main(argv: list[str] | None = None) -> None:
         choices=[
             "problems",
             "model-debug",
+            "mesh-audit",
             "ground-debug",
             "material-debug",
             "material-audit",
@@ -44,13 +46,14 @@ def main(argv: list[str] | None = None) -> None:
             "behavior-audit",
             "behavior-export",
             "warm",
+            "scene-preview",
             "serve",
             "project",
             "edit",
             "mod-export",
             "profile",
         ],
-        help="problems, model-debug, ground-debug, material-debug, material-audit, tex-debug, tex-audit, behavior, behavior-audit, behavior-export, warm, project, edit, mod-export, and profile. The default is the editor server.",
+        help="Commands for auditing, editing, and preparing scenes. The default is the editor server.",
     )
     parser.add_argument("banc", nargs="?", help="Scene path, gyaml, project action (list, create, open), or actor class.")
     parser.add_argument("extra", nargs="?", help="Project name for 'project create' and 'project open'.")
@@ -66,7 +69,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--near", help="x,y,z in metres. List actors within --radius of this point. No gyaml is required.")
     parser.add_argument("--radius", type=float, default=10.0, help="Metres around --near. Default 10.")
     parser.add_argument("--at", action="append", default=[], help="x,z in metres. ground-debug prints the ground height there. Repeat for another point.")
+    parser.add_argument("--resources-only", action="store_true", help="ground-debug reads TSCB resource records and skips terrain payloads.")
     parser.add_argument("--dump", help="Dump folder. Defaults to the saved config.")
+    parser.add_argument("--fallback-dump", help="For scene-preview, use this dump when no dump is configured.")
+    parser.add_argument("--share-textures", action="store_true",
+                        help="For scene-preview, prepare texture-sharing variants for cached models in the map.")
+    parser.add_argument("--prepare-missing", action="store_true",
+                        help="Convert missing meshes when running scene-preview or mesh-audit.")
     parser.add_argument(
         "--strings",
         action="store_true",
@@ -85,11 +94,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--scale", default="", help="x,y,z for edit.")
     parser.add_argument("--install", action="store_true", help="mod-export copies the mod into the game's mods/local folder.")
     parser.add_argument("--game", default="", help="Game install. Default ~/Games/Longshot/mod-test, or config game, or OCARINA_FORGE_GAME.")
-    parser.add_argument("--all", action="store_true", help="warm converts every scene instead of one banc and its neighbors.")
+    parser.add_argument("--all", action="store_true", help="Prepare every scene with warm or scene-preview.")
     parser.add_argument("--scene-only", action="store_true", help="warm converts the named scene and does not walk neighboring scenes.")
-    parser.add_argument("--model", action="append", default=[], help="profile this actor class. Repeat to add another. Example: Land_Kokiri_House_Inside_E_04.")
+    parser.add_argument("--model", action="append", default=[], help="Limit profile or mesh-audit to this actor class. Repeat to add another.")
     parser.add_argument("--cprofile", default="", help="profile writes a cProfile file for one --model cold convert.")
-    parser.add_argument("--limit", type=int, default=0, help="profile stops each scene after N models. 0 means every model.")
+    parser.add_argument("--limit", type=int, default=0, help="Profile or scene-preview stops each scene after N models. 0 means every model.")
     parser.add_argument("--jobs", type=int, default=1, help="profile converts this many models at once. 1 stays in this process.")
     parser.add_argument("--home-cache", action="store_true", help="profile uses the normal model cache. The default is a private directory under ~/.cache/ocarina-forge/profile-tmp.")
     parser.add_argument("--keep-cache", action="store_true", help="profile leaves the private cache directory in place. The default is to delete it on exit.")
@@ -114,10 +123,16 @@ def main(argv: list[str] | None = None) -> None:
                 radius=args.radius,
             )
         )
+    if args.command == "mesh-audit":
+        if not args.banc:
+            parser.error("mesh-audit needs a banc path")
+        raise SystemExit(print_mesh_audit(args.banc, dump=args.dump, models=args.model,
+                                          prepare_missing=args.prepare_missing, as_json=args.json))
     if args.command == "ground-debug":
         if not args.banc:
             parser.error("ground-debug needs a banc path")
-        raise SystemExit(print_ground_debug(args.banc, points=args.at, as_json=args.json, dump=args.dump))
+        raise SystemExit(print_ground_debug(args.banc, points=args.at, as_json=args.json, dump=args.dump,
+                                            resources_only=args.resources_only))
     if args.command == "material-debug":
         if not args.banc:
             parser.error("material-debug needs a gyaml or a bfres path")
@@ -148,6 +163,12 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(print_tex_debug(args.banc, png=args.png, as_json=args.json, dump=args.dump))
     if args.command == "tex-audit":
         raise SystemExit(print_tex_audit(as_json=args.json, dump=args.dump, out=args.out))
+    if args.command == "scene-preview":
+        if bool(args.banc) == args.all:
+            parser.error("scene-preview needs a banc path or --all")
+        raise SystemExit(print_scene_preview(args.banc, dump=args.dump, fallback=args.fallback_dump, all_scenes=args.all,
+                                            limit=args.limit, prepare_missing=args.prepare_missing,
+                                            share_textures=args.share_textures))
     if args.command == "warm":
         if not args.all and not args.banc:
             parser.error("warm needs a banc path or --all")
@@ -394,13 +415,14 @@ def print_model_debug(
     return 0
 
 
-def print_ground_debug(banc: str, *, points: list[str] | None = None, as_json: bool = False, dump: str | None = None) -> int:
+def print_ground_debug(banc: str, *, points: list[str] | None = None, as_json: bool = False, dump: str | None = None,
+                       resources_only: bool = False) -> int:
     """Print the ground layer. 2 when the dump is missing or a point is not x,z."""
     from ocarina_forge.config import load_config
     from ocarina_forge.dump import Dump
     from ocarina_forge.errors import BancError
     from ocarina_forge.formats.terrain import TerrainError
-    from ocarina_forge.grounddebug import inspect_ground, parse_at, render_text
+    from ocarina_forge.grounddebug import inspect_ground, inspect_resources, parse_at, render_resources, render_text
 
     parsed = []
     try:
@@ -420,14 +442,15 @@ def print_ground_debug(banc: str, *, points: list[str] | None = None, as_json: b
         print(exc.message, file=sys.stderr)
         return 2
     try:
-        report = inspect_ground(opened, banc, parsed)
+        report = inspect_resources(opened, banc, parsed) if resources_only else inspect_ground(opened, banc, parsed)
     except (BancError, TerrainError, OSError, ValueError) as exc:
         print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
         return 2
     if as_json:
         print(json.dumps(report, indent=2))
     else:
-        print(render_text(report), end="")
+        render = render_resources if resources_only else render_text
+        print(render(report), end="")
     return 0
 
 
@@ -490,6 +513,62 @@ def print_material_audit(*, as_json: bool = False, dump: str | None = None, out:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(text, encoding="utf-8")
     print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
+def print_mesh_audit(banc: str, *, dump: str | None, models: list[str], prepare_missing: bool, as_json: bool) -> int:
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.meshaudit import audit_scene_meshes, render_text
+
+    path = dump or load_config().get("dump")
+    if not path:
+        print("Set a game dump to audit meshes.", file=sys.stderr)
+        return 2
+    try:
+        report = audit_scene_meshes(Dump(path), banc, models=models, prepare_missing=prepare_missing)
+    except (BancError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(json.dumps(report, indent=2) if as_json else render_text(report))
+    issues = {"missing", "unsupported", "partial", "failed", "invalid"}
+    return int(any(report["counts"].get(status) for status in issues))
+
+
+def print_scene_preview(
+    banc: str | None, *, dump: str | None, fallback: str | None, limit: int, prepare_missing: bool,
+    share_textures: bool, all_scenes: bool = False,
+) -> int:
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.scene_preview import build_all_scene_previews, build_scene_preview, prepare_scene_shared_models
+
+    path = dump or load_config().get("dump") or fallback
+    if not path or limit < 0:
+        print("Set a dump and use a nonnegative model limit.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(path)
+        if all_scenes:
+            result = build_all_scene_previews(opened, limit, prepare_missing=prepare_missing, share_textures=share_textures,
+                                              log=lambda message: print(message, flush=True))
+            print(f"Forge previews ready for {result['ready']} scenes, {result['skipped']} skipped, {result['failed']} failed. "
+                  f"Checked {result['models']} model types and {result['shared']} shared models.", flush=True)
+            return 2 if result["failed"] else 0
+        output, count = build_scene_preview(opened, banc, limit, prepare_missing=prepare_missing)
+    except (BancError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    print(f"Scene preview ready: {count} actor types, {output.stat().st_size:,} bytes", flush=True)
+    if share_textures:
+        try:
+            variants = prepare_scene_shared_models(opened, banc)
+        except (BancError, OSError, ValueError) as exc:
+            print(f"Could not prepare shared model textures: {exc}", file=sys.stderr)
+            return 2
+        print(f"Shared textures ready for {variants} distinct cached models.")
     return 0
 
 

@@ -17,6 +17,14 @@ my-mod/
 
 `build/` is produced by export. Do not treat it as source.
 
+## Importing local Longshot mods
+
+The project chooser also scans `<game>/mods/local/` (the `OCARINA_FORGE_GAME` game root). It can open a matching Forge
+project or import a mod whose `patches/*.json` files contain placement `set` operations on `Translate`, `Rotate`, or
+`Scale`. Other local mods are shown as **Not editable**. Import creates a project in the Forge library and keeps the
+original mod tree, including its runtime entry and manifest fields, in `.longshot-source/`; export and install preserve
+those files while regenerating the placement patches. The game’s Ocarina Forge page can open a local mod directly.
+
 ## manifest.yaml
 
 ```yaml

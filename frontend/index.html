@@ -62,15 +62,26 @@
           <div id="viewport">
             <div id="viewport-empty">
               <p>Open a scene from the list.</p>
-              <p class="muted">Actors start as boxes. Models load from the dump when the scene opens.</p>
+              <p class="muted">The first open prepares scene models before showing them. Later opens reuse the cache.</p>
             </div>
             <div id="model-progress" class="model-progress" hidden>
               <span id="model-progress-text">Loading models</span>
               <i><b id="model-progress-bar"></b></i>
             </div>
+            <div id="scene-prepare" class="scene-prepare" role="status" aria-live="polite" hidden>
+              <div class="scene-prepare-card">
+                <strong id="scene-prepare-title">Preparing scene</strong>
+                <span id="scene-prepare-text"></span>
+                <i><b id="scene-prepare-bar"></b></i>
+              </div>
+            </div>
           </div>
           <div class="stage-bar">
             <strong id="scene-name"></strong>
+            <select id="active-bank" aria-label="Active bank" title="Active bank for new actors and single-bank view" hidden>
+              <option value="Dynamic">Dynamic</option>
+              <option value="Static">Static</option>
+            </select>
             <div class="seg" role="group" aria-label="Gizmo">
               <button type="button" data-gizmo="translate" class="is-on">Move</button>
               <button type="button" data-gizmo="rotate">Rotate</button>
@@ -92,7 +103,7 @@
               </select>
             </label>
             <label class="check" title="Show the ground. A heightmap is on by default. An untextured stand-in is a neutral grid, not a green sheet."><input id="show-ground" type="checkbox" /> Ground</label>
-            <label class="check" title="Off by default. The _sub overlay is a separate sheet above the actors, not the walkable floor."><input id="show-sub" type="checkbox" /> Sub terrain</label>
+            <label class="check" title="Show the separate sub terrain heightmap as a wireframe reference."><input id="show-sub" type="checkbox" /> Sub terrain</label>
             <label class="check" title="Draw water. The front sheet is a faint desaturated layer and does not write depth."><input id="show-water" type="checkbox" checked /> Water</label>
             <label class="check" title="Colour the ground by tile. A tile from the _sub folder is lighter."><input id="terrain-debug" type="checkbox" /> Tile colors</label>
             <label class="check" title="Show the moss blend mask instead of the two textures. White is the overlay, black is the base."><input id="blend-mask" type="checkbox" /> Blend mask</label>

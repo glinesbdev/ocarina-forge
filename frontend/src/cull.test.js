@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { boundsGap, chooseLod, instanceLod, isTerrainProxy, resolveLod, transformSphere } from "./cull.js";
+import { boundsGap, chooseLod, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, transformSphere } from "./cull.js";
+
+test("a prominent preview can stream detail beyond the normal nearby range", () => {
+  const foreground = { inFrustum: true, gap: 300, radius: 100, hasPreview: true };
+  assert.equal(modelLoadTier(foreground), 1);
+  assert.equal(modelLoadTier({ ...foreground, inFrustum: false }), 5);
+  assert.equal(modelLoadTier({ ...foreground, radius: 8 }), 2);
+  assert.equal(modelLoadTier({ ...foreground, gap: 1400, radius: 8 }), 4);
+  assert.equal(modelLoadTier({ ...foreground, hasPreview: false }), 2);
+  assert.equal(modelLoadTier({ ...foreground, gap: 45, radius: 4, hasPreview: false }), 1);
+  assert.equal(modelLoadTier({ ...foreground, gap: 15, inFrustum: false }), 3);
+  assert.equal(modelLoadTier({ ...foreground, selected: true, inFrustum: false }), 0);
+  assert.equal(isForegroundModel(modelLoadTier(foreground)), true);
+  assert.equal(isForegroundModel(modelLoadTier({ ...foreground, inFrustum: false })), false);
+});
+
+test("glTF near and far meshes stay in the same family after Three sanitizes their names", () => {
+  const near = { name: "lod0Mountain5", userData: { name: "lod0:Mountain:5" }, uuid: "near" };
+  const far = { name: "lod1Mountain5", userData: { name: "lod1:Mountain:5" }, uuid: "far" };
+  assert.deepEqual(modelLod(near), { lod: 0, family: "Mountain:5" });
+  assert.deepEqual(modelLod({ name: "primitive", parent: far }), { lod: 1, family: "Mountain:5" });
+  assert.deepEqual(modelLod({ name: "legacy", uuid: "other" }), { lod: 0, family: "other" });
+});
 
 test("a selected actor keeps the full mesh", () => {
   assert.equal(chooseLod({ distance: 400, radius: 0.4, pixels: 1, hasFar: true, selected: true }), 0);

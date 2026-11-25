@@ -61,6 +61,62 @@ def list_projects(config: dict | None = None) -> list[dict]:
     return found
 
 
+def list_local_mods(config: dict | None = None) -> list[dict]:
+    """Local game mods Forge can open or import from their placement patches."""
+    from ocarina_forge.importers.longshot_mod import inspect_local_mod, local_slug
+
+    root = game_root(config) / "mods" / "local"
+    if not root.is_dir():
+        return []
+    projects = {row["modId"]: row for row in list_projects(config)}
+    found = []
+    for folder in sorted(root.iterdir()):
+        if folder.is_symlink() or not folder.is_dir():
+            continue
+        try:
+            slug = local_slug(f"local/{folder.name}")
+        except BancError:
+            continue
+        identifier = f"local/{slug}"
+        existing = projects.get(identifier)
+        row = {
+            "id": identifier,
+            "name": folder.name,
+            "title": folder.name,
+            "version": "",
+            "path": str(folder),
+            "editable": False,
+            "action": "import",
+            "reason": "",
+        }
+        try:
+            if existing:
+                row.update({
+                    "name": existing["name"],
+                    "title": existing["title"],
+                    "version": existing["version"],
+                    "editable": True,
+                    "action": "open_project",
+                    "projectRoot": existing["root"],
+                })
+                row["reason"] = "An existing Forge project will be opened; local patch changes are not re-imported."
+            else:
+                info = inspect_local_mod(folder, identifier)
+                manifest = info["manifest"]
+                row.update({
+                    "name": str(manifest.get("name") or folder.name),
+                    "title": str(manifest.get("name") or folder.name),
+                    "version": str(manifest.get("version") or ""),
+                    "editable": True,
+                    "action": "import",
+                    "reason": f"{len(info['patches'])} placement patch file(s) can be imported.",
+                })
+        except BancError as exc:
+            row["reason"] = exc.message
+        found.append(row)
+    return found
+
+
 def create_in_library(
     name: str,
     title: str,

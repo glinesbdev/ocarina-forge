@@ -57,6 +57,7 @@ decodes. `<tile>.<child|adult>.bake_ao.extm` uses the same header and is a
 
 from __future__ import annotations
 
+import math
 import re
 import struct
 from dataclasses import dataclass, field
@@ -176,6 +177,87 @@ def read_tscb(data: bytes) -> tuple[float, float, list[tuple[float, float, float
     if not tiles:
         raise TerrainError("TSCB has no named tiles")
     return scale, height, tiles
+
+
+def read_tscb_resources(data: bytes) -> dict:
+    """Read the resource index of an OoT 0x10D TSCB without opening tile files."""
+    if len(data) < 0x80 or data[:4] != b"TSCB":
+        raise TerrainError("not a TSCB terrain index")
+    version = struct.unpack_from("<I", data, 4)[0]
+    if version != 0x10D:
+        raise TerrainError(f"TSCB resource layout for version {version:#x} is unverified")
+    strings = _rel(data, 0x0C)
+    if not 0x80 <= strings < len(data):
+        raise TerrainError("TSCB string pool is outside the file")
+
+    def string(at: int) -> str:
+        start = _rel(data, at)
+        end = data.find(b"\0", start, start + 256)
+        if not strings <= start < len(data) or end < 0:
+            raise TerrainError(f"TSCB resource string at {at:#x} is invalid")
+        return data[start:end].decode("utf-8", "replace")
+
+    def offsets(count_at: int, table_at: int, maximum: int) -> list[int]:
+        count = struct.unpack_from("<I", data, count_at)[0]
+        start = _rel(data, table_at)
+        end = start + 4 * count
+        if count > maximum or not 0x7C <= start <= end <= strings:
+            raise TerrainError(f"TSCB offset table at {table_at:#x} is outside the index")
+        result = [_rel(data, slot) for slot in range(start, end, 4)]
+        if any(not end <= at < strings for at in result):
+            raise TerrainError(f"TSCB offset table at {table_at:#x} points outside its data")
+        return result
+
+    types = {}
+    for at in offsets(0x30, 0x70, 4096):
+        if at + 0x70 > strings:
+            raise TerrainError("TSCB file-type record is truncated")
+        code = struct.unpack_from("<I", data, at)[0]
+        if code in types:
+            raise TerrainError(f"TSCB repeats file type {code:#x}")
+        resource_type = at + 0x6C
+        types[code] = {
+            "type": code,
+            "name": string(at + 0x60),
+            "extension": string(at + 0x64),
+            "resourceType": string(resource_type) if _rel(data, resource_type) != resource_type else None,
+        }
+
+    area_offsets = offsets(0x38, 0x78, 200000)
+    boundaries = sorted(set(area_offsets) | {strings})
+    ends = dict(zip(boundaries, boundaries[1:]))
+    tiles = []
+    for at in area_offsets:
+        end = ends[at]
+        if at + 0x68 > end:
+            raise TerrainError("TSCB area header is truncated")
+        count = struct.unpack_from("<I", data, at + 0x20)[0]
+        slots = at + 0x68
+        slots_end = slots + 4 * count
+        if slots_end > end:
+            raise TerrainError("TSCB area resource table is truncated")
+        x, z, edge = struct.unpack_from("<3f", data, at)
+        if not all(math.isfinite(value) for value in (x, z, edge)) or edge <= 0:
+            raise TerrainError("TSCB area dimensions are invalid")
+        resources = []
+        for slot in range(slots, slots_end, 4):
+            record = _rel(data, slot)
+            # The last record can have less trailing padding before strings.
+            if not slots_end <= record <= end - 0x28:
+                raise TerrainError("TSCB area resource record points outside its area")
+            code = struct.unpack_from("<I", data, record)[0]
+            low, high = struct.unpack_from("<2f", data, record + 0x20)
+            resources.append({
+                "type": code,
+                "extension": types.get(code, {}).get("extension"),
+                "rawMin": low if math.isfinite(low) else None,
+                "rawMax": high if math.isfinite(high) else None,
+            })
+        tiles.append({"name": string(at + 0x60), "center": [x, z], "edge": edge, "resources": resources})
+    scale, height = struct.unpack_from("<2f", data, 0x10)
+    if not math.isfinite(scale) or not math.isfinite(height) or scale <= 0 or height == 0:
+        raise TerrainError("TSCB resource index scales are invalid")
+    return {"version": version, "scale": scale, "heightScale": height, "fileTypes": list(types.values()), "tiles": tiles}
 
 
 def unpack_hght(data: bytes, dicts) -> bytes:

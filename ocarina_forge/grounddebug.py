@@ -12,6 +12,7 @@ is the one the opened banc uses.
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 from ocarina_forge.actors import format_hash, read_vec
 from ocarina_forge.errors import BancError
@@ -207,6 +208,60 @@ def _load(dump, banc: str) -> dict:
         "tiles": catalog,
         "loaded": loaded,
     }
+
+
+def inspect_resources(dump, banc: str, points: list[tuple[float, float]]) -> dict:
+    """List the declared TerrainArc resources without loading their payloads."""
+    from ocarina_forge.models import _locate_heightmap, _lookup_directories, _tscb_candidates
+
+    located = _locate_heightmap(dump, banc)
+    path = located.get("tscb")
+    if not path:
+        raise heightmap.TerrainError(located.get("missing") or f"No terrain index for {banc}")
+    scene = located["scene"]
+    raw, _dict_id = dump.read_file(path)
+    origin = tuple(located["origin"])
+    directories = _lookup_directories(dump, scene, located.get("document"), raw)
+    sources = []
+    for folder in dict.fromkeys((scene, *directories)):
+        if folder == scene:
+            source = path
+            data = raw
+        else:
+            source = next((item for item in _tscb_candidates(folder) if (dump.romfs / item).is_file()), "")
+            if not source:
+                continue
+            data, _dict_id = dump.read_file(source)
+        index = heightmap.read_tscb_resources(data)
+        tiles = index["tiles"]
+        counts = Counter(resource["type"] for tile in tiles for resource in tile["resources"])
+        if points:
+            matching = []
+            for tile in tiles:
+                left, top, right, bottom = heightmap._world_box(*tile["center"], tile["edge"], index["scale"], origin)
+                if any(left <= x <= right and top <= z <= bottom for x, z in points):
+                    matching.append(tile)
+            index["tiles"] = matching
+        sources.append(index | {
+            "source": source,
+            "tileCount": len(tiles),
+            "resourceCounts": dict(sorted(counts.items())),
+        })
+    return {"banc": banc, "origin": origin, "points": points, "sources": sources}
+
+
+def render_resources(report: dict) -> str:
+    lines = [f"Terrain resources for {report['banc']}"]
+    for index in report["sources"]:
+        lines.append(f"{index['source']} · TSCB {index['version']:#x} · {index['tileCount']} tiles")
+        types = {item["type"]: item["extension"] for item in index["fileTypes"]}
+        for code in sorted(types.keys() | index["resourceCounts"].keys()):
+            lines.append(f"  {code:#06x} {types.get(code, '(unknown extension)')} · {index['resourceCounts'].get(code, 0)} records")
+        if report["points"]:
+            for tile in index["tiles"]:
+                extensions = ", ".join(item["extension"] or f"{item['type']:#x}" for item in tile["resources"])
+                lines.append(f"  Tile {tile['name']} · {extensions or 'no resources'}")
+    return "\n".join(lines) + "\n"
 
 
 def _sample(report: dict, x: float, z: float) -> dict:

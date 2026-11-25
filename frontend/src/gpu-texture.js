@@ -178,18 +178,24 @@ export function createGpuTextureLoader(options) {
     if (onError) onError(new Error("no texture"));
   }
 
-  function load(url, onLoad, _onProgress, onError) {
+  function download(url, onLoad, onError, deferred) {
     fetch(url).then((response) => {
       if (!response.ok) throw new Error(`texture download failed (${response.status})`);
       return response.arrayBuffer();
     }).then((buffer) => {
-      parse(buffer, onLoad, onError);
+      const apply = () => parse(buffer, onLoad, onError);
+      if (deferred && options.scheduleDetailParse) options.scheduleDetailParse(apply);
+      else apply();
     }).catch((error) => {
       if (onError) onError(error);
     });
   }
 
-  return { load, parse };
+  return {
+    load: (url, onLoad, _onProgress, onError) => download(url, onLoad, onError, false),
+    loadDeferred: (url, onLoad, _onProgress, onError) => download(url, onLoad, onError, true),
+    parse,
+  };
 }
 
 export function canUploadCompressed(gl, format, levels) {

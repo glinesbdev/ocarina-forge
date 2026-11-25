@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 const source = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
@@ -39,7 +42,7 @@ test("the map replacement has no function definitions", () => {
     MAP,
     /\b(?:void|float|int|uint|bool|vec[234]|mat[234]|sampler2D)\s+[A-Za-z_]\w*\s*\([^;]*\)\s*\{/
   );
-  assert.match(MAP, /if \(terrainLayerMissing < 0\.5 && terrainSub < 0\.5 && vTerrainMark\.y > 0\.5\) discard;/);
+  assert.doesNotMatch(MAP, /\bdiscard\b/);
   const inject = source.indexOf('.replace("void main() {", `${TERRAIN_FUNCS}\\nvoid main() {`)');
   const maps = source.indexOf('.replace("#include <map_fragment>", TERRAIN_MAP)');
   const decls = source.lastIndexOf("#include <uv_pars_fragment>", inject);
@@ -64,12 +67,12 @@ test("committing an edit does not rebuild the field", () => {
   assert.match(setActors, /shouldReloadTerrain\(terrainBanc, options\.banc\)/);
   assert.doesNotMatch(setActors, /clearTerrain\(/);
   assert.doesNotMatch(load, /clearTerrain\(/);
-  assert.match(source, /renderer\.compileAsync\(root, camera, scene\)/);
+  assert.match(source, /warmWebGLPrograms\(renderer, root, camera, scene\)/);
   assert.match(source, /renderer\.initTexture\(map\)/);
   assert.match(source, /function showTerrain\(nextRoot\)/);
 });
 
-test("sub terrain starts off and the field is front-side", () => {
+test("sub terrain is an opt-in wireframe, excluded from snapping", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const box = html.match(/<input id="show-sub"[^>]*>/);
@@ -77,10 +80,13 @@ test("sub terrain starts off and the field is front-side", () => {
   assert.equal(box[0].includes("checked"), false);
   assert.match(main, /showSub:\s*false/);
   assert.match(source, /let showSub = false/);
+  assert.match(source, /wireframe: true, transparent: true, opacity: .*depthWrite: false/);
+  assert.match(source, /\(isSub \? sub : ground\)\.push\(a, b, c\)/);
+  assert.match(source, /!child\.geometry \|\| child\.userData\.subTerrain/);
   assert.match(source, /material\.side = THREE\.FrontSide/);
 });
 
-test("the terrain shader compiles", async () => {
+test("the terrain shader renders ground in both normal and Tile Colors modes", async () => {
   const page = `<!doctype html>
 <meta charset="utf-8">
 <script type="importmap">{"imports":{"three":"/three.module.js"}}</script>
@@ -112,11 +118,11 @@ try {
   const texture = new THREE.DataTexture(new Uint8Array([180, 140, 90, 255]), 1, 1);
   texture.needsUpdate = true;
   const material = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.85, metalness: 0 });
+  const terrainDebug = { value: 0 };
   material.onBeforeCompile = (shader) => {
     shader.uniforms.terrainCols = { value: 4 };
     shader.uniforms.terrainRepeat = { value: 8 };
-    shader.uniforms.terrainDebug = { value: 0 };
-    shader.uniforms.terrainSub = { value: 1 };
+    shader.uniforms.terrainDebug = terrainDebug;
     shader.uniforms.terrainLayerMissing = { value: 0 };
     shader.vertexShader = shader.vertexShader
       .replace("#include <uv_pars_vertex>", UV_PARS_VERT)
@@ -127,10 +133,21 @@ try {
       .replace("#include <map_fragment>", TERRAIN_MAP);
   };
   const scene = new THREE.Scene();
-  scene.add(new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material));
+  scene.add(new THREE.AmbientLight(0xffffff, 2));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), material);
+  ground.position.set(0.5, 0.5, 0.5);
+  scene.add(ground);
+  scene.background = new THREE.Color(0);
   const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 20);
-  camera.position.set(0, 0.4, 2);
-  renderer.render(scene, camera);
+  camera.position.set(0.5, 1.5, 0.5);
+  camera.lookAt(ground.position);
+  const pixel = new Uint8Array(4);
+  for (const debug of [0, 1]) {
+    terrainDebug.value = debug;
+    renderer.render(scene, camera);
+    gl.readPixels(32, 32, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+    if (!pixel[0] && !pixel[1] && !pixel[2]) errors.push("Missing ground in Tile Colors mode " + debug);
+  }
   window.__shader = { errors };
 } catch (error) {
   window.__shader = { errors: [String(error && error.stack || error)] };
@@ -150,20 +167,25 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
   const debug = 9341;
-  const chrome = spawn("google-chrome", [
+  const profile = await mkdtemp(join(tmpdir(), "forge-terrain-shader-"));
+  const chrome = spawn(process.env.CHROME || "google-chrome", [
     "--headless=new",
     "--disable-gpu",
     "--no-sandbox",
     "--use-gl=angle",
     "--use-angle=swiftshader",
+    "--enable-unsafe-swiftshader",
     `--remote-debugging-port=${debug}`,
-    `--user-data-dir=/tmp/terrain-shader-${process.pid}`,
+    `--user-data-dir=${profile}`,
     `http://127.0.0.1:${port}/`,
   ], { stdio: "ignore" });
+  let launchError;
+  chrome.once("error", (error) => { launchError = error; });
 
   try {
     let socketUrl = "";
     for (let i = 0; i < 40 && !socketUrl; i += 1) {
+      if (launchError) throw launchError;
       try {
         const list = await (await fetch(`http://127.0.0.1:${debug}/json/list`)).json();
         const tab = list.find((item) => item.type === "page" && item.webSocketDebuggerUrl);
@@ -178,7 +200,9 @@ try {
     assert.deepEqual(result.errors, [], result.errors.join("\n"));
   } finally {
     chrome.kill("SIGKILL");
+    server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
 

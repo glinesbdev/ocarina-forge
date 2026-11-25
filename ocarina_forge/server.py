@@ -10,7 +10,9 @@ import signal
 import threading
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ocarina_forge import __version__
+from ocarina_forge.actors import is_marker
 from ocarina_forge.changes import project_report, scene_changes
 from ocarina_forge.config import load_config, save_config
 from ocarina_forge.dump import Dump
@@ -38,7 +41,9 @@ from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, replace_diff, scene_view, sibling_bancs
 from ocarina_forge.streamlog import STREAM
-from ocarina_forge.warm import queue_warm, scene_model_names
+from ocarina_forge.scene_preview import corrected_terrain_path, prepare_scene_terrain, preview_bank, preview_path, terrain_fit_pending
+from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, shared_model_path, shared_texture_path
+from ocarina_forge.warm import scene_warm_queue
 
 def _ignore_sigint() -> None:
     """Worker processes must not print KeyboardInterrupt when the terminal gets Ctrl+C."""
@@ -84,6 +89,7 @@ _POOL_SIZE = 0
 _POOL_INFLIGHT = 0
 _POOL_WANT: int | None = None
 _PREFETCH: set[asyncio.Task] = set()
+_TERRAIN_FIT_LOCK = asyncio.Lock()
 
 
 def _configured_workers() -> tuple[int, int, str]:
@@ -178,22 +184,53 @@ async def _submit(fn, *args):
 _CONVERTING: dict[str, asyncio.Future] = {}
 _CONVERT_LOCK = asyncio.Lock()
 _INTERACTIVE = 0
-_WARM_QUEUE: list[tuple[str, str]] = []
-_WARM_DONE = 0
-_WARM_TOTAL = 0
-_WARM_SCENE = ""
-_WARM_SEEN: set[str] = set()
+
+
+@dataclass
+class _WarmJob:
+    job_id: int
+    scene: str
+    queue: list[str]
+    total: int
+    done: int = 0
+    in_flight: int = 0
+    failed: int = 0
+    failures: list[dict] = field(default_factory=list)
+    phase: str = "warming"
+
+
+_WARM_JOB: _WarmJob | None = None
+_WARM_JOB_ID = 0
 _WARM_TASK: asyncio.Task | None = None
 _WARM_EVENT: asyncio.Event | None = None
 
 
 def _warm_status() -> dict:
+    job = _WARM_JOB
+    if job is None:
+        return {
+            "jobId": None,
+            "scene": "",
+            "phase": "idle",
+            "done": 0,
+            "total": 0,
+            "inFlight": 0,
+            "left": 0,
+            "failed": 0,
+            "failures": [],
+            "paused": _INTERACTIVE > 0,
+        }
     return {
-        "scene": _WARM_SCENE,
-        "done": _WARM_DONE,
-        "total": _WARM_TOTAL,
+        "jobId": job.job_id,
+        "scene": job.scene,
+        "phase": job.phase,
+        "done": job.done,
+        "total": job.total,
+        "inFlight": job.in_flight,
+        "left": len(job.queue),
+        "failed": job.failed,
+        "failures": job.failures[:5],
         "paused": _INTERACTIVE > 0,
-        "left": sum(1 for kind, _name in _WARM_QUEUE if kind == "model"),
     }
 
 
@@ -214,41 +251,86 @@ def _leave_interactive() -> None:
     _kick_warm()
 
 
+def _warm_failure(name: str, result) -> dict | None:
+    if isinstance(result, BaseException):
+        message = str(result) or result.__class__.__name__
+    elif not isinstance(result, dict):
+        message = "Model conversion returned no metadata."
+    elif result.get("status") != "mesh":
+        reason = result.get("reason") or f"Model is unavailable ({result.get('status', 'unknown')})."
+        if reason.startswith(("No mesh.", "Marker")) or (result.get("status") == "box" and is_marker(name)):
+            return None
+        message = reason
+    else:
+        return None
+    return {"name": name, "message": message[:500]}
+
+
+def _record_warm_result(job: _WarmJob, name: str, result) -> None:
+    if _WARM_JOB is not job:
+        return
+    job.in_flight = max(0, job.in_flight - 1)
+    job.done += 1
+    failure = _warm_failure(name, result)
+    if failure:
+        job.failed += 1
+        if len(job.failures) < 20:
+            job.failures.append(failure)
+
+
 async def _warm_loop() -> None:
-    """One model at a time, and only while nothing interactive is waiting."""
-    global _WARM_DONE, _WARM_TOTAL, _WARM_QUEUE
-    while True:
-        if _INTERACTIVE > 0 or not _WARM_QUEUE:
+    """Prepare a scene with bounded concurrency, yielding to interactive converts."""
+    active: dict[asyncio.Task, tuple[_WarmJob, str]] = {}
+    try:
+        while True:
+            job = _WARM_JOB
+            if job is not None and job.phase == "warming":
+                if not job.queue and not job.in_flight:
+                    job.phase = "failed" if job.failed else "ready"
+                    continue
+                worker_count, _cpus, _source = _configured_workers()
+                limit = min(2, max(1, worker_count))
+                while job.queue and _INTERACTIVE == 0 and len(active) < limit:
+                    name = job.queue.pop(0)
+                    task = asyncio.create_task(_describe_model(name, interactive=False))
+                    active[task] = (job, name)
+                    job.in_flight += 1
+                if active:
+                    completed, _pending = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                    for task in completed:
+                        owner, name = active.pop(task)
+                        try:
+                            result = task.result()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            result = exc
+                        _record_warm_result(owner, name, result)
+                    continue
+            if active:
+                completed, _pending = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+                for task in completed:
+                    owner, name = active.pop(task)
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        result = exc
+                    _record_warm_result(owner, name, result)
+                continue
             assert _WARM_EVENT is not None
             _WARM_EVENT.clear()
-            if _INTERACTIVE > 0 or not _WARM_QUEUE:
-                await _WARM_EVENT.wait()
+            if _WARM_JOB is not job:
                 continue
-        kind, name = _WARM_QUEUE.pop(0)
-        if _INTERACTIVE > 0:
-            _WARM_QUEUE.insert(0, (kind, name))
-            continue
-        if kind == "scene":
-            # A Static file has no Actors array. Skip it and keep the queue moving.
-            try:
-                extra = await asyncio.to_thread(scene_model_names, _open_dump(), name)
-            except Exception:
-                extra = []
-            fresh = []
-            for item in extra:
-                if item in _WARM_SEEN:
-                    continue
-                _WARM_SEEN.add(item)
-                fresh.append(("model", item))
-            _WARM_QUEUE[0:0] = fresh
-            _WARM_TOTAL += len(fresh)
-            _kick_warm()
-            continue
-        try:
-            await _describe_model(name, interactive=False)
-        except Exception:
-            pass
-        _WARM_DONE += 1
+            if job is not None and job.phase == "warming" and job.queue and _INTERACTIVE == 0:
+                continue
+            await _WARM_EVENT.wait()
+    except asyncio.CancelledError:
+        for task in active:
+            task.cancel()
+        await asyncio.gather(*active, return_exceptions=True)
+        raise
 
 
 def _ensure_warm() -> None:
@@ -267,7 +349,10 @@ def _publish(info: dict) -> dict:
         return info
     published = dict(info)
     join = "&" if "?" in url else "?"
-    published["url"] = f"{url}{join}v={digest}"
+    version = digest
+    if url.startswith("/api/models/") and shared_model_path(digest).is_file():
+        version = f"{digest}-{SHARED_MODEL_VERSION}"
+    published["url"] = f"{url}{join}v={version}"
     return published
 
 
@@ -472,26 +557,33 @@ def stream_summary():
 
 @app.post("/api/warm")
 async def start_warm(body: dict):
-    """Queue this scene, nearest first, then neighboring scenes. Pauses while the view is converting."""
-    global _WARM_QUEUE, _WARM_DONE, _WARM_TOTAL, _WARM_SCENE
+    """Prepare one scene and its Static/Dynamic sibling before opening it."""
+    global _WARM_JOB, _WARM_JOB_ID
     banc = str(body.get("banc") or "")
     nearest = [name for name in (body.get("names") or []) if isinstance(name, str) and name]
+    if not banc:
+        raise BancError("Which scene?", "edit")
     dump = _open_dump()
 
-    def plan() -> list[tuple[str, str]]:
-        scenes = [item["path"] for item in dump.list_scenes()]
-        if banc and banc not in scenes and banc not in {"all", "--all"}:
-            raise BancError(f"No scene {banc}.", "not_found")
-        # Neighbor files stay as markers. The loop parses one after the target's models start.
-        return queue_warm(dump, banc, nearest, neighbors=True)
-
-    _WARM_QUEUE = await asyncio.to_thread(plan)
-    _WARM_DONE = 0
-    _WARM_TOTAL = sum(1 for kind, _name in _WARM_QUEUE if kind == "model")
-    _WARM_SEEN = {name for kind, name in _WARM_QUEUE if kind == "model"}
-    _WARM_SCENE = banc
+    try:
+        names = await asyncio.to_thread(scene_warm_queue, dump, banc, nearest)
+    except ValueError as exc:
+        raise BancError(str(exc), "not_found") from exc
+    _WARM_JOB_ID += 1
+    _WARM_JOB = _WarmJob(
+        job_id=_WARM_JOB_ID,
+        scene=banc,
+        queue=names,
+        total=len(names),
+        phase="warming" if names else "ready",
+    )
     _ensure_warm()
     _kick_warm()
+    return _warm_status()
+
+
+@app.get("/api/warm")
+def warm_status():
     return _warm_status()
 
 
@@ -602,6 +694,37 @@ def get_projects():
 
     config = load_config()
     return {"root": str(projects_root(config)), "projects": list_projects(config)}
+
+
+@app.get("/api/local-mods")
+def get_local_mods():
+    from ocarina_forge.projects import game_root, list_local_mods
+
+    config = load_config()
+    return {
+        "root": str(game_root(config) / "mods" / "local"),
+        "mods": list_local_mods(config),
+    }
+
+
+@app.post("/api/local-mods/open")
+def open_local_mod(body: dict):
+    from ocarina_forge.importers.longshot_mod import import_local_mod, local_slug
+    from ocarina_forge.projects import game_root, list_projects, projects_root
+
+    identifier = body.get("id")
+    if not isinstance(identifier, str):
+        raise BancError("Choose a local mod id.", "mod_import")
+    slug = local_slug(identifier)
+    config = load_config()
+    existing = next((row for row in list_projects(config) if row["modId"] == identifier), None)
+    if existing:
+        project = Project(existing["root"])
+    else:
+        source = game_root(config) / "mods" / "local" / slug
+        project = import_local_mod(source, projects_root(config) / slug, identifier)
+    save_config(project=str(project.root))
+    return project.summary()
 
 
 @app.post("/api/project")
@@ -750,6 +873,19 @@ def scene_problems(banc: str):
     return diagnose(_open_dump(), _open_project(), banc)
 
 
+@app.get("/api/scene/mesh-audit")
+def scene_mesh_audit(banc: str):
+    from ocarina_forge.meshaudit import audit_scene_meshes
+
+    dump = _open_dump()
+
+    def view(bank):
+        document, _, _ = dump.read_byml(bank)
+        return _attach_recipes(scene_view(document, _diff_for(bank)), bank)
+
+    return audit_scene_meshes(dump, banc, view=view)
+
+
 @app.get("/api/scene")
 def get_scene(banc: str):
     dump = _open_dump()
@@ -758,7 +894,25 @@ def get_scene(banc: str):
     view = scene_view(document, diff)
     view["banc"] = banc
     view = _attach_recipes(view, banc)
-    return _attach_companions(view, banc, dump)
+    view = _attach_companions(view, banc, dump)
+    preview = preview_bank(dump, banc, {extra["banc"] for extra in view.get("companions", [])})
+    try:
+        version = preview_path(dump, preview).stat().st_mtime_ns
+    except FileNotFoundError:
+        pass
+    else:
+        view["previewUrl"] = "/api/scene/preview.glb?" + urlencode({"banc": preview, "v": version})
+    return view
+
+
+@app.get("/api/scene/preview.glb")
+def scene_preview_file(banc: str, request: Request):
+    path = preview_path(_open_dump(), banc)
+    try:
+        version = str(path.stat().st_mtime_ns)
+    except FileNotFoundError:
+        raise BancError("This scene has no preview pack.", "not_found") from None
+    return _cached_file(request, path, "scene-preview.glb", version)
 
 
 @app.post("/api/scene/edit")
@@ -854,7 +1008,7 @@ async def models_batch(body: dict):
     # worker keeps the old path: the batch stays a lookup, and the GET starts
     # the convert. That is what the single-worker cache test locks.
     count, _, _ = _configured_workers()
-    if count > 1:
+    if count > 1 and body.get("prefetch", True):
         for name, info in found.items():
             if info.get("status") == "queued":
                 task = asyncio.create_task(_describe_model(name, interactive=True))
@@ -875,18 +1029,61 @@ async def model_file(gyaml: str, request: Request):
     path = _cached_glb(digest) if info.get("status") == "mesh" else None
     if path is None:
         raise BancError(info.get("reason") or "This actor has no converted model.", "not_found")
+    variant = f"{digest}-{SHARED_MODEL_VERSION}"
+    if request.query_params.get("v") == variant:
+        shared = shared_model_path(digest)
+        if shared.is_file():
+            return _cached_file(request, shared, f"{gyaml}.glb", variant)
     return _cached_file(request, path, f"{gyaml}.glb", digest)
 
 
+@app.get("/api/model-textures/{name}")
+def shared_texture_file(name: str):
+    path = shared_texture_path(name)
+    if path is None or not path.is_file():
+        raise BancError("This shared model texture is not in the cache.", "not_found")
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".ktx2": "image/ktx2"}[path.suffix]
+    return FileResponse(path, media_type=mime, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 @app.get("/api/terrain")
-async def terrain_info(banc: str):
-    return await _describe_terrain_model(banc)
+async def terrain_info(banc: str, refine: bool = False):
+    info = await _describe_terrain_model(banc)
+    if info.get("status") != "mesh":
+        return info
+    dump = _open_dump()
+    if refine and terrain_fit_pending(dump, banc, info):
+        async with _TERRAIN_FIT_LOCK:
+            await asyncio.to_thread(prepare_scene_terrain, dump, banc, info)
+    _, version = _corrected_terrain(dump, banc, info)
+    if version:
+        return {**info, "url": "/api/terrain/model.glb?" + urlencode({"banc": banc, "v": version})}
+    if not refine and terrain_fit_pending(dump, banc, info):
+        return {**info, "fitPending": True}
+    return info
+
+
+def _corrected_terrain(dump, banc: str, info: dict) -> tuple[Path | None, str]:
+    digest = info.get("digest") or ""
+    if info.get("status") != "mesh" or not digest:
+        return None, ""
+    path = corrected_terrain_path(dump, banc, digest)
+    if path:
+        try:
+            return path, f"{path.stem}-{path.stat().st_mtime_ns}"
+        except FileNotFoundError:
+            pass
+    return None, ""
 
 
 @app.get("/api/terrain/model.glb")
 async def terrain_file(banc: str, request: Request):
     info = await _describe_terrain_model(banc)
     digest = info.get("digest") or ""
+    if info.get("status") == "mesh" and request.query_params.get("v") != digest:
+        corrected, version = _corrected_terrain(_open_dump(), banc, info)
+        if corrected:
+            return _cached_file(request, corrected, "terrain.glb", version)
     path = _cached_glb(digest) if info.get("status") == "mesh" else None
     if path is None:
         raise BancError(info.get("reason") or "This scene has no converted map model.", "not_found")
@@ -899,6 +1096,14 @@ def behavior(gyaml: str = "", banc: str = "", id: str = ""):
     from ocarina_forge.behavior_edit import apply_ops
 
     dump = _open_dump()
+    if "::" in id:
+        source, _, placement = id.partition("::")
+        available = {scene["path"] for scene in dump.list_scenes()}
+        if not placement:
+            raise BancError("The actor's placement ID is missing.", "actor")
+        if source not in available or (banc and source != banc and source not in sibling_bancs(banc, available)):
+            raise BancError("The actor's placement bank is not part of this scene.", "actor")
+        banc, id = source, placement
     graph = load_actor_graph(dump, gyaml=gyaml, banc=banc, actor_id=id)
     ops = []
     try:
