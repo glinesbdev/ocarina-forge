@@ -7,7 +7,7 @@ from PIL import Image
 
 from ocarina_forge.formats.gpu import ktx2, pack_texture, split_texture
 from ocarina_forge.formats.gltf import join_glb, split_glb
-from ocarina_forge.shared_models import externalize_images, publish_texture_bytes, reduced_texture, shared_texture_path
+from ocarina_forge.shared_models import externalize_images, publish_texture_bytes, read_shared_texture, reduced_texture, shared_texture_path
 
 
 def test_external_images_preserve_accessor_and_meshopt_ranges():
@@ -101,3 +101,87 @@ def test_concurrent_publishes_of_one_texture_share_the_file(tmp_path, monkeypatc
     before = state["calls"]
     assert shared.publish_texture_bytes(payload) == urls[0]
     assert state["calls"] == before
+
+
+def _denied(src, dst):
+    error = PermissionError(
+        13,
+        "The process cannot access the file because it is being used by another process",
+        src,
+        32,
+        dst,
+    )
+    error.winerror = 32
+    raise error
+
+
+def test_an_open_destination_with_the_same_bytes_is_reused(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path))
+    import ocarina_forge.shared_models as shared
+
+    payload = b"OCFG-held-open"
+    url = shared.publish_texture_bytes(payload)
+    name = url.rsplit("/", 1)[-1]
+    path = shared.shared_texture_path(name)
+    holder = path.open("rb")
+    calls = {"n": 0}
+
+    def blocked(src, dst):
+        calls["n"] += 1
+        _denied(src, dst)
+
+    monkeypatch.setattr(shared.os, "replace", blocked)
+    try:
+        assert shared.publish_texture_bytes(payload) == url
+        assert calls["n"] == 0
+        assert shared.read_shared_texture(name) == payload
+        assert not holder.closed
+    finally:
+        holder.close()
+
+
+def test_a_locked_destination_still_serves_the_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path))
+    import ocarina_forge.shared_models as shared
+
+    payload = b"OCFG-stat-locked"
+    url = shared.publish_texture_bytes(payload)
+    name = url.rsplit("/", 1)[-1]
+    path = shared.shared_texture_path(name)
+    holder = path.open("rb")
+    real_stat = os.stat
+
+    def locked_stat(target, *args, **kwargs):
+        if os.path.abspath(target) == os.path.abspath(path):
+            error = PermissionError(13, "Access is denied", target)
+            error.winerror = 32
+            raise error
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(shared.os, "replace", _denied)
+    monkeypatch.setattr(shared.os, "stat", locked_stat)
+    try:
+        assert shared.publish_texture_bytes(payload) == url
+        assert shared.read_shared_texture(name) == payload
+        assert not holder.closed
+    finally:
+        holder.close()
+
+
+def test_a_rename_that_never_lands_still_serves_the_bytes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path))
+    import ocarina_forge.shared_models as shared
+
+    def locked_unlink(self, missing_ok=False):
+        error = PermissionError(13, "Permission denied", str(self))
+        error.winerror = 32
+        raise error
+
+    monkeypatch.setattr(shared.os, "replace", _denied)
+    monkeypatch.setattr(shared.Path, "unlink", locked_unlink)
+    payload = b"OCFG-never-renamed"
+    url = shared.publish_texture_bytes(payload)
+    name = url.rsplit("/", 1)[-1]
+    path = shared.shared_texture_path(name)
+    assert path is not None and not path.is_file()
+    assert shared.read_shared_texture(name) == payload

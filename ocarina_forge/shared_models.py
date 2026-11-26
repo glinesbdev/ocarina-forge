@@ -35,16 +35,22 @@ def shared_texture_path(name: str) -> Path | None:
     return cache_dir() / TEXTURE_STORE / "textures" / name[:2] / name
 
 
-_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
+# Bytes whose rename has not landed. The file name is the content hash, so a
+# later read can serve this copy when Windows still has the destination open.
+_PENDING: dict[str, bytes] = {}
+_PENDING_ORDER: list[str] = []
+_PENDING_GUARD = threading.Lock()
+_PENDING_LIMIT = 256
 
 
-def _path_lock(path: Path) -> threading.Lock:
+def _path_lock(path: Path) -> threading.RLock:
     key = str(path)
     with _PATH_LOCKS_GUARD:
         lock = _PATH_LOCKS.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = threading.RLock()
             _PATH_LOCKS[key] = lock
         return lock
 
@@ -63,36 +69,113 @@ def _sharing_violation(error: BaseException) -> bool:
     return getattr(error, "winerror", None) == 32
 
 
-def _replace_unique(path: Path, data: bytes) -> None:
-    """Publish ``data`` as ``path``. Concurrent writers do not share a temp name.
+def _remember_pending(name: str, blob: bytes) -> None:
+    with _PENDING_GUARD:
+        if name in _PENDING_ORDER:
+            _PENDING_ORDER.remove(name)
+        _PENDING[name] = blob
+        _PENDING_ORDER.append(name)
+        _trim_pending()
 
-    Windows rejects ``os.replace`` with WinError 32 while another handle still
-    has the destination open. A short retry covers that. If the destination
-    already holds these bytes, the replace is skipped.
+
+def _forget_pending(name: str) -> None:
+    with _PENDING_GUARD:
+        _PENDING.pop(name, None)
+        if name in _PENDING_ORDER:
+            _PENDING_ORDER.remove(name)
+
+
+def _pending_bytes(name: str) -> bytes | None:
+    with _PENDING_GUARD:
+        return _PENDING.get(name)
+
+
+def _trim_pending() -> None:
+    """Drop a published image once its file reads back. Called with the guard held."""
+    while len(_PENDING_ORDER) > _PENDING_LIMIT:
+        dropped = False
+        for index, old in enumerate(list(_PENDING_ORDER)):
+            data = _PENDING.get(old)
+            path = shared_texture_path(old)
+            if data is None or path is None or not _same_bytes(path, data):
+                continue
+            _PENDING_ORDER.pop(index)
+            _PENDING.pop(old, None)
+            dropped = True
+            break
+        if dropped:
+            continue
+        if len(_PENDING_ORDER) <= _PENDING_LIMIT * 2:
+            return
+        old = _PENDING_ORDER.pop(0)
+        _PENDING.pop(old, None)
+
+
+def write_cached_bytes(path: Path, data: bytes) -> str:
+    """Write ``data`` to ``path``. A sharing violation does not raise.
+
+    ``written`` means this call renamed the file. ``existing`` means the
+    destination already held these bytes, including when a handle still had
+    it open and ``os.replace`` failed. ``pending`` means the rename never
+    landed; the caller still has the bytes.
     """
-    if _same_bytes(path, data):
-        return
-    temporary = path.with_name(
-        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
-    )
-    temporary.write_bytes(data)
-    delay = 0.01
-    try:
-        for attempt in range(6):
-            if _same_bytes(path, data):
-                return
+    blob = bytes(data)
+    with _path_lock(path):
+        if _same_bytes(path, blob):
+            return "existing"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+        )
+        try:
+            temporary.write_bytes(blob)
+        except OSError as error:
+            if _sharing_violation(error):
+                return "existing" if _same_bytes(path, blob) else "pending"
+            raise
+        delay = 0.02
+        try:
+            for attempt in range(8):
+                if _same_bytes(path, blob):
+                    return "existing"
+                try:
+                    os.replace(temporary, path)
+                    return "written"
+                except OSError as error:
+                    if not _sharing_violation(error):
+                        raise
+                    if attempt == 7 or _same_bytes(path, blob):
+                        return "existing" if _same_bytes(path, blob) else "pending"
+                    time.sleep(delay)
+                    delay = min(delay * 2, 0.2)
+        finally:
             try:
-                os.replace(temporary, path)
-                return
-            except OSError as error:
-                if not _sharing_violation(error) or attempt == 5:
-                    if _same_bytes(path, data):
-                        return
-                    raise
-                time.sleep(delay)
-                delay = min(delay * 2, 0.2)
-    finally:
-        temporary.unlink(missing_ok=True)
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return "existing" if _same_bytes(path, blob) else "pending"
+
+
+def read_shared_texture(name: str) -> bytes | None:
+    """The texture bytes, read into memory and closed.
+
+    A destination that is still open, or a rename that has not landed, is
+    served from the bytes the publisher already held. The response does not
+    keep a file handle.
+    """
+    path = shared_texture_path(name)
+    pending = _pending_bytes(name)
+    if path is not None:
+        try:
+            if path.is_file():
+                data = path.read_bytes()
+                if pending is None or len(data) == len(pending):
+                    _forget_pending(name)
+                    return data
+                return pending
+        except OSError:
+            pass
+    return pending
 
 
 def publish_texture_bytes(data: bytes) -> str:
@@ -100,8 +183,9 @@ def publish_texture_bytes(data: bytes) -> str:
 
     GPU packs (``OCFG`` / KTX2) use the ``.ktx2`` suffix. JPEG and PNG keep
     their own. The bytes are content-addressed, so a second model that shares
-    the image does not write it again. One lock per path keeps two requests
-    from renaming onto the same file.
+    the image does not write it again. A Windows sharing violation on the
+    rename does not fail the request: the same bytes are served from memory
+    or from the file that is already there.
     """
     blob = bytes(data)
     if blob.startswith(b"\xff\xd8"):
@@ -114,25 +198,22 @@ def publish_texture_bytes(data: bytes) -> str:
     path = shared_texture_path(name)
     if path is None:
         raise ValueError("texture name was rejected")
-    with _path_lock(path):
-        if _same_bytes(path, blob):
-            note_access(path)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _replace_unique(path, blob)
-            note_written(path)
+    _remember_pending(name, blob)
+    result = write_cached_bytes(path, blob)
+    if result == "written":
+        note_written(path)
+    elif result == "existing":
+        note_access(path)
     return f"/api/model-textures/{name}"
 
 
 def _atomic_write(path: Path, data: bytes | bytearray | memoryview) -> None:
     blob = bytes(data)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _path_lock(path):
-        if _same_bytes(path, blob):
-            note_access(path)
-            return
-        _replace_unique(path, blob)
-    note_written(path)
+    result = write_cached_bytes(path, blob)
+    if result == "written":
+        note_written(path)
+    elif result == "existing":
+        note_access(path)
 
 
 def _view_references(document):

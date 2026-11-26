@@ -74,3 +74,48 @@ export function formatTextureDebug(report) {
   }
   return [text, ...samples].join("\n");
 }
+
+/**
+ * One block for the actor that is selected. Paste this when a mesh is the
+ * wrong colour: it names the albedo slot, the file, the format, and the uv
+ * span on the geometry that is actually drawn.
+ */
+export function formatActorTextureDebug(actor) {
+  const row = actor || {};
+  const lines = [
+    "forge texdebug actor",
+    `gyaml=${row.gyaml || ""}`,
+    `name=${row.name || ""}`,
+    `parts=${(row.parts || []).length}`,
+  ];
+  for (const part of row.parts || []) {
+    const color = (part.color || []).slice(0, 3).map((item) => Number(item).toFixed(2)).join(",");
+    lines.push(
+      [
+        `part ${part.name || "?"}`,
+        `material=${part.material || ""}`,
+        `banc=${part.banc || ""}`,
+        `sampler=${part.sampler || ""}`,
+        `texture=${part.texture || ""}`,
+        `format=${part.format || ""}`,
+        `map=${part.map ? 1 : 0}`,
+        `url=${part.url || ""}`,
+        `compressed=${part.compressed ? 1 : 0}`,
+        `ch=${Number.isInteger(part.channel) ? part.channel : 0}`,
+        `vertexColors=${part.vertexColors ? 1 : 0}`,
+        `colorNode=${part.colorNode ? 1 : 0}`,
+        `blend=${part.blend ? 1 : 0}`,
+        `alphaTest=${Number(part.alphaTest) || 0}`,
+        `transparent=${part.transparent ? 1 : 0}`,
+        color ? `color=${color}` : "",
+        `attrs=${(part.attributes || []).join("|") || "none"}`,
+      ].filter(Boolean).join(" "),
+    );
+  }
+  for (const role of row.roles || []) {
+    lines.push(
+      `role ${role.material || "?"} sampler=${role.sampler || ""} texture=${role.texture || ""} uv=${role.uv || ""} alpha=${role.alpha || ""}`,
+    );
+  }
+  return lines.join("\n");
+}

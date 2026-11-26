@@ -2510,6 +2510,13 @@ function renderDetails() {
   panel.append(title, modelBlock(actor));
   const materials = materialBlock(viewport.modelInfo(actor.id));
   if (materials) panel.append(materials);
+  const dump = viewport.textureDebugSelection && viewport.textureDebugSelection();
+  if (dump) {
+    const block = document.createElement("pre");
+    block.className = "material-dump";
+    block.textContent = dump;
+    panel.append(block);
+  }
 }
 
 function modelBlock(actor) {

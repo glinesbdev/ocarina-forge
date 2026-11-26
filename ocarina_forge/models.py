@@ -345,7 +345,12 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                 }
                 continue
             if part.stand_in == "water":
-                color = _WATER if part.texture == _WATER_TEX or image is None else (0.35, 0.55, 0.55, 0.2)
+                # The ripple image is already the teal. Multiplying it by the
+                # same tint again flattens the wave into one cyan sheet.
+                if part.texture == _WATER_TEX or image is None:
+                    color = (1.0, 1.0, 1.0, _WATER[3])
+                else:
+                    color = (0.35, 0.55, 0.55, 0.2)
                 alpha = "blend"
             elif part.proxy and image is None:
                 color = _TERRAIN
@@ -376,6 +381,15 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                     if part.blend.get("skinColor"):
                         blend_slot["skinColor"] = [float(channel) for channel in part.blend["skinColor"][:4]]
                 slot["blend"] = blend_slot
+            slot["texture"] = part.texture or ""
+            slot["sampler"] = part.albedo_sampler or ""
+            if image is not None:
+                codec = getattr(image, "codec", "") or ""
+                fmt = getattr(image, "fmt", 0) or 0
+                slot["format"] = f"{codec or format(int(fmt), '#x')} {getattr(image, 'width', 0)}x{getattr(image, 'height', 0)}".strip()
+            if part.stand_in == "water" and (part.texture == _WATER_TEX or image is None):
+                slot["standIn"] = "water"
+                slot["texture"] = part.texture or _WATER_TEX
             slot["status"] = "ready"
             slot["found"] = found
             slot["error"] = ""
@@ -639,6 +653,24 @@ def _stamp_flat_sources(models, dump=None, hint: str = "") -> None:
             )
 
 
+def _stamp_flat_water(models) -> None:
+    """Mark a water material on the geometry file without decoding its image."""
+    for model in models:
+        model_name = getattr(model, "name", "") or ""
+        materials = model.materials or []
+        for part in model.parts:
+            labels = [model_name, part.name, part.material]
+            if 0 <= part.material_index < len(materials):
+                material = materials[part.material_index]
+                labels.append(getattr(material, "name", "") or "")
+                labels.extend(tex for _slot, tex in (getattr(material, "binds", None) or []) if tex)
+            if not _water_names(*labels):
+                continue
+            part.stand_in = "water"
+            part.alpha = "blend"
+            part.base_color = _WATER
+
+
 def _present_companions(dump, hint: str) -> list[str]:
     """``.Tex.bfres`` files that exist. A pack was already opened by the Tex lookup.
 
@@ -690,6 +722,11 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
             _plan_layer_blends(models)
             _stamp_flat_sources(models, dump, hint)
             _drop_textures(models)
+            # The geometry file does not decode the ripple. Tag the material
+            # anyway so the viewer generates tiled UVs. Without the tag, a
+            # water plane that has no TEXCOORD samples nothing and stays the
+            # flat cyan tint when the stand-in arrives.
+            _stamp_flat_water(models)
             external, log, raws = {}, [], []
         else:
             _fill_texture_names(models, dump)
@@ -949,12 +986,16 @@ def _write_bwtx(path: Path, decoded: list) -> None:
         blocks = getattr(image, "blocks", b"") or b""
         payload += struct.pack("<HHHI", getattr(image, "block_w", 0), getattr(image, "block_h", 0), getattr(image, "bytes_per", 0), len(blocks))
         payload += blocks
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(b"BWTX" + struct.pack("<H", 2) + zlib.compress(bytes(payload), 1))
-    os.replace(tmp, path)
-    write_version_sidecar(path, bntx_version())
-    note_written(path)
+    from ocarina_forge.shared_models import write_cached_bytes
+
+    encoded = b"BWTX" + struct.pack("<H", 2) + zlib.compress(bytes(payload), 1)
+    result = write_cached_bytes(path, encoded)
+    try:
+        write_version_sidecar(path, bntx_version())
+    except OSError:
+        pass
+    if result == "written":
+        note_written(path)
 
 
 def _pack_str(text: str) -> bytes:
@@ -1058,12 +1099,19 @@ def _encode_cached(image, alpha: str, gpu: bool = False) -> bytes:
     encoded = gpu_image(image, alpha) if gpu else None
     if not encoded:
         encoded, _mime = encode_albedo(image.width, image.height, image.rgba, alpha)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(encoded)
-    os.replace(tmp, path)
-    write_version_sidecar(path, bntx_version())
-    note_written(path)
+    from ocarina_forge.shared_models import write_cached_bytes
+
+    # A sharing violation must not become "decode error" for the whole actor.
+    # The caller still has ``encoded`` when the rename does not land.
+    result = write_cached_bytes(path, encoded)
+    try:
+        write_version_sidecar(path, bntx_version())
+    except OSError:
+        pass
+    if result == "written":
+        note_written(path)
+    elif result == "existing":
+        note_access(path)
     _remember_img(token, encoded)
     return encoded
 
@@ -1124,20 +1172,24 @@ def _consider_water(names: list[str], binds, result: dict) -> dict:
 
 
 def _water_ripple():
-    """A small tiled colour so a moat is not a flat sheet when the albedo is missing."""
+    """A small tiled colour so a moat is not a flat sheet when the albedo is missing.
+
+    The wave has to be obvious at a 4 m tile. A few steps of the same cyan,
+    multiplied again by the material tint, reads as one flat sheet.
+    """
     from ocarina_forge.formats.bntx import Texture
 
     width = height = 16
     rgba = bytearray(width * height * 4)
     for y in range(height):
         for x in range(width):
-            wave = ((x * 3 + y * 5) % 8) / 7
-            band = 1 if (x // 4 + y // 4) % 2 == 0 else 0
-            red = int(18 + wave * 20)
-            green = int(70 + wave * 40 + band * 12)
-            blue = int(88 + wave * 36)
+            crest = 0.5 + 0.5 * math.sin((x * 0.85 + y * 0.35) * math.pi / 2)
+            band = 1 if ((x // 2) + (y // 3)) % 2 == 0 else 0
+            red = int(8 + crest * 36)
+            green = int(42 + crest * 120 + band * 28)
+            blue = int(58 + crest * 96)
             at = (y * width + x) * 4
-            rgba[at : at + 4] = bytes((red, green, blue, 210))
+            rgba[at : at + 4] = bytes((red, green, blue, 255))
     return Texture(_WATER_TEX, width, height, bytes(rgba), 0, "generated water stand-in")
 
 

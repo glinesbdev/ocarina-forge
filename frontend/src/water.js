@@ -19,11 +19,34 @@ export function isPreviewWater(material, surface, actor) {
   return material.transparent && /\b(?:water(?:plane|surface|fall|front|back)|shallowwater)\w*\b|\bwater\b/i.test(names);
 }
 
-export function ensureWaterUv(geometry, channel = 0) {
+function uvSpan(attribute) {
+  let minU = Infinity;
+  let maxU = -Infinity;
+  let minV = Infinity;
+  let maxV = -Infinity;
+  for (let i = 0; i < attribute.count; i += 1) {
+    const u = attribute.getX(i);
+    const v = attribute.getY(i);
+    if (u < minU) minU = u;
+    if (u > maxU) maxU = u;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+  }
+  if (!Number.isFinite(minU)) return 0;
+  return Math.max(maxU - minU, maxV - minV);
+}
+
+export function ensureWaterUv(geometry, channel = 0, options = {}) {
+  if (!geometry || typeof geometry.hasAttribute !== "function") return false;
   const attribute = channel === 0 ? "uv" : `uv${channel}`;
-  if (geometry.hasAttribute(attribute)) return;
+  const retile = Boolean(options && options.retile);
+  if (geometry.hasAttribute(attribute)) {
+    // A chart that already repeats is the authored tiling. A 0..1 chart on a
+    // lake stretches the 16×16 stand-in into one texel and looks flat.
+    if (!retile || uvSpan(geometry.getAttribute(attribute)) > 2) return false;
+  }
   const position = geometry.getAttribute("position");
-  if (!position?.count) return;
+  if (!position?.count) return false;
   if (!geometry.boundingBox) geometry.computeBoundingBox();
   const { min, max } = geometry.boundingBox;
   const width = max.x - min.x;
@@ -38,4 +61,5 @@ export function ensureWaterUv(geometry, channel = 0) {
     uv[2 * i + 1] = (horizontal ? position.getZ(i) : position.getY(i)) / WATER_TILE_SIZE;
   }
   geometry.setAttribute(attribute, new Float32BufferAttribute(uv, 2));
+  return true;
 }

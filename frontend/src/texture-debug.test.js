@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatTextureDebug, noteTexturePipelineError, resetTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
+import { formatActorTextureDebug, formatTextureDebug, noteTexturePipelineError, resetTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 
 test("texture debug is off unless the flag or the stored value is 1", () => {
   assert.equal(textureDebugEnabled("", null), false);
@@ -62,6 +62,35 @@ test("the texture pipeline warns once and keeps the first error", () => {
       error: texturePipelineError(),
     });
     assert.match(text, /allow=1 requested=4 fetched=4 decoded=0 assigned=0 error=Textures are not loaded\./);
+    const actor = formatActorTextureDebug({
+      gyaml: "Land_LakeHrl_Tree_A_01",
+      name: "Tree",
+      parts: [{
+        name: "Bark:0",
+        material: "Mt_Bark",
+        banc: "",
+        sampler: "_a0",
+        texture: "Tree_Alb",
+        format: "bc7 1024x1024",
+        map: true,
+        url: "/api/model-textures/abc.ktx2",
+        compressed: true,
+        channel: 0,
+        vertexColors: false,
+        colorNode: true,
+        blend: false,
+        alphaTest: 0,
+        transparent: false,
+        color: [1, 1, 1],
+        attributes: ["position", "uv 0.000..1.000,0.000..1.000"],
+      }],
+      roles: [{ material: "Mt_Bark", sampler: "_a0", texture: "Tree_Alb", uv: "_u0", alpha: "opaque" }],
+    });
+    assert.match(actor, /forge texdebug actor/);
+    assert.match(actor, /gyaml=Land_LakeHrl_Tree_A_01/);
+    assert.match(actor, /sampler=_a0 texture=Tree_Alb format=bc7 1024x1024/);
+    assert.match(actor, /attrs=position\|uv 0.000..1.000,0.000..1.000/);
+    assert.match(actor, /role Mt_Bark sampler=_a0 texture=Tree_Alb uv=_u0/);
   } finally {
     console.warn = original;
     resetTexturePipelineError();

@@ -68,6 +68,33 @@ test("a failed image request warns once and leaves the material untextured", asy
   }
 });
 
+test("a water stand-in records the ripple and does not keep the cyan multiply", async () => {
+  const mesh = material();
+  mesh.transparent = true;
+  await applyTextureManifest(
+    [{ materialKey: "Sheet:0", material: mesh }],
+    {
+      materials: {
+        "Sheet:0": {
+          map: "/api/model-textures/ripple.ktx2",
+          standIn: "water",
+          texture: "ocarina-forge-water",
+          sampler: "_a0",
+          format: "generated 16x16",
+          color: [1, 1, 1, 0.62],
+          alpha: "blend",
+        },
+      },
+    },
+    async () => texture("/api/model-textures/ripple.ktx2"),
+  );
+  assert.equal(mesh.userData.waterStandIn, true);
+  assert.equal(mesh.userData.forgeAlbedoName, "ocarina-forge-water");
+  assert.equal(mesh.userData.forgeAlbedoSampler, "_a0");
+  assert.equal(mesh.userData.forgeAlbedoFormat, "generated 16x16");
+  assert.deepEqual(mesh.color.rgb, [1, 1, 1]);
+});
+
 test("a manifest keys the glTF node without its lod prefix", () => {
   assert.equal(materialKey("lod0:Body:0"), "Body:0");
   assert.equal(materialKey("lod1:Body:0"), "Body:0");

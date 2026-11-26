@@ -251,6 +251,10 @@ async function assignSlot(material, slot, loadTexture) {
     const color = slot.color;
     material.color.setRGB(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
   }
+  if (slot.standIn === "water") userData.waterStandIn = true;
+  if (slot.texture) userData.forgeAlbedoName = String(slot.texture);
+  if (slot.sampler) userData.forgeAlbedoSampler = String(slot.sampler);
+  if (slot.format) userData.forgeAlbedoFormat = String(slot.format);
   const albedo = asTexture(material.map);
   if (albedo && slot.tile) {
     albedo.wrapS = REPEAT;

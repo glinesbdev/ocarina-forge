@@ -55,6 +55,10 @@ export function attachAlbedo(material) {
     return material;
   }
   const map = material.map;
+  // Opaque albedo keeps alpha 1. Returning the texel alpha punches holes
+  // wherever a mask or a block stores a low alpha, which draws as black
+  // blotches on a light mesh. Cutouts use attachCutout. Blend keeps the alpha.
+  const opaque = material.transparent !== true;
   material.colorNode = Fn((builder) => {
     const channel = Number.isInteger(map.channel) ? map.channel : 0;
     const name = channel > 0 ? `uv${channel}` : "uv";
@@ -69,7 +73,7 @@ export function attachAlbedo(material) {
     // material, and a batch whose geometry has no TEXCOORD still draws it.
     if (!hasUv) return vec4(tint, 1);
     const sampled = texture(map, uv(channel));
-    return vec4(sampled.rgb.mul(tint), sampled.a);
+    return vec4(sampled.rgb.mul(tint), opaque ? float(1) : sampled.a);
   })();
   material.userData = userData || {};
   material.userData.albedoNode = true;

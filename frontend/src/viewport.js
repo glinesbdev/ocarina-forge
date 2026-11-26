@@ -51,7 +51,7 @@ import { buildCapture, countTextures, createProfileWindow, formatProfileHud, rec
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
-import { formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
+import { formatActorTextureDebug, formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -951,6 +951,21 @@ let convertSlots = 8;
     return changed;
   }
 
+  function retileWaterStandIns(parts) {
+    let changed = 0;
+    const seen = new Set();
+    for (const part of parts || []) {
+      const material = part && part.material;
+      const geometry = part && part.geometry;
+      if (!material || !geometry || seen.has(geometry)) continue;
+      if (!material.userData || !material.userData.waterStandIn) continue;
+      seen.add(geometry);
+      const channel = material.map && Number.isInteger(material.map.channel) ? material.map.channel : 0;
+      if (ensureWaterUv(geometry, channel, { retile: true })) changed += 1;
+    }
+    return changed;
+  }
+
   function finishTextureEdit(parts) {
     if (texturesShown) restoreShownMaps(parts, true);
     const seen = new Set();
@@ -964,10 +979,14 @@ let convertSlots = 8;
     // A new key, or a mesh that still has the pre-upload stamp, has to be
     // built again so compileAsync sees the map. Rebind first so the mesh
     // already on screen samples the map without waiting out that rebuild.
+    // The stand-in ripple is 16×16. A 0..1 chart stretches it into one flat
+    // cyan sheet, so those UVs are replaced before the batch is built again.
+    const retiled = retileWaterStandIns(parts);
     uvDirty = true;
     const rebound = rebindDrawnMaps();
-    if (rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
+    if (retiled || rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
     noteTextureDebug();
+    logSelectionTextureDebug();
   }
 
   function loadOwnedTexture(url) {
@@ -4225,6 +4244,7 @@ uniform float terrainLayerMissing;`
     attach();
     syncLabels();
     updateSnapGrid(selected ? entries.get(selected) : null);
+    logSelectionTextureDebug();
     requestRender();
   }
 
@@ -5471,6 +5491,101 @@ uniform float terrainLayerMissing;`
   }
 
   let textureDebugSignature = "";
+  let selectionDebugSignature = "";
+
+  function attributeSpan(attribute) {
+    let minU = Infinity;
+    let maxU = -Infinity;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    const count = Math.min(attribute.count || 0, 4096);
+    for (let i = 0; i < count; i += 1) {
+      const u = attribute.getX(i);
+      const v = attribute.getY(i);
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    if (!Number.isFinite(minU)) return "";
+    return ` ${minU.toFixed(3)}..${maxU.toFixed(3)},${minV.toFixed(3)}..${maxV.toFixed(3)}`;
+  }
+
+  function textureDebugSelection() {
+    const entry = selected ? entries.get(selected) : null;
+    if (!entry) return "";
+    const parts = [];
+    for (const part of entry.parts || []) {
+      const material = part && part.material;
+      const geometry = part && part.geometry;
+      const userData = (material && material.userData) || {};
+      const map = material && material.map && material.map.isTexture === true ? material.map : null;
+      const attributes = [];
+      const named = geometry && geometry.attributes ? geometry.attributes : null;
+      if (named) {
+        for (const name of Object.keys(named)) {
+          const attr = named[name];
+          const span = attr && (name === "uv" || name.startsWith("uv")) ? attributeSpan(attr) : "";
+          attributes.push(`${name}${span}`);
+        }
+      }
+      const color = material && material.color;
+      parts.push({
+        name: part.name || part.materialKey || "",
+        material: (material && material.name) || "",
+        banc: userData.banc || "",
+        sampler: userData.forgeAlbedoSampler || "",
+        texture: userData.forgeAlbedoName || "",
+        format: userData.forgeAlbedoFormat || "",
+        map: Boolean(map),
+        url: (map && map.name) || userData.forgeMapUrl || "",
+        compressed: Boolean(map && map.isCompressedTexture),
+        channel: map && Number.isInteger(map.channel) ? map.channel : 0,
+        vertexColors: Boolean(material && material.vertexColors),
+        colorNode: Boolean(material && (material.colorNode || userData.albedoNode || userData.cutoutNode)),
+        blend: Boolean(userData.blend || userData.blendNode),
+        alphaTest: material && material.alphaTest ? material.alphaTest : 0,
+        transparent: Boolean(material && material.transparent),
+        color: color ? [color.r, color.g, color.b] : [],
+        attributes,
+      });
+    }
+    const roles = [];
+    for (const row of (entry.modelMeta && entry.modelMeta.textureLog) || []) {
+      if (!row) continue;
+      const albedo = (row.roles || []).find((role) => role && role[2] === "albedo");
+      roles.push({
+        material: row.material || "",
+        sampler: albedo ? albedo[0] : "",
+        texture: albedo ? albedo[1] : "",
+        uv: albedo ? albedo[3] : "",
+        alpha: row.alpha || "",
+      });
+    }
+    return formatActorTextureDebug({
+      gyaml: entry.gyaml || "",
+      name: entry.name || "",
+      parts,
+      roles,
+    });
+  }
+
+  function logSelectionTextureDebug() {
+    let search = "";
+    let stored = null;
+    try {
+      search = window.location.search;
+      stored = window.localStorage.getItem("ocarinaforge.texdebug");
+    } catch {
+      return;
+    }
+    if (!textureDebugEnabled(search, stored)) return;
+    const text = textureDebugSelection();
+    if (!text || text === selectionDebugSignature) return;
+    selectionDebugSignature = text;
+    console.info(text);
+  }
+
 
   function noteTextureDebug() {
     let search = "";
@@ -6107,6 +6222,7 @@ uniform float terrainLayerMissing;`
       return lastLightingNote;
     },
     modelInfo,
+    textureDebugSelection,
     auditPlacements,
     auditView,
     shaderDiagnostics,

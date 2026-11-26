@@ -3050,6 +3050,19 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
     assert "baseColorTexture" in doc["materials"][0]["pbrMetallicRoughness"]
     assert doc["materials"][0]["alphaMode"] == "BLEND"
     assert doc["materials"][0]["extras"]["banc"] == "water"
+    from ocarina_forge.models import describe_actor_textures
+
+    flat = describe_actor(dump, "Tm_Pond", flat=True)
+    flat_doc = _document((tmp_path / "cache" / flat["digest"][:2] / f"{flat['digest']}.glb").read_bytes())
+    flat_mat = flat_doc["materials"][0]
+    assert flat_mat["extras"]["banc"] == "water"
+    assert "baseColorTexture" not in flat_mat["pbrMetallicRoughness"]
+    manifest = describe_actor_textures(dump, "Tm_Pond")
+    slot = next(iter(manifest["materials"].values()))
+    assert slot["standIn"] == "water"
+    assert slot["texture"] == "ocarina-forge-water"
+    assert slot["color"][0] == 1.0
+    assert slot["color"][3] == 0.62
 
 
 def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeypatch):

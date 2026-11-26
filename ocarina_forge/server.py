@@ -54,7 +54,7 @@ from ocarina_forge.grounddebug import query_ground
 from ocarina_forge.lighting import lighting_report
 from ocarina_forge.surface_pack import load_or_build_surface
 from ocarina_forge.scene_preview import corrected_terrain_path, prepare_scene_terrain, preview_bank, preview_path, terrain_fit_pending
-from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, shared_model_path, shared_texture_path
+from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, read_shared_texture, shared_model_path, shared_texture_path
 from ocarina_forge.warm import scene_warm_queue
 
 def _ignore_sigint() -> None:
@@ -1232,14 +1232,17 @@ async def model_file(gyaml: str, request: Request, flat: int = 0, load: str = ""
 @app.get("/api/model-textures/{name}")
 def shared_texture_file(name: str):
     path = shared_texture_path(name)
-    if path is None or not path.is_file():
+    if path is None:
         raise BancError("This shared model texture is not in the cache.", "not_found")
-    note_access(path)
+    # Read into memory and close. FileResponse and StaticFiles keep a handle,
+    # and Windows cannot replace a file that is open without FILE_SHARE_DELETE.
+    # A rename that has not landed is served from the publisher's bytes.
+    payload = read_shared_texture(name)
+    if payload is None:
+        raise BancError("This shared model texture is not in the cache.", "not_found")
+    if path.is_file():
+        note_access(path)
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".ktx2": "image/ktx2"}[path.suffix]
-    # Read and close before the response is sent. FileResponse keeps the
-    # handle open, and on Windows that blocks the atomic rename of a writer
-    # that lost the race to create the same content-addressed file.
-    payload = path.read_bytes()
     return Response(content=payload, media_type=mime, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
