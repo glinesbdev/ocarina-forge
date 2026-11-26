@@ -31,14 +31,18 @@ import {
 } from "three/tsl";
 import { pickMask, resolvePickTexture } from "./gpu-pick.js";
 
-// One Node class means one id counter. A second copy (three/webgpu importing a
-// different three.tsl.js than this file) restarts that counter, and the builder
-// then treats our nodes as the camera uniforms that share those ids.
-if (Node !== TslNode) {
-  throw new Error(
-    "WebGPU loaded two copies of three's node system (three/webgpu and three/tsl). Pick ids would be written as camera matrices.",
-  );
+const SPLIT_NODE_SYSTEM = "WebGPU loaded two copies of three's node system (three/webgpu and three/tsl). GPU picking is off; clicks use the CPU raycast.";
+
+// One Node class means one id counter. A second copy restarts that counter, and
+// the builder then treats our nodes as the camera uniforms that share those ids.
+// This must not throw: a throw during the dynamic import takes down the editor.
+export function rejectSplitNodeSystem(webgpuNode, tslNode) {
+  if (webgpuNode === tslNode) return false;
+  console.error(SPLIT_NODE_SYSTEM);
+  return true;
 }
+
+export const nodeSystemsDiffer = rejectSplitNodeSystem(Node, TslNode);
 
 function texelNode(tex) {
   const node = texture(tex).setSampler(false).setUpdateMatrix(false);
@@ -77,6 +81,7 @@ function maskNode(material, hasUv) {
 }
 
 export function createNodePickMaterial({ uniforms, getActiveObject }) {
+  if (nodeSystemsDiffer) return null;
   const excludeNode = watchedTexel(() => resolvePickTexture(uniforms.forgeExclude.value));
   const material = new NodeMaterial();
   material.fragmentNode = Fn((builder) => {

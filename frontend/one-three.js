@@ -25,12 +25,28 @@ export function mark(id) {
   return `${id}${String(id).includes("?") ? "&" : "?"}${WEBGPU_MARK}`;
 }
 
+/** Module ids use forward slashes. `path.join` on Windows puts backslashes back. */
+export function moduleId(file) {
+  return String(file).replaceAll("\\", "/");
+}
+
 /** r187 keeps TSL in three.tsl.js. three.webgpu.js imports that file; it does not re-export `reference`. */
 export function tslBuild(webgpuFile) {
-  // three.webgpu.js imports this sibling. Aliasing `three/tsl` onto the WebGPU
-  // build drops `reference`, and pointing it at any other file duplicates the
-  // Node class and its id counter.
-  return path.join(path.dirname(webgpuFile), "three.tsl.js");
+  // Fallback only. resolveId prefers Vite's resolution of `./three.tsl.js` from
+  // the WebGPU build, which realpaths the file. A hand-built path can differ
+  // on Windows (drive-letter case, directory case) and Rollup then loads a
+  // second Node class with its own id counter.
+  const file = moduleId(webgpuFile);
+  const slash = file.lastIndexOf("/");
+  return `${slash === -1 ? "" : file.slice(0, slash)}/three.tsl.js`;
+}
+
+async function canonicalTsl(resolve, webgpuFile) {
+  if (typeof resolve !== "function") return tslBuild(webgpuFile);
+  const resolved = await resolve("./three.tsl.js", moduleId(webgpuFile), { skipSelf: true });
+  const id = typeof resolved === "string" ? resolved : resolved?.id;
+  if (id && !resolved?.external) return id;
+  return tslBuild(webgpuFile);
 }
 
 /** The resolved file that must be the WebGPU build, or null to keep it. A TSL prebundle points at three.tsl.js. */
@@ -70,18 +86,21 @@ export function oneThreePlugin(webgpuFile) {
       const sourceMarked = source.includes(WEBGPU_MARK);
       if (!fromMarked && !sourceMarked) return null;
       const bare = unmark(source);
-      if (bare === "three" || bare === "three/webgpu") return webgpuFile;
-      if (bare === "three/tsl") return tslBuild(webgpuFile);
+      if (bare === "three" || bare === "three/webgpu") return moduleId(webgpuFile);
+      if (bare === "three/tsl") return canonicalTsl(this.resolve, webgpuFile);
       const raw = rawDependency(bare, webgpuFile);
-      if (raw) return mark(raw);
+      if (raw) return mark(moduleId(raw));
       const importerFile = importer ? unmark(importer) : undefined;
       const resolved = await this.resolve(bare, importerFile, { skipSelf: true });
       if (!resolved || resolved.external) return resolved;
       const replacement = sameThreeBuild(resolved.id, webgpuFile);
-      if (replacement) return replacement;
+      if (replacement) {
+        if (moduleId(replacement).endsWith("/three.tsl.js")) return canonicalTsl(this.resolve, webgpuFile);
+        return moduleId(replacement);
+      }
       const file = unmark(resolved.id).split("?")[0];
-      if (!SCRIPT.test(file)) return resolved.id;
-      return mark(resolved.id);
+      if (!SCRIPT.test(file)) return moduleId(resolved.id);
+      return mark(moduleId(resolved.id));
     },
     load(id) {
       if (!id.includes(WEBGPU_MARK) || id.includes("\0")) return null;

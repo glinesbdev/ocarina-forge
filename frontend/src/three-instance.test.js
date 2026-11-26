@@ -50,5 +50,6 @@ test("the production bundle has one Node class and a native pick pack", (t) => {
     assert.doesNotMatch(chunk.source, /cameraProjectionMatrix|cameraViewMatrix|\.bitAnd\(|\.shiftRight\(/);
     assert.match(chunk.source, /from"\.\/three\.tsl-/);
     assert.match(chunk.source, /(?:import|from)"\.\/three\.webgpu-/);
+    assert.doesNotMatch(chunk.source, /throw new Error\("WebGPU loaded two copies/);
   }
 });

@@ -47,9 +47,32 @@ test("WebGPU aliases Three.js before Vite can prebundle it in a custom cache", a
   for (const name of ["three", "three/webgpu"]) {
     assert.equal(await plugin.resolveId.call(context, name, "/src/viewport.js?three=webgpu"), webgpu);
   }
+  assert.equal(await plugin.resolveId.call(context, "three", "/src/viewport.js"), null);
+});
+
+test("three/tsl uses Vite's id for three.webgpu.js's relative import", async () => {
+  // Windows realpath can change drive-letter and directory case. path.join of
+  // the unresolved string is then a second module, with a second Node class.
+  const webgpu = "C:/Proj/node_modules/three/build/three.webgpu.js";
+  const real = "C:/proj/node_modules/three/build/three.tsl.js";
+  const plugin = oneThreePlugin(webgpu);
+  const context = {
+    async resolve(source, importer, options) {
+      assert.equal(source, "./three.tsl.js");
+      assert.equal(importer, webgpu);
+      assert.equal(options.skipSelf, true);
+      return { id: real };
+    },
+  };
   assert.equal(
-    await plugin.resolveId.call(context, "three/tsl", "/src/viewport.js?three=webgpu"),
+    await plugin.resolveId.call(context, "three/tsl", "C:/Proj/src/gpu-pick-node.js?three=webgpu"),
+    real,
+  );
+  assert.equal(tslBuild("C:\\Proj\\node_modules\\three\\build\\three.webgpu.js"), "C:/Proj/node_modules/three/build/three.tsl.js");
+  assert.equal(tslBuild(webgpu), "C:/Proj/node_modules/three/build/three.tsl.js");
+  const fallback = oneThreePlugin(webgpu);
+  assert.equal(
+    await fallback.resolveId.call({ resolve: async () => null }, "three/tsl", "/src/viewport.js?three=webgpu"),
     tslBuild(webgpu),
   );
-  assert.equal(await plugin.resolveId.call(context, "three", "/src/viewport.js"), null);
 });

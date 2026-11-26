@@ -4,7 +4,24 @@ import test from "node:test";
 test("the WebGPU pick material builds for meshes with and without maps", async () => {
   globalThis.self = globalThis;
   const THREE = await import("three/webgpu");
-  const { createNodePickMaterial } = await import("./gpu-pick-node.js");
+  const { createNodePickMaterial, nodeSystemsDiffer, rejectSplitNodeSystem } = await import("./gpu-pick-node.js");
+  assert.equal(nodeSystemsDiffer, false);
+  const reported = [];
+  const previousError = console.error;
+  console.error = (...args) => {
+    reported.push(args.join(" "));
+  };
+  try {
+    const split = function SplitNode() {};
+    const other = function OtherNode() {};
+    assert.equal(rejectSplitNodeSystem(split, other), true);
+    assert.equal(rejectSplitNodeSystem(split, split), false);
+  } finally {
+    console.error = previousError;
+  }
+  assert.equal(reported.length, 1);
+  assert.match(reported[0], /two copies of three's node system/);
+  assert.match(reported[0], /CPU raycast/);
   const canvas = {
     width: 4,
     height: 4,

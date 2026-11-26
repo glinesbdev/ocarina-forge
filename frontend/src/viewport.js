@@ -127,8 +127,13 @@ export async function createViewport(host, hooks) {
     terrainNodes = await import("./terrain-node.js");
     mapNodes = await import("./cutout-node.js");
     blendNodes = await import("./blend-node.js");
-    pickNodes = await import("./gpu-pick-node.js");
+    try {
+      pickNodes = await import("./gpu-pick-node.js");
+    } catch (error) {
+      console.error("GPU pick material did not load; clicks use the CPU raycast.", error);
+    }
   }
+  const useGpuPick = !created.nodes || (Boolean(pickNodes) && pickNodes.nodeSystemsDiffer !== true);
   const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
   const frameTimer = createFrameTimer(renderer);
@@ -154,7 +159,8 @@ export async function createViewport(host, hooks) {
     renderer,
     scene,
     getCamera: () => camera,
-    createNodeMaterial: pickNodes ? (args) => pickNodes.createNodePickMaterial(args) : null,
+    createNodeMaterial: useGpuPick && pickNodes ? (args) => pickNodes.createNodePickMaterial(args) : null,
+    gpuPick: useGpuPick,
   });
   await gpuPicker.attachNodeMaterial();
   let pickFallbackWarned = false;
@@ -4131,6 +4137,7 @@ uniform float terrainLayerMissing;`
       }
     }
     const token = ++orbitToken;
+    if (!useGpuPick) return;
     enqueuePick(async () => {
       try {
         const point = await gpuPicker.pickDistance({ ndcX: ndc.x, ndcY: ndc.y, terrain: true, preview: false });
@@ -4903,6 +4910,7 @@ uniform float terrainLayerMissing;`
 
   async function groupsAt(event, { preview, peel }) {
     const ndc = setPointer(event);
+    if (!useGpuPick) return aimed(event, preview);
     try {
       const keys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview, peel });
       return groupsFromPick(keys, volumeRayHits(raycaster));
@@ -4946,6 +4954,15 @@ uniform float terrainLayerMissing;`
 
   async function pickAt(event) {
     const ndc = setPointer(event);
+    if (!useGpuPick) {
+      const groups = aimed(event, true);
+      const repeat = Boolean(
+        lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
+      );
+      lastClick = { x: event.clientX, y: event.clientY, front: groups.solids[0] || null, signature: signature(groups) };
+      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }));
+      return;
+    }
     try {
       const frontKeys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview: true, peel: false });
       const front = frontKeys[0] || null;
