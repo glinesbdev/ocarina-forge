@@ -3,7 +3,7 @@ import test from "node:test";
 
 import * as THREE from "three";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -273,6 +273,39 @@ test("an AO map on uv1 stays when that set exists and a channel-0 map still need
   assert.deepEqual(names, ["mesh"]);
   assert.equal(mesh.material.aoMap, ao);
   assert.equal(mesh.material.map, null);
+});
+
+test("an albedo colour node is not sampled when the batch geometry has no uv", () => {
+  const map = { isTexture: true, channel: 0 };
+  const colorNode = { sampled: "uv" };
+  const shared = {
+    map,
+    colorNode,
+    userData: { albedoNode: true },
+    clone() {
+      return { map: this.map, colorNode: this.colorNode, userData: { ...this.userData }, needsUpdate: false };
+    },
+  };
+  const bare = { name: "card", geometry: { hasAttribute: () => false }, material: shared, children: [] };
+  const textured = { name: "wall", geometry: { hasAttribute: (name) => name === "uv" }, material: shared, children: [] };
+  dropMapWithoutUv({ children: [bare, textured] });
+  assert.equal(bare.material.map, null);
+  assert.equal(bare.material.colorNode, null);
+  assert.equal(bare.material.userData.albedoNode, false);
+  assert.equal(textured.material, shared);
+  assert.equal(shared.colorNode, colorNode);
+  const drawn = materialForGeometry(shared, { hasAttribute: () => false });
+  assert.equal(drawn.map, null);
+  assert.equal(drawn.colorNode, null);
+  assert.equal(materialForGeometry(shared, { hasAttribute: (name) => name === "uv" }), shared);
+  const uv1 = { isTexture: true, channel: 1 };
+  const channeled = {
+    map: uv1,
+    userData: {},
+    clone() { return { map: this.map, userData: {}, needsUpdate: false }; },
+  };
+  assert.equal(materialForGeometry(channeled, { hasAttribute: (name) => name === "uv1" }), channeled);
+  assert.equal(materialForGeometry(channeled, { hasAttribute: (name) => name === "uv" }).map, null);
 });
 
 test("a map can use an authored UV channel other than uv", () => {

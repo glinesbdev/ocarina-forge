@@ -1,11 +1,13 @@
 from io import BytesIO
+import os
 import struct
+import threading
 
 from PIL import Image
 
 from ocarina_forge.formats.gpu import ktx2, pack_texture, split_texture
 from ocarina_forge.formats.gltf import join_glb, split_glb
-from ocarina_forge.shared_models import externalize_images, reduced_texture, shared_texture_path
+from ocarina_forge.shared_models import externalize_images, publish_texture_bytes, reduced_texture, shared_texture_path
 
 
 def test_external_images_preserve_accessor_and_meshopt_ranges():
@@ -56,3 +58,46 @@ def test_reduced_packed_texture_keeps_mip_blocks_and_a_smaller_fallback():
         assert smaller.size == (256, 128)
         assert smaller.getpixel((0, 0))[3] == 128
     assert shared_texture_path("a" * 64 + "-mip256.ktx2") is not None
+
+
+def test_concurrent_publishes_of_one_texture_share_the_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path))
+    import ocarina_forge.shared_models as shared
+
+    payload = b"OCFG" + bytes(range(64))
+    real = os.replace
+    state = {"calls": 0}
+
+    def flaky(src, dst):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            error = PermissionError(13, "The process cannot access the file because it is being used by another process", src, 32, dst)
+            error.winerror = 32
+            raise error
+        return real(src, dst)
+
+    monkeypatch.setattr(shared.os, "replace", flaky)
+    barrier = threading.Barrier(8)
+    errors = []
+    urls = []
+
+    def work():
+        try:
+            barrier.wait()
+            urls.append(shared.publish_texture_bytes(payload))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert len(set(urls)) == 1
+    path = shared.shared_texture_path(urls[0].rsplit("/", 1)[-1])
+    assert path is not None and path.read_bytes() == payload
+    assert not list(path.parent.glob("*.tmp"))
+    before = state["calls"]
+    assert shared.publish_texture_bytes(payload) == urls[0]
+    assert state["calls"] == before

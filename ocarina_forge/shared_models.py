@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import re
 import struct
-import tempfile
+import threading
+import time
 
 from PIL import Image, UnidentifiedImageError
 
@@ -34,12 +35,73 @@ def shared_texture_path(name: str) -> Path | None:
     return cache_dir() / TEXTURE_STORE / "textures" / name[:2] / name
 
 
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = str(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+def _same_bytes(path: Path, data: bytes) -> bool:
+    """The file name is the content hash. A matching size is that stamp."""
+    try:
+        return path.is_file() and path.stat().st_size == len(data)
+    except OSError:
+        return False
+
+
+def _sharing_violation(error: BaseException) -> bool:
+    if isinstance(error, PermissionError):
+        return True
+    return getattr(error, "winerror", None) == 32
+
+
+def _replace_unique(path: Path, data: bytes) -> None:
+    """Publish ``data`` as ``path``. Concurrent writers do not share a temp name.
+
+    Windows rejects ``os.replace`` with WinError 32 while another handle still
+    has the destination open. A short retry covers that. If the destination
+    already holds these bytes, the replace is skipped.
+    """
+    if _same_bytes(path, data):
+        return
+    temporary = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp"
+    )
+    temporary.write_bytes(data)
+    delay = 0.01
+    try:
+        for attempt in range(6):
+            if _same_bytes(path, data):
+                return
+            try:
+                os.replace(temporary, path)
+                return
+            except OSError as error:
+                if not _sharing_violation(error) or attempt == 5:
+                    if _same_bytes(path, data):
+                        return
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 2, 0.2)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def publish_texture_bytes(data: bytes) -> str:
     """Store one encoded image and return the URL the editor assigns to a material.
 
     GPU packs (``OCFG`` / KTX2) use the ``.ktx2`` suffix. JPEG and PNG keep
     their own. The bytes are content-addressed, so a second model that shares
-    the image does not write it again.
+    the image does not write it again. One lock per path keeps two requests
+    from renaming onto the same file.
     """
     blob = bytes(data)
     if blob.startswith(b"\xff\xd8"):
@@ -52,23 +114,24 @@ def publish_texture_bytes(data: bytes) -> str:
     path = shared_texture_path(name)
     if path is None:
         raise ValueError("texture name was rejected")
-    if not path.is_file():
-        _atomic_write(path, blob)
-        note_written(path)
-    else:
-        note_access(path)
+    with _path_lock(path):
+        if _same_bytes(path, blob):
+            note_access(path)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _replace_unique(path, blob)
+            note_written(path)
     return f"/api/model-textures/{name}"
 
 
 def _atomic_write(path: Path, data: bytes | bytearray | memoryview) -> None:
+    blob = bytes(data)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as out:
-        temporary = Path(out.name)
-    try:
-        temporary.write_bytes(data)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    with _path_lock(path):
+        if _same_bytes(path, blob):
+            note_access(path)
+            return
+        _replace_unique(path, blob)
     note_written(path)
 
 

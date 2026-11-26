@@ -53,7 +53,7 @@ import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
 import { formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -964,6 +964,7 @@ let convertSlots = 8;
     // A new key, or a mesh that still has the pre-upload stamp, has to be
     // built again so compileAsync sees the map. Rebind first so the mesh
     // already on screen samples the map without waiting out that rebuild.
+    uvDirty = true;
     const rebound = rebindDrawnMaps();
     if (rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
     noteTextureDebug();
@@ -2752,8 +2753,11 @@ let convertSlots = 8;
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
       let material = prepareMaterial(source);
-      if (material.map && (material.userData.banc || material.name) === "water") {
-        ensureWaterUv(geometry, material.map.channel);
+      if ((material.userData && material.userData.banc) === "water" || material.name === "water") {
+        // The stand-in ripple is published after this geometry is batched.
+        // A water plane with no TEXCOORD would sample nothing and stay the flat cyan tint.
+        const channel = material.map && Number.isInteger(material.map.channel) ? material.map.channel : 0;
+        ensureWaterUv(geometry, channel);
       }
       if (material.userData && material.userData.blend && geometry.getAttribute("color")) {
         material = cloneMaterialPreservingTextures(material);
@@ -3164,6 +3168,8 @@ let convertSlots = 8;
       }
       if (!verts || !group.records.length) continue;
       group.material = materialForBatch(group.records, group.material);
+      const sampleGeometry = group.geometries.values().next().value;
+      group.material = materialForGeometry(group.material, sampleGeometry);
       let mesh;
       try {
         mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);

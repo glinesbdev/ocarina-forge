@@ -245,12 +245,39 @@ function sampledAttribute(slot, texture) {
 }
 
 /**
- * A mapped material on a geometry without its UV channel makes the node builder warn
- * every compile. Clone that material and drop the samples. The shared material
- * stays mapped for the meshes that do have uvs. Returns the object names.
- * Colour nodes that already avoid `uv` keep their map. AO and light maps are
- * skipped when `uv` (channel 0) or `uv1` (channel 1) is missing.
+ * The material the batch should draw. A map whose TEXCOORD is not on this
+ * geometry is left on the shared material and taken off a clone, including
+ * the albedo colour node. Otherwise the cached program samples `uv` and the
+ * mesh is a solid texel.
  */
+export function materialForGeometry(material, geometry) {
+  if (!material || !geometry) return material;
+  const userData = material.userData || {};
+  if (userData.terrainNode || userData.blendNode || userData.terrainShader || userData.banc === "terrain") return material;
+  const missing = [];
+  for (const slot of SAMPLED_SLOTS) {
+    const texture = material[slot];
+    if (!texture) continue;
+    if (hasUvAttribute(geometry, sampledAttribute(slot, texture))) continue;
+    missing.push(slot);
+  }
+  if (!missing.length) return material;
+  const copy = typeof material.clone === "function" ? cloneMaterialPreservingTextures(material) : material;
+  if (copy === material) return material;
+  for (const slot of missing) copy[slot] = null;
+  if (missing.includes("map")) {
+    copy.colorNode = null;
+    copy.alphaTestNode = null;
+    copy.userData = copy.userData || {};
+    copy.userData.albedoNode = false;
+    copy.userData.cutoutNode = false;
+  }
+  if (missing.includes("aoMap")) copy.aoMapIntensity = 0;
+  if (missing.includes("lightMap")) copy.lightMapIntensity = 0;
+  copy.needsUpdate = true;
+  return copy;
+}
+
 export function dropMapWithoutUv(root) {
   const names = [];
   const visit = (node) => {
@@ -261,13 +288,14 @@ export function dropMapWithoutUv(root) {
       let next = null;
       list.forEach((material, index) => {
         if (!material) return;
-        const ownsColor = Boolean(
-          material.colorNode
-          || (material.userData && (material.userData.terrainNode || material.userData.cutoutNode || material.userData.blendNode)),
-        );
+        const userData = material.userData || {};
+        // Terrain and blend build their own samples. The albedo and cutout
+        // colour nodes still reference `uv`, and a program built for a mesh
+        // that has it is reused on a batch that does not.
+        const guarded = Boolean(userData.terrainNode || userData.blendNode || userData.terrainShader || userData.banc === "terrain");
         const drop = [];
         for (const slot of SAMPLED_SLOTS) {
-          if (slot === "map" && ownsColor) continue;
+          if (slot === "map" && guarded) continue;
           const texture = material[slot];
           if (!texture) continue;
           if (hasUvAttribute(geometry, sampledAttribute(slot, texture))) continue;
@@ -276,6 +304,13 @@ export function dropMapWithoutUv(root) {
         if (!drop.length) return;
         const copy = typeof material.clone === "function" ? cloneMaterialPreservingTextures(material) : material;
         for (const slot of drop) copy[slot] = null;
+        if (drop.includes("map")) {
+          copy.colorNode = null;
+          copy.alphaTestNode = null;
+          copy.userData = copy.userData || {};
+          copy.userData.albedoNode = false;
+          copy.userData.cutoutNode = false;
+        }
         if (drop.includes("aoMap")) copy.aoMapIntensity = 0;
         if (drop.includes("lightMap")) copy.lightMapIntensity = 0;
         copy.needsUpdate = true;

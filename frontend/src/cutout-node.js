@@ -56,11 +56,17 @@ export function attachAlbedo(material) {
   }
   const map = material.map;
   material.colorNode = Fn((builder) => {
-    const geometry = builder && builder.geometry;
     const channel = Number.isInteger(map.channel) ? map.channel : 0;
     const name = channel > 0 ? `uv${channel}` : "uv";
-    const hasUv = Boolean(geometry && typeof geometry.hasAttribute === "function" && geometry.hasAttribute(name));
+    const geometry = builder && builder.geometry;
+    const hasUv = Boolean(
+      builder && typeof builder.hasGeometryAttribute === "function"
+        ? builder.hasGeometryAttribute(name)
+        : geometry && typeof geometry.hasAttribute === "function" && geometry.hasAttribute(name),
+    );
     const tint = materialReference("color", "color", material);
+    // Do not construct `uv()` on this branch. The node is cached with the
+    // material, and a batch whose geometry has no TEXCOORD still draws it.
     if (!hasUv) return vec4(tint, 1);
     const sampled = texture(map, uv(channel));
     return vec4(sampled.rgb.mul(tint), sampled.a);

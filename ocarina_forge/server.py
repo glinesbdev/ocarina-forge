@@ -1236,7 +1236,11 @@ def shared_texture_file(name: str):
         raise BancError("This shared model texture is not in the cache.", "not_found")
     note_access(path)
     mime = {".png": "image/png", ".jpg": "image/jpeg", ".ktx2": "image/ktx2"}[path.suffix]
-    return FileResponse(path, media_type=mime, headers={"Cache-Control": "public, max-age=31536000, immutable"})
+    # Read and close before the response is sent. FileResponse keeps the
+    # handle open, and on Windows that blocks the atomic rename of a writer
+    # that lost the race to create the same content-addressed file.
+    payload = path.read_bytes()
+    return Response(content=payload, media_type=mime, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 
