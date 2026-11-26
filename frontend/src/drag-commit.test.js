@@ -42,6 +42,8 @@ test("a snap that drops the pivot also writes the batched instance before return
     matrix,
   });
   assert.equal(posed.snapped, true);
+  assert.equal(position.x, 1);
+  assert.equal(position.z, -4);
   assert.equal(position.y, 0);
   assert.equal(readY(mesh, slots[0].index), 0);
   assert.equal(slots[0].matrix.elements[13], 0);
@@ -103,6 +105,15 @@ test("the viewport commits the instance before it waits on a ground reply", () =
   );
   assert.match(release, /maybeSnap\(entry, "release", axis\)/);
   assert.match(release, /applySelectedActorTransform\(entry, \{ commit: false \}\)/);
+  const move = viewport.slice(
+    viewport.indexOf('transform.addEventListener("objectChange"'),
+    viewport.indexOf('transform.addEventListener("dragging-changed"'),
+  );
+  const planeAt = move.indexOf("dragPlaneY = entry.pivot.position.y");
+  const snapMoveAt = move.indexOf('maybeSnap(entry, "move")');
+  assert.ok(planeAt !== -1 && snapMoveAt !== -1 && planeAt < snapMoveAt);
+  assert.match(viewport, /entry\.pivot\.position\.y = dragPlaneY/);
+  assert.match(viewport, /transform\._root\.updateMatrixWorld\(true\)/);
   const snapAt = release.indexOf('maybeSnap(entry, "release", axis)');
   const syncAt = release.indexOf("applySelectedActorTransform(entry, { commit: false })");
   const waitAt = release.indexOf("typeof pending.then");

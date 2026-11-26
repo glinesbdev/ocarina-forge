@@ -279,6 +279,41 @@ test("dragging a Kokiri tree through the viewport keeps the batched mesh on the 
       returnByValue: true,
     }, 70000);
     const boss = bossEvaluated.result && bossEvaluated.result.value;
+    const ganonEvaluated = await send("Runtime.evaluate", {
+      expression: `(async () => {
+        const row = document.querySelector('[data-actor-id$="0x1000000000000032"]');
+        if (!row) return "ganon missing";
+        row.click();
+        const snap = document.getElementById("snap-surface");
+        snap.checked = true;
+        snap.dispatchEvent(new Event("change", { bubbles: true }));
+        let onFloor = null;
+        for (let i = 0; i < 30; i += 1) {
+          onFloor = __forgeSnapDrag("X", 20, 6);
+          const read = onFloor && onFloor.reads && (onFloor.reads.find((slot) => slot.shown) || onFloor.reads[0]);
+          if (read && onFloor.pivotY > 2 && onFloor.pivotY < 3.2 && Math.abs(onFloor.pivotX - 6) < 0.05 && Math.abs(onFloor.pivotZ + 4) < 0.05) break;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        const offFloor = __forgeSnapDrag("X", 20, 30);
+        document.getElementById("frame").click();
+        return { onFloor, offFloor };
+      })()`,
+      awaitPromise: true,
+      returnByValue: true,
+    }, 40000);
+    const ganon = ganonEvaluated.result && ganonEvaluated.result.value;
+    const ganonHandle = ganon && ganon.onFloor ? await (async () => {
+      await send("Runtime.evaluate", {
+        expression: `(() => { const row = document.querySelector('[data-actor-id$="0x1000000000000032"]'); if (row) row.click(); __forgeSnapDrag("X", 20, 6); document.getElementById("frame").click(); })()`,
+        returnByValue: true,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const before = await pose();
+      const xHandle = await handle("X");
+      await drag(xHandle, 90, 0);
+      const after = await pose();
+      return { before, after, xHandle };
+    })() : null;
     socket.close();
     report.handleDrag = { before: beforeHandles, yHandle, lifted: liftedHandle, xHandle, snapped: snappedHandle };
     assert.ok(report && report.lifted, `the editor did not report a drag: ${JSON.stringify(report)}`);
@@ -305,6 +340,28 @@ test("dragging a Kokiri tree through the viewport keeps the batched mesh on the 
     assert.ok(boss && boss.pivotY > 2 && boss.pivotY < 3.2, `Boss Rush room did not snap onto its floor: ${JSON.stringify(boss)}`);
     const bossRead = boss.reads && (boss.reads.find((slot) => slot.shown) || boss.reads[0]);
     assert.ok(bossRead && Math.abs(bossRead.gpuY - boss.pivotY) < 0.05, JSON.stringify(boss));
+    assert.ok(ganon && ganon.onFloor, `Ganon was not in the boss room: ${JSON.stringify(ganon)}`);
+    assert.ok(
+      ganon.onFloor.pivotY > 2 && ganon.onFloor.pivotY < 3.2 && Math.abs(ganon.onFloor.pivotX - 6) < 0.05 && Math.abs(ganon.onFloor.pivotZ + 4) < 0.05,
+      `Ganon did not stay on the drag XZ and the floor: ${JSON.stringify(ganon.onFloor)}`,
+    );
+    assert.ok(
+      ganon.offFloor && Math.abs(ganon.offFloor.pivotY - 20) < 0.05 && Math.abs(ganon.offFloor.pivotX - 30) < 0.05 && ganon.offFloor.pivotY < 90,
+      `Ganon off the floor locked to the ceiling: ${JSON.stringify(ganon.offFloor)}`,
+    );
+    assert.ok(ganonHandle && ganonHandle.before && ganonHandle.after, `Ganon handle drag missing: ${JSON.stringify(ganonHandle)}`);
+    assert.ok(
+      Math.abs(ganonHandle.after.pivotZ - ganonHandle.before.pivotZ) < 0.15,
+      `X drag changed Z: ${JSON.stringify(ganonHandle)}`,
+    );
+    assert.ok(
+      Math.abs(ganonHandle.after.pivotX - ganonHandle.before.pivotX) > 0.3,
+      `X drag did not move X: ${JSON.stringify(ganonHandle)}`,
+    );
+    assert.ok(
+      ganonHandle.after.pivotY > 2 && ganonHandle.after.pivotY < 4 && ganonHandle.after.pivotY < 90,
+      `X drag did not keep Ganon on the floor: ${JSON.stringify(ganonHandle.after)}`,
+    );
   } finally {
     browser.kill();
     vite.kill();

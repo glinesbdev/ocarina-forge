@@ -1,10 +1,17 @@
 /** Pick the walkable surface under an actor.
  *
- * `hits` are `{ y }` from a downward ray. The nearest surface at or just
- * under the pivot wins. When every hit is above the pivot, the nearest of
- * those is used, so a room floor still catches an actor that started below
- * it. No hit returns null: the caller keeps the current height instead of
- * inventing y = 0. */
+ * `hits` are `{ y }` from a downward ray cast at the drag's X and Z. The
+ * nearest surface at or just under the pivot wins. A hit above the pivot is
+ * used only when it is within a couple of metres, so a ceiling or a huge
+ * arena mesh does not pull the actor up. No acceptable hit returns null:
+ * the caller keeps the current height instead of inventing y = 0.
+ *
+ * Snap writes that Y only. X and Z stay on the drag. The gizmo plane has to
+ * be sampled at the unsnapped height: once Y jumps, the plane follows, and
+ * the same mouse ray hits it at a different X and Z. */
+
+/** A platform you started just under can still catch you. A ceiling cannot. */
+export const SNAP_ABOVE_REACH = 2;
 
 /** Cached /api/ground samples farther than this are a different column (an
  * island edge is only a metre or two from the lakebed). */
@@ -12,13 +19,44 @@ export const GROUND_SNAP_RADIUS = 0.2;
 
 export function chooseSnap(originY, hits, options = {}) {
   const epsilon = Number.isFinite(options.epsilon) ? options.epsilon : 0.05;
+  const aboveReach = Number.isFinite(options.aboveReach) ? options.aboveReach : SNAP_ABOVE_REACH;
   const finite = (hits || []).map((hit) => hit && hit.y).filter((y) => Number.isFinite(y));
   if (!finite.length || !Number.isFinite(originY)) return null;
   const below = finite.filter((y) => y <= originY + epsilon);
   if (below.length) return Math.max(...below);
-  const above = finite.filter((y) => y > originY);
+  const above = finite.filter((y) => y > originY && y - originY <= aboveReach);
   if (!above.length) return null;
   return Math.min(...above);
+}
+
+/**
+ * Intersection of a view ray with the horizontal plane the translate gizmo
+ * samples. `planeY` is the height the drag controls assigned, not the snapped
+ * height. Sampling the snapped height is what pins X and Z: the ray that
+ * crosses the drag at one point crosses y = 95 at another.
+ */
+export function dragPlanePoint(origin, direction, planeY) {
+  const dy = direction[1];
+  if (!Number.isFinite(dy) || Math.abs(dy) < 1e-8 || !Number.isFinite(planeY)) return null;
+  const t = (planeY - origin[1]) / dy;
+  if (!Number.isFinite(t)) return null;
+  return [
+    origin[0] + direction[0] * t,
+    planeY,
+    origin[2] + direction[2] * t,
+  ];
+}
+
+/** Banc-qualified ids (`Banc/...::0x…`) and the bare hash are the same actor. */
+export function isSameActor(a, b) {
+  if (a == null || b == null || a === "" || b === "") return false;
+  const left = String(a);
+  const right = String(b);
+  if (left === right) return true;
+  const hash = (value) => (value.includes("::") ? value.slice(value.lastIndexOf("::") + 2) : value);
+  const leftHash = hash(left);
+  const rightHash = hash(right);
+  return /^0x[0-9a-f]+$/i.test(leftHash) && leftHash.toLowerCase() === rightHash.toLowerCase();
 }
 
 function finiteSnapHits(hits) {
@@ -90,8 +128,7 @@ export function snapExcludeId(actor) {
 
 /** True when this hit is the actor currently being dragged. */
 export function isSnapSelfHit(actorId, ignoreId) {
-  if (ignoreId == null || ignoreId === "" || actorId == null || actorId === "") return false;
-  return String(actorId) === String(ignoreId);
+  return isSameActor(actorId, ignoreId);
 }
 
 /**

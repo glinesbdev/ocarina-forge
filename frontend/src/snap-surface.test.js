@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as THREE from "three";
 
-import { chooseSnap, selectSnapHits, translateAfterSnap } from "./snap.js";
+import { chooseSnap, isSameActor, selectSnapHits, translateAfterSnap } from "./snap.js";
 import { columnHits } from "./snap-surface.js";
 
 function floor(y, width = 8) {
@@ -55,6 +55,48 @@ test("a BatchedMesh floor is hit per instance, and the dragged instance is exclu
   assert.ok(Math.abs(y - 2.5) < 1e-3);
 });
 
+test("a large actor's body and cape are excluded, and the ceiling is not the snap", () => {
+  const body = new THREE.BoxGeometry(2.4, 18.2, 2.4);
+  body.translate(0, 8.9, 0);
+  const cape = new THREE.BoxGeometry(4, 8, 0.4);
+  cape.translate(0, 14, -1.4);
+  const floorGeo = new THREE.PlaneGeometry(20, 20);
+  floorGeo.rotateX(-Math.PI / 2);
+  const ceilingGeo = new THREE.PlaneGeometry(80, 80);
+  ceilingGeo.rotateX(-Math.PI / 2);
+  const mesh = new THREE.BatchedMesh(
+    4,
+    200,
+    400,
+    new THREE.MeshBasicMaterial({ side: THREE.DoubleSide }),
+  );
+  const hash = "0x1000000000000032";
+  const qualified = `Banc/BossRush/BossRush_InternalRoom_Static.bcett.byml.zs::${hash}`;
+  const ids = [];
+  const add = (geometry, matrix, owner) => {
+    const index = mesh.addInstance(mesh.addGeometry(geometry));
+    mesh.setMatrixAt(index, matrix);
+    ids[index] = owner;
+    return index;
+  };
+  const bodyId = add(body, new THREE.Matrix4().setPosition(6, 20, -4), qualified);
+  const capeId = add(cape, new THREE.Matrix4().setPosition(6, 20, -4), hash);
+  add(floorGeo, new THREE.Matrix4().setPosition(0, 2.5, 0), "floor");
+  add(ceilingGeo, new THREE.Matrix4().setPosition(0, 95.0245, 0), "ceiling");
+  mesh.matrixWorld.identity();
+  const owned = (hit) => isSameActor(ids[hit.batchId], hash);
+  const hits = columnHits([mesh], 6, 20, -4, (hit) => !owned(hit));
+  assert.equal(hits.some((hit) => hit.batchId === bodyId || hit.batchId === capeId), false);
+  const y = chooseSnap(20, hits.map((hit) => ({ y: hit.point.y })));
+  assert.ok(Math.abs(y - 2.5) < 1e-2, `floor snap ${y}`);
+  const stuck = chooseSnap(20, columnHits([mesh], 6, 20, -4).map((hit) => ({ y: hit.point.y })));
+  assert.ok(stuck > 10, `own mesh should win without exclusion, got ${stuck}`);
+  mesh.setMatrixAt(bodyId, new THREE.Matrix4().setPosition(30, 20, -4));
+  mesh.setMatrixAt(capeId, new THREE.Matrix4().setPosition(30, 20, -4));
+  const offFloor = columnHits([mesh], 30, 20, -4, (hit) => !owned(hit));
+  assert.equal(chooseSnap(20, offFloor.map((hit) => ({ y: hit.point.y }))), null);
+});
+
 test("a static map mesh whose raycast was disabled still hits", () => {
   const mesh = floor(4);
   mesh.raycast = () => {};
@@ -82,6 +124,8 @@ test("collision wins over the room model only when the ground missed", () => {
   assert.equal(selectSnapHits({ ground: [{ y: Number.NaN }], collision: [], models: [] }).length, 0);
 });
 
-test("an actor below every surface snaps up to the nearest one", () => {
-  assert.equal(chooseSnap(0, [{ y: 2.5 }, { y: 8 }]), 2.5);
+test("an actor just under a floor snaps up, and a ceiling does not", () => {
+  assert.equal(chooseSnap(1, [{ y: 2.5 }, { y: 8 }]), 2.5);
+  assert.equal(chooseSnap(0, [{ y: 2.5 }, { y: 8 }]), null);
+  assert.equal(chooseSnap(8, [{ y: 95.0245 }]), null);
 });

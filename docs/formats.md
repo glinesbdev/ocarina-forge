@@ -148,7 +148,7 @@ Longshot's modding API, on the `main` tree checked for this note, does not expor
 | `Phive/StaticCompoundBody` | Per-scene baked compound, world space of that scene | Not parsed. Snap does not read it |
 | Visible map and room meshes | The static map glb, plus each `BatchedMesh` or preview `InstancedMesh` instance | Used when the walkable sample and the collision volumes both miss. The actor being dragged, and a mesh marked as its proxy, are left out of the ray. The ray is per instance, not one merged bounds box |
 
-A room such as Boss Rush Internal Room has no TSCB and often no `Land_*` floor. The surface is the room model. Snap raycasts that geometry. The nearest hit at or under the pivot wins. If every hit is above the pivot, the nearest of those wins. If the ray misses, the actor keeps its current height. It does not fall to y = 0.
+A room such as Boss Rush Internal Room has no TSCB and often no `Land_*` floor. The surface is the room model. Snap raycasts that geometry from the drag's X and Z and writes only Y. The nearest hit at or under the pivot wins. A hit above the pivot counts only when it is within a couple of metres, so a ceiling does not pull the actor up. Every mesh of the actor being moved is left out of the ray: submeshes, batched instances, proxies, and a companion banc copy of the same hash. The translate plane stays at the height the handle assigned. Sampling it at the snapped height would take X and Z from the view ray and pin the actor to one point. If the ray misses, the actor keeps its current height. It does not fall to y = 0.
 
 The same paragraph belongs in After the Ocarina `docs/game-formats.md` under the actor-local collision note. Longshot's API was checked first and has no collision query to add there.
 

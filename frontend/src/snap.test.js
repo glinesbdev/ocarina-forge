@@ -4,9 +4,11 @@ import test from "node:test";
 
 import {
   chooseSnap,
+  dragPlanePoint,
   groundReplyApplies,
   isExplicitLift,
   isMovedTerrainActor,
+  isSameActor,
   isSnapSelfHit,
   nearestGroundSample,
   shouldApplyGroundReply,
@@ -23,6 +25,30 @@ test("the nearest surface under the actor wins, and a shelf above does not beat 
 
 test("a pivot under the floor snaps up to the nearest surface", () => {
   assert.equal(chooseSnap(-2, [{ y: 0 }, { y: 4 }]), 0);
+});
+
+test("a ceiling far above the actor is not a snap, and a raised drag plane moves X and Z", () => {
+  assert.equal(chooseSnap(20, [{ y: 2.5 }, { y: 95.0245 }]), 2.5);
+  assert.equal(chooseSnap(20, [{ y: 95.0245 }]), null);
+  assert.equal(chooseSnap(94, [{ y: 95.0245 }]), 95.0245);
+  const drag = [6, 20, -4];
+  const locked = [0, 95.0245, -14.9636];
+  const direction = [locked[0] - drag[0], locked[1] - drag[1], locked[2] - drag[2]];
+  const onDrag = dragPlanePoint(drag, direction, drag[1]);
+  const onCeiling = dragPlanePoint(drag, direction, locked[1]);
+  assert.ok(onDrag.every((value, index) => Math.abs(value - drag[index]) < 1e-6));
+  assert.ok(onCeiling.every((value, index) => Math.abs(value - locked[index]) < 1e-6));
+  const sideways = translateAfterSnap([6, 20, -4], 2.5, { axis: "XZ", phase: "move", snapOn: true });
+  assert.deepEqual(sideways.translate, [6, 2.5, -4]);
+});
+
+test("a companion banc id is the same actor as the bare hash", () => {
+  const hash = "0x1000000000000032";
+  const qualified = `Banc/BossRush/BossRush_InternalRoom_Static.bcett.byml.zs::${hash}`;
+  assert.equal(isSameActor(qualified, hash), true);
+  assert.equal(isSameActor(hash, qualified), true);
+  assert.equal(isSnapSelfHit(qualified, hash), true);
+  assert.equal(isSameActor(hash, "0x1000000000000033"), false);
 });
 
 test("no hit leaves the actor where it is", () => {

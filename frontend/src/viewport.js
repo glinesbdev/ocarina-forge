@@ -52,7 +52,7 @@ import {
   ndcFromClient,
 } from "./gpu-pick.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
-import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, snapExcludeId } from "./snap.js";
+import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSameActor, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, snapExcludeId } from "./snap.js";
 import { columnHits } from "./snap-surface.js";
 import { commitTranslateDrag } from "./drag-commit.js";
 import { disposeGroundSurface, groundSurfaceMeta, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
@@ -284,6 +284,18 @@ export async function createViewport(host, hooks) {
   const transform = new TransformControls(camera, renderer.domElement);
   transform.setMode("translate");
   transform.setSpace("world");
+  // Y the translate controls assigned for this move, before Snap replaces it.
+  // The drag plane follows the pivot. Leaving the snapped height there makes
+  // the next sample take X and Z from the view ray at that height.
+  let dragPlaneY = null;
+  renderer.domElement.addEventListener("pointermove", () => {
+    if (!transform.dragging || dragPlaneY == null || transform.axis === "Y") return;
+    const entry = selected ? entries.get(selected) : null;
+    if (!entry) return;
+    entry.pivot.position.y = dragPlaneY;
+    entry.pivot.updateMatrixWorld(true);
+    transform._root.updateMatrixWorld(true);
+  }, true);
   scene.add(transform.getHelper());
   transform.getHelper().traverse((child) => {
     child.layers.disable(PICK_LAYER);
@@ -4027,11 +4039,24 @@ uniform float terrainLayerMissing;`
 
   function rejectsDraggedHit(hit, ignoreId) {
     if (!ignoreId) return false;
+    const dragged = entries.get(ignoreId);
+    const ids = [ignoreId];
+    if (dragged) ids.push(dragged.id, dragged.key);
+    const owned = (value) => ids.some((candidate) => isSameActor(value, candidate));
     const id = idOfHit(hit);
-    if (isSnapSelfHit(id, ignoreId)) return true;
+    if (owned(id)) return true;
     const entry = id ? entries.get(id) : null;
-    if (!entry) return false;
-    return isSnapSelfHit(entry.id, ignoreId) || isSnapSelfHit(entry.key, ignoreId);
+    if (entry && (owned(entry.id) || owned(entry.key))) return true;
+    // Submeshes, skinned meshes, and proxies parented to the pivot, plus a
+    // companion banc copy of the same hash.
+    let object = hit && hit.object;
+    while (object) {
+      const mark = object.userData && (object.userData.actorId || object.userData.snapOwner);
+      if (owned(mark)) return true;
+      if (dragged && object === dragged.pivot) return true;
+      object = object.parent;
+    }
+    return false;
   }
 
   function modelSnapRoots() {
@@ -4453,6 +4478,10 @@ uniform float terrainLayerMissing;`
     const entry = selected ? entries.get(selected) : null;
     if (!entry) return;
     dragAxis = transform.axis || dragAxis;
+    // Record the controls' Y before Snap replaces it. The next pointer sample
+    // puts the pivot back here so the drag plane, and therefore X and Z, stay
+    // on the handle instead of on the snapped surface.
+    if ((transform.axis || dragAxis) !== "Y") dragPlaneY = entry.pivot.position.y;
     maybeSnap(entry, "move");
     applySelectedActorTransform(entry, { commit: false });
   });
@@ -4464,6 +4493,7 @@ uniform float terrainLayerMissing;`
       gizmoUsed = true;
       dragSerial += 1;
       dragAxis = transform.axis || dragAxis;
+      dragPlaneY = null;
       return;
     }
     const entry = selected ? entries.get(selected) : null;
@@ -4483,6 +4513,7 @@ uniform float terrainLayerMissing;`
       // A newer drag owns the pivot. Committing here would save that pose early.
       if (serial !== dragSerial || transform.dragging) return;
       dragAxis = null;
+      dragPlaneY = null;
       applySelectedActorTransform(entry, { commit: true });
     };
     const wait = pending && typeof pending.then === "function"
@@ -5099,6 +5130,7 @@ uniform float terrainLayerMissing;`
         gyaml: entry.gyaml,
         pivotX: entry.pivot.position.x,
         pivotY: entry.pivot.position.y,
+        pivotZ: entry.pivot.position.z,
         reads,
         pending: Boolean(pending && pending.then),
         base: project(0.4),
@@ -5118,7 +5150,7 @@ uniform float terrainLayerMissing;`
         }
         return { index: slot.index, shown: slot.shown, gpuY, cpuY: slot.matrix ? slot.matrix.elements[13] : null };
       });
-      return { pivotX: entry.pivot.position.x, pivotY: entry.pivot.position.y, reads };
+      return { pivotX: entry.pivot.position.x, pivotY: entry.pivot.position.y, pivotZ: entry.pivot.position.z, reads };
     };
     // Screen point on the positive translate handle, for a real pointer drag.
     globalThis.__forgeHandleClient = (axis) => {
