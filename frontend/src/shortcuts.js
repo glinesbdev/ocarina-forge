@@ -34,7 +34,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "Actors panel, top", action: "Choose Full, Visual only, Layout, Terrain + water, or Logic. Custom appears when the checkboxes do not match a preset" },
       { keys: "Layer checkbox", action: "Fetch that layer. Turning one on loads it without reopening the scene" },
       { keys: "Show / Hide", action: "Hide a loaded layer. The Ground and Water stage-bar boxes stay in step with Terrain and Water" },
-      { keys: "Load textures", action: "Download images after the mesh. Layout and textures=0 leave this off. Images already stored stay in memory" },
+      { keys: "Load textures", action: "Download images after the mesh. Layout and textures=0 leave this off, and the editor shows a notice. The stage-bar Textures checkbox only shows or hides images already loaded, except the first check while this is off, which turns it on" },
       { keys: "?load=terrain,models", action: "Open with those layers. ?load=logic uses a preset. textures=0 skips images" },
     ],
   },
@@ -79,7 +79,7 @@ export const SHORTCUT_GROUPS = [
     label: "View toggles",
     items: [
       { keys: "Esc", action: "Close a dialog, release mouse look, or clear the selection" },
-      { keys: "Textures", action: "Show or hide images on the meshes. The switch is immediate. Downloads continue while it is off, and the status label counts them" },
+      { keys: "Textures", action: "Show or hide images already loaded. Downloads continue while this is off when Load textures is on. The first check, when that filter is off, turns it on. The Actors panel checkbox is what skips the download, and the editor shows a notice then" },
       { keys: "Status", action: "The viewport label stays on. It names the backend, including a WebGPU fallback reason, the page revision, the draw count, layers that were not loaded, and texture progress while images stream" },
       { keys: "P", action: "Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open" },
     ],

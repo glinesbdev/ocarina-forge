@@ -331,6 +331,46 @@ def test_check_prints_a_report_and_shell_status(tmp_path, capsys, monkeypatch):
     assert "node" in status.split("missing=", 1)[1].split("\n", 1)[0]
 
 
+def test_windows_popen_keeps_ctrl_c_in_the_builder_and_joins_the_job(monkeypatch):
+    from ocarina_forge import builder
+
+    monkeypatch.setattr(builder.sys, "platform", "win32")
+    monkeypatch.setattr(builder.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    seen = {}
+
+    def fake_popen(args, **kwargs):
+        seen["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(builder.subprocess, "Popen", fake_popen)
+    called = []
+    monkeypatch.setattr("ocarina_forge.procjob.ensure_builder_job", lambda: called.append("job") or False)
+    builder._popen(["python", "-m", "ocarina_forge"], cwd=Path("."), env={})
+    assert called == ["job"]
+    assert seen["kwargs"]["creationflags"] == 0x200
+    assert seen["kwargs"]["cwd"] == Path(".")
+
+
+def test_linux_popen_still_starts_a_new_session(monkeypatch):
+    from ocarina_forge import builder
+
+    if builder.sys.platform == "win32":
+        monkeypatch.setattr(builder.sys, "platform", "linux")
+    seen = {}
+
+    def fake_popen(args, **kwargs):
+        seen["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(builder.subprocess, "Popen", fake_popen)
+    called = []
+    monkeypatch.setattr("ocarina_forge.procjob.ensure_builder_job", lambda: called.append("job") or False)
+    builder._popen(["python"], cwd=Path("."), env={"A": "b"})
+    assert called == ["job"]
+    assert seen["kwargs"]["start_new_session"] is True
+    assert "creationflags" not in seen["kwargs"]
+
+
 def test_install_commands_are_explicit():
     apt = install_commands("linux", "apt")
     assert apt["python"] == "sudo apt-get install -y python3 python3-venv"

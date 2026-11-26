@@ -168,6 +168,19 @@ export function layersOff(load) {
   return off;
 }
 
+/**
+ * Banner copy when this project will fetch meshes without images.
+ * Empty when textures are on, or when no mesh layer is fetched (Logic).
+ * The stage-bar Textures checkbox only shows or hides images already loaded.
+ */
+export function textureFilterNotice(load) {
+  if (!load || load.textures !== false) return "";
+  const layers = load.layers || {};
+  const meshes = layers.models || layers.terrain || layers.water || layers.decorations || layers.lights;
+  if (!meshes) return "";
+  return "Load textures is off for this project, so models are fetched without images. That can look like a hang. Turn it on with Load textures in the Actors panel. The Textures checkbox on the stage bar only shows or hides images that are already loaded. The first time you check that box while this filter is off, it turns Load textures on.";
+}
+
 export function loadQuery(load) {
   if (!load) return "";
   if (load.preset && load.preset !== "custom" && PRESETS[load.preset]) return load.preset;

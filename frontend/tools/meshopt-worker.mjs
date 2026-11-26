@@ -6,6 +6,12 @@ import { NodeIO } from "@gltf-transform/core";
 import { EXTMeshoptCompression, KHRMaterialsUnlit, KHRTextureBasisu } from "@gltf-transform/extensions";
 import { MeshoptDecoder, MeshoptEncoder, MeshoptSimplifier } from "meshoptimizer";
 import { LengthPrefixedFrameReader } from "./length-prefixed.mjs";
+import { watchParent } from "./parent-watch.mjs";
+
+// A hard kill of the Python worker skips atexit. Stdin EOF (below) and this
+// parent watch both end the helper. The env value is that worker's pid.
+const meshoptParent = Number(process.env.OCARINA_FORGE_MESHOPT_PARENT || process.ppid);
+watchParent(meshoptParent);
 
 await MeshoptSimplifier.ready;
 await MeshoptEncoder.ready;

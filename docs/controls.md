@@ -27,7 +27,7 @@ The editor shows this same list with ? or the Shortcuts button.
 - Actors panel, top: Choose Full, Visual only, Layout, Terrain + water, or Logic. Custom appears when the checkboxes do not match a preset
 - Layer checkbox: Fetch that layer. Turning one on loads it without reopening the scene
 - Show / Hide: Hide a loaded layer. The Ground and Water stage-bar boxes stay in step with Terrain and Water
-- Load textures: Download images after the mesh. Layout and textures=0 leave this off. Images already stored stay in memory
+- Load textures: Download images after the mesh. Layout and textures=0 leave this off, and the editor shows a notice. The stage-bar Textures checkbox only shows or hides images already loaded, except the first check while this is off, which turns it on
 - ?load=terrain,models: Open with those layers. ?load=logic uses a preset. textures=0 skips images
 
 ## Gizmo
@@ -57,7 +57,7 @@ The editor shows this same list with ? or the Shortcuts button.
 ## View toggles
 
 - Esc: Close a dialog, release mouse look, or clear the selection
-- Textures: Show or hide images on the meshes. The switch is immediate. Downloads continue while it is off, and the status label counts them
+- Textures: Show or hide images already loaded. Downloads continue while this is off when Load textures is on. The first check, when that filter is off, turns it on. The Actors panel checkbox is what skips the download, and the editor shows a notice then
 - Status: The viewport label stays on. It names the backend, including a WebGPU fallback reason, the page revision, the draw count, layers that were not loaded, and texture progress while images stream
 - P: Toggle the frame profile. It starts off, so timestamp queries stay out of the frame until the HUD is open
 

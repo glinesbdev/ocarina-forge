@@ -1,14 +1,17 @@
 """Converter cores: the env var wins, and the pool changes between jobs."""
 
 import os
+import sys
 
 from ocarina_forge.config import load_config, save_config
+from ocarina_forge.procjob import POOL_TASKS_PER_CHILD
 from ocarina_forge.server import (
     _POOL_LOCK,
     _close_pool,
     _configured_workers,
     _job_finished,
     _pool,
+    _worker_init,
 )
 
 
@@ -63,3 +66,41 @@ def test_the_pool_waits_until_the_current_job_finishes(tmp_path, monkeypatch):
         assert _pool() is None
     finally:
         _close_pool()
+
+
+def test_replacing_the_pool_terminates_the_previous_workers(monkeypatch):
+    from ocarina_forge import server
+
+    _close_pool()
+    captured = {}
+    ended = []
+
+    class Fake:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(server, "ProcessPoolExecutor", Fake)
+    monkeypatch.setattr(server, "ensure_server_job", lambda: False)
+    monkeypatch.setattr(server, "terminate_executor", lambda pool: ended.append(pool))
+    try:
+        with server._POOL_LOCK:
+            server._POOL = None
+            server._POOL_SIZE = 0
+            server._POOL_INFLIGHT = 0
+            server._install_pool(2)
+        assert captured["max_workers"] == 2
+        assert captured["initializer"] is _worker_init
+        assert captured["mp_context"].get_start_method() == "spawn"
+        if sys.version_info >= (3, 11):
+            assert captured["max_tasks_per_child"] == POOL_TASKS_PER_CHILD
+        old = server._POOL
+        with server._POOL_LOCK:
+            server._install_pool(1)
+        assert ended == [old]
+        assert server._POOL is None
+    finally:
+        with server._POOL_LOCK:
+            server._POOL = None
+            server._POOL_SIZE = 0
+            server._POOL_WANT = None
+            server._POOL_INFLIGHT = 0

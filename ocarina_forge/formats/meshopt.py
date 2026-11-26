@@ -1,8 +1,10 @@
 """A far mesh from meshoptimizer, and EXT_meshopt_compression for cached glbs.
 
-Node stays up for the life of this process. A forked child does not reuse or
-kill the parent's helper: helpers are keyed by pid, and the child drops the
-inherited pipes without flushing them. Stderr goes to
+Node stays up for the life of this process, and it exits when this process
+does. ``atexit`` kills it on a normal shutdown. A hard kill skips ``atexit``,
+so the helper also leaves on stdin EOF and when its parent pid is gone.
+Helpers are keyed by pid. A forked child does not reuse or kill the parent's
+helper: it drops the inherited pipes without flushing them. Stderr goes to
 ``~/.cache/ocarina-forge/meshopt.log``.
 
 Requests are length-prefixed frames, not newline JSON. A multi-megabyte glb
@@ -155,6 +157,8 @@ def _start() -> subprocess.Popen | None:
         try:
             log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} pid {pid} start ---\n")
             log.flush()
+            env = os.environ.copy()
+            env["OCARINA_FORGE_MESHOPT_PARENT"] = str(pid)
             proc = subprocess.Popen(
                 ["node", str(_SCRIPT)],
                 cwd=str(_FRONTEND),
@@ -162,6 +166,7 @@ def _start() -> subprocess.Popen | None:
                 stdout=subprocess.PIPE,
                 stderr=log,
                 bufsize=0,
+                env=env,
             )
         finally:
             log.close()
