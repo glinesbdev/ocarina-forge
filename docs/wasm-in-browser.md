@@ -81,7 +81,7 @@ Wasm decode on this VM is the same order as the 11.17 ms `decodeSwizzle` in [was
 - After the pack is ready, one Snap sample is 10–25 µs. Until then, `GET /api/ground` is about a second per point once the server mesh cache is warm, and the first point was 116 s.
 - At 567 of 852 unique models the tab held a 2.31 GB JS heap (limit 4.19 GB) and a 15.0 GB Chrome working set. The 119 MB index is small beside that.
 
-[rendering-performance.md](rendering-performance.md) is the later cap: about 240 unique meshes or 2.2 GB of JS heap stops further loads, with a hard stop near 280 or 2.8 GB. A headless run with a 10 GB working-set cap stopped at 388 of 852 models with a 4.67 GB JS heap, already over the 4.19 GB limit. An earlier pass that baked island and hill meshes into the visible terrain glb ran the tab out of memory. The heightmap stays on screen, and the walkable meshes stay in the one wasm object that `WasmGroundSurface.free()` drops on a scene change.
+[rendering-performance.md](rendering-performance.md) is the later cap: 1.2 GB of geometry plus BC7, or 2.2 GB of JS heap, stops further loads. 4096 unique meshes is the last resort. An earlier build stopped near 240. A headless run with a 10 GB working-set cap stopped at 388 of 852 models with a 4.67 GB JS heap, already over the 4.19 GB limit. An earlier pass that baked island and hill meshes into the visible terrain glb ran the tab out of memory. The heightmap stays on screen, and the walkable meshes stay in the one wasm object that `WasmGroundSurface.free()` drops on a scene change.
 
 The current glb cache prefix on main is `models-64`. Decoded images stay `bntx-6`. Texture manifests are `texman-2` under the cache, and shared images are `shared-v1`.
 
