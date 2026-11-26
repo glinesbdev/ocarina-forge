@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 const source = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
-const threeModule = readFileSync(new URL("../node_modules/three/build/three.module.js", import.meta.url));
+const threeBuild = new URL("../node_modules/three/build/", import.meta.url);
 
 function extractTemplate(name) {
   const marker = `const ${name} = \``;
@@ -163,10 +163,15 @@ try {
 
   const server = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
-    if (url.pathname === "/three.module.js") {
-      res.writeHead(200, { "content-type": "text/javascript" });
-      res.end(threeModule);
-      return;
+    if (url.pathname.startsWith("/") && url.pathname.endsWith(".js") && !url.pathname.includes("..")) {
+      try {
+        const file = readFileSync(new URL(`.${url.pathname}`, threeBuild));
+        res.writeHead(200, { "content-type": "text/javascript" });
+        res.end(file);
+        return;
+      } catch {
+        // The page itself is the HTML fallback.
+      }
     }
     res.writeHead(200, { "content-type": "text/html" });
     res.end(page);

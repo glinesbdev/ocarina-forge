@@ -9,6 +9,7 @@ import {
   gpuTexturesEnabled,
   releaseTextureCpu,
   repairCompressedTexture,
+  textureGpuReady,
   textureSupport,
 } from "./gpu-texture.js";
 import { loadForgeImageSource } from "./gltf-image-source.js";
@@ -50,7 +51,7 @@ import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -128,7 +129,6 @@ export async function createViewport(host, hooks) {
     blendNodes = await import("./blend-node.js");
     pickNodes = await import("./gpu-pick-node.js");
   }
-  if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
   const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
   const frameTimer = createFrameTimer(renderer);
@@ -611,6 +611,14 @@ let convertSlots = 8;
         textureCpuReleaseFrames.delete(key);
         continue;
       }
+      // A texture that was never uploaded still has its CPU mips. Dropping
+      // them leaves the next compile sampling an empty image. WebGL has no
+      // backend.get texture record; it uploads on the draw that cleared needsUpdate.
+      if (renderer.backend && renderer.backend.isWebGPUBackend === true
+        && !group.some((texture) => textureGpuReady(renderer.backend, texture))) {
+        textureCpuReleaseFrames.delete(key);
+        continue;
+      }
       const frames = (textureCpuReleaseFrames.get(key) || 0) + 1;
       textureCpuReleaseFrames.set(key, frames);
       if (frames >= 3) ready.push(group[0]);
@@ -867,6 +875,11 @@ let convertSlots = 8;
       seen.add(part.material);
       refreshTextureMaterial(part.material);
     }
+    // Geometry glbs have no images, so the mesh was compiled against a flat
+    // material. The manifest writes the BC7 onto that material afterwards.
+    // A new key, or a mesh that still has the pre-upload stamp, has to be
+    // built again so compileAsync sees the map.
+    if (refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
   }
 
   function loadOwnedTexture(url) {
@@ -2811,8 +2824,9 @@ let convertSlots = 8;
 
   const imageKeys = new WeakMap();
 
-  function imageSignature(image) {
+  function imageSignature(image, texture) {
     if (!image) return "none";
+    if (texture && texture.isCompressedTexture) return imageIdentity(texture);
     const cached = imageKeys.get(image);
     if (cached) return cached;
     const width = image.width || image.videoWidth || 0;
@@ -2833,7 +2847,9 @@ let convertSlots = 8;
       }
       key = `${key}:${hash >>> 0}`;
     } catch {
-      key = `${key}:${image.src || "bitmap"}`;
+      // A compressed image is not drawable. Sharing "bitmap" across every
+      // same-size map put those models on the first material.
+      key = texture ? imageIdentity(texture) : `${key}:${image.src || image.uuid || "image"}`;
     }
     imageKeys.set(image, key);
     return key;
@@ -2841,18 +2857,23 @@ let convertSlots = 8;
 
   function batchKeyFor(material, geometry) {
     const image = material.map && material.map.image
-      ? imageSignature(material.map.image)
+      ? imageSignature(material.map.image, material.map)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
     const blend = material.userData && material.userData.blend;
-    const blendImage = material.userData && material.userData.blendMap && material.userData.blendMap.image;
-    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage) : "flat"}` : "";
-    const roughImage = material.roughnessMap && material.roughnessMap.image;
-    const normalImage = material.normalMap && material.normalMap.image;
-    const orm1Image = material.userData && material.userData.orm1Map && material.userData.orm1Map.image;
-    const normal1Image = material.userData && material.userData.normal1Map && material.userData.normal1Map.image;
+    const blendMap = material.userData && material.userData.blendMap;
+    const blendImage = blendMap && blendMap.image;
+    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage, blendMap) : "flat"}` : "";
+    const roughMap = material.roughnessMap;
+    const normalMap = material.normalMap;
+    const orm1Map = material.userData && material.userData.orm1Map;
+    const normal1Map = material.userData && material.userData.normal1Map;
+    const roughImage = roughMap && roughMap.image;
+    const normalImage = normalMap && normalMap.image;
+    const orm1Image = orm1Map && orm1Map.image;
+    const normal1Image = normal1Map && normal1Map.image;
     const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
-      ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
+      ? `|orm:${roughImage ? imageSignature(roughImage, roughMap) : "flat"}|n:${normalImage ? imageSignature(normalImage, normalMap) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image, orm1Map) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image, normal1Map) : "flat"}`
       : "";
     return batchKey({
       image: image + blendKey + surfaceKey,
@@ -3032,6 +3053,7 @@ let convertSlots = 8;
         indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
       }
       if (!verts || !group.records.length) continue;
+      group.material = materialForBatch(group.records, group.material);
       let mesh;
       try {
         mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
@@ -3057,15 +3079,17 @@ let convertSlots = 8;
       if (label) mesh.name = label;
       const previousRender = mesh.onBeforeRender.bind(mesh);
       const webgpuBatch = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+      const albedo = group.material.map && group.material.map.isTexture === true ? group.material.map : null;
+      mesh.userData.forgeAlbedo = albedo;
       mesh.onBeforeRender = function pickAndGroup(rendererArg, sceneArg, cameraArg, geometry, material, ...rest) {
-        // A quiet frame leaves the grouped ranges in place. Grouping them
-        // again would treat each run as one instance and restart the next
-        // geometry at slot 1.
         const picking = Boolean(sceneArg.overrideMaterial && sceneArg.overrideMaterial.userData && sceneArg.overrideMaterial.userData.forgePick);
         if (picking) gpuPicker.prepareObject(mesh, mesh.material);
-        const dirty = mesh._visibilityChanged || mesh.perObjectFrustumCulled || mesh.sortObjects;
-        previousRender(rendererArg, sceneArg, cameraArg, geometry, picking ? mesh.material : material, ...rest);
-        if (webgpuBatch && dirty) groupGeometryDraws(mesh);
+        const drawMaterial = picking ? mesh.material : material;
+        // r187 draws the merged ranges. Filling them after previousRender is
+        // too late for this frame, and the WebGPU onBeforeRender does not
+        // fill them at all.
+        if (webgpuBatch) scheduleMergedDraws(mesh, cameraArg, geometry, drawMaterial);
+        previousRender(rendererArg, sceneArg, cameraArg, geometry, drawMaterial, ...rest);
       };
       mesh.layers.enable(PICK_LAYER);
       mesh.userData.forgePickKind = 1;
@@ -5302,7 +5326,7 @@ uniform float terrainLayerMissing;`
     const info = (renderer.info && renderer.info.render) || {};
     const webgpu = Boolean(renderer.isWebGPURenderer);
     const subDraws = renderer.backend && renderer.backend.isWebGPUBackend === true
-      ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+      ? batches.reduce((sum, batch) => sum + batchSubDrawCount(batch.mesh), 0)
       : 0;
     const drawCalls = webgpu ? Number(info.drawCalls) || 0 : Number(info.calls) || 0;
     const batchCount = batches.length;
@@ -5472,7 +5496,7 @@ uniform float terrainLayerMissing;`
       info,
       Boolean(renderer.isWebGPURenderer),
       renderer.backend && renderer.backend.isWebGPUBackend === true
-        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        ? batches.reduce((sum, batch) => sum + batchSubDrawCount(batch.mesh), 0)
         : 0,
     );
     const background = (statDeferred || 0) + (statBackgroundLoading || 0);
@@ -5644,7 +5668,7 @@ uniform float terrainLayerMissing;`
       info,
       Boolean(renderer.isWebGPURenderer),
       renderer.backend && renderer.backend.isWebGPUBackend === true
-        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        ? batches.reduce((sum, batch) => sum + batchSubDrawCount(batch.mesh), 0)
         : 0,
     );
   }

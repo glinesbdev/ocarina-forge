@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import * as THREE from "three";
+
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -138,88 +140,70 @@ test("a batched mesh has no instanceMatrix and the drag must not touch it", () =
   assert.equal(mesh.instanceMatrix.needsUpdate, true);
 });
 
-test("consecutive geometries become one instanced draw each", () => {
-  const mesh = {
-    userData: {},
-    _multiDrawCount: 400,
-    _multiDrawStarts: new Int32Array(400).fill(0),
-    _multiDrawCounts: new Int32Array(400).fill(36),
-    _multiDrawInstances: null,
-  };
-  assert.equal(groupGeometryDraws(mesh), 1);
-  assert.equal(mesh._multiDrawCount, 1);
-  assert.equal(mesh._multiDrawInstances[0], 400);
-  assert.equal(mesh.userData.batchFirst[0], 0);
-  const mixed = {
-    userData: {},
-    _multiDrawCount: 5,
-    _multiDrawStarts: Int32Array.from([0, 0, 0, 90, 90]),
-    _multiDrawCounts: Int32Array.from([36, 36, 36, 12, 12]),
-  };
-  assert.equal(groupGeometryDraws(mixed), 2);
-  assert.equal(mixed._multiDrawInstances[0], 3);
-  assert.equal(mixed._multiDrawInstances[1], 2);
-  assert.equal(mixed.userData.batchFirst[0], 0);
-  assert.equal(mixed.userData.batchFirst[1], 3);
-  const interleaved = {
-    userData: {},
-    _multiDrawCount: 4,
-    _multiDrawStarts: Int32Array.from([0, 90, 0, 90]),
-    _multiDrawCounts: Int32Array.from([36, 12, 36, 12]),
-  };
-  assert.equal(groupGeometryDraws(interleaved), 4);
+test("r187 merged draws fold one geometry and keep a hidden instance's indirect id", () => {
+  const geom = new THREE.BoxGeometry(1, 1, 1);
+  const other = new THREE.BoxGeometry(0.5, 2, 0.5);
+  const material = new THREE.MeshBasicMaterial();
+  const mesh = new THREE.BatchedMesh(4, 5000, 8000, material);
+  mesh.perObjectFrustumCulled = false;
+  mesh.sortObjects = false;
+  assert.equal(mesh.geometry.hasAttribute("uv"), false);
+  const first = mesh.addGeometry(geom);
+  const second = mesh.addGeometry(other);
+  assert.equal(mesh.geometry.hasAttribute("uv"), true);
+  mesh.addInstance(first);
+  mesh.addInstance(first);
+  const later = mesh.addInstance(second);
+  const camera = new THREE.PerspectiveCamera();
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 2);
+  assert.equal(mesh._mergedDrawInstanceCounts[0], 2);
+  assert.equal(mesh._mergedDrawInstanceCounts[1], 1);
+  assert.equal(batchSubDrawCount(mesh), 2);
+  mesh.setVisibleAt(0, false);
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 2);
+  assert.equal(mesh._mergedDrawInstanceCounts[0], 1);
+  assert.equal(mesh._mergedDrawInstanceCounts[1], 1);
+  assert.equal(mesh._indirectTexture.image.data[0], 1);
+  assert.equal(mesh._indirectTexture.image.data[1], later);
+  geom.dispose();
+  other.dispose();
+  mesh.dispose();
 });
 
-test("culling a grouped draw down to one clears the discarded instances", () => {
-  const mesh = {
-    userData: {}, _multiDrawCount: 3,
-    _multiDrawStarts: new Int32Array([0, 0, 0]),
-    _multiDrawCounts: new Int32Array([6, 6, 6]),
-  };
-  assert.equal(groupGeometryDraws(mesh), 1);
-  assert.equal(mesh._multiDrawInstances[0], 3);
-  // Three rebuilt the ungrouped ranges after two copies were culled.
-  mesh._multiDrawCount = 1;
-  assert.equal(groupGeometryDraws(mesh), 1);
-  assert.equal(mesh._multiDrawInstances, null);
-  assert.equal(mesh.userData.batchFirst, null);
+test("same-size compressed images do not share a batch identity, and a clone does", () => {
+  const make = () => new THREE.CompressedTexture(
+    [{ data: new Uint8Array(16), width: 8, height: 8 }],
+    8,
+    8,
+    36492,
+  );
+  const left = make();
+  const right = make();
+  assert.notEqual(imageIdentity(left), imageIdentity(right));
+  assert.equal(imageIdentity(left), imageIdentity(left.clone()));
+  const part = { material: {}, geometry: {}, materialKey: "Body:0", batchKey: "flat|Body:0" };
+  assert.equal(refreshBatchKeys([part], () => imageIdentity(left)), true);
+  assert.equal(part.batchKey, `${imageIdentity(left)}|Body:0`);
+  assert.equal(refreshBatchKeys([part], () => imageIdentity(left)), false);
 });
 
-test("a later geometry run keeps its own first instance", () => {
-  const calls = [];
-  const pass = {
-    drawIndexed(...args) {
-      calls.push(args);
-    },
-  };
-  const backend = {
-    get() {
-      return { currentPass: pass };
-    },
-    draw(renderObject) {
-      const object = renderObject.object;
-      for (let i = 0; i < object._multiDrawCount; i += 1) {
-        const count = object._multiDrawInstances[i];
-        const first = count > 1 ? 0 : i;
-        this.get().currentPass.drawIndexed(object._multiDrawCounts[i], count, object._multiDrawStarts[i], 0, first);
-      }
-    },
-  };
-  patchBatchedDraw(backend);
-  backend.draw({
-    context: {},
-    object: {
-      _multiDrawCount: 2,
-      _multiDrawStarts: [0, 100],
-      _multiDrawCounts: [6, 6],
-      _multiDrawInstances: [3, 2],
-      userData: { batchFirst: [0, 3] },
-    },
-  });
-  assert.deepEqual(calls, [
-    [6, 3, 0, 0, 0],
-    [6, 2, 100, 0, 3],
-  ]);
+test("a batch rebuilds when the upload lands on a material the mesh was not compiled with", () => {
+  const map = { isTexture: true, uuid: "bc7" };
+  const uploaded = { map };
+  const plain = { map: null };
+  assert.equal(materialForBatch([{ part: { material: plain } }, { part: { material: uploaded } }], plain), uploaded);
+  const part = { material: uploaded, geometry: {}, materialKey: "Body:0", batchKey: "flat|Body:0" };
+  const compiledFlat = { material: uploaded, userData: { forgeAlbedo: null } };
+  assert.equal(batchMissesUpload([part], [{ mesh: compiledFlat }]), true);
+  compiledFlat.userData.forgeAlbedo = map;
+  assert.equal(batchMissesUpload([part], [{ mesh: compiledFlat }]), false);
+  const other = { material: plain, userData: { forgeAlbedo: null } };
+  assert.equal(batchMissesUpload([part], [{ mesh: other }]), true);
+});
+
+test("tint stays in the batch key", () => {
+  const house = { image: "roof", alpha: "opaque", side: 0, tint: "ffffff", indexed: "idx", attributes: "position,uv" };
+  assert.notEqual(batchKey(house), batchKey({ ...house, tint: "c8b090" }));
 });
 
 test("a mapped geometry without uv loses only its own map", () => {

@@ -4,8 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { oneThreePlugin } from "./one-three.js";
-import { webgpuBptcPlugin } from "./webgpu-bptc-plugin.js";
-
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function forgeRevision() {
@@ -82,7 +80,7 @@ export default defineConfig(({ mode }) => ({
             if (source === "three/webgpu" || source === "three/tsl") return { id: source, external: true };
           },
         }]
-      : [oneThreePlugin(threeWebgpu), webgpuBptcPlugin()]),
+      : [oneThreePlugin(threeWebgpu)]),
     basisTranscoder(),
   ],
   build: {

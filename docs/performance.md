@@ -330,9 +330,9 @@ Bradyn's Kokiri pass on `515cd10`, real WebGPU, same spot the earlier passes use
 
 That is about 8× the WebGL frame, and the whole trial sat between 3× and 12× slower (32 ms, then 66.3 ms and 315 draws on `4bf5287`, then 247.9 ms and 338 draws). `separate` was already 0, so the copies were instances. The extra cost did not come from falling out of `BatchedMesh`.
 
-What r170 cannot do, and what is still unresolved:
+What that r170 trial could not do, and what is still unresolved. The renderer is now three r187. See [rendering-performance.md](rendering-performance.md) for the checks against that source.
 
-- **No multi-draw.** WebGL packs every geometry that shares a material into one `WEBGL_multi_draw`. r170's WebGPU backend draws one index range per call. Sharing a material and fixing the first instance did not bring the draw count down to WebGL's, and the frame got worse.
+- **Merged draws, not multi-draw.** WebGL packs every geometry that shares a material into one `WEBGL_multi_draw`. r187's WebGPU backend draws one merged index range per consecutive run (`_mergedDraw*`). Forge fills those ranges with `scheduleMergedDraws`. That is still not one indirect multi-draw for the whole mesh. On the r170 trial, sharing a material and fixing the first instance did not bring the draw count down to WebGL's, and the frame got worse.
 - **Render-call loop.** `info.render.calls` is how many times `render()` ran, not the draw count. A quiet editor frame is one call. The Kokiri console reached about 80 calls in a frame. That loop is not fixed.
 - **Cutouts.** Some grass cards still drew as solid sheets after the colour-node discard. The mask path is not reliable on this three.
 

@@ -6,12 +6,12 @@ This note is the Field-scale memory and draw path: what the viewer already does,
 
 A previous measurement (25 Nov 2026, America/New_York) of Hyrule Field Child, after the Snap dispose fixes, reached **2.31 GB JS heap** (limit 4.19 GB) and a **15.0 GB Chrome working set** (~29 GB private) at **567 of 852** unique scene models. The tab could crash with Out of Memory once the Field finished streaming.
 
-The largest cause on WebGPU was that packed KTX2 textures never actually uploaded as BC1/BC7. `textureSupport` read `renderer.getContext()`, which is a `GPUCanvasContext` with no `getExtension`. Every compressed cap came back false, so `chooseTexture` decoded the JPEG/PNG fallback into an RGBA `ImageBitmap`. Full-resolution RGBA for hundreds of unique maps is several times larger on the GPU than BC7 and also keeps a decoded CPU copy. A second, independent gap: three.js r170's WebGPU `getFormat` maps DXT, ETC2, and ASTC, but not `RGBA_BPTC_Format` (BC7, 36492). Even a correct `CompressedTexture` would have failed to upload.
+The largest cause on WebGPU was that packed KTX2 textures never actually uploaded as BC1/BC7. `textureSupport` read `renderer.getContext()`, which is a `GPUCanvasContext` with no `getExtension`. Every compressed cap came back false, so `chooseTexture` decoded the JPEG/PNG fallback into an RGBA `ImageBitmap`. Full-resolution RGBA for hundreds of unique maps is several times larger on the GPU than BC7 and also keeps a decoded CPU copy. A second, independent gap on three r170: WebGPU `getFormat` mapped DXT, ETC2, and ASTC, but not `RGBA_BPTC_Format` (BC7, 36492). r187 maps that case to `bc7-rgba-unorm` / `bc7-rgba-unorm-srgb`. The Vite plugin and `patchWebgpuBc7Format` are gone.
 
 ## Fixes in this pass
 
 - **WebGPU compressed textures.** `textureSupport(gl, renderer)` uses `renderer.backend.hasFeature("texture-compression-bc")` and `"texture-compression-astc"` after `WebGPURenderer.init()` (already awaited). `canUploadCompressed` does not call `compressedTexImage2D` on a context that has no WebGL probe; alignment is still checked. Packed maps upload as BC7/BC1 when the adapter supports `texture-compression-bc`.
-- **BC7 format mapping.** A Vite plugin (`frontend/webgpu-bptc-plugin.js`) inserts the missing `RGBA_BPTC_Format` case into r170's `getFormat`, and corrects r170's typo `BC7RGBAUnormSRGB: 'bc7-rgba-srgb'` to the WebGPU name `bc7-rgba-unorm-srgb`. `patchWebgpuBc7Format` in `frontend/src/backend.js` also wraps `backend.textureUtils.getFormat` at init (and when `textureUtils` is assigned later).
+- **BC7 format mapping.** three r187's `WebGPUTextureUtils.getFormat` handles `RGBA_BPTC_Format` with `GPUTextureFormat.BC7RGBAUnorm` and `BC7RGBAUnormSRGB`. The r170 string `bc7-rgba-srgb` is not in that file. Forge no longer patches `getFormat`.
 - **Normals, ORM, and other data maps are packed too.** Albedos already went through `gpu_image`. Extra maps used `_encode_cached(..., gpu=False)` and stayed PNG, which is most of the unique Field textures (thousands of PNG files in the shared-v1 store vs ~1.3k packed KTX2). Those now pack as BC7 as well. `asDataMap` keeps them in linear color space and repairs the compressed sampler. Model caches are `shared-v3` / `models-53` so existing GLBs rebuild.
 - **Template geometry.** After `partsFromTemplate` clones and bakes a mesh, the source template geometries are disposed. `BatchedMesh.addGeometry` keeps the copy it uploaded. The part clone is dropped once that copy exists; see GPU picking below.
 - **Instrumentation.** In development, `window.__forgeMemory()` (and `viewport.getMemoryReport()`) returns a per-category breakdown: textures by format (unique sources, not clones), geometries by role, unique models vs instances, draw counts, and frame time. The Profile HUD splits that frame into CPU and GPU. It stays closed until opened. See [Profiling HUD](#profiling-hud).
@@ -40,7 +40,7 @@ CPU-merging small, unique, moving meshes every frame is a poor fit here. Most Fi
 
 ### Indirect / multi-draw
 
-WebGPU supports `drawIndirect` and `multiDrawIndirect`. three r170 has no public `drawIndirect` path for `BatchedMesh`. The viewer already folds same-geometry instances on WebGPU through `groupGeometryDraws` / `_multiDrawCount` (a CPU-side multi-draw, not a GPU-written indirect buffer). A custom indirect path would matter more once cull results are written on the GPU. Estimated gain on the current CPU cull: **small**. Documented, not implemented as a custom buffer.
+WebGPU supports `drawIndirect` and `multiDrawIndirect`. r187's WebGPU backend draws `BatchedMesh` from `_mergedDrawStarts`, `_mergedDrawCounts`, and `_mergedDrawInstanceCounts`, and advances `firstInstance` by the run. The batch shader indexes `_indirectTexture` with that instance index, which is how a hidden instance stays on its own matrix. `BatchedMesh.onBeforeRender` does not call `_updateDrawParameters(..., 'merged')` on WebGPU, so Forge does, from the mesh's `onBeforeRender` (`scheduleMergedDraws`). The r170 hand fold (`groupGeometryDraws` / `patchBatchedDraw`) is gone: wrapping `drawIndexed` would replace the running `firstInstance` and read the wrong matrices. A custom GPU-written indirect buffer would matter more once cull results are written on the GPU. Estimated gain on the current CPU cull: **small**. Documented, not implemented as a custom buffer.
 
 ### Frustum culling
 
@@ -96,17 +96,41 @@ Kokiri Forest Child is about 470–482 unique models (`262 loaded` + `207 backgr
 
 ## Shader pipelines
 
-three r170 builds a render pipeline on the thread that is drawing when the cache misses. `Pipelines` publishes the cache entry before `createRenderPipelineAsync` assigns `pipelineData.pipeline`. A draw in that window calls `setPipeline(undefined)`. `warmWebGLPrograms` stays on WebGL and does not call `compileAsync` on the live WebGPU renderer.
+three still builds a render pipeline on the thread that is drawing when the cache misses. `Pipelines` publishes the cache entry before `createRenderPipelineAsync` assigns `pipelineData.pipeline`. A draw in that window calls `setPipeline(undefined)`. `warmWebGLPrograms` stays on WebGL and does not call `compileAsync` on the live WebGPU renderer.
 
-A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (r170's `targetScene` argument is the live scene, so its lights are included) and only then added. At most **6** of those compiles run at once. More than that stalls the browser's GPU process. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing.
+A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (the live scene is the third argument, so its lights are included) and only then added. At most **6** of those compiles run at once. More than that stalls the browser's GPU process. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing. That guard stays: r187 still has open reports where a compile resolves before the native pipeline exists ([#35556](https://github.com/mrdoob/three.js/issues/35556), [#35659](https://github.com/mrdoob/three.js/issues/35659)).
 
-r170's `compileAsync` calls `_renderTransparents(list, camera, scene, lights)`. `render()` calls the same method as `(list, doublePassList, camera, scene, lights)`. On a transparent batch the lights node arrives as the scene, `overrideMaterial` is undefined, and `renderObject` throws `Cannot read properties of undefined (reading 'isShadowNodeMaterial')`. Opaque batches never take that path. `repairCompileAsyncTransparents` puts the empty double-pass list back in the missing slot, and if a compile still throws it puts `_handleObjectFunction` back to `_renderObjectDirect` so later frames keep drawing. The failure is logged once and the batch is attached anyway.
+r187's `compileAsync` calls `_renderTransparents(transparentObjects, transparentDoublePassObjects, camera, sceneRef, lightsNode)`, the same argument order as `render()`. The r170 call omitted the double-pass list, so the lights node arrived as the scene and `overrideMaterial` threw `isShadowNodeMaterial`. `repairCompileAsyncTransparents` is gone. A throw before three restores `_handleObjectFunction` is still caught in `compileObjectPipeline`: the draw path is put back, the failure is logged once, and the batch is attached anyway.
 
-### three.js upgrade
+### three.js r187
 
-Forge pins `three@0.170.0`. The current npm release checked for this note is **0.187.0** (26 Nov 2026). An upgrade is not in this change.
+Forge pins `three@0.187.0` (30 Oct 2026). Checked against that package's sources, not the release notes alone:
 
-r170's draw path still calls synchronous `createRenderPipeline` on a cache miss. Later releases have not removed that. Open reports on the 0.18x line: `compileComputeAsync` can resolve with `pipeline` unset and a later `setPipeline` throws ([#35556](https://github.com/mrdoob/three.js/issues/35556), r187), and `compileAsync` can miss the pipeline a later draw actually uses when the color format differs ([#35659](https://github.com/mrdoob/three.js/issues/35659), checked on r186 and current dev). A background-compilation pull request ([#33766](https://github.com/mrdoob/three.js/pull/33766)) was closed without merging. The BC7 `getFormat` patch, the batched-draw fold, and the rest of the r170 WebGPU shims would all have to be re-checked across 17 minor versions. That is not a small upgrade. The compile-before-attach path and the draw guard cover the race on r170.
+| r170 workaround | r187 source | What Forge does |
+| --- | --- | --- |
+| Vite plugin and `patchWebgpuBc7Format` | `getFormat` case `RGBA_BPTC_Format` returns `BC7RGBAUnorm` / `BC7RGBAUnormSRGB`. The string `bc7-rgba-srgb` is absent | Removed |
+| `repairCompileAsyncTransparents` | `compileAsync` passes `transparentDoublePassObjects` | Removed. The 6-wide compile limit and the attach-on-failure catch stay |
+| `groupGeometryDraws` / `patchBatchedDraw` | WebGPU `_draw` reads `_mergedDraw*` and adds `instanceCount` onto `firstInstance`. Nothing calls `_updateDrawParameters(..., 'merged')`, so `_mergedDrawCount` stays 0 and the mesh would draw nothing | `scheduleMergedDraws` calls it. The hand patch is removed so it cannot override `firstInstance` |
+| No per-layer compressed array upload | `_copyCompressedBufferToTexture` writes `texture.layerUpdates` through `writeTextureLayer` (`origin.z = layerIndex`). The WebGL path uses `compressedTexSubImage3D` when `isCompressedArrayTexture` | Not used yet. Issue #7's spike can upload BC7 layers. This change does not build texture arrays |
+
+`three-mesh-bvh` `0.8.3` accepts `three >= 0.159.0`, so the peer range includes r187. `three/tsl` is `three.tsl.js`. `three.webgpu.js` imports it and does not re-export `reference`, so the one-three plugin no longer aliases `three/tsl` onto the WebGPU build. Both files import `three.core.js`, which is the shared copy.
+
+Residency is unchanged: soft byte budget 1.2 GB of geometry plus BC7 (target about 1.0 GB), hard 1.5 GB, count caps 4096 / 4608, JS heap 2.2 GB soft / 2.8 GB hard.
+
+### Untextured Field
+
+On main, Hyrule Field drew with Profile `tex 3` while `__forgeMemory()` estimated about 8.8 GB of BC7, 2233 batches, and about 58 ms of CPU. Those two numbers look at different sets. `tex` is `countTextures` on batch materials and terrain, one level deep, and it does not walk `userData.forgeLit`. The memory report also walks part materials, template materials, and `forgeLit`, and `gpuTextureBytes` estimates a GPU size from width and height. It does not prove the texture is bound.
+
+The geometry glb leaves the images out. `partsFromTemplate` records a flat batch key, and the staged `BatchedMesh` is compiled before `applyTextureManifest` assigns the BC7. Two bugs kept the draw on that flat material:
+
+- `imageSignature` called `drawImage` on a compressed image (`{width, height, data}`). That throws, and the catch labeled every same-size map `WxH:bitmap`. The batch key also includes the node family (`materialKey`), not the model name, so different models with the same family and the same texture size shared one mesh. The mesh kept the first material. The manifest wrote each BC7 onto its own material, which is what the memory report counted.
+- When the mesh and the part did share one material, the pipeline had already been compiled with `map` null. Putting the map on the material afterwards did not rebuild that mesh.
+
+After the upload, the batch key is the compressed texture's source id (clones share `source`). If the key changed, or the mesh's `forgeAlbedo` stamp is not the map now on the material, or no resident mesh holds that material, the batches rebuild. `materialForBatch` picks a material that holds the map. `compileAsync` then runs with the map assigned. `releaseTextureCpu` waits until `textureGpuReady` sees `backend.get(texture).texture` or `externalTexture`, so emptied mips are not what the next compile samples.
+
+Material tint stays in the batch key. `setColorAt` is already the selection tint. Taking the material color out of the key means a shared white material, and building that before the map is on the compiled material is what painted models a flat cream. That stays a follow-up (issue #4).
+
+Both checkboxes have to be on for a textured read. **Load textures** in the Actors panel downloads the images. **Textures** on the stage bar shows or hides images that are already loaded. Unchecking only the stage bar strips the maps onto `forgeLit` and leaves `tex` at the terrain leftovers while the memory report still counts the BC7.
 
 ## GPU picking
 
@@ -138,7 +162,7 @@ The HUD shows the latest frame and the rolling average and p95 over the last 180
 
 - **CPU** — JavaScript in the frame. Update is fly, streaming, and labels. Cull is `syncBatchVisibility`. Submit is `renderer.render` on the CPU.
 - **GPU** — On WebGPU, a `timestamp-query` query set is written at the render-pass boundaries, resolved into a buffer, and mapped with `mapAsync`. On WebGL, and on the WebGPU renderer's WebGL2 fallback, the timer is `EXT_disjoint_timer_query_webgl2`. The line reads `n/a` when the adapter has neither, and when a WebGL disjoint sync throws the result away. It reads `…` until the first result arrives.
-- **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `sub` is the sum of `_multiDrawCount` (the folded WebGPU draws). `draws` is the same total the status label prints.
+- **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `sub` is the sum of `_mergedDrawCount` once `scheduleMergedDraws` has filled it, otherwise `_multiDrawCount`. `draws` is the same total the status label prints.
 - **fps, inst, culled, separate** — frame rate (`idle` when the view has settled), live instances, hidden instances, and the draw count those actors would cost without batching.
 - **queued, loading, loaded, background** — the model queue. `conv`, `tex`, `dl`, and `up` are this scene's convert, texture, download, and upload times. `warm` is the server warm-up. `detail` is the wait for the first nearby detailed batch. The server convert summary is the last of those lines, and **Dump JSON** keeps the recent convert log with it.
 - **tris, meshes, tex, heap** — triangles, resident unique meshes, resident textures on batches and terrain, and `performance.memory` when the browser exposes it. Otherwise the heap reads `n/a`.

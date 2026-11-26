@@ -38,9 +38,9 @@ function sampleR(tex, index) {
   const base = tex.isTextureNode === true ? tex : texelNode(tex);
   const size = textureSize(base).x;
   const j = int(index);
-  const x = j.modInt(int(size));
+  const x = j.mod(int(size));
   const y = j.div(int(size));
-  const sampled = base.uv(ivec2(x, y));
+  const sampled = base.sample(ivec2(x, y));
   sampled.setSampler(false);
   sampled.setUpdateMatrix(false);
   return sampled.x;

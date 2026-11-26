@@ -29,6 +29,11 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
 
   function shaderFor(renderer, object) {
     renderer.hasFeature = () => false;
+    // init() is what installs Bindings. A shader build before that sees null,
+    // and r187 still calls getSharedBindGroup when the field is not undefined.
+    if (renderer._bindings == null) {
+      renderer._bindings = { getSharedBindGroup(group) { return group; } };
+    }
     const builder = renderer.backend.createNodeBuilder(object, renderer);
     builder.camera = new THREE.PerspectiveCamera();
     builder.build();

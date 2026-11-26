@@ -1,8 +1,9 @@
 /**
  * WebGPU and WebGL three builds each set `window.__THREE__`. Lights, materials,
  * and BatchedMesh only work when the renderer and the objects are the same copy.
- * The WebGPU graph uses one build for every Three.js import. The WebGL2 graph
- * uses `three.module.js` for its scene and renderer.
+ * The WebGPU graph uses three.webgpu.js for `three` and `three/webgpu`.
+ * r187 puts TSL in three.tsl.js, which that build imports, so `three/tsl`
+ * stays on three.tsl.js. The WebGL2 graph uses `three.module.js`.
  *
  * Prebundled addons inline the WebGL build, so the WebGPU graph loads the raw
  * addon sources and points their `three` import at the WebGPU build.
@@ -24,12 +25,19 @@ export function mark(id) {
   return `${id}${String(id).includes("?") ? "&" : "?"}${WEBGPU_MARK}`;
 }
 
-/** The resolved file that must be the WebGPU build, or null to keep it. */
+/** r187 keeps TSL in three.tsl.js. three.webgpu.js imports that file; it does not re-export `reference`. */
+export function tslBuild(webgpuFile) {
+  return path.join(path.dirname(webgpuFile), "three.tsl.js");
+}
+
+/** The resolved file that must be the WebGPU build, or null to keep it. A TSL prebundle points at three.tsl.js. */
 export function sameThreeBuild(resolvedId, webgpuFile) {
   const file = unmark(resolvedId).split("?")[0];
+  if (file.endsWith("/three.tsl.js") || file.endsWith("\\three.tsl.js")) return null;
+  if (/[/\\]\.vite[/\\]deps[/\\]three_tsl\.js$/.test(file)) return tslBuild(webgpuFile);
   if (file === webgpuFile || file.endsWith("/three.webgpu.js") || file.endsWith("\\three.webgpu.js")) return webgpuFile;
   if (file.endsWith("/three.module.js") || file.endsWith("\\three.module.js")) return webgpuFile;
-  if (/[/\\]\.vite[/\\]deps[/\\]three(?:_webgpu|_tsl)?\.js$/.test(file)) return webgpuFile;
+  if (/[/\\]\.vite[/\\]deps[/\\]three(?:_webgpu)?\.js$/.test(file)) return webgpuFile;
   return null;
 }
 
@@ -59,7 +67,8 @@ export function oneThreePlugin(webgpuFile) {
       const sourceMarked = source.includes(WEBGPU_MARK);
       if (!fromMarked && !sourceMarked) return null;
       const bare = unmark(source);
-      if (bare === "three" || bare === "three/webgpu" || bare === "three/tsl") return webgpuFile;
+      if (bare === "three" || bare === "three/webgpu") return webgpuFile;
+      if (bare === "three/tsl") return tslBuild(webgpuFile);
       const raw = rawDependency(bare, webgpuFile);
       if (raw) return mark(raw);
       const importerFile = importer ? unmark(importer) : undefined;

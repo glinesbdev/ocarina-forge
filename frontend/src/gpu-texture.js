@@ -107,6 +107,23 @@ export function textureImageSize(texture) {
   return { width, height };
 }
 
+/**
+ * True once WebGPU has a real image for this texture. `needsUpdate` can clear
+ * without `backend.get(texture)` holding a GPU texture, and releasing the CPU
+ * mips then leaves the sample bound to nothing.
+ */
+export function textureGpuReady(backend, texture) {
+  if (!texture || !backend || typeof backend.get !== "function") return false;
+  let data;
+  try {
+    data = backend.get(texture);
+  } catch {
+    return false;
+  }
+  if (!data || data.isDefaultTexture === true) return false;
+  return Boolean(data.texture || data.externalTexture);
+}
+
 export function releaseTextureCpu(texture) {
   if (!texture) return false;
   const source = texture.source;

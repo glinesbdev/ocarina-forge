@@ -46,86 +46,103 @@ export function batchKey({ image, alpha, side, tint, indexed, attributes }) {
 }
 
 /**
- * Fold consecutive BatchedMesh ranges that share one index span into one
- * instanced draw. `batchFirst[i]` is the indirect-texture slot of that run.
- * r170's WebGPU backend ignores it and restarts every run at instance 0, so
- * `patchBatchedDraw` has to pass the slot through. Returns the draw count.
+ * Identity of one image for the batch key. Bitmap hashes still live in the
+ * viewport. Compressed images are `{width,height,data}`: `drawImage` throws,
+ * and a shared `"bitmap"` label then puts every same-size map on one mesh.
+ * Clones share `source`, so identical pixels still share a key.
  */
-export function groupGeometryDraws(mesh) {
-  const count = mesh && mesh._multiDrawCount ? mesh._multiDrawCount : 0;
-  if (!mesh.userData) mesh.userData = {};
-  if (count <= 1) {
-    mesh.userData.batchFirst = null;
-    mesh._multiDrawInstances = null;
-    return count;
-  }
-  const starts = mesh._multiDrawStarts;
-  const counts = mesh._multiDrawCounts;
-  if (!starts || !counts) {
-    mesh.userData.batchFirst = null;
-    mesh._multiDrawInstances = null;
-    return count;
-  }
-  const nextStarts = [];
-  const nextCounts = [];
-  const nextInstances = [];
-  const nextFirst = [];
-  let run = 0;
-  for (let i = 1; i <= count; i += 1) {
-    const same = i < count && starts[i] === starts[run] && counts[i] === counts[run];
-    if (same) continue;
-    nextStarts.push(starts[run]);
-    nextCounts.push(counts[run]);
-    nextInstances.push(i - run);
-    nextFirst.push(run);
-    run = i;
-  }
-  if (!mesh._multiDrawInstances || mesh._multiDrawInstances.length < nextStarts.length) {
-    mesh._multiDrawInstances = new Int32Array(Math.max(count, nextStarts.length));
-  }
-  if (!mesh.userData.batchFirst || mesh.userData.batchFirst.length < nextFirst.length) {
-    mesh.userData.batchFirst = new Int32Array(Math.max(count, nextFirst.length));
-  }
-  for (let i = 0; i < nextStarts.length; i += 1) {
-    starts[i] = nextStarts[i];
-    counts[i] = nextCounts[i];
-    mesh._multiDrawInstances[i] = nextInstances[i];
-    mesh.userData.batchFirst[i] = nextFirst[i];
-  }
-  mesh._multiDrawCount = nextStarts.length;
-  return nextStarts.length;
+export function imageIdentity(texture) {
+  const image = texture && texture.image;
+  if (!image) return "none";
+  const width = image.width || image.videoWidth || 0;
+  const height = image.height || image.videoHeight || 0;
+  const source = texture.source;
+  const id = (source && (source.uuid || source.id)) || texture.uuid || texture.id || "";
+  return `${width}x${height}:${id}`;
 }
 
 /**
- * r170 draws a multi-instance batch from instance 0. A later geometry in the
- * same mesh would then read the first run's matrices. Wrap the pass encoder
- * for that one call and supply the slot `groupGeometryDraws` recorded.
+ * Rewrite `part.batchKey` from the material that now holds the maps.
+ * Returns true when any key changed, which means the current meshes were
+ * grouped before those maps existed.
  */
-export function patchBatchedDraw(backend) {
-  if (!backend || backend.drawPatched || typeof backend.draw !== "function") return backend;
-  const original = backend.draw;
-  backend.draw = function drawGrouped(renderObject, info) {
-    const object = renderObject && renderObject.object;
-    const firsts = object && object.userData && object.userData.batchFirst;
-    if (!firsts || !object._multiDrawCount) return original.call(this, renderObject, info);
-    const data = typeof this.get === "function" ? this.get(renderObject.context) : null;
-    const pass = data && data.currentPass;
-    if (!pass || typeof pass.drawIndexed !== "function") return original.call(this, renderObject, info);
-    const native = pass.drawIndexed;
-    let slot = 0;
-    pass.drawIndexed = function groupedIndexed(indexCount, instanceCount, firstIndex, baseVertex) {
-      const firstInstance = firsts[slot] || 0;
-      slot += 1;
-      return native.call(this, indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
-    };
-    try {
-      return original.call(this, renderObject, info);
-    } finally {
-      pass.drawIndexed = native;
+export function refreshBatchKeys(parts, keyFor) {
+  let changed = false;
+  if (typeof keyFor !== "function") return false;
+  for (const part of parts || []) {
+    if (!part || !part.material || !part.geometry) continue;
+    const next = `${keyFor(part.material, part.geometry)}|${part.materialKey || ""}`;
+    if (part.batchKey !== next) {
+      part.batchKey = next;
+      changed = true;
     }
-  };
-  backend.drawPatched = true;
-  return backend;
+  }
+  return changed;
+}
+
+/** The mesh has to draw a material that actually holds the uploaded map. */
+export function materialForBatch(records, fallback) {
+  for (const record of records || []) {
+    const material = record && record.part && record.part.material;
+    const map = material && material.map;
+    if (map && map.isTexture === true) return material;
+  }
+  return fallback;
+}
+
+/**
+ * True when a resident mesh was compiled before this upload, or when the
+ * mesh is still holding a different material than the one that received it.
+ * `forgeAlbedo` is the map the mesh was built with. A missing stamp with a
+ * live map is the geometry-glb path: the batch existed before the manifest.
+ */
+export function batchMissesUpload(parts, batches) {
+  const materials = new Set();
+  for (const part of parts || []) {
+    if (part && part.material) materials.add(part.material);
+  }
+  const held = new Set();
+  for (const batch of batches || []) {
+    const mesh = batch && (batch.mesh || batch);
+    const material = mesh && mesh.material;
+    if (!material || !materials.has(material)) continue;
+    held.add(material);
+    const now = material.map && material.map.isTexture === true ? material.map : null;
+    const userData = mesh.userData;
+    const stamped = userData && Object.prototype.hasOwnProperty.call(userData, "forgeAlbedo")
+      ? (userData.forgeAlbedo && userData.forgeAlbedo.isTexture === true ? userData.forgeAlbedo : null)
+      : undefined;
+    if (stamped === undefined) {
+      if (now) return true;
+    } else if (stamped !== now) return true;
+  }
+  for (const material of materials) {
+    const map = material.map && material.map.isTexture === true ? material.map : null;
+    if (map && !held.has(material)) return true;
+  }
+  return false;
+}
+
+/**
+ * r187's WebGPU backend draws `_mergedDrawStarts/Counts/InstanceCounts` and
+ * advances `firstInstance` by each run. The batch shader indexes
+ * `_indirectTexture` with that instance index. `_updateDrawParameters` fills
+ * both arrays, but `BatchedMesh.onBeforeRender` never calls it with
+ * `'merged'` on WebGPU, so a mesh would draw nothing. Calling it every frame
+ * is safe: it returns immediately when visibility, frustum, and sort are quiet.
+ * Returns the merged draw count.
+ */
+export function scheduleMergedDraws(mesh, camera, geometry, material) {
+  if (!mesh || typeof mesh._updateDrawParameters !== "function") return 0;
+  mesh._updateDrawParameters(camera, geometry, material, "merged");
+  return mesh._mergedDrawCount || 0;
+}
+
+/** Folded WebGPU draws. r187 counts those on `_mergedDrawCount`. */
+export function batchSubDrawCount(mesh) {
+  if (!mesh) return 0;
+  if (mesh._mergedDrawStarts && typeof mesh._mergedDrawCount === "number") return mesh._mergedDrawCount;
+  return mesh._multiDrawCount || 0;
 }
 
 const reportedMissingUv = new WeakSet();

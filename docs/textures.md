@@ -92,4 +92,4 @@ From the repo, with the venv active and the dump that contains `romfs`:
 
 ## WebGPU compressed uploads
 
-On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r170's missing BC7 `getFormat` case is patched at init and by a Vite plugin. See `docs/rendering-performance.md`.
+On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r187's `getFormat` maps `RGBA_BPTC_Format` itself, so Forge does not patch it. See `docs/rendering-performance.md`.

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { chooseTexture, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
   releaseTextureCpu,
-  repairCompressedTexture, VK_FORMAT } from "./gpu-texture.js";
+  repairCompressedTexture, textureGpuReady, VK_FORMAT } from "./gpu-texture.js";
 
 function makePacked() {
   const ktx = new Uint8Array(104);
@@ -286,4 +286,23 @@ test("releaseTextureCpu leaves a size stub after closing an ImageBitmap so mipLe
   const levels = Math.floor(Math.log2(Math.max(texture.image.width, texture.image.height))) + 1;
   assert.equal(Number.isFinite(levels) && levels >= 1, true);
   assert.equal(levels, 7);
+});
+
+test("textureGpuReady waits for a real WebGPU image and ignores the default texture", () => {
+  const texture = { id: 1 };
+  const gpu = { texture: {} };
+  const backend = {
+    get(item) {
+      return item === texture ? gpu : null;
+    },
+  };
+  assert.equal(textureGpuReady(backend, texture), true);
+  gpu.isDefaultTexture = true;
+  assert.equal(textureGpuReady(backend, texture), false);
+  gpu.isDefaultTexture = false;
+  gpu.texture = null;
+  gpu.externalTexture = { id: "ext" };
+  assert.equal(textureGpuReady(backend, texture), true);
+  assert.equal(textureGpuReady(null, texture), false);
+  assert.equal(textureGpuReady({ get() { throw new Error("missing"); } }, texture), false);
 });

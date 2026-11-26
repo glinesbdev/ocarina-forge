@@ -282,58 +282,17 @@ export function pipelineCompileInFlight() {
   return pipelineActive;
 }
 
-/**
- * r170 compileAsync calls `_renderTransparents(list, camera, scene, lights)`.
- * The method is `(list, doublePassList, camera, scene, lights)`, which is how
- * `render()` calls it. The camera lands in the double-pass slot, the scene in
- * the camera slot, and the lights node in the scene slot. `renderObject` then
- * reads `lights.overrideMaterial` (undefined, not null) and throws
- * `isShadowNodeMaterial`. Every transparent batch hits this, including water
- * and alpha-blend. Opaque batches use `_renderObjects` and do not.
- * A real render passes an array for the double-pass list. Putting an empty
- * array back in that slot restores the camera and the scene. Double-sided
- * materials still compile both faces inside `renderObject`.
- * A throw before compileAsync's own restore leaves `_handleObjectFunction` as
- * `_createObjectPipeline`, so later draws compile instead of drawing.
- */
-export function repairCompileAsyncTransparents(renderer) {
-  if (!renderer || renderer.__forgeCompileTransparents) return false;
-  let patched = false;
-  if (typeof renderer._renderTransparents === "function") {
-    const original = renderer._renderTransparents.bind(renderer);
-    renderer._renderTransparents = function renderTransparents(renderList, doublePassList, camera, scene, lightsNode) {
-      if (doublePassList && doublePassList.isCamera === true && !Array.isArray(doublePassList)) {
-        return original(renderList, [], doublePassList, camera, scene);
-      }
-      return original(renderList, doublePassList, camera, scene, lightsNode);
-    };
-    patched = true;
-  }
-  if (typeof renderer.compileAsync === "function" && typeof renderer._renderObjectDirect === "function") {
-    const original = renderer.compileAsync.bind(renderer);
-    renderer.compileAsync = function compileAsyncRestored(...args) {
-      // then() so a synchronous throw still restores the draw path.
-      return Promise.resolve().then(() => original(...args)).catch((error) => {
-        renderer._handleObjectFunction = renderer._renderObjectDirect;
-        renderer._compilationPromises = null;
-        throw error;
-      });
-    };
-    patched = true;
-  }
-  if (!patched) return false;
-  renderer.__forgeCompileTransparents = true;
-  return true;
-}
-
 let compileFailureLogged = false;
 
 /**
  * Compile one object's render pipelines on WebGPU before it joins the scene.
- * r170's signature is compileAsync(scene, camera, targetScene): the batch is
- * the first argument and the live scene is targetScene so lights are included.
- * At most PIPELINE_COMPILE_LIMIT compiles run at once. WebGL keeps warmWebGLPrograms.
- * A compile failure is logged once and the promise still resolves, so the caller attaches the batch.
+ * The batch is the first argument and the live scene is the third, so lights
+ * are included. At most PIPELINE_COMPILE_LIMIT compiles run at once. WebGL
+ * keeps warmWebGLPrograms. A compile failure is logged once, the draw path is
+ * restored, and the promise still resolves so the caller attaches the batch.
+ * r187's compileAsync already passes the double-pass list into
+ * `_renderTransparents`. A throw before that method restores
+ * `_handleObjectFunction` would leave later frames compiling instead of drawing.
  */
 export async function compileObjectPipeline(renderer, object, camera, scene) {
   const webgpu = Boolean(
@@ -345,11 +304,14 @@ export async function compileObjectPipeline(renderer, object, camera, scene) {
     && object,
   );
   if (!webgpu) return;
-  repairCompileAsyncTransparents(renderer);
   await acquirePipelineSlot();
   try {
     await renderer.compileAsync(object, camera, scene);
   } catch (error) {
+    if (typeof renderer._renderObjectDirect === "function") {
+      renderer._handleObjectFunction = renderer._renderObjectDirect;
+    }
+    renderer._compilationPromises = null;
     if (!compileFailureLogged) {
       compileFailureLogged = true;
       console.error("WebGPU pipeline compile failed; attaching the batch anyway.", error);
@@ -379,50 +341,6 @@ export function guardWebgpuSetPipeline(renderer) {
   };
   backend.__forgePipelineGuard = true;
   return true;
-}
-
-/** three r170's WebGPU getFormat() does not map RGBA_BPTC_Format (BC7), and its sRGB enum typo is "bc7-rgba-srgb". */
-const RGBA_BPTC_Format = 36492;
-const BC7_UNORM = "bc7-rgba-unorm";
-const BC7_SRGB = "bc7-rgba-unorm-srgb";
-
-function installBc7GetFormat(utils) {
-  if (!utils || typeof utils.getFormat !== "function") return false;
-  if (utils.__forgeBc7) return true;
-  const original = utils.getFormat.bind(utils);
-  utils.getFormat = function patchedGetFormat(texture, options) {
-    if (texture && texture.format === RGBA_BPTC_Format) {
-      return texture.colorSpace === "srgb" ? BC7_SRGB : BC7_UNORM;
-    }
-    const format = original(texture, options);
-    if (format === "bc7-rgba-srgb") return BC7_SRGB;
-    return format;
-  };
-  utils.__forgeBc7 = true;
-  return true;
-}
-
-export function patchWebgpuBc7Format(renderer) {
-  const backend = renderer && renderer.backend;
-  if (!backend) return false;
-  if (installBc7GetFormat(backend.textureUtils)) return true;
-  if (backend.__forgeBc7Pending) return false;
-  backend.__forgeBc7Pending = true;
-  let current = backend.textureUtils;
-  try {
-    Object.defineProperty(backend, "textureUtils", {
-      configurable: true,
-      enumerable: true,
-      get() { return current; },
-      set(value) {
-        current = value;
-        installBc7GetFormat(value);
-      },
-    });
-    return false;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -464,9 +382,7 @@ export async function createBackendRenderer(THREE, options = {}) {
     // r170's getFallback already swapped in WebGLBackend. Reject it so boot can
     // record the reason and open the classic WebGL graph instead of a silent label.
     if (backend !== "WebGPU") throw new Error("WebGPU init used the WebGL2 backend");
-    patchWebgpuBc7Format(gpuRenderer);
     guardWebgpuSetPipeline(gpuRenderer);
-    repairCompileAsyncTransparents(gpuRenderer);
     return { renderer: gpuRenderer, backend, nodes: true, webgpu: true, reason: "", requested, note: options.note || "" };
   } catch (error) {
     // If the timeout fired first, release the renderer once initialization settles.
