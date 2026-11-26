@@ -10,6 +10,8 @@
 
 const SRGB = "srgb";
 const LINEAR = "srgb-linear";
+// three.js RepeatWrapping. A character albedo whose UVs or SRT leave 0–1 has to tile.
+const REPEAT = 1000;
 
 export function materialKey(part) {
   if (part && typeof part === "object") {
@@ -117,7 +119,15 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
         report.push({ key, status: "not-applied", error: "not applied. The image request failed.", found: slot.found || "" });
         return;
       }
-      report.push({ key, status: "applied", error: "", found: slot.found || slot.map || "" });
+      report.push({
+        key,
+        status: "applied",
+        error: "",
+        found: slot.found || slot.map || "",
+        tint: slot.tint || null,
+        uv: slot.uv || "",
+        tile: slot.tile || "",
+      });
     }));
   }
   await Promise.all(jobs);
@@ -131,7 +141,14 @@ export function formatTextureReport(report) {
     const error = String(row.error || "");
     const lower = error.toLowerCase();
     if (row.status === "applied") {
-      lines.push(`${key}applied ${row.found || "texture"}`.trim());
+      let line = `${key}applied ${row.found || "texture"}`.trim();
+      if (Array.isArray(row.tint) && row.tint.length >= 3) {
+        const nums = row.tint.slice(0, 3).map((item) => Number(item).toFixed(2));
+        line += `; tint ${nums.join(" ")}`;
+      }
+      if (row.uv) line += `; uv ${row.uv}`;
+      if (row.tile) line += `; repeats ${row.tile}`;
+      lines.push(line);
     } else if (row.status === "decode") {
       lines.push(lower.includes("decode") ? `${key}${error}` : `${key}decode error. ${error}`.trim());
     } else if (row.status === "not-applied") {
@@ -185,6 +202,12 @@ async function assignSlot(material, slot, loadTexture) {
   if (slot.color && material.color && typeof material.color.setRGB === "function") {
     const color = slot.color;
     material.color.setRGB(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
+  }
+  const albedo = asTexture(material.map);
+  if (albedo && slot.tile) {
+    albedo.wrapS = REPEAT;
+    albedo.wrapT = REPEAT;
+    albedo.needsUpdate = true;
   }
   if (asTexture(orm)) {
     material.roughness = 1;

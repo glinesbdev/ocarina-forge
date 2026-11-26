@@ -156,6 +156,32 @@ test("applying textures does not rebuild geometry and clearing drops them", asyn
   assert.equal(parts[0].geometry, geometry);
 });
 
+test("a skin tint is named and a tiling albedo repeats", async () => {
+  const mesh = material();
+  const parts = [{ name: "lod0Body_low0", materialKey: "Body_low:5", material: mesh }];
+  const report = await applyTextureManifest(parts, {
+    materials: {
+      "Body_low:5": {
+        map: "/api/model-textures/skin.ktx2",
+        color: [0.72, 0.48, 0.28, 1],
+        tint: [0.72, 0.48, 0.28],
+        uv: "_u1",
+        tile: "2.00×2.00",
+        status: "ready",
+        found: "Pack/Actor/CmnTex_Chara.pack.zs",
+      },
+    },
+  }, async (url) => texture(url));
+  assert.deepEqual(mesh.color.rgb, [0.72, 0.48, 0.28]);
+  assert.equal(mesh.map.wrapS, 1000);
+  assert.equal(mesh.map.wrapT, 1000);
+  const note = formatTextureReport(report);
+  assert.match(note, /Body_low:5: applied Pack\/Actor\/CmnTex_Chara\.pack\.zs/);
+  assert.match(note, /tint 0\.72 0\.48 0\.28/);
+  assert.match(note, /uv _u1/);
+  assert.match(note, /repeats 2\.00×2\.00/);
+});
+
 test("the texture toggle does not ask the model loader to run", () => {
   const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
