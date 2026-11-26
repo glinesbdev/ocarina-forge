@@ -8,6 +8,8 @@ const node = readFileSync(new URL("./blend-node.js", import.meta.url), "utf8");
 
 test("the moss mix is a soft threshold on the vertex mask", () => {
   assert.match(viewport, /smoothstep\(0\.35, 0\.65, mask\)/);
+  assert.match(viewport, /blendSkinVertex > 0\.5/);
+  assert.match(viewport, /low \*= vBlendMask\.rgb/);
   assert.match(viewport, /attribute vec4 blendMask/);
   assert.match(viewport, /vMossUv/);
   assert.match(page, /id="blend-mask"/);
@@ -23,6 +25,8 @@ test("one blend program mixes roughness and the overlay normal", () => {
 
 test("the node path uses the same threshold and the overlay's own scale", () => {
   assert.match(node, /smoothstep\(float\(0\.35\), float\(0\.65\)/);
+  assert.match(node, /blend\.skinVertex/);
+  assert.match(node, /skinColor/);
   assert.match(node, /attribute\("blendMask"/);
   assert.match(node, /blendScaleUniform/);
   assert.match(node, /roughnessNode/);

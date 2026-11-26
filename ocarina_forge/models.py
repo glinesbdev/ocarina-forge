@@ -16,7 +16,8 @@ project name (`Pack/Actor/Npc_Goron_GOU.pack.zs` for
 `Npc_Goron_GOU_Biggoron`), and a sibling `Model/<prefix>.Tex.bfres` is read
 for images the mesh bfres only names. Older `Model/<name>.bfres` paths and a
 bfres stored in the pack are still accepted. Vertex colours do not mean the
-material has no texture.
+material has no texture. On a character material they are the mask: the albedo
+is the rock, and a const-colour uniform is the skin underneath it.
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ from ocarina_forge.cache_prune import (
 )
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, rank_albedo, texture_rank
-from ocarina_forge.blend import color_span, overlay_plan, sampler_indices
+from ocarina_forge.blend import color_span, overlay_plan, sampler_indices, skin_overlay_plan, span_from_colors
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
@@ -75,7 +76,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-58\0"
+_CACHE_VERSION = b"models-59\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -295,16 +296,25 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
             if part.omit:
                 continue
             image = taken(model, part.texture)
-            albedo = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
+            skin = bool(part.blend and part.blend.get("skin") and image is not None)
+            if skin:
+                albedo = _published_image(_skin_swatch(part.blend.get("skinColor")), "png", urls)
+            else:
+                albedo = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
             normal = _published_image(taken(model, part.normal_texture), "mask", urls)
             normal1 = _published_image(taken(model, getattr(part, "normal1_texture", "")), "mask", urls)
+            if skin and normal and not normal1:
+                normal1 = normal
+                normal = None
             orm = _published_image(getattr(part, "orm_image", None), "png", urls)
             orm1 = _published_image(getattr(part, "orm1_image", None), "png", urls)
             emissive = _published_image(getattr(part, "emission_image", None), "png", urls) or _published_image(
                 taken(model, part.emission_texture), "mask", urls
             )
             moss = None
-            if part.blend and part.overlay_texture:
+            if skin:
+                moss = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
+            elif part.blend and part.overlay_texture:
                 moss = _published_image(taken(model, part.overlay_texture), "mask", urls)
             if not any((albedo, normal, normal1, orm, orm1, emissive, moss)):
                 continue
@@ -330,10 +340,16 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                 "color": [float(channel) for channel in color[:4]],
             }
             if moss and part.blend:
-                slot["blend"] = {
+                blend_slot = {
                     "channel": part.blend.get("channel") or "r",
                     "uv": part.blend.get("uv") or "_u0",
                 }
+                if part.blend.get("skin"):
+                    blend_slot["skin"] = True
+                    blend_slot["skinVertex"] = bool(part.blend.get("skinVertex"))
+                    if part.blend.get("skinColor"):
+                        blend_slot["skinColor"] = [float(channel) for channel in part.blend["skinColor"][:4]]
+                slot["blend"] = blend_slot
             materials[f"{part.name}:{part.material_index}"] = slot
     return {"gyaml": gyaml, "materials": materials}
 
@@ -510,7 +526,11 @@ def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: 
 
 
 def _drop_textures(models) -> None:
-    """Layout loads the mesh and does not decode BNTX."""
+    """Layout loads the mesh and does not decode BNTX.
+
+    A blend planned just before this still keeps its overlay name. The geometry
+    file has the vertex mask, and the texture manifest brings the images.
+    """
     for model in models:
         for material in model.materials or []:
             material.binds = []
@@ -519,7 +539,8 @@ def _drop_textures(models) -> None:
             part.candidates = []
             part.normal_texture = ""
             part.emission_texture = ""
-            part.overlay_texture = ""
+            if not part.blend:
+                part.overlay_texture = ""
 
 
 def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: ConvertClock, pointer: Path, flat: bool = False) -> tuple[str, dict]:
@@ -534,6 +555,7 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
     token = _FILES.set(files)
     try:
         if flat:
+            _plan_layer_blends(models)
             _drop_textures(models)
             external, log, raws = {}, [], []
         else:
@@ -1263,6 +1285,8 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 if part.proxy:
                     if "terrain proxy" not in notes:
                         notes.append("terrain proxy")
+                elif part.blend and part.overlay_texture:
+                    pass
                 elif part.texture or getattr(part, "texture_error", "") or not (model.images or external):
                     notes.append(_flat_colour_note(part, why))
             unlit = False
@@ -1322,25 +1346,45 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             moss_png = None
             blend_extra = None
             overlay_uvs = None
-            if part.blend and part.overlay_texture:
+            if part.blend and part.blend.get("skin") and part.overlay_texture and png is not None:
+                rock_png = png if part.overlay_texture == part.texture else extra_png(part.overlay_texture)
+                swatch = image_png(_skin_swatch(part.blend.get("skinColor")))
+                if rock_png and swatch:
+                    png = swatch
+                    moss_png = rock_png
+                    if part.normal_texture and not part.normal1_texture:
+                        normal1_png = normal_png
+                        normal_png = None
+            elif part.blend and part.overlay_texture:
                 moss_png = extra_png(part.overlay_texture)
-            if moss_png:
-                blend_extra = {
-                    "blend": {
-                        "channel": part.blend.get("channel") or "r",
-                        "uv": part.blend.get("uv") or "_u0",
-                        "scale": list(part.blend.get("scale") or [1, 1]),
-                        "translate": list(part.blend.get("translate") or [0, 0]),
-                        "sampler": part.blend.get("sampler") or "",
-                        "texture": part.overlay_texture,
-                    }
+            if part.blend and part.overlay_texture and (moss_png or part.blend.get("skin")):
+                blend_body = {
+                    "channel": part.blend.get("channel") or "r",
+                    "uv": part.blend.get("uv") or "_u0",
+                    "scale": list(part.blend.get("scale") or [1, 1]),
+                    "translate": list(part.blend.get("translate") or [0, 0]),
+                    "sampler": part.blend.get("sampler") or "",
+                    "texture": part.overlay_texture,
                 }
+                if part.blend.get("skin"):
+                    blend_body["skin"] = True
+                    blend_body["skinVertex"] = bool(part.blend.get("skinVertex"))
+                    if part.blend.get("skinColor"):
+                        blend_body["skinColor"] = [float(channel) for channel in list(part.blend["skinColor"])[:4]]
+                    if part.blend.get("maskTexture"):
+                        blend_body["maskSampler"] = part.blend.get("maskSampler") or ""
+                        blend_body["maskTexture"] = part.blend["maskTexture"]
+                blend_extra = {"blend": blend_body}
                 wanted_uv = part.blend.get("uv") or "_u0"
                 if wanted_uv != "_u0":
                     overlay_uvs = (part.uv_extra or {}).get(wanted_uv)
                     if overlay_uvs is not None and len(overlay_uvs) != len(part.positions):
                         overlay_uvs = None
-                if not any(note.startswith("blend ") for note in notes):
+                if part.blend.get("skin"):
+                    line = _layer_note(part)
+                    if line not in notes:
+                        notes.append(line)
+                elif moss_png and not any(note.startswith("blend ") for note in notes):
                     notes.append(
                         f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
                     )
@@ -1529,16 +1573,15 @@ def _apply_choice(part, choice, external) -> None:
 
 
 def _choose_unlinked(dump, model, part, hints, terrain, external, raws, remembered) -> dict:
-    """A shape whose material index misses the parsed list still uses those materials.
+    """A shape whose material index misses the list uses a material that names it.
 
-    The index is kept only when it lands on a material. An out-of-range index
-    used to leave the part with an empty error, and the vertex-colour sentence
-    then claimed the material names no albedo. The materials in the file are
-    the ones that name the textures.
+    One material in the file is that material. Several materials only match a
+    shape that shares a name token. The first material whose image happened to
+    load is not painted onto every unmatched shape.
     """
     ranked = _materials_for_shape(model, part)
     if not ranked:
-        return _choose_loose(dump, model, part, hints, terrain, external, raws)
+        return _unlinked_miss(model, part)
     chosen = None
     for material in ranked:
         key = id(material)
@@ -1564,7 +1607,12 @@ def _choose_unlinked(dump, model, part, hints, terrain, external, raws, remember
 
 
 def _materials_for_shape(model, part) -> list:
-    """Materials most likely to colour this shape. A single material is that one."""
+    """Materials that colour this shape. A single material is that one.
+
+    With more than one, only a positive name-token overlap matches. A zero
+    score used to fall through to the first material whose texture loaded,
+    which painted one rock albedo onto every shape.
+    """
     materials = list(model.materials or [])
     if len(materials) <= 1:
         return materials
@@ -1572,27 +1620,152 @@ def _materials_for_shape(model, part) -> list:
     scored = []
     for index, material in enumerate(materials):
         score = len(tokens & _name_tokens(material.name))
-        scored.append((-score, index, material))
-    scored.sort(key=lambda item: (item[0], item[1]))
-    return [material for _score, _index, material in scored]
+        scored.append((score, index, material))
+    best = max(score for score, _index, _material in scored)
+    if best <= 0:
+        return []
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [material for score, _index, material in scored if score == best]
+
+
+def _unlinked_miss(model, part) -> dict:
+    """The shape's index missed, and no material name matches it."""
+    listed = []
+    for material in model.materials or []:
+        binds = ", ".join(f"{slot or '?'}={tex}" for slot, tex in (material.binds or [])[:6]) or "no samplers"
+        listed.append(f"{material.name} ({binds})")
+    summary = "; ".join(listed[:8]) or "no materials"
+    error = f"shape material index {part.material_index} did not match a material by name. Materials: {summary}"
+    return {
+        "entry": {
+            "material": part.material or part.name or "unlinked",
+            "error": error,
+            "shapes": [part.name] if part.name else [],
+            "textured": False,
+            "flat": True,
+            "decoded": False,
+            "binds": [],
+            "via": "",
+            "flatCause": "unlinked-shape",
+        },
+        "wanted": "",
+        "sampler": "",
+        "alpha": "opaque",
+        "cutoff": 0.5,
+        "image": None,
+        "maps": {},
+        "overlay": {},
+        "surface": {},
+        "emission": {},
+    }
 
 
 def _c0_label(plan: dict) -> str:
     return f"_c0.{plan.get('channel') or 'r'}"
 
 
-def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
-    """The decoded ``_a1`` layer, or nothing when this material is a single albedo."""
-    span = None
+def _span_for_material(model, material):
+    """Vertex-colour span for shapes that draw this material, including a missed index."""
+    materials = list(model.materials or [])
+    try:
+        index = materials.index(material)
+    except ValueError:
+        index = -1
+    only = len(materials) == 1
     for part in model.parts:
-        if part.material_index < 0 or part.material_index >= len(model.materials):
+        linked = index >= 0 and part.material_index == index
+        unlinked = part.material_index < 0 or part.material_index >= len(materials)
+        named = False
+        if unlinked and not only:
+            ranked = _materials_for_shape(model, part)
+            named = bool(ranked) and ranked[0] is material
+        if not (linked or (unlinked and only) or named):
             continue
-        if model.materials[part.material_index] is not material:
-            continue
-        span = color_span(part.vertex_attributes)
+        span = color_span(getattr(part, "vertex_attributes", None)) or span_from_colors(getattr(part, "colors", None))
         if span:
-            break
-    plan = overlay_plan(material, span)
+            return span
+    return None
+
+
+def _plan_layer_blends(models) -> None:
+    """Record skin and two-albedo blends before a flat convert drops the images.
+
+    The geometry file has no texels. It still has to carry the vertex mask and
+    the blend extras, or the viewer never installs the mix. The texture manifest
+    supplies the rock and the skin swatch.
+    """
+    for model in models:
+        materials = list(model.materials or [])
+        for material in materials:
+            span = _span_for_material(model, material)
+            plan = overlay_plan(material, span) or skin_overlay_plan(material, span)
+            if not plan:
+                continue
+            index = materials.index(material)
+            only = len(materials) == 1
+            for part in model.parts:
+                linked = part.material_index == index
+                unlinked = part.material_index < 0 or part.material_index >= len(materials)
+                named = False
+                if unlinked and not only:
+                    ranked = _materials_for_shape(model, part)
+                    named = bool(ranked) and ranked[0] is material
+                if not (linked or (unlinked and only) or named):
+                    continue
+                part.blend = plan
+                part.overlay_texture = plan.get("texture") or ""
+
+
+def _layer_note(part) -> str:
+    """One details line: material, skin tint, rock sampler, and the mask."""
+    plan = part.blend or {}
+    color = plan.get("skinColor")
+    if color:
+        tint = "tint ({:.2f}, {:.2f}, {:.2f})".format(float(color[0]), float(color[1]), float(color[2]))
+    elif plan.get("skinVertex"):
+        tint = "vertex colour"
+    else:
+        tint = "tint"
+    mask = _c0_label(plan)
+    if plan.get("maskTexture"):
+        mask = f"{mask}; mask sampler {plan.get('maskSampler') or 'mask'} {plan['maskTexture']}"
+    shader = plan.get("shader") or ""
+    archive = plan.get("archive") or ""
+    where = ""
+    if archive or shader:
+        where = f" shader {archive}/{shader}".rstrip("/")
+    material = part.material or "material"
+    rock = f"{plan.get('sampler') or '_a0'} {part.overlay_texture}".strip()
+    return f"layers: {material}{where}; skin {tint}; rock {rock}; mask {mask}"
+
+
+def _skin_swatch(color) -> object:
+    """A 1x1 albedo of the skin tint. White when the vertices carry the colour."""
+    from ocarina_forge.formats.bntx import Texture
+
+    def channel(value, fallback: float) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = fallback
+        return max(0, min(255, int(round(number * 255))))
+
+    if color and len(color) >= 3:
+        rgba = bytes([
+            channel(color[0], 1),
+            channel(color[1], 1),
+            channel(color[2], 1),
+            channel(color[3] if len(color) > 3 else 1, 1),
+        ])
+    else:
+        rgba = bytes([255, 255, 255, 255])
+    return Texture("skin", 1, 1, rgba, 0, "skin tint")
+
+
+def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
+    """The second albedo, or a skin tint under the one albedo, when a mask exists."""
+    span = _span_for_material(model, material)
+    plan = overlay_plan(material, span) or skin_overlay_plan(material, span)
     if not plan:
         return {}
     found = _load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws)

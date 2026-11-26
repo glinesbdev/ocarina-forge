@@ -11,11 +11,21 @@ from types import SimpleNamespace
 
 from ocarina_forge.dump import Dump
 from ocarina_forge.fixtures import build_fixture
-from ocarina_forge.formats.bfres import rank_albedo, sample_v10_bfres
+from ocarina_forge.formats.bfres import Material, Model, Part, rank_albedo, sample_v10_bfres
+from ocarina_forge.formats.bntx import Texture
 from ocarina_forge.formats.bntx import write_rgba
 from ocarina_forge.formats.sarc import pack
 from ocarina_forge.formats.zsio import compress
-from ocarina_forge.models import _PACK_TEX, _TEX_INDEX, _flat_colour_note, _resolve_tex, _stem
+from ocarina_forge.models import (
+    _COMPANION_IMAGES,
+    _COMPANION_LIST,
+    _PACK_TEX,
+    _TEX_INDEX,
+    _flat_colour_note,
+    _resolve_materials,
+    _resolve_tex,
+    _stem,
+)
 from ocarina_forge.textureaudit import audit_models
 
 
@@ -272,6 +282,33 @@ def test_unlinked_character_shape_uses_companion_textures_and_names_them(tmp_pat
     assert report["resolvedViaSampler"] == 2
     assert report["flat"] == 0
     assert "rgba" not in json_blob(report)
+
+
+def test_an_unlinked_shape_does_not_take_the_first_textured_material():
+    """A missed index used to paint every shape with the first albedo that loaded."""
+    face = Texture("Face_Alb", 1, 1, bytes([240, 200, 90, 255]), 0)
+    rock = Texture("Rock_Alb", 1, 1, bytes([90, 80, 70, 255]), 0)
+    triangle = ([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)])
+    model = Model(
+        "Npc",
+        parts=[
+            Part("Face", *triangle, "", "", 9),
+            Part("Back", *triangle, "", "", 9),
+            Part("Prop", *triangle, "", "", 9),
+        ],
+        materials=[
+            Material("Mt_Face", binds=[("_a0", "Face_Alb")], albedo=[("_a0", "Face_Alb")]),
+            Material("Mt_Back", binds=[("_a0", "Rock_Alb")], albedo=[("_a0", "Rock_Alb")]),
+        ],
+        images={"Face_Alb": face, "Rock_Alb": rock},
+    )
+    _resolve_materials(None, [model], "Npc_Goron", False)
+    assert model.parts[0].texture == "Face_Alb"
+    assert model.parts[1].texture == "Rock_Alb"
+    assert model.parts[2].texture == ""
+    assert "did not match a material by name" in model.parts[2].texture_error
+    assert "Mt_Back" in model.parts[2].texture_error
+    assert "Rock_Alb" in model.parts[2].texture_error
 
 
 def json_blob(report: dict) -> str:

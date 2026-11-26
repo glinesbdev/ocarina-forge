@@ -899,6 +899,23 @@ let convertSlots = 8;
     }
   }
 
+  function refreshBlendMaps(parts) {
+    for (const part of parts || []) {
+      const material = part && part.material;
+      const blend = material && material.userData && material.userData.blend;
+      if (!material || !blend) continue;
+      if (material.userData.blendMap && material.userData.blendMapUniform) {
+        material.userData.blendMapUniform.value = material.userData.blendMap;
+      }
+      const geometry = part.geometry;
+      const hasMask = geometry && geometry.getAttribute && geometry.getAttribute("blendMask");
+      if (hasMask && !material.userData.blendShader) installBlendShader(material);
+      if (blendNodes && hasMask && material.userData.blendMap && material.map && !material.userData.blendNode) {
+        blendNodes.attachBlend(material);
+      }
+    }
+  }
+
   async function paintActorTextures(gyaml, url, generation = textureGeneration) {
     if (!url) return;
     const parsed = parsedTemplates.get(url);
@@ -907,6 +924,7 @@ let convertSlots = 8;
     if (generation !== textureGeneration) return;
     if (!parsedTemplates.has(url)) return;
     await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
+    refreshBlendMaps(parsed.parts);
     if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
     presentTextures(parsed.parts, texturesShown);
     finishTextureEdit(parsed.parts);
@@ -2441,8 +2459,10 @@ let convertSlots = 8;
           geometry.setAttribute("blendUv", geometry.getAttribute("uv1"));
         }
         material.vertexColors = false;
-        installBlendShader(material);
-        if (blendNodes) blendNodes.attachBlend(material);
+        if (material.userData.blendMap) {
+          installBlendShader(material);
+          if (blendNodes) blendNodes.attachBlend(material);
+        }
       }
       const sphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : new THREE.Sphere(new THREE.Vector3(), 1);
       const keepCpu = isPreviewWater(material, child.name || "", url || "");
@@ -3258,7 +3278,12 @@ let convertSlots = 8;
   blendWeight = smoothstep(0.35, 0.65, mask);
   blendMossUv = vMossUv * blendScale + blendTranslate;
   vec4 moss = texture2D(blendMap, blendMossUv);
-  diffuseColor.rgb = mix(diffuseColor.rgb, moss.rgb, blendWeight);
+  vec3 low = diffuseColor.rgb;
+  if (blendSkin > 0.5) {
+    low = blendSkinColor;
+    if (blendSkinVertex > 0.5) low *= vBlendMask.rgb;
+  }
+  diffuseColor.rgb = mix(low, moss.rgb, blendWeight);
   if (blendDebug > 0.5) diffuseColor.rgb = vec3(blendWeight);
 }`;
 
@@ -3298,6 +3323,15 @@ let convertSlots = 8;
     material.userData.blendTranslateUniform = { value: new THREE.Vector2(Number(translate[0]) || 0, Number(translate[1]) || 0) };
     material.userData.blendChannelUniform = { value: { r: 0, g: 1, b: 2, a: 3 }[blend.channel] ?? 0 };
     material.userData.blendUv1Uniform = { value: blend.uv === "_u1" || blend.uv === "u1" ? 1 : 0 };
+    const skinColor = blend.skinColor || [1, 1, 1];
+    material.userData.blendSkinUniform = { value: blend.skin ? 1 : 0 };
+    material.userData.blendSkinVertexUniform = { value: blend.skinVertex ? 1 : 0 };
+    material.userData.blendSkinColorUniform = {
+      value: new THREE.Vector3(Number(skinColor[0] ?? 1), Number(skinColor[1] ?? 1), Number(skinColor[2] ?? 1)),
+    };
+    if (!material.userData.blendMapUniform) {
+      material.userData.blendMapUniform = { value: material.userData.blendMap || null };
+    }
     if (material.userData.mossMap && !material.userData.blendMap) {
       material.userData.blendMap = material.userData.mossMap;
       material.userData.blendMap.wrapS = THREE.RepeatWrapping;
@@ -3309,6 +3343,7 @@ let convertSlots = 8;
       material.emissive.setRGB(0, 0, 0);
       material.emissiveMap = null;
     }
+    material.userData.blendMapUniform.value = material.userData.blendMap || null;
     if (!material.roughnessMap) {
       const orm = sharedOrmMap();
       material.roughnessMap = orm;
@@ -3338,7 +3373,10 @@ let convertSlots = 8;
       shader.uniforms.blendScale = material.userData.blendScaleUniform;
       shader.uniforms.blendTranslate = material.userData.blendTranslateUniform;
       shader.uniforms.blendChannel = material.userData.blendChannelUniform;
-      shader.uniforms.blendMap = { value: material.userData.blendMap };
+      shader.uniforms.blendSkin = material.userData.blendSkinUniform;
+      shader.uniforms.blendSkinVertex = material.userData.blendSkinVertexUniform;
+      shader.uniforms.blendSkinColor = material.userData.blendSkinColorUniform;
+      shader.uniforms.blendMap = material.userData.blendMapUniform;
       shader.uniforms.orm1Map = material.userData.orm1Uniform;
       shader.uniforms.normal1Map = material.userData.normal1Uniform;
       shader.vertexShader = shader.vertexShader
@@ -3352,6 +3390,9 @@ uniform sampler2D orm1Map;
 uniform sampler2D normal1Map;
 uniform float blendDebug;
 uniform float blendChannel;
+uniform float blendSkin;
+uniform float blendSkinVertex;
+uniform vec3 blendSkinColor;
 uniform vec2 blendScale;
 uniform vec2 blendTranslate;
 float blendWeight;

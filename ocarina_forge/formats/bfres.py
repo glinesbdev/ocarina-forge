@@ -803,6 +803,7 @@ class _File:
             for index, choice in enumerate(block.get("optionChoices") or []):
                 if choice:
                     material.options.setdefault(f"option{index}", choice)
+        material.base_color = color_from_params(material.params)
         return material
 
     def _render_info_note(self, at: int) -> str:
@@ -3169,7 +3170,7 @@ def _part_from(
         uvs,
         texture,
         material.name if material else "",
-        material_index if material else -1,
+        material_index if material or material_index > 0 else -1,
         list(material.binds) if material else [],
         list(material.albedo) if material else [],
         sampler,
@@ -3226,6 +3227,20 @@ def _truthy(value) -> bool:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return value != 0
     return False
+
+
+def color_from_params(params) -> tuple[float, float, float, float] | None:
+    """A skin tint stored as a float shader param, such as ``const_color0``."""
+    for item in params or []:
+        if not isinstance(item, dict) or item.get("kind") != "float":
+            continue
+        name = str(item.get("name") or "")
+        if not _COLOR_PARAM.search(name) or _COLOR_SKIP.search(name):
+            continue
+        color = _sane_color(item.get("value"))
+        if color:
+            return color
+    return None
 
 
 def _sane_color(values) -> tuple[float, float, float, float] | None:

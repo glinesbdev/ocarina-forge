@@ -114,9 +114,15 @@ async function assignSlot(material, slot, loadTexture) {
   replaceMap(material, "emissiveMap", emissive, plain, LINEAR);
   const mossTex = asTexture(moss);
   if (mossTex) {
-    mossTex.colorSpace = LINEAR;
+    mossTex.colorSpace = slot.blend && slot.blend.skin ? SRGB : LINEAR;
     mossTex.needsUpdate = true;
     userData.blendMap = mossTex;
+    if (userData.blendMapUniform) userData.blendMapUniform.value = mossTex;
+  }
+  if (slot.blend && userData.blend) {
+    if (slot.blend.skin && !userData.blend.skin) userData.blend.skin = true;
+    if (slot.blend.skinVertex && !userData.blend.skinVertex) userData.blend.skinVertex = true;
+    if (slot.blend.skinColor && !userData.blend.skinColor) userData.blend.skinColor = slot.blend.skinColor;
   }
   if (slot.color && material.color && typeof material.color.setRGB === "function") {
     const color = slot.color;

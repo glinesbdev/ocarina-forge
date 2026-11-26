@@ -3,8 +3,8 @@
 import json
 import struct
 
-from ocarina_forge.blend import choose_channel, overlay_plan, sampler_indices
-from ocarina_forge.formats.bfres import Material, Model, Part, _close_uv_seams, _part_from
+from ocarina_forge.blend import choose_channel, overlay_plan, skin_overlay_plan, sampler_indices
+from ocarina_forge.formats.bfres import Material, Model, Part, _close_uv_seams, _part_from, color_from_params
 from ocarina_forge.formats.bntx import Texture
 from ocarina_forge.formats.gltf import Primitive, to_glb
 from ocarina_forge.models import _assemble
@@ -209,6 +209,86 @@ def test_the_glb_carries_the_mask_and_a_dark_emissive_overlay():
     # 0 is the glTF default, so a packer may omit the factor. Either way it does not glow.
     assert material.get("emissiveFactor", [0, 0, 0]) == [0, 0, 0]
     assert "emissiveTexture" in material
+
+
+def test_a_const_colour_sits_under_the_rock_where_the_mask_is_low():
+    """One albedo is the rock. The skin is the uniform. Alpha is the mask.
+
+    This is the goron body: the rock texture is not the whole surface. A gentle
+    vertex colour is left alone, and a second albedo stays on the moss path.
+    """
+    yellow = (0.95, 0.78, 0.16, 1.0)
+    material = Material(
+        "Mt_Body",
+        binds=[("_a0", "Goron_Rock_Alb"), ("_msk0", "Goron_Rock_Msk")],
+        albedo=[("_a0", "Goron_Rock_Alb")],
+        base_color=yellow,
+        shader="Goron_Skin",
+        archive="Npc_Character",
+        params=[{"kind": "float", "name": "const_color0", "value": list(yellow)}],
+    )
+    span = [(0.9, 0.98), (0.7, 0.8), (0.1, 0.2), (0.0, 1.0)]
+    plan = skin_overlay_plan(material, span)
+    assert plan["skin"] is True
+    assert plan["texture"] == "Goron_Rock_Alb"
+    assert plan["sampler"] == "_a0"
+    assert plan["channel"] == "a"
+    assert plan["skinVertex"] is False
+    assert plan["skinColor"][0] == 0.95
+    assert plan["maskTexture"] == "Goron_Rock_Msk"
+    assert plan["archive"] == "Npc_Character"
+    assert skin_overlay_plan(material, [(0.4, 0.55), (0.4, 0.5), (0.4, 0.45), (1.0, 1.0)]) is None
+    two = Material(
+        "Mt_Roof",
+        albedo=[("_a0", "slate"), ("_a1", "moss")],
+        base_color=yellow,
+    )
+    assert skin_overlay_plan(two, span) is None
+    assert color_from_params(material.params) == yellow
+
+    rock = Texture("Goron_Rock_Alb", 1, 1, bytes([110, 100, 90, 255]), 0)
+    colors = [(0.95, 0.78, 0.16, 0.0), (0.95, 0.78, 0.16, 0.0), (0.95, 0.78, 0.16, 1.0)]
+    part = Part(
+        "Body",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        "",
+        "",
+        0,
+        colors=colors,
+    )
+    model = Model("Npc_Goron", parts=[part], materials=[material], images={"Goron_Rock_Alb": rock})
+    from ocarina_forge.models import _resolve_materials
+
+    _resolve_materials(None, [model], "Npc_Goron_Biggoron", False)
+    assert part.texture == "Goron_Rock_Alb"
+    assert part.blend["skin"] is True
+    assert part.blend["channel"] == "a"
+    blob, info = _assemble([model], {})
+    text = " ".join(info["notes"])
+    assert "layers:" in text
+    assert "Mt_Body" in text
+    assert "Goron_Rock_Alb" in text
+    assert "skin tint (0.95, 0.78, 0.16)" in text
+    assert "mask _c0.a" in text
+    assert "Npc_Character/Goron_Skin" in text
+    document = _json(blob)
+    primitive = document["meshes"][0]["primitives"][0]
+    assert "COLOR_0" in primitive["attributes"]
+    blend = document["materials"][primitive["material"]]["extras"]["blend"]
+    assert blend["skin"] is True
+    assert blend["skinVertex"] is False
+    assert blend["texture"] == "Goron_Rock_Alb"
+    assert blend["channel"] == "a"
+
+
+def test_vertex_rgb_is_the_skin_when_no_uniform_is_stored():
+    material = Material("Mt_Body", albedo=[("_a0", "Rock_Alb")], binds=[("_a0", "Rock_Alb")])
+    plan = skin_overlay_plan(material, [(0.9, 0.95), (0.7, 0.8), (0.1, 0.2), (0.0, 1.0)])
+    assert plan["skinVertex"] is True
+    assert plan["skinColor"] is None
+    assert plan["channel"] == "a"
 
 
 def test_a_plain_emissive_map_still_glows():
