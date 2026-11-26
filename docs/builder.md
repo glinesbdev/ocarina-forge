@@ -21,7 +21,7 @@ Both scripts install missing tools only after a yes. They then run `python -m oc
 5. Rebuild the wasm module only when it is out of date, or when `--rebuild-wasm` is passed.
 6. `npm run build` in `frontend/` only when editor sources changed since the last bundle.
 7. Ask once for a game dump if none is saved. Enter saves it. A blank answer leaves the choice to the editor.
-8. Start the API on 127.0.0.1:47232 and the editor on http://127.0.0.1:47231, then open a browser. Ctrl+C stops both.
+8. Start the API on 127.0.0.1:47232 and the editor on http://127.0.0.1:47231, then open a browser. Ctrl+C stops both. On Windows the builder, the API, and the preview share a job object, so ending the builder process also ends those two. The API's converter workers are a separate job and end with the API. See [Converter processes](../README.md#converter-processes).
 
 The editor is Vite's preview of `frontend/dist`. It proxies `/api` to the API, and it sends the same cross-origin headers the dev server uses, so the wasm worker pool can start. `OCARINA_FORGE_HOST` and `OCARINA_FORGE_PORT` override the API address. `BANCWRIGHT_HOST` and `BANCWRIGHT_PORT` are still read when the new names are unset.
 

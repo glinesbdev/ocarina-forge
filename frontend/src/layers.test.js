@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -13,6 +14,7 @@ import {
   mergeStoredDiff,
   parseLoadParam,
   presetLoad,
+  textureFilterNotice,
   wantsMesh,
 } from "./layers.js";
 
@@ -182,4 +184,21 @@ test("models and textures load once each", () => {
     }),
     { models: 0, textures: 0 },
   );
+});
+
+test("textures off is a notice, and the stage bar is not the filter", () => {
+  assert.equal(textureFilterNotice(fullLoad()), "");
+  assert.equal(textureFilterNotice(presetLoad("logic")), "");
+  const text = textureFilterNotice(presetLoad("layout"));
+  assert.match(text, /Load textures is off/);
+  assert.match(text, /look like a hang/);
+  assert.match(text, /Actors panel/);
+  assert.match(text, /stage bar/);
+  assert.match(text, /already loaded/);
+  const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
+  const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
+  assert.match(html, /id="texture-filter-notice"/);
+  assert.match(html, /Turn on load textures/);
+  assert.match(main, /textureFilterNotice/);
+  assert.match(main, /texture-filter-notice-enable/);
 });

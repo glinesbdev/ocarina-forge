@@ -50,6 +50,7 @@ import {
   normalizeLoad,
   parseLoadParam,
   presetLoad,
+  textureFilterNotice,
 } from "./layers.js";
 
 function $(id) {
@@ -459,6 +460,13 @@ $("show-water").addEventListener("change", (event) => {
   viewport.setFlags({ water: state.showWater, visibleLayers: state.load && state.load.visible });
   persistLoad();
 });
+const enableTextureFilter = $("texture-filter-notice-enable");
+if (enableTextureFilter) {
+  enableTextureFilter.addEventListener("click", () => {
+    const load = state.load || fullLoad();
+    void applyLoadChange(loadFromLayers(load.layers, true, load.visible));
+  });
+}
 const showTextures = $("show-textures");
 if (showTextures) {
   showTextures.addEventListener("change", () => {
@@ -1313,10 +1321,20 @@ function syncTextureSwitch(load) {
   if (viewport.setTextureLoad) viewport.setTextureLoad(allow);
 }
 
+function syncTextureFilterNotice() {
+  const node = $("texture-filter-notice");
+  if (!node) return;
+  const text = textureFilterNotice(state.load || fullLoad());
+  node.hidden = !text;
+  const label = $("texture-filter-notice-text");
+  if (label) label.textContent = text;
+}
+
 function publishLoad() {
   const load = state.load || fullLoad();
   viewport.setLoadState({ off: layersOff(load) });
   syncTextureSwitch(load);
+  syncTextureFilterNotice();
   const ground = $("show-ground");
   const water = $("show-water");
   state.showGround = Boolean(load.layers.terrain && load.visible.terrain !== false);

@@ -51,6 +51,10 @@
         <a href="/troubleshooting.html">Troubleshooting</a>
         <button id="build-notice-dismiss" type="button">Dismiss</button>
       </div>
+      <div id="texture-filter-notice" class="banner notice" role="status" hidden>
+        <p id="texture-filter-notice-text"></p>
+        <button id="texture-filter-notice-enable" type="button" class="primary">Turn on load textures</button>
+      </div>
 
       <div id="workspace" hidden>
         <div id="dock" class="dock-host"></div>
@@ -146,7 +150,7 @@
             <label class="check" title="Show the ground. A heightmap is on by default. An untextured stand-in is a neutral grid, not a green sheet."><input id="show-ground" type="checkbox" /> Ground</label>
             <label class="check" title="Show the separate sub terrain heightmap as a wireframe reference."><input id="show-sub" type="checkbox" /> Sub terrain</label>
             <label class="check" title="Draw water. The front sheet is a faint desaturated layer and does not write depth."><input id="show-water" type="checkbox" checked /> Water</label>
-            <label class="check" title="Show textures. Images keep downloading while this is off. The first check, when Load textures is off, starts that download. Layout and textures=0 are what skip the download."><input id="show-textures" type="checkbox" checked /> Textures</label>
+            <label class="check" title="Show or hide images that are already loaded. Downloads continue while this is off when Load textures is on. The first check, when Load textures is off, turns that filter on and starts the download. Layout and textures=0 leave the filter off; the banner says how to turn it on."><input id="show-textures" type="checkbox" checked /> Textures</label>
             <label class="check" title="One sun shadow on the ground mesh. Off keeps the frame cheap. Actor batches do not cast."><input id="show-shadows" type="checkbox" /> Shadows</label>
             <label class="check" title="glTF occlusion maps. The ground's baked AO stays in the terrain mesh either way."><input id="show-ao" type="checkbox" checked /> AO</label>
             <label class="check" title="Small crosses on effect emitters, locators, and fog volumes."><input id="show-effect-gizmos" type="checkbox" checked /> Effect gizmos</label>

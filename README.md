@@ -68,6 +68,18 @@ The viewport status label names the renderer. `WebGPU` is a real WebGPU device. 
 
 Edits are diffs in the project folder. See [docs/project-format.md](docs/project-format.md).
 
+## Converter processes
+
+Cold model converts run in a process pool (`spawn`). One configured worker stays in the API process. A warm cache hit stays there too. The default count is one core left free.
+
+On Windows the API creates a job object named for its process id and joins it, so each pool worker inherits that membership as it is spawned. The Node meshopt helper the worker starts is in the job as well. A worker also joins the job by name, which still covers a worker when the API itself could not join (it was already in a job that refused a nested one). Killing the API (`taskkill /F /PID <pid>`, or ending it in Task Manager) closes the job, and Windows ends those workers and helpers. A normal shutdown, and a change to the converter core count, also terminate the pool's processes instead of leaving them to finish the current convert. Each worker exits after 16 converts so a multi-gigabyte high-water mark does not sit for the rest of the session. The helper exits when its worker does: stdin closes, or the helper sees that the worker pid is gone, including after a hard kill that skips `atexit`.
+
+`build.bat` and `./build.sh` put the API and the editor preview in a second job with the builder. Ctrl+C still stops them from the builder. Ending the builder process, including `taskkill /F` on the builder, ends the API and the preview too. The API's own job then ends the converter workers.
+
+On startup the API logs leftover Forge pool workers whose parent process is already gone. It does not stop them. The log line is only a `spawn_main(parent_pid=...)` process that belongs to Forge (the worker marker, a path under this checkout, or a `node` child running `meshopt-worker.mjs`). Other Python processes are ignored. Quit a leftover from Task Manager if it is still using memory.
+
+Linux workers also ask for SIGTERM when the API exits, and every worker watches its parent, so a hard kill there reaps the pool as well. macOS has the same parent watch and the same explicit shutdown. The job object is Windows-only.
+
 ## Cache
 
 Converted models, decoded textures, scene previews, terrain packs, and walkable-surface packs live under `~/.cache/ocarina-forge`. On Windows that is `C:\Users\<you>\.cache\ocarina-forge`. `$XDG_CACHE_HOME/ocarina-forge` is used when that variable is set. `$OCARINA_FORGE_CACHE` replaces the models directory only (`~/.cache/ocarina-forge/models` by default); surface packs stay next to it. Nothing in that folder is committed, and every file in it is rebuilt the next time the editor needs it.

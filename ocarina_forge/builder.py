@@ -871,6 +871,15 @@ def _port_busy(host: str, port: int) -> bool:
 
 
 def _popen(args: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Popen:
+    """Start the API or the preview.
+
+    On Windows a new process group keeps Ctrl+C with the builder, which stops
+    both in ``_stop``. The builder job is separate: if the builder is killed
+    without running that handler, the job ends the children.
+    """
+    from ocarina_forge.procjob import ensure_builder_job
+
+    ensure_builder_job()
     kwargs: dict = {"cwd": cwd, "env": env}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

@@ -81,7 +81,7 @@ After `addGeometry` the part clone's typed arrays are released (`geometry-retain
 
 ## Profiling HUD
 
-A one-line status label stays on the viewport. It names the backend that actually started (`WebGPU`, `WebGPU (WebGL2 fallback: …)`, or `WebGL (WebGPU unavailable: …)`), the page's short git revision, and the draw count. While models are still streaming it also shows `queued`, `loading`, or `background` when those counts are above zero. There is no Stats toggle. An old `ocarinaforge.stats` value is ignored. When a load filter left a layer out, the label ends with `off: …`.
+A one-line status label stays on the viewport. It names the backend that actually started (`WebGPU`, `WebGPU (WebGL2 fallback: …)`, or `WebGL (WebGPU unavailable: …)`), the page's short git revision, and the draw count. While models are still streaming it also shows `queued`, `loading`, or `background` when those counts are above zero. There is no Stats toggle. An old `ocarinaforge.stats` value is ignored. When a load filter left a layer out, the label ends with `off: …`. When textures were left out of a mesh layer, a banner says Load textures is off and names the Actors panel checkbox. The stage-bar Textures checkbox only shows or hides images already loaded.
 
 The Profile HUD is the rest of that readout, plus the CPU and GPU split. It stays off until you open it, so timestamp queries are not recorded during ordinary editing.
 

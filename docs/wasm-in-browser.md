@@ -83,7 +83,7 @@ Wasm decode on this VM is the same order as the 11.17 ms `decodeSwizzle` in [was
 
 [rendering-performance.md](rendering-performance.md) is the later cap: about 240 unique meshes or 2.2 GB of JS heap stops further loads, with a hard stop near 280 or 2.8 GB. A headless run with a 10 GB working-set cap stopped at 388 of 852 models with a 4.67 GB JS heap, already over the 4.19 GB limit. An earlier pass that baked island and hill meshes into the visible terrain glb ran the tab out of memory. The heightmap stays on screen, and the walkable meshes stay in the one wasm object that `WasmGroundSurface.free()` drops on a scene change.
 
-The current glb cache prefix on main is `models-63`. Decoded images stay `bntx-6`. Texture manifests are `texman-2` under the cache, and shared images are `shared-v1`.
+The current glb cache prefix on main is `models-64`. Decoded images stay `bntx-6`. Texture manifests are `texman-2` under the cache, and shared images are `shared-v1`.
 
 ## Memory, workers, and the wasm32 ceiling
 
@@ -94,7 +94,7 @@ A browser port has four separate limits, and the field scene presses all of them
 3. **Worker copies.** The bench's eight workers each instantiate the module. That is the right shape for a short sample. It is the wrong shape for a 119 MB surface or a convert scratch buffer copied into every worker. One convert worker, or a pool that shares read-only pages, is the only arrangement that stays near the server's memory. `SharedArrayBuffer` still needs the COOP/COEP headers `frontend/vite.config.js` already sends (`credentialless`, not `require-corp`).
 4. **GPU working set.** Chrome's process tree was 15 GB on that field load. Wasm cannot see that memory, and moving CPU convert into the tab does not shrink it.
 
-The server's process pool is the isolation the tab does not have. Children are `spawn` processes. A warm cache hit stays in the parent. The default count is one core left free (`OCARINA_FORGE_WORKERS`, else the saved config, else `cpu_count - 1`). Interactive converts pause the warm queue. A browser worker can do the same scheduling. It cannot give the convert a heap the viewer is not sharing.
+The server's process pool is the isolation the tab does not have. Children are `spawn` processes. On Windows they join a job that ends with the API, so a hard kill does not leave them behind. A warm cache hit stays in the parent. The default count is one core left free (`OCARINA_FORGE_WORKERS`, else the saved config, else `cpu_count - 1`). Interactive converts pause the warm queue. A browser worker can do the same scheduling. It cannot give the convert a heap the viewer is not sharing.
 
 The decompressed-read cache in `dump.py` is capped at 512 MiB. A tab that is already near 4 GB of JS cannot keep that cache beside the scene.
 
@@ -146,9 +146,9 @@ Projects live under `~/.local/share/ocarina-forge/projects` (or `OCARINA_FORGE_P
 
 ### Models, textures, and the warm queue
 
-`describe_actor` / `describe_terrain` in `models.py` (about 3,600 lines) plus `formats/bfres.py` (about 3,800), `formats/bntx.py`, `formats/terrain.py`, and `formats/gltf.py` are the convert. Cache keys hash the source bytes, the prefix (`models-63` for glbs, `bntx-6` for decoded images), and a stamp of the converter sources. Files land under `~/.cache/ocarina-forge`. A daemon thread drops old versions and evicts the least recently used files down to 90% of the cap. The default cap is 20 GiB. `0` means unlimited.
+`describe_actor` / `describe_terrain` in `models.py` (about 3,600 lines) plus `formats/bfres.py` (about 3,800), `formats/bntx.py`, `formats/terrain.py`, and `formats/gltf.py` are the convert. Cache keys hash the source bytes, the prefix (`models-64` for glbs, `bntx-6` for decoded images), and a stamp of the converter sources. Files land under `~/.cache/ocarina-forge`. A daemon thread drops old versions and evicts the least recently used files down to 90% of the cap. The default cap is 20 GiB. `0` means unlimited.
 
-`formats/meshopt.py` keeps a Node process up (`frontend/tools/meshopt-worker.mjs`) and ships `EXT_meshopt_compression` in the glb. If Node is missing, the converter falls back to a grid quantize and skips a generated LOD. The game's own coarser level is left as it is.
+`formats/meshopt.py` keeps a Node process up (`frontend/tools/meshopt-worker.mjs`) and ships `EXT_meshopt_compression` in the glb. The helper exits with the Python worker that started it, including when that worker is hard-killed. If Node is missing, the converter falls back to a grid quantize and skips a generated LOD. The game's own coarser level is left as it is.
 
 `POST /api/warm` and `GET /api/warm` prepare one scene and its sibling. The page does not call them. It reads `warm` off `GET /api/stream`. What the page does call is `POST /api/models/batch`, which prefetches queued names on the pool when more than one worker is configured. The CLI `warm` command is what a game build with the editor enabled runs before opening a scene.
 

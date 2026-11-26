@@ -51,6 +51,14 @@ Chrome and Brave on Linux use Vulkan for WebGPU. When `chrome://gpu` or `brave:/
 - Some Brave builds also have `brave://flags/#enable-vulkan`.
 - The same GPU page lists driver problems (an old Mesa, a missing NVIDIA Vulkan ICD). Those block the adapter before Forge runs.
 
+## Models stay untextured, or old Python processes stay in Task Manager
+
+Two separate things showed up together on a machine that had been left overnight.
+
+**Load textures is off.** The project's `load-filters.yaml` can say `textures: false` (the Layout and Logic presets do). Geometry still loads. Images do not, and the view can look stuck. The editor shows a banner when a mesh layer is on and that filter is off. Turn it on with **Load textures** in the Actors panel, or with the button on the banner. The **Textures** checkbox on the stage bar only shows or hides images that are already loaded. The first time you check it while the filter is off, it turns the filter on.
+
+**Converter workers left behind.** On Windows, killing the API without ending its process tree used to leave `python` pool workers and their `node meshopt-worker.mjs` children running. A current API puts those processes in a job that ends with the API. After `taskkill /F /PID <api pid>`, Task Manager should show no extra `python` workers and no `node` running `meshopt-worker.mjs`. A normal quit and a change to the converter core count reap the pool as well. On startup the API logs a leftover Forge worker whose parent is already gone, and it does not stop it. Other Python processes are not part of that log. Close a leftover yourself if it is still using memory. The same lifetime rules are in the README under Converter processes.
+
 ## Check from the console
 
 ```javascript

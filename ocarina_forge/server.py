@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import multiprocessing
 import os
 import shutil
 import signal
@@ -40,6 +39,13 @@ from ocarina_forge.models import (
     describe_terrain,
     describe_terrain_at,
 )
+from ocarina_forge.procjob import (
+    ensure_server_job,
+    log_leftover_workers,
+    pool_executor_kwargs,
+    prepare_pool_worker,
+    terminate_executor,
+)
 from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
 from ocarina_forge.scene import apply_command, keep_unloaded_diff, replace_diff, scene_view, sibling_bancs
@@ -56,8 +62,14 @@ def _ignore_sigint() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
+def _worker_init() -> None:
+    """Pool start: ignore Ctrl+C, then tie this process to the API's lifetime."""
+    _ignore_sigint()
+    prepare_pool_worker()
+
+
 def _close_pool() -> None:
-    """Drop queued converts and return without waiting on the workers."""
+    """Drop queued converts and kill the workers instead of waiting on them."""
     global _POOL, _POOL_SIZE, _POOL_WANT, _POOL_INFLIGHT
     with _POOL_LOCK:
         pool = _POOL
@@ -66,11 +78,13 @@ def _close_pool() -> None:
         _POOL_WANT = None
         _POOL_INFLIGHT = 0
     if pool is not None:
-        pool.shutdown(wait=False, cancel_futures=True)
+        terminate_executor(pool)
 
 
 @asynccontextmanager
 async def _lifespan(_app):
+    ensure_server_job()
+    log_leftover_workers()
     start_maintenance()
     try:
         yield
@@ -142,14 +156,11 @@ def _install_pool(count: int) -> None:
     _POOL = None
     _POOL_SIZE = count
     _POOL_WANT = None
+    ensure_server_job()
     if count > 1:
-        _POOL = ProcessPoolExecutor(
-            max_workers=count,
-            mp_context=multiprocessing.get_context("spawn"),
-            initializer=_ignore_sigint,
-        )
+        _POOL = ProcessPoolExecutor(**pool_executor_kwargs(count, _worker_init))
     if old is not None:
-        old.shutdown(wait=False, cancel_futures=True)
+        terminate_executor(old)
 
 
 def _job_finished(_future=None) -> None:
