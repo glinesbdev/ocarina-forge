@@ -51,7 +51,10 @@ export function attachCutout(material) {
 export function attachAlbedo(material) {
   if (!material || material.colorNode || !material.map || material.map.isTexture !== true) return material;
   const userData = material.userData;
-  if (userData && (userData.terrainNode || userData.cutoutNode || userData.blendNode || userData.terrainShader || userData.banc === "terrain")) {
+  // A blend material already names two layers. Sampling material.map here
+  // replaces that mix with whichever texture landed in the albedo slot,
+  // which is how a mask or a single layer covers the ground.
+  if (userData && (userData.terrainNode || userData.cutoutNode || userData.blend || userData.blendNode || userData.terrainShader || userData.banc === "terrain")) {
     return material;
   }
   const map = material.map;

@@ -78,7 +78,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-65\0"
+_CACHE_VERSION = b"models-66\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -374,6 +374,10 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                 blend_slot = {
                     "channel": part.blend.get("channel") or "r",
                     "uv": part.blend.get("uv") or "_u0",
+                    "scale": [float(item) for item in (part.blend.get("scale") or [1, 1])[:2]],
+                    "translate": [float(item) for item in (part.blend.get("translate") or [0, 0])[:2]],
+                    "sampler": part.blend.get("sampler") or "",
+                    "texture": part.overlay_texture or part.blend.get("texture") or "",
                 }
                 if part.blend.get("skin"):
                     blend_slot["skin"] = True
@@ -1579,14 +1583,19 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                         normal_png = None
             elif part.blend and part.overlay_texture:
                 moss_png = extra_png(part.overlay_texture)
-            if part.blend and part.overlay_texture and (moss_png or part.blend.get("skin")):
+            # The geometry file has no texels. A two-layer mix still needs the
+            # vertex mask and extras.blend, or the viewer samples only _a0.
+            # Requiring the overlay image dropped that mask on ?flat=1, and the
+            # albedo colour node then drew one texture for the whole part.
+            overlay_name = part.overlay_texture or (part.blend or {}).get("texture") or ""
+            if part.blend and overlay_name:
                 blend_body = {
                     "channel": part.blend.get("channel") or "r",
                     "uv": part.blend.get("uv") or "_u0",
                     "scale": list(part.blend.get("scale") or [1, 1]),
                     "translate": list(part.blend.get("translate") or [0, 0]),
                     "sampler": part.blend.get("sampler") or "",
-                    "texture": part.overlay_texture,
+                    "texture": overlay_name,
                 }
                 if part.blend.get("skin"):
                     blend_body["skin"] = True
@@ -1606,9 +1615,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     line = _layer_note(part)
                     if line not in notes:
                         notes.append(line)
-                elif moss_png and not any(note.startswith("blend ") for note in notes):
+                elif not any(note.startswith("blend ") for note in notes):
                     notes.append(
-                        f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
+                        f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {overlay_name}"
                     )
             drawn_colors = part.colors if blend_extra else None
             part_extras = dict(blend_extra or {})

@@ -900,12 +900,19 @@ let convertSlots = 8;
     }
     // The colour node captures the map it saw. A later assign has to build it
     // again, and only from a real three.js texture. That recompiles the
-    // material. The mesh stays. Blend and terrain nodes already sample their
-    // own images and must not be replaced by the flat albedo node.
+    // material. The mesh stays. A blend plans two layers. Replacing that
+    // with the albedo node draws whichever image is in material.map, including
+    // a mask, and never samples the overlay.
     if (mapNodes) {
       const userData = material.userData;
+      const blendPlanned = Boolean(userData && userData.blend);
       const keep = userData && (userData.terrainNode || userData.blendNode || userData.terrainShader);
-      if (!keep) {
+      if (blendPlanned) {
+        if (userData.albedoNode && !userData.blendNode) {
+          material.colorNode = null;
+          userData.albedoNode = false;
+        }
+      } else if (!keep) {
         material.colorNode = null;
         material.alphaTestNode = null;
         if (userData) {
@@ -947,7 +954,8 @@ let convertSlots = 8;
         changed += 1;
       }
       if (mapNodes && mapNodes.attachAlbedo && !decision.material.colorNode) {
-        mapNodes.attachAlbedo(decision.material);
+        const userData = decision.material.userData || {};
+        if (!userData.blend && !userData.blendNode) mapNodes.attachAlbedo(decision.material);
       }
     }
     return changed;
@@ -986,6 +994,9 @@ let convertSlots = 8;
     const retiled = retileWaterStandIns(parts);
     uvDirty = true;
     const rebound = rebindDrawnMaps();
+    // The albedo guard above clears a colour node that was sampling one map.
+    // Install the mix after that, once both images and the vertex mask exist.
+    refreshBlendMaps(parts);
     if (retiled || rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
     noteTextureDebug();
     logSelectionTextureDebug();
@@ -1093,6 +1104,20 @@ let convertSlots = 8;
     }
   }
 
+  function promoteBlendMask(material, geometry) {
+    const blend = material && material.userData && material.userData.blend;
+    if (!blend || !geometry || typeof geometry.getAttribute !== "function") return;
+    if (!geometry.getAttribute("blendMask") && geometry.getAttribute("color")) {
+      geometry.setAttribute("blendMask", geometry.getAttribute("color"));
+      geometry.deleteAttribute("color");
+      material.vertexColors = false;
+    }
+    const blendUv = blend.uv;
+    if ((blendUv === "_u1" || blendUv === "u1") && geometry.getAttribute("uv1") && !geometry.getAttribute("blendUv")) {
+      geometry.setAttribute("blendUv", geometry.getAttribute("uv1"));
+    }
+  }
+
   function refreshBlendMaps(parts) {
     for (const part of parts || []) {
       const material = part && part.material;
@@ -1102,6 +1127,7 @@ let convertSlots = 8;
         material.userData.blendMapUniform.value = material.userData.blendMap;
       }
       const geometry = part.geometry;
+      promoteBlendMask(material, geometry);
       const hasMask = geometry && geometry.getAttribute && geometry.getAttribute("blendMask");
       if (hasMask && !material.userData.blendShader) installBlendShader(material);
       if (blendNodes && hasMask && material.userData.blendMap && material.map && !material.userData.blendNode) {
@@ -5563,7 +5589,13 @@ uniform float terrainLayerMissing;`
         channel: map && Number.isInteger(map.channel) ? map.channel : 0,
         vertexColors: Boolean(material && material.vertexColors),
         colorNode: Boolean(material && (material.colorNode || userData.albedoNode || userData.cutoutNode)),
+        albedoNode: Boolean(userData.albedoNode),
         blend: Boolean(userData.blend || userData.blendNode),
+        blendNode: Boolean(userData.blendNode),
+        moss: Boolean(userData.blendMap),
+        blendTexture: (userData.blend && userData.blend.texture) || "",
+        blendChannel: (userData.blend && userData.blend.channel) || "",
+        ao: Boolean(material && material.aoMap),
         alphaTest: material && material.alphaTest ? material.alphaTest : 0,
         transparent: Boolean(material && material.transparent),
         helper: (userData.helper) || helperKind(part.name, part.materialKey, material && material.name),

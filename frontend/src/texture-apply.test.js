@@ -95,6 +95,29 @@ test("a water stand-in records the ripple and does not keep the cyan multiply", 
   assert.deepEqual(mesh.color.rgb, [1, 1, 1]);
 });
 
+test("a blend manifest records the overlay when the geometry file had no extras", async () => {
+  const mesh = material();
+  await applyTextureManifest(
+    [{ materialKey: "Ground:0", material: mesh }],
+    {
+      materials: {
+        "Ground:0": {
+          map: "/api/model-textures/base.ktx2",
+          moss: "/api/model-textures/grass.ktx2",
+          color: [1, 1, 1, 1],
+          blend: { channel: "r", uv: "_u0", scale: [4, 4], translate: [0, 0], sampler: "_a1", texture: "Island_Grass_Alb" },
+        },
+      },
+    },
+    async (url) => texture(url),
+  );
+  assert.equal(mesh.map.url, "/api/model-textures/base.ktx2");
+  assert.equal(mesh.userData.blendMap.url, "/api/model-textures/grass.ktx2");
+  assert.equal(mesh.userData.blend.texture, "Island_Grass_Alb");
+  assert.equal(mesh.userData.blend.channel, "r");
+  assert.deepEqual(mesh.userData.blend.scale, [4, 4]);
+});
+
 test("a UNORM BC7 albedo keeps the linear colour space", async () => {
   const mesh = material();
   await applyTextureManifest(

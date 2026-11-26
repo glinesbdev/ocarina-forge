@@ -211,6 +211,48 @@ def test_the_glb_carries_the_mask_and_a_dark_emissive_overlay():
     assert "emissiveTexture" in material
 
 
+def test_a_flat_geometry_file_keeps_the_blend_mask_without_the_image():
+    """The editor loads ?flat=1. The overlay image arrives later.
+
+    Dropping extras and COLOR_0 because the png is absent left the viewer
+    sampling only the first albedo. A ground piece then draws that one
+    texture, which is the white sheet with black blotches when the bound
+    image is a mask or the base of a two-layer mix.
+    """
+    blend = {
+        "channel": "r",
+        "uv": "_u0",
+        "scale": [4, 4],
+        "translate": [0, 0],
+        "sampler": "_a1",
+        "texture": "Island_Grass_Alb",
+    }
+    part = Part(
+        "Island",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        "",
+        "Mt_Land_LakeHrl_Island",
+        0,
+        colors=[(1, 1, 1, 1), (0, 1, 1, 1), (1, 1, 1, 1)],
+        overlay_texture="Island_Grass_Alb",
+        blend=blend,
+    )
+    model = Model("Land_LakeHrl_Island", parts=[part], images={})
+    blob, info = _assemble([model], {})
+    assert any(note.startswith("blend ") and "Island_Grass_Alb" in note for note in info["notes"])
+    document = _json(blob)
+    primitive = document["meshes"][0]["primitives"][0]
+    assert "COLOR_0" in primitive["attributes"]
+    material = document["materials"][primitive["material"]]
+    assert "baseColorTexture" not in material.get("pbrMetallicRoughness", {})
+    stored = material["extras"]["blend"]
+    assert stored["channel"] == "r"
+    assert stored["texture"] == "Island_Grass_Alb"
+    assert stored["scale"] == [4, 4]
+
+
 def test_a_const_colour_sits_under_the_rock_where_the_mask_is_low():
     """One albedo is the rock. The skin is the uniform. Alpha is the mask.
 

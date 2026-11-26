@@ -78,7 +78,11 @@ test("the texture pipeline warns once and keeps the first error", () => {
         channel: 0,
         vertexColors: false,
         colorNode: true,
+        albedoNode: true,
         blend: false,
+        blendNode: false,
+        moss: false,
+        ao: false,
         alphaTest: 0,
         transparent: false,
         color: [1, 1, 1],
@@ -92,6 +96,9 @@ test("the texture pipeline warns once and keeps the first error", () => {
     assert.match(actor, /gyaml=Land_LakeHrl_Tree_A_01/);
     assert.match(actor, /sampler=_a0 texture=Tree_Alb format=bc7 1024x1024/);
     assert.match(actor, /space=srgb/);
+    assert.match(actor, /albedoNode=1/);
+    assert.match(actor, /blendNode=0/);
+    assert.match(actor, /moss=0/);
     assert.match(actor, /attrs=position\|uv 0.000..1.000,0.000..1.000/);
     assert.match(actor, /role Mt_Bark sampler=_a0 texture=Tree_Alb uv=_u0/);
   } finally {

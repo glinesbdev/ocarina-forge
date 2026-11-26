@@ -244,10 +244,20 @@ async function assignSlot(material, slot, loadTexture) {
     userData.blendMap = mossTex;
     if (userData.blendMapUniform) userData.blendMapUniform.value = mossTex;
   }
-  if (slot.blend && userData.blend) {
-    if (slot.blend.skin && !userData.blend.skin) userData.blend.skin = true;
-    if (slot.blend.skinVertex && !userData.blend.skinVertex) userData.blend.skinVertex = true;
-    if (slot.blend.skinColor && !userData.blend.skinColor) userData.blend.skinColor = slot.blend.skinColor;
+  if (slot.blend) {
+    const prior = userData.blend && typeof userData.blend === "object" ? userData.blend : {};
+    userData.blend = {
+      ...prior,
+      channel: slot.blend.channel || prior.channel || "r",
+      uv: slot.blend.uv || prior.uv || "_u0",
+      scale: prior.scale || slot.blend.scale || [1, 1],
+      translate: prior.translate || slot.blend.translate || [0, 0],
+      sampler: prior.sampler || slot.blend.sampler || "",
+      texture: prior.texture || slot.blend.texture || "",
+    };
+    if (slot.blend.skin || prior.skin) userData.blend.skin = true;
+    if (slot.blend.skinVertex || prior.skinVertex) userData.blend.skinVertex = true;
+    if (slot.blend.skinColor || prior.skinColor) userData.blend.skinColor = slot.blend.skinColor || prior.skinColor;
   }
   if (slot.color && material.color && typeof material.color.setRGB === "function") {
     const color = slot.color;
