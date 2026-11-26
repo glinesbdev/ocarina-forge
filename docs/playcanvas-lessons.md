@@ -99,7 +99,7 @@ Smaller or later items follow in the per-area sections: render bundles for stati
 
 **PlayCanvas.** It creates render pipelines with `createRenderPipelineAsync` and caps concurrent creations at `hardwareConcurrency` clamped to 4–32. The comment explains why: with too many in flight, the browser's GPU process "cannot present any update of the page for a while" (`webgpu-render-pipeline.js:170-205`). The draw is skipped until its pipeline exists (`webgpu-graphics-device.js:1530-1560`). Pipelines are cached by a hash of their state (`webgpu-render-pipeline.js:129-167, 299-312`). Each material caches its shader variants (`engine/src/scene/materials/material.js:133-139`).
 
-**Forge.** New WebGPU batches await `compileAsync` before they are attached, at most 6 at a time. `draw` skips a cache entry whose native pipeline is still missing. `warmWebGLPrograms` is still WebGL only. three stays on 0.170.0; the upgrade note is in [rendering-performance.md](rendering-performance.md).
+**Forge.** New WebGPU batches await `compileAsync` before they are attached, at most 6 at a time. `draw` skips a cache entry whose native pipeline is still missing. `warmWebGLPrograms` is still WebGL only. r170's `compileAsync` omits the double-pass list on transparent batches, so that call is repaired before a water or alpha-blend mesh is compiled. A compile error is logged once and the batch is still attached. three stays on 0.170.0; the upgrade note is in [rendering-performance.md](rendering-performance.md).
 
 **Gain.** No steady-state gain. Streaming new materials into the Field stops stalling the frame.
 

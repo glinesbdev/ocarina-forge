@@ -3127,13 +3127,9 @@ let convertSlots = 8;
       pendingMeshes.push({ mesh, ids, water });
     }
     const compileStarted = performance.now();
-    await Promise.all(pendingMeshes.map(async ({ mesh }) => {
-      try {
-        await compileObjectPipeline(renderer, mesh, camera, scene);
-      } catch (error) {
-        console.error(error);
-      }
-    }));
+    // compileObjectPipeline logs a compile failure once and still resolves.
+    // Attaching is outside that call so a transparent batch cannot stall streaming.
+    await Promise.all(pendingMeshes.map(({ mesh }) => compileObjectPipeline(renderer, mesh, camera, scene)));
     if (sceneStreamStats && pendingMeshes.length) {
       const waited = performance.now() - compileStarted;
       sceneStreamStats.compileMs = (sceneStreamStats.compileMs || 0) + waited;

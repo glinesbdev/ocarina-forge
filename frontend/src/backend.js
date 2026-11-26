@@ -283,10 +283,57 @@ export function pipelineCompileInFlight() {
 }
 
 /**
+ * r170 compileAsync calls `_renderTransparents(list, camera, scene, lights)`.
+ * The method is `(list, doublePassList, camera, scene, lights)`, which is how
+ * `render()` calls it. The camera lands in the double-pass slot, the scene in
+ * the camera slot, and the lights node in the scene slot. `renderObject` then
+ * reads `lights.overrideMaterial` (undefined, not null) and throws
+ * `isShadowNodeMaterial`. Every transparent batch hits this, including water
+ * and alpha-blend. Opaque batches use `_renderObjects` and do not.
+ * A real render passes an array for the double-pass list. Putting an empty
+ * array back in that slot restores the camera and the scene. Double-sided
+ * materials still compile both faces inside `renderObject`.
+ * A throw before compileAsync's own restore leaves `_handleObjectFunction` as
+ * `_createObjectPipeline`, so later draws compile instead of drawing.
+ */
+export function repairCompileAsyncTransparents(renderer) {
+  if (!renderer || renderer.__forgeCompileTransparents) return false;
+  let patched = false;
+  if (typeof renderer._renderTransparents === "function") {
+    const original = renderer._renderTransparents.bind(renderer);
+    renderer._renderTransparents = function renderTransparents(renderList, doublePassList, camera, scene, lightsNode) {
+      if (doublePassList && doublePassList.isCamera === true && !Array.isArray(doublePassList)) {
+        return original(renderList, [], doublePassList, camera, scene);
+      }
+      return original(renderList, doublePassList, camera, scene, lightsNode);
+    };
+    patched = true;
+  }
+  if (typeof renderer.compileAsync === "function" && typeof renderer._renderObjectDirect === "function") {
+    const original = renderer.compileAsync.bind(renderer);
+    renderer.compileAsync = function compileAsyncRestored(...args) {
+      // then() so a synchronous throw still restores the draw path.
+      return Promise.resolve().then(() => original(...args)).catch((error) => {
+        renderer._handleObjectFunction = renderer._renderObjectDirect;
+        renderer._compilationPromises = null;
+        throw error;
+      });
+    };
+    patched = true;
+  }
+  if (!patched) return false;
+  renderer.__forgeCompileTransparents = true;
+  return true;
+}
+
+let compileFailureLogged = false;
+
+/**
  * Compile one object's render pipelines on WebGPU before it joins the scene.
  * r170's signature is compileAsync(scene, camera, targetScene): the batch is
  * the first argument and the live scene is targetScene so lights are included.
  * At most PIPELINE_COMPILE_LIMIT compiles run at once. WebGL keeps warmWebGLPrograms.
+ * A compile failure is logged once and the promise still resolves, so the caller attaches the batch.
  */
 export async function compileObjectPipeline(renderer, object, camera, scene) {
   const webgpu = Boolean(
@@ -298,9 +345,15 @@ export async function compileObjectPipeline(renderer, object, camera, scene) {
     && object,
   );
   if (!webgpu) return;
+  repairCompileAsyncTransparents(renderer);
   await acquirePipelineSlot();
   try {
     await renderer.compileAsync(object, camera, scene);
+  } catch (error) {
+    if (!compileFailureLogged) {
+      compileFailureLogged = true;
+      console.error("WebGPU pipeline compile failed; attaching the batch anyway.", error);
+    }
   } finally {
     releasePipelineSlot();
   }
@@ -413,6 +466,7 @@ export async function createBackendRenderer(THREE, options = {}) {
     if (backend !== "WebGPU") throw new Error("WebGPU init used the WebGL2 backend");
     patchWebgpuBc7Format(gpuRenderer);
     guardWebgpuSetPipeline(gpuRenderer);
+    repairCompileAsyncTransparents(gpuRenderer);
     return { renderer: gpuRenderer, backend, nodes: true, webgpu: true, reason: "", requested, note: options.note || "" };
   } catch (error) {
     // If the timeout fired first, release the renderer once initialization settles.

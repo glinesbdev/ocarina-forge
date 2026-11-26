@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, compileObjectPipeline, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, guardWebgpuSetPipeline, initFailureReason, inspectWebGPU, patchWebgpuBc7Format, PIPELINE_COMPILE_LIMIT, pipelineCompileInFlight, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
+import { backendLabel, compileObjectPipeline, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, guardWebgpuSetPipeline, initFailureReason, inspectWebGPU, patchWebgpuBc7Format, PIPELINE_COMPILE_LIMIT, pipelineCompileInFlight, rendererChoice, rendererSearch, repairCompileAsyncTransparents, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
 import { buildNoticeId, buildNoticeVisible, describeBuildMismatch, dismissBuildNotice, shortRevision } from "./build-info.js";
 import { formatStatusLabel } from "./frame.js";
 
@@ -70,6 +70,91 @@ test("WebGPU compiles a batch before attach and caps how many run at once", asyn
     compileAsync(...received) { webglCalls.push(received); },
   }, mesh, camera, scene);
   assert.deepEqual(webglCalls, []);
+});
+
+test("a transparent batch survives r170 compileAsync's missing double-pass list", () => {
+  const camera = { isCamera: true };
+  const scene = { isScene: true, overrideMaterial: null };
+  const lights = {};
+  const blend = { transparent: true, side: 2, forceSinglePass: false, name: "alpha" };
+  const list = [{ object: { material: blend }, material: blend }];
+  const seen = [];
+  const renderer = {
+    _renderObjects(renderList, cameraArg, sceneArg) {
+      for (const item of renderList) {
+        if (sceneArg.overrideMaterial !== null) {
+          const overrideMaterial = sceneArg.overrideMaterial;
+          void overrideMaterial.isShadowNodeMaterial;
+        }
+        seen.push({ camera: cameraArg, scene: sceneArg, material: item.material });
+      }
+    },
+    _renderTransparents(renderList, doublePassList, cameraArg, sceneArg, lightsNode) {
+      if (doublePassList.length > 0) {
+        this._renderObjects(doublePassList, cameraArg, sceneArg, lightsNode, "backSide");
+        this._renderObjects(renderList, cameraArg, sceneArg, lightsNode);
+      } else {
+        this._renderObjects(renderList, cameraArg, sceneArg, lightsNode);
+      }
+    },
+  };
+  assert.throws(
+    () => renderer._renderTransparents(list, camera, scene, lights),
+    (error) => error instanceof TypeError && /isShadowNodeMaterial/.test(error.message),
+  );
+  assert.equal(repairCompileAsyncTransparents(renderer), true);
+  assert.equal(repairCompileAsyncTransparents(renderer), false);
+  renderer._renderTransparents(list, camera, scene, lights);
+  assert.deepEqual(seen, [{ camera, scene, material: blend }]);
+
+  const passed = [];
+  renderer._renderObjects = (renderList, cameraArg, sceneArg, lightsArg) => {
+    passed.push({ renderList, camera: cameraArg, scene: sceneArg, lights: lightsArg });
+  };
+  const doublePass = [{ material: blend }];
+  renderer._renderTransparents(list, doublePass, camera, scene, lights);
+  assert.equal(passed.length, 2);
+  assert.equal(passed[0].renderList, doublePass);
+  assert.equal(passed[0].camera, camera);
+  assert.equal(passed[0].scene, scene);
+  assert.equal(passed[0].lights, lights);
+  assert.equal(passed[1].renderList, list);
+  assert.equal(passed[1].camera, camera);
+  assert.equal(passed[1].scene, scene);
+});
+
+test("a compileAsync failure is logged once and the batch promise still resolves", async () => {
+  const direct = function renderDirect() {};
+  let compiles = 0;
+  const renderer = {
+    isWebGPURenderer: true,
+    backend: { isWebGPUBackend: true },
+    _renderObjectDirect: direct,
+    _handleObjectFunction: direct,
+    _compilationPromises: null,
+    compileAsync() {
+      compiles += 1;
+      this._handleObjectFunction = function compiling() {};
+      this._compilationPromises = [];
+      throw new TypeError("Cannot read properties of undefined (reading 'isShadowNodeMaterial')");
+    },
+  };
+  const errors = [];
+  const original = console.error;
+  console.error = (...args) => errors.push(args);
+  try {
+    await compileObjectPipeline(renderer, { name: "blend", material: { transparent: true } }, { isCamera: true }, { isScene: true });
+    await compileObjectPipeline(renderer, { name: "water", material: { transparent: true } }, { isCamera: true }, { isScene: true });
+  } finally {
+    console.error = original;
+  }
+  assert.equal(compiles, 2);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0][0], /attaching the batch anyway/);
+  assert.match(errors[0][1].message, /isShadowNodeMaterial/);
+  assert.equal(renderer._handleObjectFunction, direct);
+  assert.equal(renderer._compilationPromises, null);
+  assert.equal(pipelineCompileInFlight(), 0);
 });
 
 test("a draw waits until the native pipeline exists", () => {
@@ -177,6 +262,7 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   assert.match(backend, /new THREE\.WebGLRenderer\(\{ antialias: true \}\)/);
   assert.match(backend, /guardWebgpuSetPipeline\(gpuRenderer\)/);
+  assert.match(backend, /repairCompileAsyncTransparents\(gpuRenderer\)/);
   assert.match(backend, /PIPELINE_COMPILE_LIMIT = 6/);
   assert.match(backend, /WebGPU \(WebGL2 fallback\)/);
   assert.match(backend, /backendLabel\(gpuRenderer\)/);

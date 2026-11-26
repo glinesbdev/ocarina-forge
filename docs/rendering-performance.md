@@ -98,6 +98,8 @@ three r170 builds a render pipeline on the thread that is drawing when the cache
 
 A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (r170's `targetScene` argument is the live scene, so its lights are included) and only then added. At most **6** of those compiles run at once. More than that stalls the browser's GPU process. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing.
 
+r170's `compileAsync` calls `_renderTransparents(list, camera, scene, lights)`. `render()` calls the same method as `(list, doublePassList, camera, scene, lights)`. On a transparent batch the lights node arrives as the scene, `overrideMaterial` is undefined, and `renderObject` throws `Cannot read properties of undefined (reading 'isShadowNodeMaterial')`. Opaque batches never take that path. `repairCompileAsyncTransparents` puts the empty double-pass list back in the missing slot, and if a compile still throws it puts `_handleObjectFunction` back to `_renderObjectDirect` so later frames keep drawing. The failure is logged once and the batch is attached anyway.
+
 ### three.js upgrade
 
 Forge pins `three@0.170.0`. The current npm release checked for this note is **0.187.0** (26 Nov 2026). An upgrade is not in this change.
