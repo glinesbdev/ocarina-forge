@@ -222,10 +222,10 @@ Fly, orbit, pan, dock, undo, and F to frame are already in [controls.md](../cont
 - The scale gizmo is the Scale button, beside Move (G) and Rotate (R). The pressed button names the mode. S stays fly-back.
 - A ground grid and a corner axis indicator (X red, Y green, Z blue). The grid is still missing.
 - A ground grid and a corner axis indicator (X red, Y green, Z blue).
-- Grid snap at 0.5 m, separate from ground snap (V).
+- Grid snap is separate from ground snap (V). Shift+V toggles it. Move steps are 0.25, 0.5, 1, 5, or 10 metres. Rotate steps are 5, 15, 45, or 90 degrees. Scale snap is optional. L toggles world and local for move and rotate; scale stays local. Grid lines draws the move increment. With both snaps on, the grid sets X and Z and ground snap sets the height.
 - F frames the selection and sets the orbit pivot there.
 
-Check: move, rotate, and scale the sign from the gizmos alone, with the grid on, then F. No typed numbers. The patch from milestone 1 still updates.
+Check: move, rotate, and scale the sign from the gizmos alone, with Grid lines on, then F. No typed numbers. The patch from milestone 1 still updates.
 
 ### 7. Add an actor. Record remove as a gap
 

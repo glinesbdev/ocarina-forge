@@ -45,6 +45,7 @@ export const SHORTCUT_GROUPS = [
       { keys: "G", action: "Move" },
       { keys: "R", action: "Rotate" },
       { keys: "Scale button", action: "Scale the selection. S stays fly-back, so scale has no letter." },
+      { keys: "L", action: "Toggle world space and the selected actor's local space. Move and rotate follow it. Scale stays local. The toolbar shows the current space, and this browser remembers it" },
       { keys: "Drag a handle", action: "Transform the selection" },
     ],
   },
@@ -61,6 +62,10 @@ export const SHORTCUT_GROUPS = [
     label: "Snap",
     items: [
       { keys: "V", action: "Toggle snap to ground and collision" },
+      { keys: "Shift+V", action: "Toggle grid snap. Move uses 0.25, 0.5, 1, 5, or 10 metres. Rotate uses 5, 15, 45, or 90 degrees. Scale snap is the separate checkbox" },
+      { keys: "Ctrl while dragging", action: "Flip grid snap for that drag. The toolbar toggle stays as it was" },
+      { keys: "Arrow keys in a transform field", action: "With grid snap on, nudge position by the move increment and rotation by the degree increment. Scale nudges only when scale snap is on" },
+      { keys: "Grid lines", action: "Draw a grid at the move increment, in world space or in the actor's local space" },
       { keys: "X, Z, or XZ drag", action: "With Snap on, change only the height. X and Z stay on the drag. The surface is the ground, a collision mesh, or the room model when the map has no ground. A hit more than a couple of metres above the actor is ignored. A miss keeps the current height. Releasing any translate handle except Y does the same" },
       { keys: "Y drag", action: "With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up" },
       { keys: "Dragged mesh", action: "Left out of the snap query: every submesh, batched instance, proxy, and companion copy of that actor, including a Land_ piece" },

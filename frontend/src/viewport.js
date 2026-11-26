@@ -52,7 +52,9 @@ import {
   ndcFromClient,
 } from "./gpu-pick.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
-import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSameActor, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, snapExcludeId } from "./snap.js";
+import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSameActor, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, shouldSnapTranslate, snapExcludeId } from "./snap.js";
+import { basisFromQuaternion, defaultGridSettings, effectiveRotationSpace, gridSnapEngaged, normalizeGridSettings, snapGridLayout, snapRotation, snapScale, snapTranslation } from "./grid-snap.js";
+import { normalizeSpace, spaceForMode } from "./gizmo-space.js";
 import { columnHits } from "./snap-surface.js";
 import { commitTranslateDrag } from "./drag-commit.js";
 import { disposeGroundSurface, groundSurfaceMeta, groundSurfaceReady, loadGroundSurface, sampleGroundSurface } from "./ground-surface.js";
@@ -289,10 +291,21 @@ export async function createViewport(host, hooks) {
   // The drag plane follows the pivot. Leaving the snapped height there makes
   // the next sample take X and Z from the view ray at that height.
   let dragPlaneY = null;
+  // Unsnapped pose from the controls, and the pose where this drag began.
+  // Grid snap writes over the pivot. The next sample has to see the raw pose
+  // or the drag plane follows the snapped point and X/Z walk off the handle.
+  let dragRaw = null;
+  let dragOrigin = null;
+  let gizmoSpace = "world";
+  let ctrlSnap = false;
+  let gridSettings = defaultGridSettings();
+  let snapGrid = null;
   renderer.domElement.addEventListener("pointermove", () => {
-    if (!transform.dragging || dragPlaneY == null || transform.axis === "Y") return;
+    if (!transform.dragging) return;
     const entry = selected ? entries.get(selected) : null;
     if (!entry) return;
+    restoreDragRaw(entry);
+    if (dragPlaneY == null || transform.axis === "Y") return;
     entry.pivot.position.y = dragPlaneY;
     entry.pivot.updateMatrixWorld(true);
     transform._root.updateMatrixWorld(true);
@@ -1032,6 +1045,7 @@ let convertSlots = 8;
     sceneStreamStats = null;
     nextDetailScan = 0;
     transform.detach();
+    clearSnapGrid();
     if (rebuildTimer) {
       clearTimeout(rebuildTimer);
       rebuildTimer = 0;
@@ -1093,6 +1107,7 @@ let convertSlots = 8;
       rebuildTimer = 0;
     }
     transform.detach();
+    clearSnapGrid();
     selected = null;
     hovered = null;
     foregroundModelNames.clear();
@@ -1739,6 +1754,7 @@ let convertSlots = 8;
     paintLabel(entry);
     paint(entry);
     syncInstanceMatrix(entry);
+    if (entry.key === selected) updateSnapGrid(entry);
   }
 
   function patchActors(actors) {
@@ -3882,6 +3898,7 @@ uniform float terrainLayerMissing;`
     syncBatchVisibility();
     attach();
     syncLabels();
+    updateSnapGrid(selected ? entries.get(selected) : null);
     requestRender();
   }
 
@@ -3944,7 +3961,127 @@ uniform float terrainLayerMissing;`
 
   function setGizmo(mode) {
     transform.setMode(mode);
-    transform.setSpace(mode === "translate" ? "world" : "local");
+    transform.setSpace(spaceForMode(mode, gizmoSpace));
+  }
+
+  function captureDragOrigin(entry) {
+    const quaternion = entry.pivot.quaternion.toArray();
+    dragOrigin = {
+      position: entry.pivot.position.toArray(),
+      quaternion,
+      scale: [entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z],
+      basis: basisFromQuaternion(quaternion),
+    };
+  }
+
+  function restoreDragRaw(entry) {
+    if (!dragRaw || !entry) return;
+    entry.pivot.position.fromArray(dragRaw.position);
+    entry.pivot.quaternion.fromArray(dragRaw.quaternion);
+    entry.pivot.scale.fromArray(dragRaw.scale);
+    if (entry.pivot.rotation.order !== "ZYX") entry.pivot.rotation.order = "ZYX";
+    entry.pivot.updateMatrixWorld(true);
+    transform._root.updateMatrixWorld(true);
+  }
+
+  function applyGridSnap(entry) {
+    if (!entry) return;
+    dragRaw = {
+      position: entry.pivot.position.toArray(),
+      quaternion: entry.pivot.quaternion.toArray(),
+      scale: [entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z],
+    };
+    if (!transform.dragging || !dragOrigin || !gridSnapEngaged(gridSettings.enabled, ctrlSnap)) return;
+    const axis = transform.axis || dragAxis;
+    if (!axis) return;
+    if (transform.mode === "translate") {
+      const groundOwnsY = snapOn && !isExplicitLift(axis) && shouldSnapTranslate(axis, "move");
+      const next = snapTranslation({
+        position: dragRaw.position,
+        origin: dragOrigin.position,
+        axis,
+        space: gizmoSpace,
+        basis: dragOrigin.basis,
+        increment: gridSettings.move,
+        lockY: groundOwnsY,
+      });
+      entry.pivot.position.fromArray(next);
+      return;
+    }
+    if (transform.mode === "rotate") {
+      const next = snapRotation({
+        current: dragRaw.quaternion,
+        origin: dragOrigin.quaternion,
+        axis,
+        space: effectiveRotationSpace(gizmoSpace, axis),
+        incrementRadians: gridSettings.rotate * Math.PI / 180,
+      });
+      entry.pivot.quaternion.fromArray(next);
+      if (entry.pivot.rotation.order !== "ZYX") entry.pivot.rotation.order = "ZYX";
+      return;
+    }
+    if (transform.mode === "scale" && gridSettings.scaleEnabled) {
+      const next = snapScale({
+        current: dragRaw.scale,
+        origin: dragOrigin.scale,
+        axis,
+        increment: gridSettings.scale,
+      });
+      entry.pivot.scale.fromArray(next);
+    }
+  }
+
+  function reapplyDragSnap() {
+    if (!transform.dragging || !dragRaw) return;
+    const entry = selected ? entries.get(selected) : null;
+    if (!entry) return;
+    restoreDragRaw(entry);
+    applyGridSnap(entry);
+    if (transform.mode === "translate") maybeSnap(entry, "move");
+    applySelectedActorTransform(entry, { commit: false });
+    updateSnapGrid(entry);
+  }
+
+  function clearSnapGrid() {
+    if (!snapGrid) return;
+    scene.remove(snapGrid);
+    snapGrid.geometry.dispose();
+    const materials = Array.isArray(snapGrid.material) ? snapGrid.material : [snapGrid.material];
+    for (const material of materials) material.dispose();
+    snapGrid = null;
+  }
+
+  function updateSnapGrid(entry) {
+    if (!gridSettings.visible || !entry || !entry.pivot) {
+      if (snapGrid) snapGrid.visible = false;
+      return;
+    }
+    const layout = snapGridLayout(gridSettings.move);
+    if (!snapGrid || snapGrid.userData.cell !== layout.cell || snapGrid.userData.divisions !== layout.divisions) {
+      clearSnapGrid();
+      snapGrid = new THREE.GridHelper(layout.size, layout.divisions, 0x8ea184, 0x3c4a40);
+      snapGrid.userData.cell = layout.cell;
+      snapGrid.userData.divisions = layout.divisions;
+      const materials = Array.isArray(snapGrid.material) ? snapGrid.material : [snapGrid.material];
+      for (const material of materials) {
+        material.transparent = true;
+        material.opacity = 0.85;
+        material.depthWrite = false;
+      }
+      snapGrid.raycast = () => {};
+      snapGrid.traverse((child) => {
+        child.raycast = () => {};
+        child.layers.disable(PICK_LAYER);
+        child.layers.disable(PREVIEW_PICK_LAYER);
+        child.layers.disable(TERRAIN_PICK_LAYER);
+      });
+      scene.add(snapGrid);
+    }
+    snapGrid.visible = true;
+    snapGrid.position.copy(entry.pivot.position);
+    if (gizmoSpace === "local") snapGrid.quaternion.copy(entry.pivot.quaternion);
+    else snapGrid.quaternion.identity();
+    snapGrid.translateY(0.02);
   }
 
   function pivotScale(pivot) {
@@ -4725,8 +4862,10 @@ uniform float terrainLayerMissing;`
     // puts the pivot back here so the drag plane, and therefore X and Z, stay
     // on the handle instead of on the snapped surface.
     if ((transform.axis || dragAxis) !== "Y") dragPlaneY = entry.pivot.position.y;
+    applyGridSnap(entry);
     maybeSnap(entry, "move");
     applySelectedActorTransform(entry, { commit: false });
+    updateSnapGrid(entry);
   });
 
   let dragSerial = 0;
@@ -4737,8 +4876,14 @@ uniform float terrainLayerMissing;`
       dragSerial += 1;
       dragAxis = transform.axis || dragAxis;
       dragPlaneY = null;
+      dragRaw = null;
+      const started = selected ? entries.get(selected) : null;
+      if (started) captureDragOrigin(started);
+      else dragOrigin = null;
       return;
     }
+    dragRaw = null;
+    dragOrigin = null;
     const entry = selected ? entries.get(selected) : null;
     const serial = dragSerial;
     const axis = transform.axis || dragAxis;
@@ -5446,6 +5591,23 @@ uniform float terrainLayerMissing;`
     setTextureLoad,
     setSnap(on) {
       snapOn = Boolean(on);
+    },
+    setGizmoSpace(space) {
+      gizmoSpace = normalizeSpace(space);
+      transform.setSpace(spaceForMode(transform.mode, gizmoSpace));
+      updateSnapGrid(selected ? entries.get(selected) : null);
+      requestRender();
+    },
+    setGridSnap(settings) {
+      gridSettings = normalizeGridSettings(settings);
+      updateSnapGrid(selected ? entries.get(selected) : null);
+      requestRender();
+    },
+    setSnapModifier(held) {
+      const next = Boolean(held);
+      if (next === ctrlSnap) return;
+      ctrlSnap = next;
+      if (transform.dragging) reapplyDragSnap();
     },
     followActorTransform(follow) {
       if (typeof follow !== "function") return () => {};
