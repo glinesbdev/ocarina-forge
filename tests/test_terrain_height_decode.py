@@ -75,3 +75,13 @@ def test_walkable_sample_prefers_main_and_skips_an_empty_fine_tile():
     assert drawn["layer"] == "main"
     assert drawn["name"] == "34000000C8"
     assert abs(drawn["worldY"] - 160.0) < 1e-9
+
+
+def test_near_zero_samples_are_treated_as_holes():
+    from ocarina_forge.formats.terrain import _uncover_sentinel_zeros, _HEIGHT_HOLE
+
+    values = _uncover_sentinel_zeros([0.0, _HEIGHT_HOLE, _HEIGHT_HOLE / 2, 1e-5, 0.2, -0.0])
+    assert all(v != v for v in values[:4])
+    assert values[4] == 0.2
+    assert values[5] != values[5]
+

@@ -363,9 +363,16 @@ def _fill_isolated_zeros(values: list[float]) -> list[float]:
     return out
 
 
+# Packed leftovers and empty parent cells under a missing finer tile can be
+# a tiny non-zero (1e-5 .. 1e-3) instead of an exact 0. At height scale 800
+# that is still under a metre, and meshing it produces a flat ground sheet at
+# the origin. The same rule is used when sampling.
+_HEIGHT_HOLE = 1e-3
+
+
 def _uncover_sentinel_zeros(values: list[float]) -> list[float]:
-    """Exact 0 left after dashed-column repair is uncovered, not a height at the origin."""
-    return [float("nan") if value == 0.0 else value for value in values]
+    """Exact 0, or a near-zero leftover, is uncovered, not a height at the origin."""
+    return [float("nan") if not _finite(value) or abs(value) <= _HEIGHT_HOLE else value for value in values]
 
 def _plausible_height_max(values) -> float | None:
     """Largest finite sample in the normalised 0..1 height range, excluding 0."""

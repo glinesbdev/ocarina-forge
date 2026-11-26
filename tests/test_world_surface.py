@@ -22,6 +22,7 @@ def test_terrain_actor_includes_islands_and_excludes_scenery():
     assert terrain_actor("Land_LakeHrl_Island_E_05")
     assert terrain_actor("Land_LakeHrl_Island_C_01")
     assert terrain_actor("Land_LakeHrl_Cliff_B_01")
+    assert terrain_actor("Land_HrlField_MiddleMountain_A_01_UnBake")
     assert terrain_actor("Land_LakeHrl_CliffEdge_A_01")
     assert terrain_actor("Land_LakeHrl_Soil_A_01")
     assert terrain_actor("Land_LakeHrl_MatsuCliff_A_01")

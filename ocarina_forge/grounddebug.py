@@ -288,7 +288,7 @@ def _sample(report: dict, x: float, z: float) -> dict:
         fx = (unit_x - x0) / edge * span
         fz = (unit_z - z0) / edge * span
         raw = _bilinear(heights, fx, fz)
-        if raw is None or raw == 0.0:
+        if raw is None or abs(raw) <= heightmap._HEIGHT_HOLE:
             world = None
         else:
             world = raw * height_scale + origin[1]

@@ -168,6 +168,37 @@ test("collision-backed entrances clear buried ground while excluding disconnecte
   assert.equal(height(-6), 6);
 });
 
+test("an entrance raises too-low coarse ground up to the approach floor", async () => {
+  const surface = (doc, name, left, right, height) => {
+    const buffer = doc.getRoot().listBuffers()[0] || doc.createBuffer();
+    const attr = (type, data) => doc.createAccessor().setType(type).setArray(data).setBuffer(buffer);
+    const primitive = doc.createPrimitive()
+      .setAttribute("POSITION", attr("VEC3", Float32Array.of(left, height, 0, left, height, 12, right, height, 0, right, height, 12)))
+      .setAttribute("TEXCOORD_3", attr("VEC2", new Float32Array(8)))
+      .setIndices(attr("SCALAR", Uint16Array.of(0, 1, 2, 2, 1, 3)));
+    const scene = doc.getRoot().listScenes()[0] || doc.createScene();
+    scene.addChild(doc.createNode(name).setMesh(doc.createMesh().addPrimitive(primitive)));
+    return primitive;
+  };
+  const base = new Document(), model = new Document();
+  const ground = surface(base, "ground", -12, 14, 4);
+  surface(model, "lod0:Approach__Material:0", 0, 6, 0);
+  const collision = { Land_Test: [
+    [0, 0.01, 0, 0, 0.01, 12, 6, 0.01, 0], [6, 0.01, 0, 0, 0.01, 12, 6, 0.01, 12],
+  ] };
+  const actor = { gyaml: "Land_Test", translate: [0, 9, 0], rotate: [0, 0, 0], scale: [1, 1, 1],
+    entranceIndices: [0] };
+  const result = await buildCorrectedTerrain({ read: (path) => path === "ground" ? base : model }, "ground",
+    { Land_Test: "model" }, [actor], [], 1, [[-12, -9, 18, 21]], [[3, 9, 6]], collision);
+  assert.ok(result === base);
+  const geometry = new BufferGeometry().setAttribute("position", new BufferAttribute(ground.getAttribute("POSITION").getArray(), 3));
+  geometry.setIndex([...ground.getIndices().getArray()]);
+  const mesh = new Mesh(geometry);
+  const height = (x) => new Raycaster(new Vector3(x, 20, 6), new Vector3(0, -1, 0)).intersectObject(mesh)[0].point.y;
+  assert.ok(Math.abs(height(3) - 8.98) < 0.05, `raised height was ${height(3)}`);
+  assert.equal(height(11), 4);
+});
+
 test("scene preparation fits an ordinary modeled floor without a map-specific override", async () => {
   const surface = (left, right) => {
     const doc = new Document();
