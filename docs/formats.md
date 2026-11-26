@@ -143,7 +143,7 @@ Longshot's modding API was checked before this layout was written down. Spec rev
 
 Hyblitze traced the actor-pack path and the physics ray. Zirem wrote the spawn request. That ray is the query `world.ray` would call. It is not this file. Their notes are from Heros Legacy (`heros-legacy/v3.0.0` at `6ce46cc7`). Their code is not copied.
 
-The byte layout below is the one published by reading the files, in oot-texture-tool `phive_compound.py` (GPL-3.0, ToxicToucan). This repo reimplements that description. It does not copy the program. No retail `.bphsc` was opened here. A file that does not match fails closed, and the export stops.
+The byte layout below is the one published by reading the files, in oot-texture-tool `phive_compound.py` (GPL-3.0, ToxicToucan). This repo reimplements that description. It does not copy the program. No retail `.bphsc` was opened in this repo. The `SRTHash` offset and the no-body marker were confirmed in game on Kokiri. A file that does not match fails closed, and the export stops.
 
 The file starts with `Phive`. A mesh file uses `Phive\0`. At `+0x10` there are five little-endian u32s: actor-table start, actor-table end, a word that reader does not use, body-table start, body-table end.
 
@@ -154,9 +154,10 @@ An actor record is `0x20` bytes. That is the per-actor record issue [#10](https:
 | `+0x00` | u32 first body index |
 | `+0x04` | u32 last body index, inclusive |
 | `+0x08` | u64 layout `Hash` |
-| `+0x10` | 16 bytes the published reader does not interpret |
+| `+0x10` | u32 `SRTHash`, the start of the 16-byte tail |
+| `+0x14` | 12 bytes still unread |
 
-`0xFFFFFFFF` in the first body index means this tile has no body for that actor. Issue #10 says the record carries the hash, the `SRTHash`, and a shape range. The 16-byte tail is the only unread span, so an `SRTHash` could sit there. Those bytes are not written. No retail tile was measured, so the offset of `SRTHash` inside the record is not established.
+`first == last == 0xFFFFFFFF` means the row has no body. `Land_Kokiri_Zenmai_A_02` (a fern) is that case. A hash in the actor table is not the same thing as baked collision. The patcher still does not write the tail. `bake` leaves the banc `SRTHash` alone, so the row's `SRTHash` has to stay the value the lookup uses.
 
 Breath of the Wild's `ksys::phys::ActorInfo` is a different struct: 16 bytes, `HashId`, `SRTHash`, shape start, shape end, and `getActorIdx` matches hash and `SRTHash`. That SDK is not this file. Those offsets are not used.
 
@@ -181,13 +182,22 @@ The scene directory is not a fixed grid. Kokiri's 4×4 per age and Hyrule Field'
 
 ### What `collisionFollow` writes
 
-The manifest key is `collisionFollow` (`collision_follow` is accepted). The CLI flag is `--collision-follow`. `POST /api/export` and `POST /api/mod-export` take `collisionFollow` in the body. A typo is an error. The default is `off`, which is today's export: the mesh moves and the bake stays.
+The manifest key is `collisionFollow` (`collision_follow` is accepted). The CLI flag is `--collision-follow`. `POST /api/export` and `POST /api/mod-export` take `collisionFollow` in the body. A typo is an error. The default is `off`.
 
-`srt` is variant B. A pose move keeps `Hash` and `Phive.Placement.ID`. Export mints a new `SRTHash`: the CRC-32 of `ocarina-forge-collision-follow-b:` plus the 16-digit actor hash, skipping 0, bumped until no other actor in the banc has it. Save Longshot mod adds a placements `set` of `SRTHash` (an `add` only when the key was missing). Build mod writes that same u32 into the banc. No `.bphsh` and no `.bphsc` is shipped. The shape is unchanged. Re-minting the hash is a new value in the data structure, not a new shape. Whether the game then ignores the old bake is not known. The game was not launched.
+`srt` is variant B. A pose move keeps `Hash` and `Phive.Placement.ID`. Export mints a new `SRTHash`: the CRC-32 of `ocarina-forge-collision-follow-b:` plus the 16-digit actor hash, skipping 0, bumped until no other actor in the banc has it. Save Longshot mod adds a placements `set` of `SRTHash` (an `add` only when the key was missing). Build mod writes that same u32 into the banc. No `.bphsh` and no `.bphsc` is shipped. The shape is unchanged. Re-minting the hash is a new value in the data structure, not a new shape. It does not move the baked row.
 
-`bake` leaves `SRTHash` alone, so a lookup by hash and `SRTHash` can still hit the same row. Each tile that contains the actor is copied and the instance transform is moved. A tile that does not mention the actor is left out. A tile that mentions the actor and cannot be patched fails the export, so a half-updated world is not shipped. The unpacked length stays the same. The bytes differ, so the size-table entry still grows by 1024 (`align8(old + 1024)`), and the whole table is shipped. A missing row is an error. It is not invented. The frame is recompressed with the dictionary id from the source frame. `.bphsc.zs` is not in the suffix table, so the id is not assumed to be 1. A scene with no `StaticCompoundBody` directory warns and does not fail. An actor that is in no tile is logged. The class `.bphsh` is not rewritten in either mode. Whether an unbaked actor's collision follows the placement is still an in-game question.
+`bake` leaves `SRTHash` alone, so a lookup by hash and `SRTHash` can still hit the same row. Each tile that contains the actor is copied and the instance transform is moved. Static and Dynamic bancs that share a tile are applied to that tile together. One starts from the dump, and the next does not overwrite it with a fresh copy. A tile that does not mention the actor is left out. A tile that mentions the actor and cannot be patched fails the export, so a half-updated world is not shipped. The unpacked length stays the same. The bytes differ, so the size-table entry still grows by 1024 (`align8(old + 1024)`), and the whole table is shipped. A missing row is an error. It is not invented. The frame is recompressed with the dictionary id from the source frame. `.bphsc.zs` is not in the suffix table, so the id is not assumed to be 1. A scene with no `StaticCompoundBody` directory warns and does not fail. An actor that is in no tile is logged. The class `.bphsh` is not rewritten in either mode.
 
-`examples/collision-follow-test` is variant B. Its scene yaml is generated from the dump when the command runs, and that folder is gitignored. Do not commit it. The in-game steps are in that example's README. The result of the run is still open.
+### Kokiri sign, in game
+
+`Obj_Kokiri_Signboard_A_01` (`KokiriForest_013`, `0x4a13f8880eb01a43`) has both of these:
+
+- An actor-side ControllerSet. It follows `Translate`. That is why `off` still has collision at the new spot.
+- A baked compound row in `KokiriForest_Child_X1_Z2.bphsc`.
+
+`off` moves the mesh and the ControllerSet. The vanilla bake row stays where it was, and that is an invisible box at the old spot. `bake` moves that row. The old spot is clear. Bake mode is required for this sign, and it works. The shape bytes were not rewritten.
+
+`examples/collision-follow-test` generates `scenes/` from the dump on each run and deletes the previous scene yaml first, so an earlier `--id` is not exported again. That folder is gitignored. Do not commit it. The steps, including the house-facade command, are in that example's README.
 
 ## BFRES models (version 10)
 

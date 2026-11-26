@@ -1072,7 +1072,7 @@ def print_mod_export(args) -> int:
 
 def print_collision_follow_test(args) -> int:
     """Write variant B (SRTHash re-mint) for the Kokiri sign and the nearest Land_."""
-    from ocarina_forge.collision_follow import SIGN_BANC, prepare_variant_b
+    from ocarina_forge.collision_follow import prepare_variant_b, requested_banc
     from ocarina_forge.config import load_config
     from ocarina_forge.dump import Dump
     from ocarina_forge.errors import BancError
@@ -1092,11 +1092,16 @@ def print_collision_follow_test(args) -> int:
     try:
         dump = Dump(dump_path)
         project = Project(root)
-        lines = prepare_variant_b(dump, project, only_hash=args.id or None, banc=args.banc or SIGN_BANC)
+        lines = prepare_variant_b(
+            dump,
+            project,
+            only_hash=args.id or None,
+            banc=requested_banc(args.scene_banc, args.banc),
+        )
     except BancError as exc:
         print(exc.message, file=sys.stderr)
         return 2
-    print("Variant B moves each actor 4 m on +X and, unless --collision-follow off, mints a new SRTHash.")
+    print("Each actor moves 4 m on +X. scenes/ is replaced, so only this run is exported.")
     for line in lines:
         print(line)
     mode = args.collision_follow or None

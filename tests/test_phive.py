@@ -9,7 +9,12 @@ import pytest
 from ocarina_forge.actors import format_hash
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import U64, loads
-from ocarina_forge.formats.phive import CompoundLayoutError, patch_compound_transform, read_mesh_shape
+from ocarina_forge.formats.phive import (
+    CompoundLayoutError,
+    compound_actor_spans,
+    patch_compound_transform,
+    read_mesh_shape,
+)
 from ocarina_forge.formats.zsio import compress, decompress
 
 
@@ -179,6 +184,7 @@ def test_compound_misses_return_none_and_bad_files_fail_closed():
         bodies=[],
     )
     assert patch_compound_transform(empty, _HASH, _pose((0, 0, 0)), _pose((1, 0, 0))) is None
+    assert compound_actor_spans(empty)[_HASH] == (0xFFFFFFFF, 0xFFFFFFFF)
     with pytest.raises(CompoundLayoutError):
         patch_compound_transform(b"Nope\0\0" + bytes(32), _HASH, _pose((0, 0, 0)), _pose((1, 0, 0)))
     broken = bytearray(raw)
@@ -312,7 +318,7 @@ def test_collision_follow_export_changes_the_record_or_the_transform(tmp_path):
     assert by_path["SRTHash"]["hash"] == format_hash(GROUND)
     assert isinstance(by_path["SRTHash"]["value"], int)
     assert by_path["SRTHash"]["value"] not in (0, GROUND & 0xFFFFFFFF)
-    assert any("variant B" in line["message"] for line in srt["log"])
+    assert any("does not move the baked row" in line["message"] for line in srt["log"])
 
     built = build(project, dump, collision_follow="srt", level=1)
     payload, _dict = decompress((project.root / "build" / "romfs" / KOKIRI_STATIC).read_bytes(), dump.dicts())
@@ -340,3 +346,101 @@ def test_collision_follow_export_changes_the_record_or_the_transform(tmp_path):
     updated = load_table((folder / "romfs" / table_rel).read_bytes())
     assert updated.get(relative) == 9216
     assert "skip.bphsc" not in " ".join(baked["files"])
+
+
+def test_a_compound_body_outranks_a_nearer_land_with_no_body():
+    from ocarina_forge.collision_follow import SIGN_GYAML, SIGN_HASH, _best_land, choose_variant_b
+
+    sign = {"Gyaml": SIGN_GYAML, "Hash": U64(SIGN_HASH), "Translate": [0.0, 0.0, 0.0]}
+    near = {"Gyaml": "Land_Kokiri_Zenmai_A_02", "Hash": U64(0x30), "Translate": [1.0, 0.0, 0.0], "Bakeable": True}
+    far = {"Gyaml": "Land_Far", "Hash": U64(0x20), "Translate": [8.0, 0.0, 0.0], "Bakeable": True}
+    document = {"Actors": [sign, near, far]}
+    assert choose_variant_b(document, has_body={0x20})[1]["Gyaml"] == "Land_Far"
+    banc, actor = _best_land(
+        [0.0, 0.0, 0.0],
+        [("Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs", near),
+         ("Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs", far)],
+        {0x20},
+    )
+    assert banc.endswith("_Dynamic.bcett.byml.zs")
+    assert actor["Gyaml"] == "Land_Far"
+
+
+def test_prepare_replaces_scenes_and_finds_an_id_on_the_paired_banc(tmp_path):
+    from ocarina_forge.collision_follow import prepare_variant_b, requested_banc
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.fixtures import HOUSE, KOKIRI_STATIC, build_fixture
+    from ocarina_forge.project import Project
+
+    assert requested_banc("Banc/KokiriForest/KokiriForest_Child_Dynamic.bcett.byml.zs", KOKIRI_STATIC).endswith("_Dynamic.bcett.byml.zs")
+    assert requested_banc(None, KOKIRI_STATIC) == KOKIRI_STATIC
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    project = Project.create(tmp_path / "mod", name="collision-follow-test", title="Collision follow", author="Ada", version="0.1.0")
+    stale = project.root / "scenes" / "HyruleField" / "Old.yaml"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("format: 1\nbanc: Banc/HyruleField/Old.bcett.byml.zs\nactors: {}\n", encoding="utf-8")
+    lines = prepare_variant_b(dump, project, only_hash=format_hash(HOUSE), banc=KOKIRI_STATIC)
+    yamls = list((project.root / "scenes").rglob("*.yaml"))
+    assert [path.name for path in yamls] == ["KokiriForest_Child_Dynamic.yaml"]
+    assert any("Land_Kokiri_House_01" in line for line in lines)
+    assert not stale.exists()
+
+
+def test_static_and_dynamic_edits_merge_into_one_tile(tmp_path):
+    from ocarina_forge.collision_follow import PoseMove, bake_tiles
+    from ocarina_forge.fixtures import KOKIRI_DYNAMIC, KOKIRI_STATIC
+
+    hash_a = 0x111
+    hash_b = 0x222
+    data = bytearray(0x100)
+    struct.pack_into("<I", data, 0x38, 0x80 - 0x38)
+    struct.pack_into("<I", data, 0x40, 2)
+    struct.pack_into("<4f", data, 0x80, 0, 0, 0, 1)
+    struct.pack_into("<3f", data, 0x90, 0, 0, 0)
+    struct.pack_into("<3f", data, 0xA0, 1, 1, 1)
+    struct.pack_into("<Q", data, 0xB0, 1)
+    struct.pack_into("<4f", data, 0xC0, 0, 0, 0, 1)
+    struct.pack_into("<3f", data, 0xD0, 8, 0, 0)
+    struct.pack_into("<3f", data, 0xE0, 1, 1, 1)
+    struct.pack_into("<Q", data, 0xF0, 1)
+    raw, (inst_a,) = _compound(
+        [data],
+        actors=[(hash_a, 0, 0, _TAIL), (hash_b, 1, 1, _TAIL)],
+        bodies=[0, 1],
+    )
+    inst_b = inst_a + 0x40
+    relative = "Phive/StaticCompoundBody/KokiriForest_Child/X1_Z2.bphsc"
+    romfs = tmp_path / "romfs"
+    destination = romfs / relative
+    destination.parent.mkdir(parents=True)
+    destination.write_bytes(raw)
+
+    class Dump:
+        def __init__(self, root):
+            self.romfs = root
+
+        def read_file(self, path):
+            return (self.romfs / path).read_bytes(), None
+
+    def move(hash_value, old, new):
+        return PoseMove(
+            hash=format_hash(hash_value),
+            hash_int=hash_value,
+            gyaml="Land",
+            old=_pose(old),
+            new=_pose(new),
+            srt_old=1,
+        )
+
+    baked = bake_tiles(Dump(romfs), [
+        (KOKIRI_STATIC, [move(hash_a, (0, 0, 0), (4, 0, 0))]),
+        (KOKIRI_DYNAMIC, [move(hash_b, (8, 0, 0), (12, 0, 0))]),
+    ])
+    assert [item[0] for item in baked] == [relative]
+    patched = baked[0][1]
+    assert len(patched) == len(raw)
+    assert _floats(patched, inst_a + 0x10, 3) == pytest.approx((4.0, 0.0, 0.0))
+    assert _floats(patched, inst_b + 0x10, 3) == pytest.approx((12.0, 0.0, 0.0))
+    assert patched[inst_a + 0x30:inst_a + 0x38] == raw[inst_a + 0x30:inst_a + 0x38]
+    assert patched[inst_b + 0x30:inst_b + 0x38] == raw[inst_b + 0x30:inst_b + 0x38]
+    assert patched[0x40:0x80] == raw[0x40:0x80]

@@ -264,6 +264,7 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
     warnings: list[str] = []
     generated: set[tuple[str, str, str]] = set()
     baked: list[tuple[str, bytes, int | None]] = []
+    bake_jobs: list[tuple[str, list]] = []
     slug = mod_slug(project.manifest["name"])
     imported_ids: dict[str, set[str]] = {}
     if source_info:
@@ -286,7 +287,7 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
                     f"{banc}: {move.gyaml} ({move.hash}) collisionFollow srt. "
                     f"SRTHash 0x{0 if move.srt_old is None else move.srt_old:08x} -> 0x{move.srt_new:08x}. "
                     "Hash and Phive.Placement.ID stay. No .bphsh and no .bphsc is written. "
-                    "The shape is unchanged. This is variant B; the in-game result is not known yet."
+                    "The shape is unchanged. On the Kokiri sign, srt does not move the baked row."
                 )
                 log.append({"level": "info", "message": message})
         elif mode == "bake" and moves:
@@ -300,23 +301,7 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
                 warnings.append(message)
                 log.append({"level": "warn", "message": message})
             else:
-                baked.extend(bake_tiles(dump, banc, moves))
-                for move in moves:
-                    if move.tiles:
-                        message = (
-                            f"{banc}: {move.gyaml} ({move.hash}) collisionFollow bake. "
-                            f"SRTHash stays 0x{0 if move.srt_old is None else move.srt_old:08x}. "
-                            f"Instance transform updated in {', '.join(move.tiles)}. "
-                            "The actor record and the shape bytes were not changed."
-                        )
-                        log.append({"level": "info", "message": message})
-                    else:
-                        message = (
-                            f"{banc}: {move.gyaml} ({move.hash}) is not in a static-compound tile "
-                            "under this scene. No bake was written for it. The class .bphsh was not rewritten."
-                        )
-                        warnings.append(message)
-                        log.append({"level": "warn", "message": message})
+                bake_jobs.append((banc, moves))
         for note in notes:
             warnings.append(f"{banc}: {note}")
             log.append({"level": "warn", "message": f"{banc}: {note}"})
@@ -335,6 +320,26 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         destination.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         written.append(destination.relative_to(out).as_posix())
         log.append({"level": "info", "message": f"Wrote {destination.name} with {len(ops)} op{'s' if len(ops) != 1 else ''}."})
+
+    if bake_jobs:
+        baked.extend(bake_tiles(dump, bake_jobs))
+        for banc, moves in bake_jobs:
+            for move in moves:
+                if move.tiles:
+                    message = (
+                        f"{banc}: {move.gyaml} ({move.hash}) collisionFollow bake. "
+                        f"SRTHash stays 0x{0 if move.srt_old is None else move.srt_old:08x}. "
+                        f"Instance transform updated in {', '.join(move.tiles)}. "
+                        "The actor record and the shape bytes were not changed."
+                    )
+                    log.append({"level": "info", "message": message})
+                else:
+                    message = (
+                        f"{banc}: {move.gyaml} ({move.hash}) is not in a static-compound tile "
+                        "under this scene. No bake was written for it. The class .bphsh was not rewritten."
+                    )
+                    warnings.append(message)
+                    log.append({"level": "warn", "message": message})
 
     if source_info is not None:
         _preserve_imported_patches(project, out, source_info, written, generated, log, warnings)

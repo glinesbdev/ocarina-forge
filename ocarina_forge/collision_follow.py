@@ -22,12 +22,13 @@ Two export modes, both off unless the project asks:
 
 from __future__ import annotations
 
+import shutil
 import zlib
 from dataclasses import dataclass, field
 
 from ocarina_forge.actors import actor_id, format_hash, parse_hash, read_vec
 from ocarina_forge.errors import BancError
-from ocarina_forge.formats.phive import CompoundLayoutError, patch_compound_transform
+from ocarina_forge.formats.phive import CompoundLayoutError, compound_actor_spans, patch_compound_transform
 from ocarina_forge.scene import _base_map, _close
 
 MODES = ("off", "srt", "bake")
@@ -236,22 +237,43 @@ def compound_files(dump, banc: str) -> tuple[bool, list[str]]:
     return found_dir, paths
 
 
-def bake_tiles(dump, banc: str, moves: list[PoseMove]) -> list[tuple[str, bytes, int | None]]:
-    """Patched tile bytes for every move that this scene's compounds contain.
+def bake_tiles(dump, jobs: list[tuple[str, list[PoseMove]]]) -> list[tuple[str, bytes, int | None]]:
+    """Patched tiles for every banc in ``jobs``.
 
-    A tile that does not mention the actor is left out. A tile that mentions
-    the actor and cannot be patched stops the export. The returned bytes are
-    the same length as the unpacked source.
+    ``jobs`` is ``(banc, moves)``. Static and Dynamic both name
+    ``KokiriForest_Child``, so they share ``X1_Z2``. Each tile is read from
+    the dump once, and every move that belongs to a banc listing that tile is
+    applied before the tile is returned. A later banc must not start over from
+    the dump and drop the earlier banc's instances. A tile that mentions an
+    actor and cannot be patched stops the export. The returned bytes are the
+    same length as the unpacked source.
     """
-    found_dir, paths = compound_files(dump, banc)
-    if not found_dir or not moves:
-        return []
+    planned: dict[str, list[PoseMove]] = {}
+    order: list[str] = []
+    for banc, moves in jobs:
+        if not moves:
+            continue
+        found_dir, paths = compound_files(dump, banc)
+        if not found_dir:
+            continue
+        for relative in paths:
+            bucket = planned.get(relative)
+            if bucket is None:
+                bucket = []
+                planned[relative] = bucket
+                order.append(relative)
+            seen = {move.hash_int for move in bucket}
+            for move in moves:
+                if move.hash_int in seen:
+                    continue
+                seen.add(move.hash_int)
+                bucket.append(move)
     written: list[tuple[str, bytes, int | None]] = []
-    for relative in paths:
+    for relative in order:
         raw, dict_id = dump.read_file(relative)
         current = raw
         touched = False
-        for move in moves:
+        for move in planned[relative]:
             try:
                 patched = patch_compound_transform(current, move.hash_int, move.old, move.new)
             except CompoundLayoutError as exc:
@@ -268,13 +290,106 @@ def bake_tiles(dump, banc: str, moves: list[PoseMove]) -> list[tuple[str, bytes,
                 )
             current = patched
             touched = True
-            move.tiles.append(relative)
+            if relative not in move.tiles:
+                move.tiles.append(relative)
         if touched:
             written.append((relative, current, dict_id))
     return written
 
 
-def choose_variant_b(document: dict, only_hash: str | None = None) -> list[dict]:
+def requested_banc(explicit: str | None, positional: str | None = None) -> str:
+    """``--banc`` wins over the positional banc. The Kokiri sign banc is the default."""
+    for value in (explicit, positional):
+        text = (value or "").strip()
+        if text:
+            return text
+    return SIGN_BANC
+
+
+def paired_banc(banc: str) -> str | None:
+    """The Static banc beside a Dynamic one, and the reverse. Same folder and extension."""
+    folder, _, name = banc.replace("\\", "/").rpartition("/")
+    stem = name
+    ext = ""
+    for suffix in (".bcett.byml.zs", ".bcett.byml"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            ext = suffix
+            break
+    if not ext:
+        return None
+    for source, dest in (("Static", "Dynamic"), ("Dynamic", "Static")):
+        token = f"_{source}"
+        if stem.endswith(token):
+            other = stem[: -len(token)] + f"_{dest}"
+            return f"{folder}/{other}{ext}" if folder else f"{other}{ext}"
+    return None
+
+
+def _open_banc(dump, banc: str):
+    try:
+        document, _dict_id, _raw = dump.read_byml(banc)
+    except BancError as exc:
+        if exc.code != "not_found":
+            raise
+        return None
+    return document
+
+
+def hashes_with_bodies(dump, banc: str) -> set[int]:
+    """Actor hashes whose compound row has a body in any tile of this scene.
+
+    ``first == 0xFFFFFFFF`` is a table row with no body. That hash is left out.
+    """
+    found_dir, paths = compound_files(dump, banc)
+    if not found_dir:
+        return set()
+    found: set[int] = set()
+    for relative in paths:
+        raw, _dict_id = dump.read_file(relative)
+        spans = compound_actor_spans(raw)
+        if not spans:
+            continue
+        for hash_value, (first, last) in spans.items():
+            if first == 0xFFFFFFFF or last == 0xFFFFFFFF or last < first:
+                continue
+            found.add(int(hash_value))
+    return found
+
+
+def _land_rows(document: dict) -> list[dict]:
+    rows = []
+    for actor in document.get("Actors") or []:
+        if not isinstance(actor, dict) or not actor_id(actor):
+            continue
+        gyaml = str(actor.get("Gyaml") or "")
+        if not gyaml.startswith("Land_"):
+            continue
+        if actor.get("Bakeable") is False:
+            continue
+        rows.append(actor)
+    return rows
+
+
+def _best_land(origin, placed: list[tuple[str, dict]], has_body: set[int] | None):
+    """Nearest eligible Land_. A row with a compound body ranks ahead of one without."""
+    ranked = []
+    for banc, actor in placed:
+        ident = actor_id(actor)
+        pos = read_vec(actor, "Translate", [0.0, 0.0, 0.0])
+        distance = sum((a - b) ** 2 for a, b in zip(pos, origin))
+        if has_body is None:
+            baked = 0
+        else:
+            baked = 0 if parse_hash(ident) in has_body else 1
+        ranked.append((baked, distance, ident, banc, actor))
+    ranked.sort()
+    if not ranked:
+        return None
+    return ranked[0][3], ranked[0][4]
+
+
+def choose_variant_b(document: dict, only_hash: str | None = None, has_body: set[int] | None = None) -> list[dict]:
     """The sign, plus the nearest Land_ that is not Bakeable false.
 
     ``only_hash`` keeps a single actor and does not add the Land_.
@@ -302,48 +417,112 @@ def choose_variant_b(document: dict, only_hash: str | None = None) -> list[dict]
             "collision",
         )
     origin = read_vec(sign, "Translate", [0.0, 0.0, 0.0])
-    lands = []
-    for actor in actors:
-        if actor_id(actor) == sign_id:
-            continue
-        gyaml = str(actor.get("Gyaml") or "")
-        if not gyaml.startswith("Land_"):
-            continue
-        if actor.get("Bakeable") is False:
-            continue
-        pos = read_vec(actor, "Translate", [0.0, 0.0, 0.0])
-        distance = sum((a - b) ** 2 for a, b in zip(pos, origin))
-        lands.append((distance, actor_id(actor), actor))
-    lands.sort(key=lambda item: (item[0], item[1]))
+    placed = [("", actor) for actor in _land_rows(document) if actor_id(actor) != sign_id]
+    best = _best_land(origin, placed, has_body)
     chosen = [sign]
-    if lands:
-        chosen.append(lands[0][2])
+    if best is not None:
+        chosen.append(best[1])
     return chosen
 
 
+def _actor_line(banc: str, actor: dict, has_body: set[int] | None) -> tuple[str, dict]:
+    ident = actor_id(actor)
+    old = read_vec(actor, "Translate", [0.0, 0.0, 0.0])
+    new = [old[0] + SHIFT_X, old[1], old[2]]
+    record = {"state": "edited", "gyaml": str(actor.get("Gyaml") or ""), "translate": new}
+    srt = actor.get("SRTHash")
+    srt_text = "none" if srt is None else f"0x{int(srt) & 0xFFFFFFFF:08x}"
+    baked = "unknown"
+    if has_body is not None:
+        baked = "body" if parse_hash(ident) in has_body else "no body"
+    line = (
+        f"{banc}: {actor.get('Gyaml')} {ident}  translate {old} -> {new}  "
+        f"SRTHash {srt_text}  Bakeable {actor.get('Bakeable')!r}  compound {baked}"
+    )
+    return line, record
+
+
+def replace_scene_tree(project, diffs: list[dict]) -> None:
+    """Drop every scene yaml, then write ``diffs``. Export must not ship a previous run."""
+    folder = project.root / "scenes"
+    if folder.exists():
+        shutil.rmtree(folder)
+    for diff in diffs:
+        project.save_scene_diff(diff)
+
+
 def prepare_variant_b(dump, project, *, only_hash: str | None = None, banc: str | None = None) -> list[str]:
-    """Write the variant B scene diff: +4 m on X, ready for ``collisionFollow: srt``."""
+    """Write this run's scene diffs: +4 m on X, and nothing left from the previous run.
+
+    ``--id`` keeps that one actor. The default run moves the Kokiri sign and
+    the Land_ that prefers a compound row with a body, searching the paired
+    Dynamic or Static banc as well.
+    """
     target = banc or SIGN_BANC
-    document, _dict_id, _raw = dump.read_byml(target)
-    chosen = choose_variant_b(document, only_hash=only_hash)
-    actors = {}
+    primary = _open_banc(dump, target)
+    if primary is None:
+        raise BancError(f"{target} is not in this dump.", "collision")
+    other_name = paired_banc(target)
+    other = _open_banc(dump, other_name) if other_name else None
+    bodies = hashes_with_bodies(dump, target)
+    if other_name and other is not None:
+        bodies |= hashes_with_bodies(dump, other_name)
+
+    grouped: dict[str, list[dict]] = {}
+    if only_hash:
+        wanted = format_hash(parse_hash(only_hash))
+        home = target if any(actor_id(actor) == wanted for actor in primary.get("Actors") or []) else None
+        document = primary
+        if home is None and other is not None and any(actor_id(actor) == wanted for actor in other.get("Actors") or []):
+            home = other_name
+            document = other
+        if home is None:
+            where = target if other is None else f"{target} or {other_name}"
+            raise BancError(
+                f"No actor {wanted} is placed in {where}. "
+                "Pass --banc for a scene outside that pair.",
+                "collision",
+            )
+        grouped[home] = choose_variant_b(document, only_hash=wanted)
+    else:
+        sign_id = format_hash(SIGN_HASH)
+        if not any(actor_id(actor) == sign_id for actor in primary.get("Actors") or []):
+            raise BancError(
+                f"This banc has no {SIGN_GYAML} at {sign_id} ({SIGN_BANC}, KokiriForest_013). "
+                "The default run moves that sign 4 m on +X, and the Land_ whose compound row has a body. "
+                "Pass --id to move one actor. --banc selects the scene.",
+                "collision",
+            )
+        chosen = choose_variant_b(primary, has_body=bodies)
+        sign = chosen[0]
+        grouped[target] = [sign]
+        origin = read_vec(sign, "Translate", [0.0, 0.0, 0.0])
+        placed = [(target, actor) for actor in _land_rows(primary) if actor_id(actor) != sign_id]
+        if other is not None and other_name:
+            placed.extend((other_name, actor) for actor in _land_rows(other))
+        best = _best_land(origin, placed, bodies)
+        if best is not None:
+            land_banc, land = best
+            grouped.setdefault(land_banc, []).append(land)
+
+    diffs = []
     lines = []
-    for actor in chosen:
-        ident = actor_id(actor)
-        old = read_vec(actor, "Translate", [0.0, 0.0, 0.0])
-        new = [old[0] + SHIFT_X, old[1], old[2]]
-        actors[ident] = {"state": "edited", "gyaml": str(actor.get("Gyaml") or ""), "translate": new}
-        srt = actor.get("SRTHash")
-        srt_text = "none" if srt is None else f"0x{int(srt) & 0xFFFFFFFF:08x}"
-        bakeable = actor.get("Bakeable")
+    for scene_banc, actors in grouped.items():
+        payload = {}
+        for actor in actors:
+            line, record = _actor_line(scene_banc, actor, bodies)
+            payload[actor_id(actor)] = record
+            lines.append(line)
+        diffs.append({"format": 1, "banc": scene_banc, "actors": payload})
+    replace_scene_tree(project, diffs)
+    land_lines = [line for line in lines if "Land_" in line]
+    if not only_hash and not land_lines:
         lines.append(
-            f"{actor.get('Gyaml')} {ident}  translate {old} -> {new}  "
-            f"SRTHash {srt_text}  Bakeable {bakeable!r}"
+            "No Land_ actor was added. The sign's baked row is in KokiriForest_Child_X1_Z2.bphsc. "
+            "A Land_ with no compound body, such as the fern, is not that test."
         )
-    project.save_scene_diff({"format": 1, "banc": target, "actors": actors})
-    if not any(str(actor.get("Gyaml") or "").startswith("Land_") for actor in chosen):
+    elif not only_hash and not any(line.endswith("compound body") for line in land_lines):
         lines.append(
-            "No Land_ actor was added. The sign alone does not answer the baked-static question "
-            "unless that sign is itself baked."
+            "The Land_ that was added has no compound body. It is in the actor table and it is not baked collision."
         )
     return lines

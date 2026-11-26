@@ -91,6 +91,7 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
 
     written: list[str] = []
     table_raised = False
+    bake_jobs: list[tuple[str, list]] = []
     for banc in bancs:
         diff = project.load_scene_diff(banc)
         try:
@@ -120,21 +121,7 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
                     "for this scene. No tile was written. The class .bphsh was not rewritten."
                 )
             else:
-                for relative, compound, compound_dict in bake_tiles(dump, banc, moves):
-                    _write_compound(out_root, dump, table, relative, compound, compound_dict, log, level)
-                    table_raised = True
-                for move in moves:
-                    if move.tiles:
-                        log.info(
-                            f"{banc}: {move.gyaml} ({move.hash}) collisionFollow bake. "
-                            f"Instance transform updated in {', '.join(move.tiles)}. "
-                            "SRTHash stays. The actor record and the shape bytes were not changed."
-                        )
-                    else:
-                        log.warn(
-                            f"{banc}: {move.gyaml} ({move.hash}) is not in a static-compound tile. "
-                            "The class .bphsh was not rewritten."
-                        )
+                bake_jobs.append((banc, moves))
         for warning in warnings:
             log.warn(f"{banc}: {warning}")
         if same(exported, document):
@@ -167,6 +154,24 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
             f"size table {before} -> {after}."
         )
         written.append(banc)
+
+    if bake_jobs:
+        for relative, compound, compound_dict in bake_tiles(dump, bake_jobs):
+            _write_compound(out_root, dump, table, relative, compound, compound_dict, log, level)
+            table_raised = True
+        for banc, moves in bake_jobs:
+            for move in moves:
+                if move.tiles:
+                    log.info(
+                        f"{banc}: {move.gyaml} ({move.hash}) collisionFollow bake. "
+                        f"Instance transform updated in {', '.join(move.tiles)}. "
+                        "SRTHash stays. The actor record and the shape bytes were not changed."
+                    )
+                else:
+                    log.warn(
+                        f"{banc}: {move.gyaml} ({move.hash}) is not in a static-compound tile. "
+                        "The class .bphsh was not rewritten."
+                    )
 
     note_pending(project, log)
     from ocarina_forge.behavior_edit import export_behaviors

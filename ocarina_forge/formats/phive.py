@@ -214,6 +214,33 @@ def _instances(raw, compound_at):
     return instances
 
 
+def compound_actor_spans(raw: bytes) -> dict[int, tuple[int, int]] | None:
+    """Map each actor-table hash to ``(first body, last body)``.
+
+    ``None`` when the header is not a Phive actor table. ``first == last ==
+    0xFFFFFFFF`` is a row with no body (the Kokiri fern
+    ``Land_Kokiri_Zenmai_A_02``). A hash in this table is not, by itself,
+    baked collision. The 16 bytes at record ``+0x10`` start with the u32
+    ``SRTHash``. This reader does not return that word, and the patcher does
+    not write the tail.
+    """
+    try:
+        if not raw.startswith(b"Phive") or len(raw) < 0x24:
+            return None
+        actor_at, actor_end, _middle, body_at, body_end = struct.unpack_from("<5I", raw, _TABLE)
+        if not (0 <= actor_at <= actor_end <= len(raw) and 0 <= body_at <= body_end <= len(raw)):
+            return None
+        spans: dict[int, tuple[int, int]] = {}
+        offset = actor_at
+        while offset + _ACTOR_STRIDE <= actor_end:
+            first, last, hash_value = struct.unpack_from("<IIQ", raw, offset)
+            spans[hash_value] = (first, last)
+            offset += _ACTOR_STRIDE
+        return spans
+    except struct.error:
+        return None
+
+
 def _parse_compound(raw: bytes):
     if not raw.startswith(b"Phive"):
         raise CompoundLayoutError("not a Phive file")

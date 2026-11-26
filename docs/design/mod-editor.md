@@ -86,7 +86,7 @@ Forge's typed records stay the source. The exporter writes the mod. [longshot-ma
 | `edited` + `rotate` | placements `set` of `Rotate`, three radians | Do not emit `content.place`'s degrees. |
 | `edited` + `scale`, key already present | placements `set` of `Scale` | Same-size, hot reload. |
 | `edited` + `scale`, key absent | placements `add` of `Scale` | Grows the file. Next process start. |
-| `collisionFollow: srt` on a pose move | placements `set` of `SRTHash` (an `add` if the key is missing) | `Hash` and `Phive.Placement.ID` stay. No `.bphsh` and no `.bphsc`. Variant B. The in-game result is not known yet. |
+| `collisionFollow: srt` on a pose move | placements `set` of `SRTHash` (an `add` if the key is missing) | `Hash` and `Phive.Placement.ID` stay. No `.bphsh` and no `.bphsc`. This does not move the Kokiri sign's baked row. |
 | `collisionFollow: bake` on a pose move | the pose ops, plus the patched `.bphsc` tiles in `romfs` | `SRTHash` stays. Only the instance transform changes. The shape bytes stay. |
 | `set` of an existing `Dynamic.*` scalar (string, number, bool) | `content.change({ file, placement, params })` | `placement` in the API text is the id without `0x` (`00a1b2c3d4e5f607`). The patch `hash` keeps `0x`. Applied at the next game start, because the content module runs then. A missing key is a stage error and the mod's content is not added. |
 | `gyaml` on an existing actor | `content.change({ file, placement, actor })` | Same start rule. This changes what is placed there. It does not move it. |
