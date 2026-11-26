@@ -73,21 +73,79 @@ function replaceMap(material, key, texture, plain, colorSpace) {
  * Maps already on the material are replaced. The plain color is kept so a
  * later clear can restore it.
  */
+function hasSlotImage(slot) {
+  return [slot.map, slot.normalMap, slot.orm, slot.emissiveMap, slot.moss].some(Boolean);
+}
+
+/**
+ * One row per material key. `missing` is file not found, `decode` is a file
+ * that opened and did not yield an image, `not-applied` is a response the
+ * mesh did not take, and `applied` is a map now on the material.
+ */
 export async function applyTextureManifest(parts, manifest, loadTexture) {
   const materials = (manifest && manifest.materials) || {};
+  if (manifest && manifest.skipped) {
+    return [{ key: "", status: "not-applied", error: manifest.reason || "Textures are not loaded.", found: "" }];
+  }
+  if (manifest && manifest.error && !Object.keys(materials).length) {
+    return [{ key: "", status: manifest.status || "missing", error: manifest.error, found: "" }];
+  }
+  const report = [];
   const jobs = [];
+  const seen = new Set();
   for (const part of parts || []) {
-    const slot = materials[materialKey(part)];
-    if (!slot || !part.material) continue;
-    if (![slot.map, slot.normalMap, slot.orm, slot.emissiveMap, slot.moss].some(Boolean)) continue;
-    jobs.push(assignSlot(part.material, slot, loadTexture));
+    const key = materialKey(part);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const slot = materials[key];
+    if (!part.material) {
+      report.push({ key, status: "not-applied", error: "not applied. This mesh has no material.", found: "" });
+      continue;
+    }
+    if (!slot) {
+      report.push({ key, status: "not-applied", error: "not applied. The texture response has no entry for this mesh.", found: "" });
+      continue;
+    }
+    if (!hasSlotImage(slot)) {
+      const status = slot.status === "decode" ? "decode" : "missing";
+      const error = slot.error || (status === "decode" ? "decode error" : "file not found");
+      report.push({ key, status, error, found: slot.found || "" });
+      continue;
+    }
+    jobs.push(assignSlot(part.material, slot, loadTexture).then((outcome) => {
+      if (slot.map && !outcome.applied) {
+        report.push({ key, status: "not-applied", error: "not applied. The image request failed.", found: slot.found || "" });
+        return;
+      }
+      report.push({ key, status: "applied", error: "", found: slot.found || slot.map || "" });
+    }));
   }
   await Promise.all(jobs);
+  return report;
+}
+
+export function formatTextureReport(report) {
+  const lines = [];
+  for (const row of report || []) {
+    const key = row.key ? `${row.key}: ` : "";
+    const error = String(row.error || "");
+    const lower = error.toLowerCase();
+    if (row.status === "applied") {
+      lines.push(`${key}applied ${row.found || "texture"}`.trim());
+    } else if (row.status === "decode") {
+      lines.push(lower.includes("decode") ? `${key}${error}` : `${key}decode error. ${error}`.trim());
+    } else if (row.status === "not-applied") {
+      lines.push(lower.includes("not applied") ? `${key}${error}` : `${key}not applied. ${error}`.trim());
+    } else {
+      lines.push(lower.includes("file not found") ? `${key}${error}` : `${key}file not found. ${error}`.trim());
+    }
+  }
+  return lines.join(" ");
 }
 
 async function assignSlot(material, slot, loadTexture) {
   const userData = rememberPlain(material);
-  if (userData.forgeMapUrl === (slot.map || "") && userData.forgeLit) return;
+  if (userData.forgeMapUrl === (slot.map || "") && userData.forgeLit) return { applied: true };
   const pending = new Map();
   const take = (url) => {
     if (!url) return null;
@@ -144,6 +202,7 @@ async function assignSlot(material, slot, loadTexture) {
   const lit = MAP_KEYS.some((key) => asTexture(material[key])) || asTexture(userData.blendMap);
   if (lit) userData.forgeLit = snapshotAppearance(material);
   material.needsUpdate = true;
+  return { applied: Boolean(lit) };
 }
 
 /**

@@ -37,7 +37,7 @@ import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { planAssetFetches, wantsMesh } from "./layers.js";
-import { applyTextureManifest, presentTextures } from "./texture-apply.js";
+import { applyTextureManifest, formatTextureReport, presentTextures } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -836,7 +836,11 @@ let convertSlots = 8;
     });
     if (!plan.textures) return textureDocs.get(gyaml);
     const pending = typeof hooks.fetchTextures === "function"
-      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch(() => ({ materials: {} }))
+      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch((error) => ({
+        materials: {},
+        status: "missing",
+        error: `file not found: texture request failed (${error && error.message ? error.message : error})`,
+      }))
       : Promise.resolve({ materials: {} });
     textureDocs.set(gyaml, pending);
     return pending;
@@ -923,7 +927,14 @@ let convertSlots = 8;
     const manifest = await textureManifest(gyaml);
     if (generation !== textureGeneration) return;
     if (!parsedTemplates.has(url)) return;
-    await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
+    let report;
+    try {
+      report = await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
+    } catch (error) {
+      rememberTextureNote(gyaml, `decode error: ${error && error.message ? error.message : error}`);
+      return;
+    }
+    rememberTextureNote(gyaml, formatTextureReport(report));
     refreshBlendMaps(parsed.parts);
     if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
     presentTextures(parsed.parts, texturesShown);
@@ -4071,10 +4082,23 @@ uniform float terrainLayerMissing;`
     requestRender();
   }
 
+  function rememberTextureNote(gyaml, note) {
+    const text = note || "";
+    let changed = false;
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml || entry.textureNote === text) continue;
+      entry.textureNote = text;
+      changed = true;
+    }
+    if (changed && hooks.onModels) hooks.onModels();
+  }
+
   function modelInfo(id) {
     const entry = entries.get(id);
     if (!entry) return null;
-    return entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
+    const info = entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
+    if (!entry.textureNote) return info;
+    return { ...info, textureNote: entry.textureNote };
   }
 
   function auditPlacements() {

@@ -17,6 +17,7 @@ from ocarina_forge.formats.bntx import write_rgba
 from ocarina_forge.formats.sarc import pack
 from ocarina_forge.formats.zsio import compress
 from ocarina_forge.models import (
+    _ACTOR_PACK_LIST,
     _COMPANION_IMAGES,
     _COMPANION_LIST,
     _PACK_TEX,
@@ -25,6 +26,8 @@ from ocarina_forge.models import (
     _resolve_materials,
     _resolve_tex,
     _stem,
+    describe_actor,
+    describe_actor_textures,
 )
 from ocarina_forge.textureaudit import audit_models
 
@@ -434,6 +437,106 @@ def test_separate_goron_materials_do_not_share_the_rock_albedo():
     _resolve_materials(None, [model], "Npc_Goron_Biggoron", False)
     assert model.parts[0].texture == skin.name
     assert model.parts[1].texture == rock.name
+
+
+def test_texture_request_uses_the_model_path_and_names_why_it_failed(tmp_path, monkeypatch):
+    """A gyaml that does not contain the project still loads that project's pack.
+
+    ``CmnTex_...`` is the texture name. It is a loose ``Tex/`` file when that
+    file exists, and a member of a pack whose name is inside the texture name
+    when it does not. The geometry note stats the file and does not decode it.
+    The texture response says file not found or decode error.
+    """
+    from ocarina_forge.formats.byml import dumps
+
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    _COMPANION_LIST.clear()
+    _COMPANION_IMAGES.clear()
+    _ACTOR_PACK_LIST.clear()
+
+    gyaml = "Npc_Goron_Biggoron_Adult"
+    project = "Npc_Goron_GOU_Biggoron"
+    hair = "Mt_Hair_Npc_Goron_GOU_Biggoron_Alb"
+    skin = "CmnTex_Chara_Mt_Skin_Npc_Goron_GON_001_Alb"
+    face = "CmnTex_Chara_Mt_Face_Npc_Goron_GON_001_Alb"
+    teeth = "CmnTex_Chara_Mt_Teeth_Npc_Goron_GON_001_Alb"
+    gone = "CmnTex_Chara_Mt_Gone_Npc_Goron_GON_001_Alb"
+    names = {
+        "Mt_Hair": hair,
+        "Mt_Skin": skin,
+        "Mt_Face": face,
+        "Mt_Teeth": teeth,
+        "Mt_Gone": gone,
+    }
+    materials = [{"name": name, "samplers": [("_a0", texture)]} for name, texture in names.items()]
+    shapes = [{"name": name, "material": index} for index, name in enumerate(names)]
+    mesh = sample_v10_bfres(project, materials, shapes=shapes)
+    model_rel = f"Model/{project}.{project}.bfres.zs"
+    (dump.romfs / model_rel).parent.mkdir(parents=True, exist_ok=True)
+    (dump.romfs / model_rel).write_bytes(compress(mesh, 1, dicts, level=3))
+    info = dumps({"FmdbName": project, "ModelProjectName": project})
+    actor = dump.romfs / "Pack" / "Actor"
+    actor.mkdir(parents=True, exist_ok=True)
+    (actor / f"{gyaml}.pack.zs").write_bytes(
+        compress(pack({f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info}), 4, dicts, level=3)
+    )
+    tex = dump.romfs / "Tex"
+    tex.mkdir(parents=True, exist_ok=True)
+    (tex / f"{hair}.bntx.zs").write_bytes(compress(write_rgba(hair, 2, 2, bytes([180, 90, 40, 255]) * 4), 1, dicts, level=3))
+    (tex / f"{teeth}.bntx.zs").write_bytes(compress(b"NOPE-not-a-bntx", 1, dicts, level=3))
+    (actor / "Npc_Goron_GOU.pack.zs").write_bytes(
+        compress(pack({f"{skin}.bntx": write_rgba(skin, 2, 2, bytes([210, 160, 120, 255]) * 4)}), 4, dicts, level=3)
+    )
+    (actor / "CmnTex_Chara.pack.zs").write_bytes(
+        compress(pack({f"{face}.bntx": write_rgba(face, 2, 2, bytes([160, 100, 80, 255]) * 4)}), 4, dicts, level=3)
+    )
+
+    import ocarina_forge.models as models
+
+    decoded = []
+    original = models._decode_bntx_cached
+
+    def counting(*args, **kwargs):
+        decoded.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_decode_bntx_cached", counting)
+    flat = describe_actor(dump, gyaml, flat=True)
+    assert decoded == []
+    note = flat["reason"]
+    assert f"found Tex/{hair}.bntx.zs" in note
+    assert "Npc_Goron_GOU.pack.zs" in note
+    assert "CmnTex_Chara.pack.zs" in note
+    assert "file not found" in note
+    assert gone in note
+    assert "Longshot serves that name" not in note
+
+    manifest = describe_actor_textures(dump, gyaml)
+    rows = manifest["materials"]
+
+    def slot(name: str) -> dict:
+        return next(row for key, row in rows.items() if key.startswith(f"{name}:"))
+
+    assert slot("Mt_Hair")["status"] == "ready"
+    assert slot("Mt_Hair")["map"]
+    assert slot("Mt_Hair")["found"] == f"Tex/{hair}.bntx.zs"
+    assert "Npc_Goron_GOU.pack.zs" in slot("Mt_Skin")["found"]
+    assert slot("Mt_Skin")["status"] == "ready"
+    assert slot("Mt_Skin")["map"]
+    assert "CmnTex_Chara.pack.zs" in slot("Mt_Face")["found"]
+    assert slot("Mt_Face")["status"] == "ready"
+    teeth_row = slot("Mt_Teeth")
+    assert teeth_row["status"] == "decode"
+    assert "decode error" in teeth_row["error"].lower()
+    assert teeth_row["map"] is None
+    gone_row = slot("Mt_Gone")
+    assert gone_row["status"] == "missing"
+    assert "file not found" in gone_row["error"].lower()
+    assert gone_row["map"] is None
 
 
 def json_blob(report: dict) -> str:

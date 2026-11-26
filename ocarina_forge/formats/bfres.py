@@ -234,6 +234,12 @@ class Part:
     normals: list[tuple[float, float, float]] | None = None
     # Why this shape stayed a flat colour, including the samplers and paths tried.
     texture_error: str = ""
+    # Path opened for the albedo, or "" when the lookup did not find a file.
+    texture_found: str = ""
+    # "missing" or "decode" when the albedo image was not produced. "" when it was.
+    texture_failure: str = ""
+    # A companion archive exists and the texture request still has to read it.
+    texture_pending: bool = False
 
 
 @dataclass
