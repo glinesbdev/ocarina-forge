@@ -554,7 +554,7 @@ let convertSlots = 8;
   let lastPointer = null;
   let gizmoUsed = false;
   const keys = new Set();
-  const clock = new THREE.Clock();
+  const timer = new THREE.Timer();
 
   function clearGrid() {
     if (!grid) return;
@@ -5527,7 +5527,8 @@ uniform float terrainLayerMissing;`
     const tickAt = performance.now();
     const gap = lastTickAt ? tickAt - lastTickAt : 0;
     lastTickAt = tickAt;
-    const dt = Math.min(clock.getDelta(), 0.05);
+    timer.update(tickAt);
+    const dt = Math.min(timer.getDelta(), 0.05);
     const flying = updateFly(dt);
     const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
     if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
@@ -5928,6 +5929,7 @@ uniform float terrainLayerMissing;`
       }
       observer.disconnect();
       frameTimer.dispose();
+      timer.dispose();
       statusEl.remove();
       profileEl.remove();
       observer.disconnect();

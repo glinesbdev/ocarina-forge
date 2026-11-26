@@ -253,8 +253,17 @@ export async function warmWebGLPrograms(renderer, root, camera, scene) {
   }
 }
 
-/** Enough to hide stream-in hitches, few enough that the GPU process can still present. */
-export const PIPELINE_COMPILE_LIMIT = 6;
+/**
+ * r187 keeps one `_precompilationState` on the renderer. `compileAsync` writes
+ * it, awaits `buildAsync` (which yields between shader stages), then
+ * `_finishPreCompile` destructures it. A second call in that gap nulls the
+ * field and the first throws `useFrameBufferTarget of null`. The same gap
+ * shares TSL's process-global `currentStack`, which is how id-unpack consts
+ * were emitted as camera matrices. One compile at a time. `compileAsync` still
+ * yields, so the frame loop is not blocked, and three still compiles that
+ * call's pipelines in parallel.
+ */
+export const PIPELINE_COMPILE_LIMIT = 1;
 
 let pipelineActive = 0;
 const pipelineWaiters = [];
@@ -287,9 +296,10 @@ let compileFailureLogged = false;
 /**
  * Compile one object's render pipelines on WebGPU before it joins the scene.
  * The batch is the first argument and the live scene is the third, so lights
- * are included. At most PIPELINE_COMPILE_LIMIT compiles run at once. WebGL
- * keeps warmWebGLPrograms. A compile failure is logged once, the draw path is
- * restored, and the promise still resolves so the caller attaches the batch.
+ * are included. One WebGPU compileAsync runs at a time (see
+ * PIPELINE_COMPILE_LIMIT). WebGL keeps warmWebGLPrograms. A compile failure is
+ * logged once, the draw path is restored, and the promise still resolves so
+ * the caller attaches the batch.
  * r187's compileAsync already passes the double-pass list into
  * `_renderTransparents`. A throw before that method restores
  * `_handleObjectFunction` would leave later frames compiling instead of drawing.

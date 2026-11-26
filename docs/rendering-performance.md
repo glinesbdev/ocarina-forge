@@ -60,7 +60,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
-| Async pipeline compile before a batch is attached | Removes 50–300 ms stream-in hitches. No steady-state frame change | Implemented. WebGPU awaits `compileAsync` with at most 6 in flight, then attaches. See [Shader pipelines](#shader-pipelines) |
+| Async pipeline compile before a batch is attached | Removes 50–300 ms stream-in hitches. No steady-state frame change | Implemented. WebGPU awaits one `compileAsync` at a time, then attaches. See [Shader pipelines](#shader-pipelines) |
 
 ## Residency budget
 
@@ -98,9 +98,11 @@ Kokiri Forest Child is about 470–482 unique models (`262 loaded` + `207 backgr
 
 three still builds a render pipeline on the thread that is drawing when the cache misses. `Pipelines` publishes the cache entry before `createRenderPipelineAsync` assigns `pipelineData.pipeline`. A draw in that window calls `setPipeline(undefined)`. `warmWebGLPrograms` stays on WebGL and does not call `compileAsync` on the live WebGPU renderer.
 
-A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (the live scene is the third argument, so its lights are included) and only then added. At most **6** of those compiles run at once. More than that stalls the browser's GPU process. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing. That guard stays: r187 still has open reports where a compile resolves before the native pipeline exists ([#35556](https://github.com/mrdoob/three.js/issues/35556), [#35659](https://github.com/mrdoob/three.js/issues/35659)).
+A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (the live scene is the third argument, so its lights are included) and only then added. **One** of those compiles runs at a time. r187 stores the precompile in a single `renderer._precompilationState`. `compileAsync` awaits `buildAsync`, which yields between shader stages, and `_finishPreCompile` destructures that field. A second call in the gap sets it to null and the first throws `Cannot destructure property 'useFrameBufferTarget'`. That is [three.js #35315](https://github.com/mrdoob/three.js/issues/35315), fixed upstream after r187. The call still yields, so the frame loop is not blocked, and three still compiles that call's own pipelines together. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing. That guard stays: r187 still has open reports where a compile resolves before the native pipeline exists ([#35556](https://github.com/mrdoob/three.js/issues/35556), [#35659](https://github.com/mrdoob/three.js/issues/35659)).
 
 r187's `compileAsync` calls `_renderTransparents(transparentObjects, transparentDoublePassObjects, camera, sceneRef, lightsNode)`, the same argument order as `render()`. The r170 call omitted the double-pass list, so the lights node arrived as the scene and `overrideMaterial` threw `isShadowNodeMaterial`. `repairCompileAsyncTransparents` is gone. A throw before three restores `_handleObjectFunction` is still caught in `compileObjectPipeline`: the draw path is put back, the failure is logged once, and the batch is attached anyway.
+
+The id-buffer pack is unsigned division (`n / 256u`, `n / 65536u`), not `shiftRight`. The Field log's fragment was `nodeConst >> render.cameraViewMatrix` inside `vec4(render.cameraProjectionMatrix, ...)`. Those two uniforms are the camera `Fn`s. `int(8)` and `int(16)` are assignable consts pushed on TSL's process-global `currentStack`, and the overlapped compiles above enter another material's setup before the first stack is popped. `pack24` is its own `Fn([n])` and only sees the id. `THREE.Clock` is gone; the frame loop uses `THREE.Timer` (`update`, then `getDelta`).
 
 ### three.js r187
 
@@ -109,7 +111,7 @@ Forge pins `three@0.187.0` (30 Oct 2026). Checked against that package's sources
 | r170 workaround | r187 source | What Forge does |
 | --- | --- | --- |
 | Vite plugin and `patchWebgpuBc7Format` | `getFormat` case `RGBA_BPTC_Format` returns `BC7RGBAUnorm` / `BC7RGBAUnormSRGB`. The string `bc7-rgba-srgb` is absent | Removed |
-| `repairCompileAsyncTransparents` | `compileAsync` passes `transparentDoublePassObjects` | Removed. The 6-wide compile limit and the attach-on-failure catch stay |
+| `repairCompileAsyncTransparents` | `compileAsync` passes `transparentDoublePassObjects`. `_precompilationState` is one field and `_finishPreCompile` throws when it is null | Removed. Compiles are serial. The attach-on-failure catch stays |
 | `groupGeometryDraws` / `patchBatchedDraw` | WebGPU `_draw` reads `_mergedDraw*` and adds `instanceCount` onto `firstInstance`. Nothing calls `_updateDrawParameters(..., 'merged')`, so `_mergedDrawCount` stays 0 and the mesh would draw nothing | `scheduleMergedDraws` calls it. The hand patch is removed so it cannot override `firstInstance` |
 | No per-layer compressed array upload | `_copyCompressedBufferToTexture` writes `texture.layerUpdates` through `writeTextureLayer` (`origin.z = layerIndex`). The WebGL path uses `compressedTexSubImage3D` when `isCompressedArrayTexture` | Not used yet. Issue #7's spike can upload BC7 layers. This change does not build texture arrays |
 

@@ -224,7 +224,10 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   assert.match(backend, /guardWebgpuSetPipeline\(gpuRenderer\)/);
   assert.doesNotMatch(backend, /patchWebgpuBc7Format/);
   assert.doesNotMatch(backend, /repairCompileAsyncTransparents/);
-  assert.match(backend, /PIPELINE_COMPILE_LIMIT = 6/);
+  assert.match(backend, /PIPELINE_COMPILE_LIMIT = 1/);
+  assert.match(viewport, /new THREE\.Timer\(\)/);
+  assert.match(viewport, /timer\.update\(tickAt\)/);
+  assert.doesNotMatch(viewport, /new THREE\.Clock\(\)/);
   assert.match(backend, /WebGPU \(WebGL2 fallback\)/);
   assert.match(backend, /backendLabel\(gpuRenderer\)/);
   assert.match(viewport, /attachTerrainColor\(material\)/);

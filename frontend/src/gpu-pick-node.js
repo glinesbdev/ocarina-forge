@@ -24,6 +24,7 @@ import {
   reference,
   texture,
   textureSize,
+  uint,
   vec4,
 } from "three/tsl";
 import { pickMask, resolvePickTexture } from "./gpu-pick.js";
@@ -114,10 +115,17 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
   return material;
 }
 
-function pack24(n) {
-  const value = int(n);
-  const r = float(value.bitAnd(int(255))).div(255);
-  const g = float(value.shiftRight(int(8)).bitAnd(int(255))).div(255);
-  const b = float(value.shiftRight(int(16)).bitAnd(int(255))).div(255);
+// 24-bit little-endian unpack. r187's `>>` retypes the shift amount with
+// changeComponentType(..., 'uint'). Overlapped compileAsync builds (the old
+// limit of 6) yield between shader stages while `currentStack` is process-global,
+// and those assignable `int(8)` / `int(16)` consts were emitted as
+// `render.cameraViewMatrix`. Division by 256 and 65536 is the same split, and
+// this Fn only sees the id, so a camera matrix cannot be an operand.
+const pack24 = Fn(([n]) => {
+  const value = uint(n);
+  const mask = uint(255);
+  const r = float(value.bitAnd(mask)).div(255);
+  const g = float(value.div(uint(256)).bitAnd(mask)).div(255);
+  const b = float(value.div(uint(65536)).bitAnd(mask)).div(255);
   return vec4(r, g, b, float(1));
-}
+});

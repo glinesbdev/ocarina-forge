@@ -47,6 +47,14 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
   const plainShader = shaderFor(webgpu, new THREE.Mesh(geometry, plain));
   assert.match(plainShader, /textureLoad/);
   assert.doesNotMatch(plainShader, /Need a three\.js texture/);
+  // 24-bit unpack is unsigned division, not a shift. r187 emitted
+  // `nodeConst >> render.cameraViewMatrix` when shift amounts were TSL consts.
+  assert.match(plainShader, /\( nodeConst\d+ & 255u \)/);
+  assert.match(plainShader, /\( nodeConst\d+ \/ 256u \) & 255u/);
+  assert.match(plainShader, /\( nodeConst\d+ \/ 65536u \) & 255u/);
+  assert.doesNotMatch(plainShader, />>/);
+  assert.doesNotMatch(plainShader, /vec4<f32>\(\s*render\./);
+  assert.doesNotMatch(plainShader, />>\s*render\./);
 
   const mapped = createNodePickMaterial({ uniforms, getActiveObject: () => null });
   mapped.alphaTest = 0.4;

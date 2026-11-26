@@ -26,7 +26,7 @@ The first step is the profiling HUD, so the rest of this list is driven by a spl
 - [#6 Indirect and multi-draw where WebGPU allows](https://github.com/glinesbdev/ocarina-forge/issues/6) — use indirect and multi-draw on the paths WebGPU allows.
 - [#7 Use texture arrays to cut bind and material switches](https://github.com/glinesbdev/ocarina-forge/issues/7) — pack textures into arrays so the viewer binds and switches materials less often.
 - [#8 Smarter streaming and residency budget](https://github.com/glinesbdev/ocarina-forge/issues/8) — done: a 1.2 GB geometry-plus-BC7 budget, a behind-camera penalty, a 2 m / 30° priority gate, and an unload cooldown. The unique-mesh count is a 4096 last resort so Kokiri is not cut off at 240.
-- [#9 Compile shader pipelines in the background](https://github.com/glinesbdev/ocarina-forge/issues/9) — done: WebGPU compiles a batch before attaching it, at most six at a time, and skips a draw whose pipeline is not ready. three stays on r170.
+- [#9 Compile shader pipelines in the background](https://github.com/glinesbdev/ocarina-forge/issues/9) — done: WebGPU compiles a batch before attaching it, one `compileAsync` at a time on r187, and skips a draw whose pipeline is not ready.
 
 ## Editing and collision
 
