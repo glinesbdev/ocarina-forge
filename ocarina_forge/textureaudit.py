@@ -5,6 +5,13 @@
 Tex file was used), or ``flat``. Flat rows are grouped by cause. Example
 rows name the model, the material, the sampler binds, and the paths that
 were tried. They do not contain image bytes.
+
+``Model/<prefix>.Tex.bfres`` and ``Model/<prefix>_Tex.bfres`` are texture
+archives shared by a character project. They are searched while a mesh is
+resolved and are not counted as their own models. A shape whose material
+index misses the parsed list is still counted: its row uses the materials
+in the file. Vertex colours are a flat cause only when that row saw no
+texture name.
 """
 
 from __future__ import annotations
@@ -74,6 +81,8 @@ def _model_files(dump) -> list[str]:
         name = path.name.lower()
         if ".anim." in name or ".bfres.mc" in name:
             continue
+        if ".tex.bfres" in name or "_tex.bfres" in name:
+            continue
         if name.endswith(".bfres.zs") or name.endswith(".bfres"):
             found.append(path.relative_to(dump.romfs).as_posix())
     found.sort()
@@ -101,11 +110,12 @@ def _kind(entry: dict) -> str:
 def _cause(entry: dict, colored: set[str]) -> str:
     stored = entry.get("flatCause") or ""
     binds = entry.get("binds") or []
+    text = (entry.get("error") or "").lower()
     if entry.get("material") in colored and not binds and stored in {"", "untextured"}:
-        return "vertex-colour"
+        if "texture names " not in text and "samplers " not in text and "texture name taken" not in text:
+            return "vertex-colour"
     if stored:
         return stored
-    text = (entry.get("error") or "").lower()
     if "terrain proxy" in text:
         return "terrain-proxy"
     if "water stand-in" in text:
