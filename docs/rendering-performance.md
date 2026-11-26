@@ -53,13 +53,56 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Compressed GPU textures (BC7/BC1) | **4–8×** texture memory vs RGBA; often the difference between a Field tab surviving and OOM | Implemented this pass |
 | Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented. Template sources are disposed, and part clones are released after the batch copy exists (GPU picking, below) |
 | Frustum culling | Already removing off-screen instance draws | Already present |
-| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented this pass: background fill stops at 240 unique meshes (or 2.2 GB JS heap). Far meshes evict past 280 unique or 2.8 GB heap |
+| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of geometry plus BC7 (`__forgeMemory()`). The 240-mesh count and the 2.2 GB JS heap are safety caps. See [Residency budget](#residency-budget) |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
 | Texture arrays / atlases | Fewer binds, more meshes in one batch; needs authoring or a pack step | Not implemented |
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
+| Async pipeline compile before a batch is attached | Removes 50–300 ms stream-in hitches. No steady-state frame change | Implemented. WebGPU awaits `compileAsync` with at most 6 in flight, then attaches. See [Shader pipelines](#shader-pipelines) |
+
+## Residency budget
+
+The viewer used to stop background loads at **240** unique meshes (hard evict at 280) or at **2.2 GB** of JS heap (hard **2.8 GB**), nearest first, at most 8 evictions a pass. One Field model can be about ten times another, so a count fills the tab with whatever happened to be nearby.
+
+The soft limit is now bytes. `__forgeMemory()` sums geometry CPU bytes and BC7 texture GPU bytes (`geometries.cpuBytes` + `textures.byFormat.BC7.gpu`). That total is the residency budget:
+
+| Limit | Value | What it does |
+| --- | --- | --- |
+| Soft byte budget | 1.2 GB | Stop loading. Evict farthest residents down toward 1.0 GB |
+| Hard byte budget | 1.5 GB | Emergency eviction, still after the unload cooldown |
+| Count safety cap | 240 soft / 280 hard | A scene of many tiny meshes cannot slip past the byte budget |
+| JS heap safety cap | 2.2 GB soft / 2.8 GB hard | The V8 limit. A hard heap overrun evicts immediately |
+
+Models behind the camera have their distance multiplied by **1.5**, so the view ahead is loaded and kept first. The queue is not re-sorted on every small orbit step. Priorities change only after the camera moves more than **2 m** or turns more than **30°**. A model that falls out of the wanted set is armed and then left alone for **90 frames**. Looking back at it cancels that wait, so a swing of the camera does not evict and reload the same mesh. The JS-heap emergency brake does not wait.
+
+`__forgeMemory().resident` reports `assetBytes`, `geometryBytes`, `bc7Bytes`, `evictions`, `reloads`, and whether the soft or hard cap is holding. `__forgeMemory().stream.maxFrameMs` is the longest tick gap while models are still streaming. `maxCompileMs` is the longest wait for `compileAsync` before a batch was attached. That wait is off the draw path.
+
+Far proxies (a 2–5% mesh kept resident so the cap never shows a box) are not in this change. Building one per Field model is a cache-format change, and the meshes that already have a coarse level still use it.
+
+### Policy simulation (not a Field tab)
+
+This checkout has no game dump, so Hyrule Field and Kokiri Forest were not loaded in a browser for this change. The comparison below is `simulateFieldOrbit()` in `frontend/src/resident-budget.js`: 852 unique models on a 600 m disk, 30% of them 12–40 MB and the rest 1–5 MB, camera orbiting a 25 m radius for 3 turns at 3° per frame (360 frames). The "before" column is the old rule (240 nearest, re-sort after 1 m or about 3.6°). The "after" column is the byte budget, the 1.5× behind penalty, the 2 m / 30° gate, and the 90-frame cooldown. A rapid reload is an unload and a load of the same name within 60 frames.
+
+| | Evictions | Reloads | Rapid reloads | Priority updates | Peak asset bytes | Peak unique meshes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before | 243 | 201 | 99 | 360 | 2.46 GB | 240 |
+| After | 0 | 0 | 0 | 180 | 1.20 GB | 122 |
+
+The drop is large here because the size mix makes the byte budget bind before the count cap. On the measured Field (25 Nov 2026) 241 unique meshes were about **1.0 GB** of geometry plus BC7, under the 1.2 GB soft budget, so the **240 count cap still binds** for that scene and the JS heap should stay near the **0.62 GB** already recorded. The byte cap is what stops a nearer set of large meshes from passing that. Re-measure both on a dump with the steps at the end of this note.
+
+## Shader pipelines
+
+three r170 builds a render pipeline on the thread that is drawing when the cache misses. `Pipelines` publishes the cache entry before `createRenderPipelineAsync` assigns `pipelineData.pipeline`. A draw in that window calls `setPipeline(undefined)`. `warmWebGLPrograms` stays on WebGL and does not call `compileAsync` on the live WebGPU renderer.
+
+A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (r170's `targetScene` argument is the live scene, so its lights are included) and only then added. At most **6** of those compiles run at once. More than that stalls the browser's GPU process. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing.
+
+### three.js upgrade
+
+Forge pins `three@0.170.0`. The current npm release checked for this note is **0.187.0** (26 Nov 2026). An upgrade is not in this change.
+
+r170's draw path still calls synchronous `createRenderPipeline` on a cache miss. Later releases have not removed that. Open reports on the 0.18x line: `compileComputeAsync` can resolve with `pipeline` unset and a later `setPipeline` throws ([#35556](https://github.com/mrdoob/three.js/issues/35556), r187), and `compileAsync` can miss the pipeline a later draw actually uses when the color format differs ([#35659](https://github.com/mrdoob/three.js/issues/35659), checked on r186 and current dev). A background-compilation pull request ([#33766](https://github.com/mrdoob/three.js/pull/33766)) was closed without merging. The BC7 `getFormat` patch, the batched-draw fold, and the rest of the r170 WebGPU shims would all have to be re-checked across 17 minor versions. That is not a small upgrade. The compile-before-attach path and the draw guard cover the race on r170.
 
 ## GPU picking
 
@@ -124,6 +167,8 @@ This checkout has no game dump, so there is no new Field split recorded here. Th
 4. Chrome's task manager (or a headless script using `--enable-precise-memory-info`) is the working-set number. JS heap alone under-reports GPU textures.
 
 `tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the status label, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone. Defaults: `FORGE_WASM_MAX_WS_MB=10240` (kill the Chrome tree at that working set), `FORGE_WASM_MIN_FREE_MB=4096` (stop if system free RAM falls this low), `FORGE_WASM_MIN_FREE_START_MB=10240` (refuse to launch below that floor).
+
+To check the residency budget and stream-in hitches on a dump: `npm run build --prefix frontend`, then restart the editor server so it serves that build. Open Hyrule Field Child, orbit in place until streaming settles, and read `__forgeMemory().resident` (`evictions`, `reloads`, `assetBytes`, `peakHeapBytes`) and `__forgeMemory().stream.maxFrameMs`. Do the same on Kokiri Forest Child. `node tools/measure-streaming-policy.mjs` reprints the synthetic orbit table; it does not open a scene.
 
 ## Measured numbers
 

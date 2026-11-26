@@ -68,6 +68,11 @@ test("committing an edit does not rebuild the field", () => {
   assert.doesNotMatch(setActors, /clearTerrain\(/);
   assert.doesNotMatch(load, /clearTerrain\(/);
   assert.match(source, /warmWebGLPrograms\(renderer, root, camera, scene\)/);
+  assert.match(source, /compileObjectPipeline\(renderer, root, camera, scene\)/);
+  const rebuild = source.slice(source.indexOf("async function rebuildBatchesNow"), source.indexOf("function queueRebuild"));
+  const compileAt = rebuild.indexOf("compileObjectPipeline(renderer, mesh, camera, scene)");
+  const addAt = rebuild.indexOf("scene.add(mesh)");
+  assert.ok(compileAt >= 0 && addAt > compileAt, "compile the batch before attaching it");
   assert.match(source, /renderer\.initTexture\(map\)/);
   assert.match(source, /function showTerrain\(nextRoot\)/);
 });

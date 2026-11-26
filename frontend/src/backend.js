@@ -243,12 +243,89 @@ export function logWebGPUReport(report) {
 export async function warmWebGLPrograms(renderer, root, camera, scene) {
   // Three r170 publishes WebGPU cache entries before the native pipeline
   // exists. A live draw sharing that entry can call setPipeline(undefined).
+  // WebGPU batches use compileObjectPipeline, which waits for that pipeline
+  // before the mesh is attached. This warm path stays WebGL-only.
   if (!renderer.isWebGLRenderer) return;
   if (typeof renderer.compileAsync === "function") {
     await renderer.compileAsync(root, camera, scene);
   } else {
     renderer.compile(root, camera, scene);
   }
+}
+
+/** Enough to hide stream-in hitches, few enough that the GPU process can still present. */
+export const PIPELINE_COMPILE_LIMIT = 6;
+
+let pipelineActive = 0;
+const pipelineWaiters = [];
+
+function acquirePipelineSlot() {
+  if (pipelineActive < PIPELINE_COMPILE_LIMIT) {
+    pipelineActive += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    pipelineWaiters.push(resolve);
+  });
+}
+
+function releasePipelineSlot() {
+  const next = pipelineWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  pipelineActive = Math.max(0, pipelineActive - 1);
+}
+
+export function pipelineCompileInFlight() {
+  return pipelineActive;
+}
+
+/**
+ * Compile one object's render pipelines on WebGPU before it joins the scene.
+ * r170's signature is compileAsync(scene, camera, targetScene): the batch is
+ * the first argument and the live scene is targetScene so lights are included.
+ * At most PIPELINE_COMPILE_LIMIT compiles run at once. WebGL keeps warmWebGLPrograms.
+ */
+export async function compileObjectPipeline(renderer, object, camera, scene) {
+  const webgpu = Boolean(
+    renderer
+    && renderer.isWebGPURenderer
+    && renderer.backend
+    && renderer.backend.isWebGPUBackend === true
+    && typeof renderer.compileAsync === "function"
+    && object,
+  );
+  if (!webgpu) return;
+  await acquirePipelineSlot();
+  try {
+    await renderer.compileAsync(object, camera, scene);
+  } finally {
+    releasePipelineSlot();
+  }
+}
+
+/**
+ * r170 inserts the cache entry in Pipelines before createRenderPipelineAsync
+ * assigns the GPURenderPipeline. draw() then calls setPipeline(undefined).
+ * Skip that draw until the native pipeline exists.
+ */
+export function guardWebgpuSetPipeline(renderer) {
+  const backend = renderer && renderer.backend;
+  if (!backend || backend.__forgePipelineGuard || typeof backend.draw !== "function") return false;
+  if (backend.isWebGPUBackend !== true) return false;
+  const original = backend.draw.bind(backend);
+  backend.draw = function drawWhenPipelineReady(renderObject, info) {
+    const pipeline = renderObject && renderObject.pipeline;
+    if (pipeline && typeof backend.get === "function") {
+      const data = backend.get(pipeline);
+      if (data && data.pipeline == null) return undefined;
+    }
+    return original(renderObject, info);
+  };
+  backend.__forgePipelineGuard = true;
+  return true;
 }
 
 /** three r170's WebGPU getFormat() does not map RGBA_BPTC_Format (BC7), and its sRGB enum typo is "bc7-rgba-srgb". */
@@ -335,6 +412,7 @@ export async function createBackendRenderer(THREE, options = {}) {
     // record the reason and open the classic WebGL graph instead of a silent label.
     if (backend !== "WebGPU") throw new Error("WebGPU init used the WebGL2 backend");
     patchWebgpuBc7Format(gpuRenderer);
+    guardWebgpuSetPipeline(gpuRenderer);
     return { renderer: gpuRenderer, backend, nodes: true, webgpu: true, reason: "", requested, note: options.note || "" };
   } catch (error) {
     // If the timeout fired first, release the renderer once initialization settles.

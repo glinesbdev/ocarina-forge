@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, initFailureReason, inspectWebGPU, patchWebgpuBc7Format, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
+import { backendLabel, compileObjectPipeline, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, guardWebgpuSetPipeline, initFailureReason, inspectWebGPU, patchWebgpuBc7Format, PIPELINE_COMPILE_LIMIT, pipelineCompileInFlight, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
 import { buildNoticeId, buildNoticeVisible, describeBuildMismatch, dismissBuildNotice, shortRevision } from "./build-info.js";
 import { formatStatusLabel } from "./frame.js";
 
@@ -34,6 +34,62 @@ test("terrain warm-up never publishes a pending pipeline in the live WebGPU rend
   assert.deepEqual(calls, []);
   await warmWebGLPrograms({ isWebGLRenderer: true, compileAsync }, ...args);
   assert.deepEqual(calls, [args]);
+});
+
+test("WebGPU compiles a batch before attach and caps how many run at once", async () => {
+  const calls = [];
+  let inFlight = 0;
+  let peak = 0;
+  const renderer = {
+    isWebGPURenderer: true,
+    backend: { isWebGPUBackend: true },
+    compileAsync(object, camera, scene) {
+      calls.push([object, camera, scene]);
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      return Promise.resolve().then(() => {
+        inFlight -= 1;
+      });
+    },
+  };
+  const mesh = { name: "batch" };
+  const camera = {};
+  const scene = {};
+  const pending = [];
+  for (let i = 0; i < PIPELINE_COMPILE_LIMIT + 3; i += 1) {
+    pending.push(compileObjectPipeline(renderer, mesh, camera, scene));
+  }
+  await Promise.all(pending);
+  assert.equal(peak, PIPELINE_COMPILE_LIMIT);
+  assert.equal(calls.length, PIPELINE_COMPILE_LIMIT + 3);
+  assert.equal(pipelineCompileInFlight(), 0);
+  assert.deepEqual(calls[0], [mesh, camera, scene]);
+  const webglCalls = [];
+  await compileObjectPipeline({
+    isWebGLRenderer: true,
+    compileAsync(...received) { webglCalls.push(received); },
+  }, mesh, camera, scene);
+  assert.deepEqual(webglCalls, []);
+});
+
+test("a draw waits until the native pipeline exists", () => {
+  const draws = [];
+  const pipelines = new Map();
+  const backend = {
+    isWebGPUBackend: true,
+    get(pipeline) { return pipelines.get(pipeline); },
+    draw(renderObject) { draws.push(renderObject); },
+  };
+  const renderer = { backend };
+  assert.equal(guardWebgpuSetPipeline(renderer), true);
+  assert.equal(guardWebgpuSetPipeline(renderer), false);
+  const pending = { id: "pending" };
+  const ready = { id: "ready" };
+  pipelines.set(pending, { pipeline: undefined });
+  pipelines.set(ready, { pipeline: { gpu: true } });
+  backend.draw({ pipeline: pending });
+  backend.draw({ pipeline: ready });
+  assert.deepEqual(draws, [{ pipeline: ready }]);
 });
 
 test("each module graph creates its own renderer", async () => {
@@ -120,6 +176,8 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   assert.match(backend, /new THREE\.WebGLRenderer\(\{ antialias: true \}\)/);
+  assert.match(backend, /guardWebgpuSetPipeline\(gpuRenderer\)/);
+  assert.match(backend, /PIPELINE_COMPILE_LIMIT = 6/);
   assert.match(backend, /WebGPU \(WebGL2 fallback\)/);
   assert.match(backend, /backendLabel\(gpuRenderer\)/);
   assert.match(viewport, /attachTerrainColor\(material\)/);

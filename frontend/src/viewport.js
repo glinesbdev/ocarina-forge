@@ -14,13 +14,21 @@ import {
 import { loadForgeImageSource } from "./gltf-image-source.js";
 import { createSharedImageCache } from "./shared-image-cache.js";
 import {
+  RESIDENT_BYTE_HARD,
+  RESIDENT_BYTE_SOFT,
+  RESIDENT_BYTE_TARGET,
+  RESIDENT_HEAP_HARD,
+  RESIDENT_MODEL_SOFT_CAP,
+  RESIDENT_UNLOAD_COOLDOWN_FRAMES,
+  cameraNeedsPriorityUpdate,
+  effectiveDistance,
+  isWorsePriority,
   overResidentHardCap,
   overResidentSoftCap,
-  modelsToEvict,
+  planEvictions,
   uniqueResidentNames,
-  isWorsePriority,
 } from "./resident-budget.js";
-import { collectMemoryReport } from "./memory-report.js";
+import { budgetAssetBytes, collectMemoryReport, residentModelBytes } from "./memory-report.js";
 import { cancelGeometryDecodes, geometryDecoder } from "./geometry-decoder.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, MeshBVH } from "three-mesh-bvh";
@@ -31,7 +39,7 @@ import { canHoverFocus } from "./focus.js";
 import { guardPointerCapture } from "./pointer-capture.js";
 import { shouldReloadTerrain } from "./terrain.js";
 import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewOffset, isPreviewWater } from "./water.js";
-import { createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
+import { compileObjectPipeline, createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
@@ -492,6 +500,17 @@ let convertSlots = 8;
   const foregroundModelNames = new Set();
   let modelPriority = new Map();
   const lastLoadDirection = new THREE.Vector3();
+  const priorityPos = new THREE.Vector3();
+  const priorityDir = new THREE.Vector3();
+  let priorityAnchored = false;
+  let streamFrame = 0;
+  let statEvictions = 0;
+  let statReloads = 0;
+  let peakHeapBytes = 0;
+  const unloadAfter = new Map();
+  const recentlyEvicted = new Set();
+  let assetBudgetCache = null;
+  let batchChain = Promise.resolve();
   const modelFrustum = new THREE.Frustum();
   const modelProjection = new THREE.Matrix4();
   const modelBounds = new THREE.Sphere();
@@ -1044,6 +1063,14 @@ let convertSlots = 8;
     textureDetailReady.clear();
     sceneStreamStats = null;
     nextDetailScan = 0;
+    unloadAfter.clear();
+    recentlyEvicted.clear();
+    statEvictions = 0;
+    statReloads = 0;
+    peakHeapBytes = 0;
+    streamFrame = 0;
+    priorityAnchored = false;
+    assetBudgetCache = null;
     transform.detach();
     clearSnapGrid();
     if (rebuildTimer) {
@@ -1444,7 +1471,12 @@ let convertSlots = 8;
     syncLabels();
     requestRender();
     performance.setResourceTimingBufferSize?.(4096);
-    sceneStreamStats = { start: performance.now(), firstDetail: null, slowFrames: 0, editBytes: null };
+    sceneStreamStats = { start: performance.now(), firstDetail: null, slowFrames: 0, maxFrameMs: 0, compileMs: 0, maxCompileMs: 0, compileBatches: 0, editBytes: null };
+    statEvictions = 0;
+    statReloads = 0;
+    peakHeapBytes = 0;
+    unloadAfter.clear();
+    recentlyEvicted.clear();
     modelStage = { previous: batches.slice(), pending: new Map(), timer: 0, done: false, failed: false };
     const previewReady = options.previewUrl ? loadScenePreview(options.previewUrl, reloadTerrain) : null;
     loadModels(token, actors.filter((actor) => wantsMesh(actor)), previewReady);
@@ -1872,10 +1904,11 @@ let convertSlots = 8;
     if (updateForeground) foregroundModelNames.clear();
     if (!names.length && !backgroundName) return;
     camera.updateMatrixWorld();
+    camera.getWorldDirection(loadForward);
     modelProjection.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     modelFrustum.setFromProjectionMatrix(modelProjection, camera.coordinateSystem);
-    const priority = new Map(names.map((name) => [name, { tier: 5, distance: Infinity }]));
-    if (backgroundName) priority.set(backgroundName, { tier: 5, distance: Infinity });
+    const priority = new Map(names.map((name) => [name, { tier: 5, distance: Infinity, behind: false }]));
+    if (backgroundName) priority.set(backgroundName, { tier: 5, distance: Infinity, behind: false });
     const selectedModel = entries.get(selected)?.gyaml;
     for (const entry of entries.values()) {
       const best = priority.get(entry.gyaml);
@@ -1907,13 +1940,16 @@ let convertSlots = 8;
         gap,
       });
       const priorityDistance = tier <= 2 || tier === 4 ? gap : distance;
-      if (tier < best.tier || (tier === best.tier && priorityDistance < best.distance)) {
-        priority.set(entry.gyaml, { tier, distance: priorityDistance });
+      loadDelta.copy(modelBounds.center).sub(camera.position);
+      const behind = loadDelta.dot(loadForward) < 0;
+      const nextPriority = { tier, distance: priorityDistance, behind };
+      if (isWorsePriority(best, nextPriority)) {
+        priority.set(entry.gyaml, nextPriority);
       }
       if (updateForeground && isForegroundModel(tier)) foregroundModelNames.add(entry.gyaml);
     }
     if (priority.has(selectedModel)) {
-      priority.set(selectedModel, { tier: 0, distance: 0 });
+      priority.set(selectedModel, { tier: 0, distance: 0, behind: false });
       if (updateForeground) foregroundModelNames.add(selectedModel);
     }
     const needsConversion = new Set(cachedFirst
@@ -1924,7 +1960,7 @@ let convertSlots = 8;
       const right = priority.get(b);
       return left.tier - right.tier
         || Number(needsConversion.has(a)) - Number(needsConversion.has(b))
-        || left.distance - right.distance;
+        || effectiveDistance(left) - effectiveDistance(right);
     });
     if (updateForeground) modelPriority = priority;
   }
@@ -1972,7 +2008,41 @@ let convertSlots = 8;
   }
 
   function heapBytes() {
-    return (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || 0;
+    const heap = (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || 0;
+    if (heap > peakHeapBytes) peakHeapBytes = heap;
+    return heap;
+  }
+
+  function invalidateAssetBudget() {
+    assetBudgetCache = null;
+  }
+
+  function currentAssetBudget() {
+    if (assetBudgetCache) return assetBudgetCache;
+    const report = collectMemoryReport({ entries, batches, parsedTemplates, terrainRoot });
+    const parts = budgetAssetBytes(report);
+    assetBudgetCache = { ...parts, byModel: residentModelBytes(entries) };
+    return assetBudgetCache;
+  }
+
+  function residentPressure() {
+    const budget = currentAssetBudget();
+    return {
+      count: residentMeshNames().size,
+      heap: heapBytes(),
+      assetBytes: budget.total,
+      geometryBytes: budget.geometry,
+      bc7Bytes: budget.bc7,
+      byModel: budget.byModel,
+    };
+  }
+
+  function softCapped(pressure = residentPressure()) {
+    return overResidentSoftCap(pressure.count, pressure.heap, pressure.assetBytes);
+  }
+
+  function hardCapped(pressure = residentPressure()) {
+    return overResidentHardCap(pressure.count, pressure.heap, pressure.assetBytes);
   }
 
   function residentMeshNames() {
@@ -1988,6 +2058,10 @@ let convertSlots = 8;
   }
 
   function unloadResidentModel(gyaml) {
+    invalidateAssetBudget();
+    statEvictions += 1;
+    recentlyEvicted.add(gyaml);
+    unloadAfter.delete(gyaml);
     textureQueue.forget(gyaml);
     const urls = new Set();
     for (const entry of entries.values()) {
@@ -2013,52 +2087,94 @@ let convertSlots = 8;
     }
   }
 
+  function residentCandidate(name, entry) {
+    const pri = modelPriority.get(name);
+    const distance = pri && Number.isFinite(pri.distance)
+      ? pri.distance
+      : Math.sqrt(entry.pivot.position.distanceToSquared(camera.position));
+    const budget = currentAssetBudget();
+    return {
+      name,
+      distance,
+      behind: Boolean(pri && pri.behind),
+      bytes: budget.byModel.get(name) || 0,
+      cooldownUntil: unloadAfter.has(name) ? unloadAfter.get(name) : undefined,
+    };
+  }
+
+  function commitEvictions(candidates, options) {
+    const plan = planEvictions(candidates, { cooldown: true, now: streamFrame, ...options });
+    for (const name of plan.arm) {
+      if (!unloadAfter.has(name)) unloadAfter.set(name, streamFrame + RESIDENT_UNLOAD_COOLDOWN_FRAMES);
+    }
+    return plan.evict;
+  }
+
   function proposeEvictForIncoming(incoming) {
     if (!incoming) return [];
-    const names = residentMeshNames();
-    const heap = heapBytes();
-    if (!overResidentSoftCap(names.size, heap)) return [];
-    const incomingPri = modelPriority.get(incoming) || { tier: 5, distance: Infinity };
+    const pressure = residentPressure();
+    if (!softCapped(pressure)) return [];
+    const incomingPri = modelPriority.get(incoming) || { tier: 5, distance: Infinity, behind: false };
     const selectedModel = entries.get(selected)?.gyaml;
     const candidates = [];
+    const seen = new Set();
     for (const entry of entries.values()) {
-      if (!entry.parts || !entry.parts.length || !entry.gyaml) continue;
-      if (entry.gyaml === incoming || entry.gyaml === selectedModel) continue;
-      const pri = modelPriority.get(entry.gyaml) || { tier: 0, distance: 0 };
-      if (!isWorsePriority(pri, incomingPri)) continue;
-      const distance = Number.isFinite(pri.distance) ? pri.distance : entry.pivot.position.distanceToSquared(camera.position);
-      candidates.push({ name: entry.gyaml, distance });
+      if (!entry.parts || !entry.parts.length || !entry.gyaml || seen.has(entry.gyaml)) continue;
+      seen.add(entry.gyaml);
+      if (entry.gyaml === incoming || entry.gyaml === selectedModel) {
+        unloadAfter.delete(entry.gyaml);
+        continue;
+      }
+      const pri = modelPriority.get(entry.gyaml) || { tier: 0, distance: 0, behind: false };
+      if (!isWorsePriority(pri, incomingPri)) {
+        unloadAfter.delete(entry.gyaml);
+        continue;
+      }
+      candidates.push(residentCandidate(entry.gyaml, entry));
     }
-    return modelsToEvict(candidates, {
+    const countCap = pressure.count >= RESIDENT_MODEL_SOFT_CAP || pressure.heap >= RESIDENT_HEAP_SOFT;
+    const byteCap = pressure.assetBytes >= RESIDENT_BYTE_SOFT;
+    return commitEvictions(candidates, {
       keep: new Set(),
-      count: names.size,
-      heapBytes: heap,
-      targetCount: names.size - 1,
-      maxEvict: 1,
+      count: pressure.count,
+      heapBytes: pressure.heap,
+      assetBytes: pressure.assetBytes,
+      targetCount: countCap ? pressure.count - 1 : pressure.count,
+      targetBytes: byteCap ? RESIDENT_BYTE_TARGET : pressure.assetBytes,
+      maxEvict: 4,
     });
   }
 
   function evictFarResidentModels() {
-    const names = residentMeshNames();
-    const heap = heapBytes();
-    // Count is enforced when launching. This path is the heap emergency brake.
-    if (heap < 1 || !overResidentHardCap(names.size, heap)) return 0;
+    const pressure = residentPressure();
+    // Launching enforces the soft byte and count caps. This path is the emergency brake.
+    // A missing JS heap reading still used to skip the count brake; a byte overrun does not.
+    const byteEmergency = pressure.assetBytes >= RESIDENT_BYTE_HARD;
+    if (!byteEmergency && (pressure.heap < 1 || !hardCapped(pressure))) return 0;
     const keep = new Set(foregroundModelNames);
     const selectedModel = entries.get(selected)?.gyaml;
     if (selectedModel) keep.add(selectedModel);
+    for (const name of keep) unloadAfter.delete(name);
     const nearest = new Map();
     for (const entry of entries.values()) {
       if (!entry.parts || !entry.parts.length || !entry.gyaml) continue;
-      const distance = entry.pivot.position.distanceToSquared(camera.position);
+      const candidate = residentCandidate(entry.gyaml, entry);
       const prev = nearest.get(entry.gyaml);
-      if (prev == null || distance < prev) nearest.set(entry.gyaml, distance);
+      if (!prev || candidate.distance < prev.distance) nearest.set(entry.gyaml, candidate);
     }
-    const candidates = [...nearest.entries()].map(([name, distance]) => ({ name, distance }));
-    let evict = modelsToEvict(candidates, { keep, count: names.size, heapBytes: heap });
-    if (!evict.length && overResidentHardCap(names.size, heap)) {
+    const candidates = [...nearest.values()];
+    const evictionOptions = {
+      keep,
+      count: pressure.count,
+      heapBytes: pressure.heap,
+      assetBytes: pressure.assetBytes,
+      ignoreCooldown: pressure.heap >= RESIDENT_HEAP_HARD,
+    };
+    let evict = commitEvictions(candidates, evictionOptions);
+    if (!evict.length && hardCapped(pressure)) {
       const pinned = new Set();
       if (selectedModel) pinned.add(selectedModel);
-      evict = modelsToEvict(candidates, { keep: pinned, count: names.size, heapBytes: heap });
+      evict = commitEvictions(candidates, { ...evictionOptions, keep: pinned });
     }
     for (const name of evict) unloadResidentModel(name);
     if (evict.length) {
@@ -2096,7 +2212,7 @@ let convertSlots = 8;
     const backgroundInFlight = () => Number(backgroundName !== null && !eligible(backgroundName));
     const foregroundInFlight = () => active.size - backgroundInFlight();
     const publish = (foregroundSettled) => {
-      const atCap = overResidentSoftCap(residentMeshNames().size, heapBytes());
+      const atCap = softCapped();
       let queued = 0;
       for (const name of queue) {
         if (!eligible(name)) continue;
@@ -2121,7 +2237,7 @@ let convertSlots = 8;
         finished: idle,
         label: names.size ? `Models ${resolved.size} of ${names.size}` : "No actors",
         resident: residentMeshNames().size,
-        residentCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()) && queue.length > 0,
+        residentCapped: softCapped() && queue.length > 0,
       }, foregroundSettled);
       requestRender();
       pumpTextures();
@@ -2134,6 +2250,9 @@ let convertSlots = 8;
       if (hooks.onModelError) hooks.onModelError(entry.gyaml, message);
     };
     function deliver(gyaml, meta, template) {
+      invalidateAssetBudget();
+      unloadAfter.delete(gyaml);
+      if (recentlyEvicted.delete(gyaml)) statReloads += 1;
       for (const entry of entries.values()) {
         if (entry.gyaml !== gyaml) continue;
         entry.modelMeta = { ...meta, status: "mesh" };
@@ -2196,7 +2315,7 @@ let convertSlots = 8;
       return token === generation && demand && !previewPending && queue.length > 0
         && !streamInteractive && !scenePreview?.terrainPending && !active.size
         && !eligible(queue[0]) && !modelStage?.pending.size
-        && !overResidentSoftCap(residentMeshNames().size, heapBytes());
+        && !softCapped();
     }
 
     function background() {
@@ -2231,20 +2350,21 @@ let convertSlots = 8;
 
     function pump() {
       if (!started || token !== generation) return;
+      invalidateAssetBudget();
       const limit = Math.min(2, convertSlots);
       while (foregroundInFlight() < limit && eligible(queue[0])) {
         const incoming = queue[0];
-        if (overResidentSoftCap(residentMeshNames().size, heapBytes())) {
+        if (softCapped()) {
           const evict = proposeEvictForIncoming(incoming);
           if (!evict.length) break;
           for (const name of evict) unloadResidentModel(name);
           queueRebuild();
         }
-        if (overResidentSoftCap(residentMeshNames().size, heapBytes())) break;
+        if (softCapped()) break;
         launch(queue.shift());
       }
       const cannotLaunchMore = !eligible(queue[0])
-        || (overResidentSoftCap(residentMeshNames().size, heapBytes()) && !proposeEvictForIncoming(queue[0]).length);
+        || (softCapped() && !proposeEvictForIncoming(queue[0]).length);
       const settled = !foregroundInFlight() && cannotLaunchMore;
       const foregroundSettled = settled && !idle;
       idle = settled;
@@ -2850,9 +2970,20 @@ let convertSlots = 8;
   }
 
   function rebuildBatches(stagedEntries = null) {
+    const job = batchChain.then(
+      () => rebuildBatchesNow(stagedEntries),
+      () => rebuildBatchesNow(stagedEntries),
+    );
+    batchChain = job.then(() => {}, () => {});
+    return job;
+  }
+
+  async function rebuildBatchesNow(stagedEntries = null) {
+    const sceneToken = generation;
     uvDirty = true;
     const previous = stagedEntries ? [] : batches.slice();
     const nextBatches = [];
+    const pendingMeshes = [];
     const actors = stagedEntries || [...entries.values()];
     for (const entry of actors) entry.slots = [];
     const groups = new Map();
@@ -2993,8 +3124,36 @@ let convertSlots = 8;
       mesh.userData.pick = { ids, geometries, spheres, count };
       mesh.userData.forgeIndirect = mesh._indirectTexture;
       mesh.computeBoundingSphere();
+      pendingMeshes.push({ mesh, ids, water });
+    }
+    const compileStarted = performance.now();
+    await Promise.all(pendingMeshes.map(async ({ mesh }) => {
+      try {
+        await compileObjectPipeline(renderer, mesh, camera, scene);
+      } catch (error) {
+        console.error(error);
+      }
+    }));
+    if (sceneStreamStats && pendingMeshes.length) {
+      const waited = performance.now() - compileStarted;
+      sceneStreamStats.compileMs = (sceneStreamStats.compileMs || 0) + waited;
+      sceneStreamStats.compileBatches = (sceneStreamStats.compileBatches || 0) + pendingMeshes.length;
+      const rounded = Math.round(waited * 10) / 10;
+      if (rounded > (sceneStreamStats.maxCompileMs || 0)) sceneStreamStats.maxCompileMs = rounded;
+    }
+    if (sceneToken !== generation) {
+      for (const item of pendingMeshes) {
+        item.mesh.removeFromParent();
+        disposePickTexture(item.mesh);
+        item.mesh.dispose();
+      }
+      return false;
+    }
+    for (const item of pendingMeshes) {
+      const mesh = item.mesh;
+      if (mesh.parent) continue;
       scene.add(mesh);
-      nextBatches.push({ mesh, ids, water });
+      nextBatches.push(item);
     }
     if (stagedEntries) {
       for (const batch of nextBatches) batches.push(batch);
@@ -3092,22 +3251,29 @@ let convertSlots = 8;
 
   function scheduleModelStage() {
     const stage = modelStage;
-    if (!stage || stage.timer) return;
+    if (!stage || stage.timer || stage.busy) return;
     stage.timer = window.requestAnimationFrame(() => {
       stage.timer = 0;
+      stage.busy = true;
+      void (async () => {
+      if (modelStage !== stage) return;
       const ready = [];
       const names = [];
       const deadline = performance.now() + (streamInteractive ? 2 : 4);
       const order = [...stage.pending.keys()];
       sortModelNames(order, false, false);
       for (const name of order) {
-        const actors = [...stage.pending.get(name)].filter((entry) => entries.get(entry.key) === entry);
+        if (modelStage !== stage) return;
+        const waiting = stage.pending.get(name);
+        if (!waiting) continue;
+        const actors = [...waiting].filter((entry) => entries.get(entry.key) === entry);
         stage.pending.delete(name);
         names.push(name);
         for (const actor of actors) ready.push(actor);
-        stage.failed = !rebuildBatches(actors) || stage.failed;
+        stage.failed = !(await rebuildBatches(actors)) || stage.failed;
         if (names.length >= (streamInteractive ? 1 : 3) || performance.now() >= deadline) break;
       }
+      if (modelStage !== stage) return;
       if (ready.length) {
         if (ready.some((entry) => entry.slots.length) && stage.previous.length) {
           const previous = new Set(stage.previous);
@@ -3137,6 +3303,7 @@ let convertSlots = 8;
         nextDetailScan = 0;
         requestRender();
       }
+      stage.busy = false;
       if (stage.pending.size) {
         scheduleModelStage();
       } else if (stage.done) {
@@ -3166,6 +3333,12 @@ let convertSlots = 8;
           noteLoadedMemory();
         }
       }
+      })().catch((error) => {
+        console.error(error);
+        stage.failed = true;
+      }).finally(() => {
+        stage.busy = false;
+      });
     });
   }
 
@@ -3173,11 +3346,13 @@ let convertSlots = 8;
     if (rebuildTimer) clearTimeout(rebuildTimer);
     rebuildTimer = window.setTimeout(() => {
       rebuildTimer = 0;
-      clearScenePreview();
-      const ready = rebuildBatches();
-      requestRender();
-      if (hooks.onModelsReady) hooks.onModelsReady({ batchesBuilt: ready });
-      if (ready) noteLoadedMemory();
+      void (async () => {
+        clearScenePreview();
+        const ready = await rebuildBatches();
+        requestRender();
+        if (hooks.onModelsReady) hooks.onModelsReady({ batchesBuilt: ready });
+        if (ready) noteLoadedMemory();
+      })().catch((error) => console.error(error));
     }, 100);
   }
 
@@ -3674,6 +3849,7 @@ uniform float terrainLayerMissing;`
 
   async function warmTerrain(root) {
     await warmWebGLPrograms(renderer, root, camera, scene);
+    await compileObjectPipeline(renderer, root, camera, scene);
     const maps = new Set();
     root.traverse((child) => {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
@@ -5326,14 +5502,28 @@ uniform float terrainLayerMissing;`
     if (sceneStreamStats && wasInteractive && streamInteractive && (statLoading || modelStage?.pending.size || textureDetailPending.size) && gap > 25) {
       sceneStreamStats.slowFrames += 1;
     }
+    streamFrame += 1;
     camera.getWorldDirection(loadForward);
+    const streaming = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
+      || (modelStage && modelStage.pending && modelStage.pending.size > 0);
+    if (sceneStreamStats && streaming && gap > (sceneStreamStats.maxFrameMs || 0)) {
+      sceneStreamStats.maxFrameMs = Math.round(gap * 10) / 10;
+    }
     if (now - lastCullAt > 100
         && (camera.position.distanceToSquared(lastCull) > 1 || lastLoadDirection.dot(loadForward) < 0.998)) {
       lastCullAt = now;
       lastCull.copy(camera.position);
       lastLoadDirection.copy(loadForward);
-      prioritizeLoad();
       syncLabels();
+    }
+    if (!priorityAnchored || cameraNeedsPriorityUpdate(
+      { position: priorityPos, direction: priorityDir },
+      { position: camera.position, direction: loadForward },
+    )) {
+      priorityPos.copy(camera.position);
+      priorityDir.copy(loadForward);
+      priorityAnchored = true;
+      prioritizeLoad();
     }
     const updateMs = performance.now() - tickAt;
     const cullStart = performance.now();
@@ -5484,12 +5674,31 @@ uniform float terrainLayerMissing;`
     };
     report.backend = backendName;
     report.gpuCaps = gpuCaps;
+    const pressure = residentPressure();
     report.resident = {
-      uniqueMeshes: residentMeshNames().size,
-      heapBytes: heapBytes(),
-      softCapped: overResidentSoftCap(residentMeshNames().size, heapBytes()),
-      hardCapped: overResidentHardCap(residentMeshNames().size, heapBytes()),
+      uniqueMeshes: pressure.count,
+      heapBytes: pressure.heap,
+      peakHeapBytes,
+      geometryBytes: pressure.geometryBytes,
+      bc7Bytes: pressure.bc7Bytes,
+      assetBytes: pressure.assetBytes,
+      byteSoft: RESIDENT_BYTE_SOFT,
+      byteTarget: RESIDENT_BYTE_TARGET,
+      countSoft: RESIDENT_MODEL_SOFT_CAP,
+      evictions: statEvictions,
+      reloads: statReloads,
+      cooldown: unloadAfter.size,
+      softCapped: softCapped(pressure),
+      hardCapped: hardCapped(pressure),
     };
+    report.stream = sceneStreamStats ? {
+      maxFrameMs: sceneStreamStats.maxFrameMs || 0,
+      slowFrames: sceneStreamStats.slowFrames || 0,
+      firstDetailMs: sceneStreamStats.firstDetail,
+      compileMs: sceneStreamStats.compileMs || 0,
+      maxCompileMs: sceneStreamStats.maxCompileMs || 0,
+      compileBatches: sceneStreamStats.compileBatches || 0,
+    } : null;
     return report;
   }
 

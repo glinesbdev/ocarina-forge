@@ -24,6 +24,69 @@ function attributeBytes(geometry) {
   return total;
 }
 
+/** Live arrays, or the shape recorded when the part clone was released. */
+export function geometryBudgetBytes(geometry) {
+  const live = attributeBytes(geometry);
+  if (live > 0) return live;
+  const shape = geometry && geometry.userData && geometry.userData.forgeCpuShape;
+  if (!shape) return 0;
+  let total = 0;
+  for (const info of Object.values(shape.attributes || {})) total += info.bytes || 0;
+  if (shape.index) total += shape.index.bytes || 0;
+  return total;
+}
+
+export function bc7GpuBytes(texture) {
+  if (!texture || !texture.isCompressedTexture || texture.format !== 36492) return 0;
+  return gpuTextureBytes(texture);
+}
+
+const MODEL_TEXTURE_KEYS = ["map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap", "alphaMap"];
+const MODEL_EXTRA_KEYS = ["mossMap", "orm1Map", "normal1Map", "blendMap"];
+
+/** Geometry plus BC7 bytes attributed once per unique model. Shared textures count on the first model. */
+export function residentModelBytes(entries) {
+  const totals = new Map();
+  const geometries = new Set();
+  const textures = new Set();
+  const list = entries && typeof entries.values === "function" ? entries.values() : entries || [];
+  for (const entry of list) {
+    if (!entry || !entry.gyaml || !entry.parts || !entry.parts.length) continue;
+    let bytes = totals.get(entry.gyaml) || 0;
+    const seenGeo = new Set();
+    const seenTex = new Set();
+    for (const part of entry.parts) {
+      if (part.geometry && !seenGeo.has(part.geometry)) {
+        seenGeo.add(part.geometry);
+        if (!geometries.has(part.geometry)) {
+          geometries.add(part.geometry);
+          bytes += geometryBudgetBytes(part.geometry);
+        }
+      }
+      const material = part.material;
+      if (!material) continue;
+      const maps = [];
+      for (const key of MODEL_TEXTURE_KEYS) if (material[key]) maps.push(material[key]);
+      const extra = material.userData || {};
+      for (const key of MODEL_EXTRA_KEYS) if (extra[key]) maps.push(extra[key]);
+      for (const texture of maps) {
+        if (!texture || seenTex.has(texture) || textures.has(texture)) continue;
+        seenTex.add(texture);
+        textures.add(texture);
+        bytes += bc7GpuBytes(texture);
+      }
+    }
+    totals.set(entry.gyaml, bytes);
+  }
+  return totals;
+}
+
+export function budgetAssetBytes(report) {
+  const geometry = (report && report.geometries && report.geometries.cpuBytes) || 0;
+  const bc7 = (report && report.textures && report.textures.byFormat && report.textures.byFormat.BC7 && report.textures.byFormat.BC7.gpu) || 0;
+  return { geometry, bc7, total: geometry + bc7 };
+}
+
 function textureExtent(texture) {
   const image = texture.image || (texture.source && texture.source.data) || {};
   if (texture.isCompressedTexture && texture.mipmaps && texture.mipmaps[0]) {

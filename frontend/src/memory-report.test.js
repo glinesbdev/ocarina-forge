@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { collectMemoryReport } from "./memory-report.js";
+import { budgetAssetBytes, collectMemoryReport, residentModelBytes } from "./memory-report.js";
 
 test("the memory report counts actors, instanced slots, and compressed textures", () => {
   const geometry = {
@@ -56,4 +56,14 @@ test("the memory report counts actors, instanced slots, and compressed textures"
   assert.equal(report.profile.gpuTiming, "webgpu");
   assert.ok(report.textures.gpuBytes > 0);
   assert.deepEqual(report.gpu, { geometries: 4, textures: 2 });
+  const budget = budgetAssetBytes(report);
+  assert.equal(budget.geometry, report.geometries.cpuBytes);
+  assert.equal(budget.bc7, report.textures.byFormat.BC7.gpu);
+  assert.equal(budget.total, budget.geometry + budget.bc7);
+  const perModel = residentModelBytes(new Map([
+    ["a", { gyaml: "Tree", parts: [{ geometry, material: { map: texture } }] }],
+    ["b", { gyaml: "Tree", parts: [{ geometry, material: { map: texture } }] }],
+  ]));
+  assert.equal(perModel.size, 1);
+  assert.ok(perModel.get("Tree") > 0);
 });
