@@ -2486,6 +2486,12 @@ function modelBlock(actor) {
     source.textContent = info.source;
     wrap.append(source);
   }
+  if (info.textureNote) {
+    const textures = document.createElement("p");
+    textures.className = "muted";
+    textures.textContent = info.textureNote;
+    wrap.append(textures);
+  }
   return wrap;
 }
 

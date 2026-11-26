@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { pickMask } from "./gpu-pick.js";
-import { applyTextureManifest, clearTextureMaps, materialKey, presentTextures } from "./texture-apply.js";
+import { applyTextureManifest, clearTextureMaps, formatTextureReport, materialKey, presentTextures } from "./texture-apply.js";
 import { createTextureQueue, orderTextureJobs, simulateTextureWave, textureSlotLimit } from "./texture-stream.js";
 
 function color(rgb) {
@@ -78,6 +78,29 @@ test("textures on from the first load assign maps on a sanitized glTF name", asy
   assert.equal(mesh.needsUpdate, true);
 });
 
+test("a missing file, a decode error, and a missed mesh are named", async () => {
+  const mesh = material();
+  const parts = [
+    { name: "lod0Hair0", materialKey: "Hair:0", material: mesh },
+    { name: "lod0Teeth0", materialKey: "Teeth:0", material: material() },
+    { name: "lod0Gone0", materialKey: "Gone:0", material: material() },
+    { name: "lod0Other0", materialKey: "Other:0", material: material() },
+  ];
+  const report = await applyTextureManifest(parts, {
+    materials: {
+      "Hair:0": { map: "/api/model-textures/hair.ktx2", status: "ready", found: "Tex/Hair.bntx.zs" },
+      "Teeth:0": { map: null, status: "decode", error: "decode error: Tex/Teeth.bntx.zs is not a BNTX", found: "Tex/Teeth.bntx.zs" },
+      "Gone:0": { map: null, status: "missing", error: "file not found. tried Tex/Gone.bntx.zs", found: "" },
+    },
+  }, async () => null);
+  const note = formatTextureReport(report);
+  assert.match(note, /Hair:0: not applied\. The image request failed\./);
+  assert.match(note, /Teeth:0: decode error: Tex\/Teeth\.bntx\.zs is not a BNTX/);
+  assert.match(note, /Gone:0: file not found\. tried Tex\/Gone\.bntx\.zs/);
+  assert.match(note, /Other:0: not applied\. The texture response has no entry for this mesh\./);
+  assert.equal(mesh.map, null);
+});
+
 test("a value that is not a three.js texture is left off the material", async () => {
   const mesh = material();
   const parts = [{ name: "lod0:Body:0", material: mesh }];
@@ -131,6 +154,65 @@ test("applying textures does not rebuild geometry and clearing drops them", asyn
   assert.equal(mesh.roughness, 0.9);
   assert.deepEqual(mesh.color.rgb, [0.6, 0.5, 0.4]);
   assert.equal(parts[0].geometry, geometry);
+});
+
+test("a shared material is cloned once per shape key", async () => {
+  const shared = material();
+  const beard = material();
+  const parts = [
+    { name: "lod0Body_low0", materialKey: "Body_low:5", material: shared },
+    { name: "lod1Body_low0", materialKey: "Body_low:5", material: shared },
+    { name: "lod0Face0", materialKey: "Eyelid_Lower_low:2", material: shared },
+    { name: "lod0Rock0", materialKey: "RockSmall_Body:4", material: shared },
+    { name: "lod0Beard0", materialKey: "BeardA_01_low:3", material: beard },
+  ];
+  const report = await applyTextureManifest(parts, {
+    materials: {
+      "Body_low:5": { map: "/api/model-textures/skin.ktx2", color: [1, 1, 1, 1], status: "ready", found: "CmnTex_Chara_Mt_Skin" },
+      "Eyelid_Lower_low:2": { map: "/api/model-textures/face.ktx2", color: [1, 1, 1, 1], status: "ready", found: "CmnTex_Chara_Mt_Face" },
+      "RockSmall_Body:4": { map: "/api/model-textures/rock.ktx2", color: [1, 1, 1, 1], status: "ready", found: "CmnTex_Chara_Mt_Rock" },
+      "BeardA_01_low:3": { map: "/api/model-textures/hair.ktx2", color: [1, 1, 1, 1], status: "ready", found: "Mt_Hair" },
+    },
+  }, async (url) => texture(url));
+  assert.equal(parts[0].material, parts[1].material);
+  assert.notEqual(parts[0].material, parts[2].material);
+  assert.notEqual(parts[0].material, parts[3].material);
+  assert.equal(parts[0].material.map.url, "/api/model-textures/skin.ktx2");
+  assert.equal(parts[1].material.map.url, "/api/model-textures/skin.ktx2");
+  assert.equal(parts[2].material.map.url, "/api/model-textures/face.ktx2");
+  assert.equal(parts[3].material.map.url, "/api/model-textures/rock.ktx2");
+  assert.equal(parts[4].material, beard);
+  assert.equal(beard.map.url, "/api/model-textures/hair.ktx2");
+  const note = formatTextureReport(report);
+  assert.match(note, /Body_low:5: applied CmnTex_Chara_Mt_Skin/);
+  assert.match(note, /RockSmall_Body:4: applied CmnTex_Chara_Mt_Rock/);
+  assert.doesNotMatch(note, /Body_low:5: applied CmnTex_Chara_Mt_Rock/);
+});
+
+test("a skin tint is named and a tiling albedo repeats", async () => {
+  const mesh = material();
+  const parts = [{ name: "lod0Body_low0", materialKey: "Body_low:5", material: mesh }];
+  const report = await applyTextureManifest(parts, {
+    materials: {
+      "Body_low:5": {
+        map: "/api/model-textures/skin.ktx2",
+        color: [0.72, 0.48, 0.28, 1],
+        tint: [0.72, 0.48, 0.28],
+        uv: "_u1",
+        tile: "2.00×2.00",
+        status: "ready",
+        found: "Pack/Actor/CmnTex_Chara.pack.zs",
+      },
+    },
+  }, async (url) => texture(url));
+  assert.deepEqual(mesh.color.rgb, [0.72, 0.48, 0.28]);
+  assert.equal(mesh.map.wrapS, 1000);
+  assert.equal(mesh.map.wrapT, 1000);
+  const note = formatTextureReport(report);
+  assert.match(note, /Body_low:5: applied Pack\/Actor\/CmnTex_Chara\.pack\.zs/);
+  assert.match(note, /tint 0\.72 0\.48 0\.28/);
+  assert.match(note, /uv _u1/);
+  assert.match(note, /repeats 2\.00×2\.00/);
 });
 
 test("the texture toggle does not ask the model loader to run", () => {

@@ -503,6 +503,12 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             blend["mossImage"] = images[moss_index]["name"]
             extras["blend"] = blend
         extra_key = tuple(sorted((key, repr(value)) for key, value in extras.items()))
+        # A flat mesh has no image, so colour and sidedness alone collapse every
+        # shape onto one material. The texture pass then paints that shared
+        # object, and the last write wins. The shape key (`Body:5`) keeps each
+        # bfres material distinct until its own image arrives. A mesh that
+        # already carries an image still shares a material with the same pixels.
+        shape_key = (prim.name or "") if image_index is None and prim.name else ""
         key = (
             image_index,
             alpha,
@@ -518,6 +524,7 @@ def to_glb(primitives: list[Primitive]) -> bytes:
             orm1_index,
             normal1_index,
             moss_index,
+            shape_key,
         )
         if key not in material_of:
             pbr = {

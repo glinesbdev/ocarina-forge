@@ -8,8 +8,18 @@ never committed.
 A real actor pack does not contain the bfres. `Component/ModelInfo/*.bgyml`
 names `ModelProjectName` and `FmdbName`, and the mesh is
 `Model/<Project>.<Fmdb>.bfres.zs` (zstd dictionary 1). Base color is a
-separate `Tex/<name>.bntx.zs`, not a BNTX embedded in the bfres. Older
-`Model/<name>.bfres` paths and a bfres stored in the pack are still accepted.
+separate `.bntx.zs`. The game resolves the material's texture name
+case-insensitively, usually as `Tex/<name>.bntx.zs`, and also from any other
+`.bntx.zs` under the romfs, then from the actor pack and the shared packs in
+`Pack/`. A shared character pack is also searched under a prefix of the
+project name (`Pack/Actor/Npc_Goron_GOU.pack.zs` for
+`Npc_Goron_GOU_Biggoron`), and a sibling `Model/<prefix>.Tex.bfres` is read
+for images the mesh bfres only names. Older `Model/<name>.bfres` paths and a
+bfres stored in the pack are still accepted. Vertex colours do not mean the
+material has no texture. Each material's own texture name is a file under
+`Tex/`. A rock albedo is a second layer only when that name is the rock.
+A flat mesh keeps one glTF material per shape key, so a later texture write
+cannot paint every shape with the last image.
 """
 
 from __future__ import annotations
@@ -41,8 +51,8 @@ from ocarina_forge.cache_prune import (
     write_version_sidecar,
 )
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
-from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, texture_rank
-from ocarina_forge.blend import color_span, overlay_plan
+from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, rank_albedo, texture_rank
+from ocarina_forge.blend import color_span, overlay_plan, sampler_indices, skin_overlay_plan, span_from_colors
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
@@ -68,7 +78,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-56\0"
+_CACHE_VERSION = b"models-63\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -142,6 +152,7 @@ def _cache_prefix() -> bytes:
 _LOCK = threading.Lock()
 _LISTING: dict[str, tuple[int, list[str]]] = {}
 _TEX_INDEX: dict[str, tuple[int, dict[str, str]]] = {}
+_PACK_TEX: dict[str, tuple[int, dict[str, str]]] = {}
 _FILE_SIG: dict[str, tuple[int, int, str]] = {}
 _BNTX_MEM: dict[str, list] = {}
 _BNTX_ORDER: list[str] = []
@@ -210,36 +221,52 @@ def describe_actor_textures(dump, gyaml: str) -> dict:
     only when textures are on. A second call reads `texman/` and does not
     decode BNTX again.
     """
-    empty = {"gyaml": gyaml or "", "materials": {}}
+    empty = {"gyaml": gyaml or "", "materials": {}, "error": "", "status": ""}
     if not _NAME.fullmatch(gyaml or ""):
-        return empty
+        return {**empty, "error": "file not found: that is not an actor name", "status": "missing"}
     try:
         plan, _tried, referenced = _actor_plan(dump, gyaml)
-    except BancError:
-        return empty
+    except BancError as exc:
+        return {**empty, "error": f"file not found: {exc.message}", "status": "missing"}
     if not referenced:
-        return empty
+        return {**empty, "error": "file not found: no model file for this actor", "status": "missing"}
     errors: list[str] = []
-    for _source, blob in _realize(dump, plan, errors):
+    for source, blob in _realize(dump, plan, errors):
         try:
-            return _textures_for_blob(dump, gyaml, blob)
-        except (FresError, BntxError, ValueError, struct.error, IndexError, OSError):
+            return _textures_for_blob(dump, gyaml, blob, source)
+        except (FresError, BntxError, ValueError, struct.error, IndexError, OSError) as exc:
+            errors.append(f"{source}: {exc}")
             continue
-    return empty
+    if errors:
+        return {**empty, "error": "decode error: " + "; ".join(errors), "status": "decode"}
+    return {**empty, "error": "file not found: no model file for this actor", "status": "missing"}
 
 
-def _textures_for_blob(dump, gyaml: str, blob: bytes) -> dict:
-    digest = hashlib.sha256(_cache_prefix() + b"texman-1\0" + blob).hexdigest()
+def _texture_hint(gyaml: str, source: str, models) -> str:
+    """The gyaml plus the model path. Shared packs are named after the project, not the actor.
+
+    ``Npc_Goron_Biggoron_Adult`` does not contain ``Npc_Goron_GOU``. The file
+    ``Model/Npc_Goron_GOU_Biggoron.Npc_Goron_GOU_Biggoron.bfres.zs`` does, and
+    that is what opens ``Pack/Actor/Npc_Goron_GOU.pack.zs``.
+    """
+    names = " ".join(getattr(model, "name", "") or "" for model in models if getattr(model, "name", ""))
+    return f"{gyaml} {source} {names}".strip()
+
+
+def _textures_for_blob(dump, gyaml: str, blob: bytes, source: str = "") -> dict:
+    hint_key = f"{gyaml}\0{source}".encode("utf-8", "replace")
+    digest = hashlib.sha256(_cache_prefix() + b"texman-2\0" + hint_key + b"\0" + blob).hexdigest()
     path = cache_dir() / "texman" / digest[:2] / f"{digest}.json"
     if path.is_file():
         note_access(path)
         return json.loads(path.read_text(encoding="utf-8"))
     models = parse(blob)
+    hint = _texture_hint(gyaml, source, models)
     files: list[dict] = []
     token = _FILES.set(files)
     try:
         _fill_texture_names(models, dump)
-        external, _log, _raws = _resolve_materials(dump, models, gyaml, False)
+        external, _log, _raws = _resolve_materials(dump, models, hint, False)
     finally:
         _FILES.reset(token)
     manifest = _texture_manifest(gyaml, models, external)
@@ -287,18 +314,35 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
             if part.omit:
                 continue
             image = taken(model, part.texture)
-            albedo = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
+            skin = bool(part.blend and part.blend.get("skin") and image is not None)
+            if skin:
+                albedo = _published_image(_skin_swatch(part.blend.get("skinColor")), "png", urls)
+            else:
+                albedo = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
             normal = _published_image(taken(model, part.normal_texture), "mask", urls)
             normal1 = _published_image(taken(model, getattr(part, "normal1_texture", "")), "mask", urls)
+            if skin and normal and not normal1:
+                normal1 = normal
+                normal = None
             orm = _published_image(getattr(part, "orm_image", None), "png", urls)
             orm1 = _published_image(getattr(part, "orm1_image", None), "png", urls)
             emissive = _published_image(getattr(part, "emission_image", None), "png", urls) or _published_image(
                 taken(model, part.emission_texture), "mask", urls
             )
             moss = None
-            if part.blend and part.overlay_texture:
+            if skin:
+                moss = _published_image(image, "png" if part.wrap == "repeat" else part.alpha, urls)
+            elif part.blend and part.overlay_texture:
                 moss = _published_image(taken(model, part.overlay_texture), "mask", urls)
+            found = getattr(part, "texture_found", "") or ""
             if not any((albedo, normal, normal1, orm, orm1, emissive, moss)):
+                status, error = _manifest_failure(part)
+                materials[f"{part.name}:{part.material_index}"] = {
+                    "map": None,
+                    "status": status,
+                    "error": error,
+                    "found": found,
+                }
                 continue
             if part.stand_in == "water":
                 color = _WATER if part.texture == _WATER_TEX or image is None else (0.35, 0.55, 0.55, 0.2)
@@ -322,12 +366,47 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                 "color": [float(channel) for channel in color[:4]],
             }
             if moss and part.blend:
-                slot["blend"] = {
+                blend_slot = {
                     "channel": part.blend.get("channel") or "r",
                     "uv": part.blend.get("uv") or "_u0",
                 }
+                if part.blend.get("skin"):
+                    blend_slot["skin"] = True
+                    blend_slot["skinVertex"] = bool(part.blend.get("skinVertex"))
+                    if part.blend.get("skinColor"):
+                        blend_slot["skinColor"] = [float(channel) for channel in part.blend["skinColor"][:4]]
+                slot["blend"] = blend_slot
+            slot["status"] = "ready"
+            slot["found"] = found
+            slot["error"] = ""
             materials[f"{part.name}:{part.material_index}"] = slot
     return {"gyaml": gyaml, "materials": materials}
+
+
+def _classify_texture_failure(entry: dict) -> str:
+    """A path that opened and produced no image is a decode error. Otherwise the file is missing."""
+    found = (entry or {}).get("found") or ""
+    error = ((entry or {}).get("error") or "").lower()
+    if found:
+        return "decode"
+    if any(token in error for token in ("not a bntx", "decode", "no usable image", "did not decode", "no images")):
+        return "decode"
+    return "missing"
+
+
+def _manifest_failure(part) -> tuple[str, str]:
+    """`missing` is file not found. `decode` is a file that opened and did not yield an image."""
+    found = getattr(part, "texture_found", "") or ""
+    failure = getattr(part, "texture_failure", "") or ""
+    error = (getattr(part, "texture_error", "") or "").strip()
+    decode = failure == "decode" or bool(found)
+    if decode:
+        text = error if "decode error" in error.lower() else f"decode error: {error or 'BNTX decode failed'}"
+        if found and found not in text:
+            text = f"{text} ({found})"
+        return "decode", text
+    text = error if "file not found" in error.lower() else f"file not found. {error or 'no Tex file matched'}"
+    return "missing", text
 
 
 def describe_terrain(dump, banc: str, *, convert: bool = True) -> dict:
@@ -501,8 +580,89 @@ def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: 
         _READ_MEM.reset(read_token)
 
 
+def _stamp_flat_sources(models, dump=None, hint: str = "") -> None:
+    """Name the albedo and say whether that file is on disk. This does not decode BNTX.
+
+    The editor draws `?flat=1` and reads this note. Printing `Tex/<name>.bntx.zs`
+    without a stat made a missing `CmnTex` look resolved. The texture request
+    is what decodes the bytes.
+    """
+    hints = _hint_tokens(_texture_hint(hint, "", models))
+    present = _present_companions(dump, hint)
+    for model in models:
+        materials = model.materials or []
+        for part in model.parts:
+            if not (0 <= part.material_index < len(materials)):
+                continue
+            material = materials[part.material_index]
+            sources = _albedo_sources(material)
+            if not sources:
+                loose = _loose_albedo_names(model, material)
+                sources = [("", name) for name in loose]
+            if not sources:
+                continue
+            slot, name = sources[0]
+            shown = ", ".join(f"{item or '?'}={tex}" for item, tex in sources[:6])
+            relative, tried = ("", [])
+            if dump is not None and name:
+                relative, tried = _resolve_tex(dump, name, hints)
+            part.texture_found = relative or ""
+            part.texture_pending = False
+            part.texture_failure = ""
+            if relative:
+                part.texture_error = (
+                    f"albedo {slot or 'texture'} {name}. "
+                    f"found {relative}. "
+                    f"The geometry file has no image; the texture request decodes it. "
+                    f"seen {shown}"
+                )
+                continue
+            if present:
+                part.texture_pending = True
+                part.texture_error = (
+                    f"albedo {slot or 'texture'} {name}. "
+                    f"no loose Tex/{_stem(name)}.bntx.zs. "
+                    f"companion {present[0]} is present; the texture request reads it. "
+                    f"seen {shown}"
+                )
+                continue
+            preview = ", ".join(dict.fromkeys(tried))
+            if len(preview) > 480:
+                preview = preview[:480].rsplit(",", 1)[0]
+            if not preview:
+                preview = f"Tex/{_stem(name)}.bntx.zs"
+            part.texture_failure = "missing"
+            part.texture_error = (
+                f"albedo {slot or 'texture'} {name}. "
+                f"file not found. tried {preview}. "
+                f"seen {shown}"
+            )
+
+
+def _present_companions(dump, hint: str) -> list[str]:
+    """``.Tex.bfres`` files that exist. A pack was already opened by the Tex lookup.
+
+    Listing the file does not decode BNTX. The texture request reads the images.
+    """
+    if dump is None or not hint:
+        return []
+    _opened, searched = _companion_search(dump, hint)
+    found = []
+    for path in searched:
+        lower = path.lower()
+        if not (lower.endswith(".bfres.zs") or lower.endswith(".bfres")):
+            continue
+        if (dump.romfs / path).is_file() and path not in found:
+            found.append(path)
+    return found
+
+
 def _drop_textures(models) -> None:
-    """Layout loads the mesh and does not decode BNTX."""
+    """Layout loads the mesh and does not decode BNTX.
+
+    A blend planned just before this still keeps its overlay name. The geometry
+    file has the vertex mask, and the texture manifest brings the images.
+    """
     for model in models:
         for material in model.materials or []:
             material.binds = []
@@ -511,7 +671,8 @@ def _drop_textures(models) -> None:
             part.candidates = []
             part.normal_texture = ""
             part.emission_texture = ""
-            part.overlay_texture = ""
+            if not part.blend:
+                part.overlay_texture = ""
 
 
 def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: ConvertClock, pointer: Path, flat: bool = False) -> tuple[str, dict]:
@@ -526,6 +687,8 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
     token = _FILES.set(files)
     try:
         if flat:
+            _plan_layer_blends(models)
+            _stamp_flat_sources(models, dump, hint)
             _drop_textures(models)
             external, log, raws = {}, [], []
         else:
@@ -639,6 +802,9 @@ def _track_file(dump, relative: str) -> None:
     files = _FILES.get()
     if files is None or dump is None or not relative or relative.startswith("embedded"):
         return
+    packed = _parse_pack_ref(relative)
+    if packed is not None:
+        relative = packed[0]
     if any(item.get("path") == relative for item in files):
         return
     path = dump.romfs / relative
@@ -945,6 +1111,8 @@ def _consider_water(names: list[str], binds, result: dict) -> dict:
         entry["textured"] = False
         entry["flat"] = True
         entry["standIn"] = "water"
+        entry["via"] = ""
+        entry["flatCause"] = "water-stand-in"
         previous = entry.get("error") or ""
         entry["error"] = f"water stand-in ({reject})" if not previous else f"water stand-in ({reject}). {previous}"
     else:
@@ -1250,11 +1418,10 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                 if part.proxy:
                     if "terrain proxy" not in notes:
                         notes.append("terrain proxy")
-                elif part.texture:
-                    notes.append(f"Base color “{part.texture}” {why or 'was not usable'}, so this mesh uses a flat colour.")
-                elif not model.images and not external:
-                    reason = why or "No albedo sampler was usable and no Tex file matched."
-                    notes.append(f"{reason} This mesh uses a flat colour.")
+                elif part.blend and part.overlay_texture:
+                    pass
+                elif part.texture or getattr(part, "texture_error", "") or not (model.images or external):
+                    notes.append(_flat_colour_note(part, why))
             unlit = False
             kind = ""
             if water:
@@ -1270,7 +1437,6 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             else:
                 color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
                 alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
-
             def extra_png(name: str):
                 nonlocal texture_count
                 extra = taken(name)
@@ -1312,28 +1478,49 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             moss_png = None
             blend_extra = None
             overlay_uvs = None
-            if part.blend and part.overlay_texture:
+            if part.blend and part.blend.get("skin") and part.overlay_texture and png is not None:
+                rock_png = png if part.overlay_texture == part.texture else extra_png(part.overlay_texture)
+                swatch = image_png(_skin_swatch(part.blend.get("skinColor")))
+                if rock_png and swatch:
+                    png = swatch
+                    moss_png = rock_png
+                    if part.normal_texture and not part.normal1_texture:
+                        normal1_png = normal_png
+                        normal_png = None
+            elif part.blend and part.overlay_texture:
                 moss_png = extra_png(part.overlay_texture)
-            if moss_png:
-                blend_extra = {
-                    "blend": {
-                        "channel": part.blend.get("channel") or "r",
-                        "uv": part.blend.get("uv") or "_u0",
-                        "scale": list(part.blend.get("scale") or [1, 1]),
-                        "translate": list(part.blend.get("translate") or [0, 0]),
-                        "sampler": part.blend.get("sampler") or "",
-                        "texture": part.overlay_texture,
-                    }
+            if part.blend and part.overlay_texture and (moss_png or part.blend.get("skin")):
+                blend_body = {
+                    "channel": part.blend.get("channel") or "r",
+                    "uv": part.blend.get("uv") or "_u0",
+                    "scale": list(part.blend.get("scale") or [1, 1]),
+                    "translate": list(part.blend.get("translate") or [0, 0]),
+                    "sampler": part.blend.get("sampler") or "",
+                    "texture": part.overlay_texture,
                 }
+                if part.blend.get("skin"):
+                    blend_body["skin"] = True
+                    blend_body["skinVertex"] = bool(part.blend.get("skinVertex"))
+                    if part.blend.get("skinColor"):
+                        blend_body["skinColor"] = [float(channel) for channel in list(part.blend["skinColor"])[:4]]
+                    if part.blend.get("maskTexture"):
+                        blend_body["maskSampler"] = part.blend.get("maskSampler") or ""
+                        blend_body["maskTexture"] = part.blend["maskTexture"]
+                blend_extra = {"blend": blend_body}
                 wanted_uv = part.blend.get("uv") or "_u0"
                 if wanted_uv != "_u0":
                     overlay_uvs = (part.uv_extra or {}).get(wanted_uv)
                     if overlay_uvs is not None and len(overlay_uvs) != len(part.positions):
                         overlay_uvs = None
-                if not any(note.startswith("blend ") for note in notes):
+                if part.blend.get("skin"):
+                    line = _layer_note(part)
+                    if line not in notes:
+                        notes.append(line)
+                elif moss_png and not any(note.startswith("blend ") for note in notes):
                     notes.append(
                         f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
                     )
+            drawn_colors = part.colors if blend_extra else None
             primitives.append(
                 Primitive(
                     part.positions,
@@ -1349,7 +1536,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     name=f"{part.name}:{part.material_index}",
                     unlit=unlit,
                     kind=kind,
-                    colors=part.colors if blend_extra else None,
+                    colors=drawn_colors,
                     uvs2=overlay_uvs,
                     normal_png=normal_png,
                     emissive_png=emissive_png,
@@ -1362,9 +1549,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             )
             if part.lod == 0 and not any(other.name == part.name and other.lod for other in model.parts):
                 if meshopt_available():
-                    coarser = simplify_mesh(part.positions, part.indices, part.uvs, part.colors if blend_extra else None)
+                    coarser = simplify_mesh(part.positions, part.indices, part.uvs, drawn_colors)
                 else:
-                    coarser = cluster_lod(part.positions, part.indices, part.uvs, colors=part.colors if blend_extra else None)
+                    coarser = cluster_lod(part.positions, part.indices, part.uvs, colors=drawn_colors)
                 if coarser:
                     primitives.append(
                         Primitive(
@@ -1380,7 +1567,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             name=f"{part.name}:{part.material_index}",
                             unlit=unlit,
                             kind=kind,
-                            colors=coarser[3] if blend_extra and len(coarser) > 3 else None,
+                            colors=coarser[3] if drawn_colors is not None and len(coarser) > 3 else None,
                             normal_png=normal_png,
                             emissive_png=emissive_png,
                             moss_png=moss_png,
@@ -1440,6 +1627,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
     log: list[dict] = []
     raws: list[bytes] = []
     remembered: dict[int, dict] = {}
+    _merge_companions(dump, models, hint)
     for model in models:
         if model.materials:
             for material in model.materials:
@@ -1455,44 +1643,34 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 choice["entry"]["shapes"] = list(dict.fromkeys(shapes))
                 choice["entry"]["textured"] = choice.get("image") is not None and not choice.get("proxy")
                 choice["entry"]["flat"] = not choice["entry"]["textured"] and bool(choice["entry"]["shapes"])
-                log.append(choice["entry"])
+                if shapes or not model.parts:
+                    log.append(choice["entry"])
                 for part in model.parts:
                     if part.material_index < 0 or part.material_index >= len(model.materials):
                         continue
                     if model.materials[part.material_index] is not material:
                         continue
-                    part.texture = choice["wanted"]
-                    part.albedo_sampler = choice["sampler"]
-                    part.normal_texture = (choice.get("maps") or {}).get("normal") or ""
-                    part.emission_texture = (choice.get("maps") or {}).get("emission") or ""
-                    overlay = choice.get("overlay") or {}
-                    part.overlay_texture = overlay.get("texture") or ""
-                    part.blend = overlay.get("plan")
-                    surface = choice.get("surface") or {}
-                    part.orm_image = surface.get("orm")
-                    part.orm1_image = surface.get("orm1")
-                    part.normal1_texture = surface.get("normal1") or ""
-                    part.surface_note = surface.get("note") or ""
-                    part.emission_image = (choice.get("emission") or {}).get("image")
-                    part.emission_note = (choice.get("emission") or {}).get("note") or ""
-                    part.alpha = choice["alpha"]
-                    part.cutoff = choice["cutoff"]
-                    if choice.get("wrap"):
-                        part.wrap = choice["wrap"]
-                    if choice.get("base_color") and choice.get("image") is None:
-                        part.base_color = choice["base_color"]
-                    if choice.get("proxy"):
-                        part.proxy = True
-                        part.base_color = _TERRAIN
-                        part.texture = ""
-                    _apply_stand_in(part, choice, external)
-                    if choice.get("image") is not None:
-                        external[choice["wanted"]] = choice["image"]
+                    _apply_choice(part, choice, external)
+            for part in model.parts:
+                if 0 <= part.material_index < len(model.materials):
+                    continue
+                choice = _choose_unlinked(dump, model, part, hints, terrain, external, raws, remembered)
+                log.append(choice["entry"])
+                _apply_choice(part, choice, external)
         else:
             for part in model.parts:
                 choice = _choose_loose(dump, model, part, hints, terrain, external, raws)
                 log.append(choice["entry"])
                 part.texture = choice["wanted"]
+                loose_entry = choice.get("entry") or {}
+                part.texture_found = loose_entry.get("found") or ""
+                part.texture_pending = False
+                if choice.get("image") is not None:
+                    part.texture_failure = ""
+                    part.texture_error = loose_entry.get("error") or ""
+                else:
+                    part.texture_failure = _classify_texture_failure(loose_entry)
+                    part.texture_error = loose_entry.get("error") or ""
                 part.alpha = choice["alpha"]
                 _apply_stand_in(part, choice, external)
                 if choice.get("image") is not None and choice["wanted"]:
@@ -1500,22 +1678,243 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
     return external, log, raws
 
 
+def _apply_choice(part, choice, external) -> None:
+    """Copy one material decision onto a shape, including a flat-colour error."""
+    part.texture = choice["wanted"]
+    entry = choice.get("entry") or {}
+    part.texture_found = entry.get("found") or ""
+    part.texture_pending = False
+    if choice.get("image") is not None:
+        part.texture_failure = ""
+        part.texture_error = entry.get("error") or ""
+    else:
+        part.texture_failure = _classify_texture_failure(entry)
+        part.texture_error = entry.get("error") or ""
+    part.albedo_sampler = choice.get("sampler") or ""
+    part.normal_texture = (choice.get("maps") or {}).get("normal") or ""
+    part.emission_texture = (choice.get("maps") or {}).get("emission") or ""
+    overlay = choice.get("overlay") or {}
+    part.overlay_texture = overlay.get("texture") or ""
+    part.blend = overlay.get("plan")
+    surface = choice.get("surface") or {}
+    part.orm_image = surface.get("orm")
+    part.orm1_image = surface.get("orm1")
+    part.normal1_texture = surface.get("normal1") or ""
+    part.surface_note = surface.get("note") or ""
+    part.emission_image = (choice.get("emission") or {}).get("image")
+    part.emission_note = (choice.get("emission") or {}).get("note") or ""
+    part.alpha = choice["alpha"]
+    part.cutoff = choice["cutoff"]
+    if choice.get("wrap"):
+        part.wrap = choice["wrap"]
+    if choice.get("base_color") and choice.get("image") is None:
+        part.base_color = choice["base_color"]
+    if choice.get("proxy"):
+        part.proxy = True
+        part.base_color = _TERRAIN
+        part.texture = ""
+    material_name = (choice.get("entry") or {}).get("material") or ""
+    if material_name and not part.material:
+        part.material = material_name
+    _apply_stand_in(part, choice, external)
+    if choice.get("image") is not None and choice.get("wanted"):
+        external[choice["wanted"]] = choice["image"]
+
+
+def _choose_unlinked(dump, model, part, hints, terrain, external, raws, remembered) -> dict:
+    """A shape whose material index misses the list uses a material that names it.
+
+    One material in the file is that material. Several materials only match a
+    shape that shares a name token. The first material whose image happened to
+    load is not painted onto every unmatched shape.
+    """
+    ranked = _materials_for_shape(model, part)
+    if not ranked:
+        return _unlinked_miss(model, part)
+    chosen = None
+    for material in ranked:
+        key = id(material)
+        if key not in remembered:
+            remembered[key] = _choose_material(dump, model, material, hints, terrain, external, raws)
+        candidate = remembered[key]
+        chosen = candidate
+        if candidate.get("image") is not None:
+            break
+    choice = dict(chosen)
+    entry = dict(chosen["entry"])
+    entry["shapes"] = [part.name] if part.name else []
+    entry["textured"] = chosen.get("image") is not None and not chosen.get("proxy")
+    entry["flat"] = not entry["textured"]
+    if chosen.get("image") is None:
+        summary = _seen_texture_summary(model)
+        error = entry.get("error") or ""
+        if summary and summary not in error:
+            error = f"{error}. {summary}".strip(". ")
+            entry["error"] = error
+    choice["entry"] = entry
+    return choice
+
+
+def _materials_for_shape(model, part) -> list:
+    """Materials that colour this shape. A single material is that one.
+
+    With more than one, only a positive name-token overlap matches. A zero
+    score used to fall through to the first material whose texture loaded,
+    which painted one rock albedo onto every shape.
+    """
+    materials = list(model.materials or [])
+    if len(materials) <= 1:
+        return materials
+    tokens = _name_tokens(part.name)
+    scored = []
+    for index, material in enumerate(materials):
+        score = len(tokens & _name_tokens(material.name))
+        scored.append((score, index, material))
+    best = max(score for score, _index, _material in scored)
+    if best <= 0:
+        return []
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [material for score, _index, material in scored if score == best]
+
+
+def _unlinked_miss(model, part) -> dict:
+    """The shape's index missed, and no material name matches it."""
+    listed = []
+    for material in model.materials or []:
+        binds = ", ".join(f"{slot or '?'}={tex}" for slot, tex in (material.binds or [])[:6]) or "no samplers"
+        listed.append(f"{material.name} ({binds})")
+    summary = "; ".join(listed[:8]) or "no materials"
+    error = f"shape material index {part.material_index} did not match a material by name. Materials: {summary}"
+    return {
+        "entry": {
+            "material": part.material or part.name or "unlinked",
+            "error": error,
+            "shapes": [part.name] if part.name else [],
+            "textured": False,
+            "flat": True,
+            "decoded": False,
+            "binds": [],
+            "via": "",
+            "flatCause": "unlinked-shape",
+        },
+        "wanted": "",
+        "sampler": "",
+        "alpha": "opaque",
+        "cutoff": 0.5,
+        "image": None,
+        "maps": {},
+        "overlay": {},
+        "surface": {},
+        "emission": {},
+    }
+
+
 def _c0_label(plan: dict) -> str:
     return f"_c0.{plan.get('channel') or 'r'}"
 
 
-def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
-    """The decoded ``_a1`` layer, or nothing when this material is a single albedo."""
-    span = None
+def _span_for_material(model, material):
+    """Vertex-colour span for shapes that draw this material, including a missed index."""
+    materials = list(model.materials or [])
+    try:
+        index = materials.index(material)
+    except ValueError:
+        index = -1
+    only = len(materials) == 1
     for part in model.parts:
-        if part.material_index < 0 or part.material_index >= len(model.materials):
+        linked = index >= 0 and part.material_index == index
+        unlinked = part.material_index < 0 or part.material_index >= len(materials)
+        named = False
+        if unlinked and not only:
+            ranked = _materials_for_shape(model, part)
+            named = bool(ranked) and ranked[0] is material
+        if not (linked or (unlinked and only) or named):
             continue
-        if model.materials[part.material_index] is not material:
-            continue
-        span = color_span(part.vertex_attributes)
+        span = color_span(getattr(part, "vertex_attributes", None)) or span_from_colors(getattr(part, "colors", None))
         if span:
-            break
-    plan = overlay_plan(material, span)
+            return span
+    return None
+
+
+def _plan_layer_blends(models) -> None:
+    """Record skin and two-albedo blends before a flat convert drops the images.
+
+    The geometry file has no texels. It still has to carry the vertex mask and
+    the blend extras, or the viewer never installs the mix. The texture manifest
+    supplies the rock and the skin swatch.
+    """
+    for model in models:
+        materials = list(model.materials or [])
+        for material in materials:
+            span = _span_for_material(model, material)
+            plan = overlay_plan(material, span) or skin_overlay_plan(material, span)
+            if not plan:
+                continue
+            index = materials.index(material)
+            only = len(materials) == 1
+            for part in model.parts:
+                linked = part.material_index == index
+                unlinked = part.material_index < 0 or part.material_index >= len(materials)
+                named = False
+                if unlinked and not only:
+                    ranked = _materials_for_shape(model, part)
+                    named = bool(ranked) and ranked[0] is material
+                if not (linked or (unlinked and only) or named):
+                    continue
+                part.blend = plan
+                part.overlay_texture = plan.get("texture") or ""
+
+
+def _layer_note(part) -> str:
+    """One details line: material, skin tint, rock sampler, and the mask."""
+    plan = part.blend or {}
+    color = plan.get("skinColor")
+    if color:
+        tint = "tint ({:.2f}, {:.2f}, {:.2f})".format(float(color[0]), float(color[1]), float(color[2]))
+    elif plan.get("skinVertex"):
+        tint = "vertex colour"
+    else:
+        tint = "tint"
+    mask = _c0_label(plan)
+    if plan.get("maskTexture"):
+        mask = f"{mask}; mask sampler {plan.get('maskSampler') or 'mask'} {plan['maskTexture']}"
+    shader = plan.get("shader") or ""
+    archive = plan.get("archive") or ""
+    where = ""
+    if archive or shader:
+        where = f" shader {archive}/{shader}".rstrip("/")
+    material = part.material or "material"
+    rock = f"{plan.get('sampler') or '_a0'} {part.overlay_texture}".strip()
+    return f"layers: {material}{where}; skin {tint}; rock {rock}; mask {mask}"
+
+
+def _skin_swatch(color) -> object:
+    """A 1x1 albedo of the skin tint. White when the vertices carry the colour."""
+    from ocarina_forge.formats.bntx import Texture
+
+    def channel(value, fallback: float) -> int:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = fallback
+        return max(0, min(255, int(round(number * 255))))
+
+    if color and len(color) >= 3:
+        rgba = bytes([
+            channel(color[0], 1),
+            channel(color[1], 1),
+            channel(color[2], 1),
+            channel(color[3] if len(color) > 3 else 1, 1),
+        ])
+    else:
+        rgba = bytes([255, 255, 255, 255])
+    return Texture("skin", 1, 1, rgba, 0, "skin tint")
+
+
+def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
+    """The second albedo, or a skin tint under the one albedo, when a mask exists."""
+    span = _span_for_material(model, material)
+    plan = overlay_plan(material, span) or skin_overlay_plan(material, span)
     if not plan:
         return {}
     found = _load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws)
@@ -1528,20 +1927,28 @@ def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
 
 
 def _choose_material(dump, model, material, hints, terrain, external, raws) -> dict:
-    sources = list(material.albedo)
+    sources = _albedo_sources(material)
     has_samplers = any(slot for slot, _tex in material.binds)
     pool_note = ""
     # A material that names samplers and has no _a0/_a1/_a2 stays flat.
     # The string pool is what painted later shapes magenta. Dummy terrain
     # (no textures, no UVs) is a solid colour, not a Tex lookup.
     proxy = bool(terrain and not sources and not has_samplers)
-    if not sources and not has_samplers and not proxy:
+    # Several materials cannot share one pool hit. Every Goron albedo contains
+    # the model name, and the first hit (the rock) would colour all of them.
+    several = len(getattr(model, "materials", None) or []) > 1
+    if not sources and not has_samplers and not proxy and not several:
         pooled = _pool_albedo(model.string_pool or model.extra_textures, _tex_index(dump) if dump is not None else {})
         if not pooled:
             pooled = base_color_name([name for name in model.extra_textures if texture_rank(name) < 2])
         if pooled:
             sources = [("", pooled)]
             pool_note = f"texture name taken from the file string pool ({pooled})"
+    if not sources and not proxy:
+        loose = _loose_albedo_names(model, material)
+        if loose:
+            sources = [("", name) for name in loose]
+            pool_note = "texture name taken from the model (" + ", ".join(loose) + ")"
     misses = []
     winner = None
     tried: list[str] = []
@@ -1636,6 +2043,10 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         found["tried"] = tried or found.get("tried") or []
         if flat_color == _BROW:
             wanted = ""
+    for path in getattr(model, "_companion_searched", ()) or ():
+        if path not in tried:
+            tried.append(path)
+    found["tried"] = tried or found.get("tried") or []
     error = found.get("error") or ""
     if proxy and winner is None:
         sampler, wanted = "", ""
@@ -1643,13 +2054,17 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
     elif misses and winner is not None:
         error = "; ".join(misses + ([error] if error else []))
     elif misses and winner is None:
-        error = "; ".join(misses)
+        error = _with_match_detail(material, tried, "; ".join(misses))
     elif not sources and not error:
         if material.binds:
             shown = ", ".join(f"{slot or '?'}={tex}" for slot, tex in material.binds)
             error = f"only non-color samplers ({shown})"
         else:
             error = "material has no texture names"
+        seen = _seen_texture_summary(model)
+        if seen and seen not in error:
+            error = f"{error}. {seen}"
+        error = _with_match_detail(material, tried, error)
     if pool_note:
         error = f"{pool_note}. {error}".strip() if error and winner is None else (pool_note if not error else f"{error}. {pool_note}")
     alpha = found.get("alpha", material.alpha) if found.get("image") is not None else material.alpha
@@ -1664,6 +2079,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         entry["wanted"] = ""
         entry["error"] = "terrain proxy"
         entry["decoded"] = False
+    _tag_resolution(entry, material, sampler, wanted, found, proxy and winner is None)
     result = _consider_water(
         [material.name, getattr(material, "shader", ""), *[tex for _slot, tex in sources]],
         list(material.binds),
@@ -1925,7 +2341,11 @@ def _read_tex(dump, relative: str) -> bytes:
     mem = _READ_MEM.get()
     if mem is not None and relative in mem:
         return mem[relative]
-    blob, _dict_id = dump.read_file(relative)
+    packed = _parse_pack_ref(relative)
+    if packed is not None:
+        blob = _read_pack_member(dump, packed[0], packed[1])
+    else:
+        blob, _dict_id = dump.read_file(relative)
     if mem is not None:
         mem[relative] = blob
     return blob
@@ -1965,7 +2385,11 @@ def _load_named(
     if model is not None and name:
         embedded = model.images.get(name) or model.images.get(name.lower())
     if embedded is not None and layer is None:
-        result["tried"] = ["embedded in the bfres"]
+        source = ""
+        if model is not None and name:
+            sources = getattr(model, "_companion_sources", {}) or {}
+            source = sources.get(name) or sources.get(name.lower()) or ""
+        result["tried"] = [source, "embedded in the bfres"] if source else ["embedded in the bfres"]
         result["found"] = "embedded"
         result["images"] = 1
         image, mode, used_cut, note = _accept(embedded, alpha, cutoff, keep_data=keep_data)
@@ -2323,41 +2747,683 @@ def _hint_tokens(hint: str) -> list[str]:
     return tokens
 
 
+def _flat_colour_note(part, why: str) -> str:
+    """The viewer sentence for a mesh that did not get an albedo image.
+
+    Vertex colours are a tint. They are not evidence that the material has no
+    texture. The sentence names the material, the sampler and texture names
+    that were seen, and the paths that were searched. It says the material
+    names no albedo only when none of those places had a texture name.
+    """
+    detail = getattr(part, "texture_error", "") or why or ""
+    material = getattr(part, "material", "") or ""
+    if part.texture:
+        reason = f"Base color “{part.texture}” {detail or 'was not usable'}"
+        if getattr(part, "colors", None):
+            reason = f"{reason} This shape also stores vertex colours."
+    else:
+        reason = detail or "No albedo sampler was usable and no Tex file matched."
+        if getattr(part, "colors", None):
+            if _texture_names_were_seen(part, reason):
+                reason = f"{reason} This shape also stores vertex colours."
+            else:
+                reason = f"{reason} This shape stores vertex colours and the material names no albedo texture."
+    if material and material not in reason:
+        reason = f"{material}: {reason}"
+    # A file that is on disk is painted by the texture request. A file that
+    # opened and was rejected (magenta, bad BNTX) is still a flat mesh.
+    if getattr(part, "texture_found", "") and not getattr(part, "texture_failure", ""):
+        return reason
+    if getattr(part, "texture_pending", False):
+        return reason
+    return f"{reason} This mesh uses a flat colour."
+
+
+def _texture_names_were_seen(part, detail: str) -> bool:
+    """True when the material, the model, or the note already has a texture name."""
+    if getattr(part, "texture", ""):
+        return True
+    if getattr(part, "binds", None):
+        return True
+    text = detail or ""
+    if "samplers " in text or "texture names " in text or "texture name taken" in text or "=" in text:
+        return True
+    return False
+
+
+def _with_match_detail(material, tried: list[str], error: str) -> str:
+    """Add the material, the sampler binds, and the paths that were opened."""
+    parts = [error] if error else []
+    name = getattr(material, "name", "") or ""
+    if name and name not in (error or ""):
+        parts.insert(0, name)
+    shown = ", ".join(f"{slot or '?'}={tex}" for slot, tex in material.binds if slot or tex)
+    if shown and shown not in (error or ""):
+        parts.append(f"samplers {shown}")
+    preview = ", ".join(dict.fromkeys(tried))
+    if len(preview) > 480:
+        preview = preview[:480].rsplit(",", 1)[0]
+    if preview and preview not in (error or ""):
+        parts.append(f"tried {preview}")
+    return ". ".join(parts)
+
+
+def _albedo_sources(material) -> list[tuple[str, str]]:
+    """Albedo binds, dropping samplers the shader variation marks unused.
+
+    ``0xFF`` in the ``+0x10`` sampler-index list means that slot is not sampled.
+    The numeric index is not a texture remap: the sampler dictionary stays
+    paired with the texture array. Dropping an unused ``_a0`` lets a later
+    albedo-named bind win instead of failing the whole material.
+    """
+    unused = _unused_sampler_names(material)
+    if not unused:
+        return list(material.albedo)
+    binds = [(slot, tex) for slot, tex in material.binds if slot not in unused]
+    return rank_albedo(binds)
+
+
+def _unused_sampler_names(material) -> set[str]:
+    seen: dict[str, list[int]] = {}
+    for block in getattr(material, "shader_blocks", None) or []:
+        if not isinstance(block, dict):
+            continue
+        for name, index in sampler_indices(block).items():
+            seen.setdefault(name, []).append(index)
+    return {name for name, indices in seen.items() if indices and all(item == 0xFF for item in indices)}
+
+
+def _tag_resolution(entry: dict, material, sampler: str, wanted: str, found: dict, proxy: bool) -> None:
+    """Mark a log row as sampler, Tex fallback, or a flat-colour cause. No texels."""
+    if proxy:
+        entry["via"] = ""
+        entry["flatCause"] = "terrain-proxy"
+        return
+    image = found.get("image")
+    if image is not None:
+        entry["via"] = _match_via(sampler, wanted, found.get("found") or "")
+        entry["flatCause"] = ""
+        return
+    entry["via"] = ""
+    entry["flatCause"] = _flat_cause(material, entry.get("error") or "")
+
+
+def _match_via(sampler: str, wanted: str, located: str) -> str:
+    if located == "embedded":
+        return "sampler" if sampler else "tex-fallback"
+    if sampler and wanted and _stem(located).lower() == _stem(wanted).lower():
+        return "sampler"
+    return "tex-fallback"
+
+
+def _flat_cause(material, error: str) -> str:
+    text = error or ""
+    lower = text.lower()
+    tokens = {
+        "".join(char for char in (slot or "").lower() if char.isalnum())
+        for slot, _tex in (getattr(material, "binds", None) or [])
+    }
+    tokens.discard("")
+    if tokens and tokens <= {"tc", "ta"}:
+        return "runtime-array"
+    if "terrain proxy" in lower:
+        return "terrain-proxy"
+    if "vertex colour" in lower:
+        return "vertex-colour"
+    if "only non-color" in lower:
+        return "non-color-samplers"
+    if "no texture names" in lower:
+        return "untextured"
+    if "magenta" in lower:
+        return "magenta-placeholder"
+    if "not a colour" in lower or "format" in lower or "bc4" in lower or "unsupported" in lower:
+        return "unsupported-format"
+    if "no tex file" in lower or "not a bntx" in lower or "was not usable" in lower:
+        return "missing-file"
+    if getattr(material, "binds", None):
+        return "non-color-samplers"
+    return "untextured"
+
+
 def _stem(name: str) -> str:
     text = name.strip().replace("\\", "/").lstrip("/")
-    if text.startswith("Work/"):
+    if text.lower().startswith("work/"):
         text = text[5:]
     stem = text.rsplit("/", 1)[-1]
+    lower = stem.lower()
     for suffix in (".bntx.zs", ".bntx"):
-        if stem.endswith(suffix):
+        if lower.endswith(suffix):
             stem = stem[: -len(suffix)]
+            lower = stem.lower()
             break
     return stem
 
 
+def _is_bntx_filename(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(".bntx.zs") or lower.endswith(".bntx")
+
+
+def _prefer_tex(paths: list[str]) -> str:
+    """Loose ``Tex/<name>.bntx.zs`` wins. That is the path the game opens."""
+
+    def score(path: str) -> tuple:
+        name = path.rsplit("/", 1)[-1].lower()
+        top = path.startswith("Tex/") and path.count("/") == 1
+        in_tex = top or path.startswith("Tex/") or "/Tex/" in f"/{path}"
+        zs = name.endswith(".bntx.zs")
+        if top and zs:
+            rank = 0
+        elif top:
+            rank = 1
+        elif in_tex and zs:
+            rank = 2
+        elif in_tex:
+            rank = 3
+        elif path.startswith("Banc/") and zs:
+            rank = 4
+        elif zs:
+            rank = 5
+        else:
+            rank = 6
+        return (rank, len(path), path.lower())
+
+    return sorted(paths, key=score)[0]
+
+
 def _tex_index(dump) -> dict[str, str]:
-    folder = dump.romfs / "Tex"
-    if not folder.is_dir():
+    """Lowercase texture stem to one romfs path.
+
+    Longshot's texture index walks every ``**/*.bntx.zs`` under the romfs, not
+    only the files sitting directly in ``Tex/``. The stem match is
+    case-insensitive. When several files share a stem, ``Tex/<name>.bntx.zs``
+    is the one the game loads.
+    """
+    root = dump.romfs
+    if not root.is_dir():
         return {}
+    stamp = 0
+    seen = False
+    for folder in (root, root / "Tex", root / "Pack", root / "Banc", root / "UI", root / "Effect"):
+        try:
+            stamp ^= folder.stat().st_mtime_ns
+            seen = True
+        except OSError:
+            continue
+    if not seen:
+        return {}
+    key = str(root)
+    cached = _TEX_INDEX.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    grouped: dict[str, list[str]] = {}
+    for dirpath, _dirs, files in os.walk(root):
+        for filename in files:
+            if not _is_bntx_filename(filename):
+                continue
+            path = Path(dirpath) / filename
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            grouped.setdefault(_stem(filename).lower(), []).append(relative)
+    index = {stem: _prefer_tex(paths) for stem, paths in grouped.items() if paths}
+    _TEX_INDEX[key] = (stamp, index)
+    return index
+
+
+def _stem_keys(stem: str) -> list[str]:
+    key = (stem or "").lower()
+    if not key:
+        return []
+    keys = [key]
+    if key.endswith("_albedo"):
+        keys.append(key[: -len("_albedo")])
+    elif key.endswith("_alb"):
+        keys.append(key[: -len("_alb")])
+    else:
+        keys.append(f"{key}_alb")
+        keys.append(f"{key}_albedo")
+    return list(dict.fromkeys(keys))
+
+
+def _pack_ref(pack_rel: str, member: str) -> str:
+    return f"pack://{pack_rel}//{member}"
+
+
+def _parse_pack_ref(relative: str) -> tuple[str, str] | None:
+    prefix = "pack://"
+    if not relative.startswith(prefix):
+        return None
+    pack_rel, sep, member = relative[len(prefix) :].partition("//")
+    if not sep or not pack_rel or not member or ".." in pack_rel.split("/"):
+        return None
+    return pack_rel, member
+
+
+def _read_pack_member(dump, pack_rel: str, member: str) -> bytes:
+    from ocarina_forge.formats.zsio import decompress, is_zstd
+
+    blob, _dict_id = dump.read_file(pack_rel)
+    try:
+        archive = Sarc(blob)
+    except ValueError as exc:
+        raise BancError(f"{pack_rel} is not a SARC pack: {exc}", "bad_pack") from exc
+    data = archive.read(member)
+    if data[:4] == b"BNTX" or not is_zstd(data):
+        return data
+    payload, _used = decompress(data, dump.dicts())
+    return payload
+
+
+_TOKEN_SKIP = {"alb", "albedo", "tex", "bntx", "model"}
+_COMPANION_LIST: dict[str, tuple[int, list[str]]] = {}
+_COMPANION_IMAGES: dict[str, tuple[int, dict, list[str]]] = {}
+
+
+def _name_tokens(text: str) -> set[str]:
+    token: list[str] = []
+    found: set[str] = set()
+    for char in (text or "").lower():
+        if char.isalnum():
+            token.append(char)
+        elif token:
+            found.add("".join(token))
+            token = []
+    if token:
+        found.add("".join(token))
+    return {item for item in found if len(item) >= 3 and item not in _TOKEN_SKIP}
+
+
+def _hint_prefixes(hints: list[str]) -> list[str]:
+    """Full hint tokens, then shorter project prefixes, longest first.
+
+    ``Npc_Goron_GOU_Biggoron`` yields that token and ``Npc_Goron_GOU``.
+    """
+    full: list[str] = []
+    extra: list[str] = []
+    for token in hints:
+        if not token or "/" in token or token in {"Model", "Tex", "Banc", "Pack"}:
+            continue
+        if token not in full:
+            full.append(token)
+        parts = [part for part in token.split("_") if part]
+        for end in range(len(parts) - 1, 1, -1):
+            prefix = "_".join(parts[:end])
+            if len(prefix) < 8 or prefix in full or prefix in extra:
+                continue
+            extra.append(prefix)
+    extra.sort(key=len, reverse=True)
+    return full + extra
+
+
+def _loose_albedo_names(model, material) -> list[str]:
+    """Albedo-like names that are not on an ``_a0`` bind.
+
+    Shader options, the assign map, and the file's albedo strings count. A
+    long list with no token in common with this material stays unused, so a
+    string pool cannot paint a later shape with an unrelated name. One name,
+    or a name that shares a token with the material or the model, is used.
+    """
+    found: list[str] = []
+
+    def add(text) -> None:
+        if not isinstance(text, str):
+            return
+        stem = text.strip().replace("\\", "/").rsplit("/", 1)[-1]
+        if not stem or stem in found or len(stem) > 80:
+            return
+        if texture_rank(stem) != 0:
+            return
+        lowered = stem.lower()
+        if lowered.startswith("materialalb") or lowered.startswith("materialcmb"):
+            return
+        found.append(stem)
+
+    for _slot, tex in material.binds:
+        add(tex)
+    for mapping in (getattr(material, "options", None) or {}, getattr(material, "assign", None) or {}):
+        for value in mapping.values():
+            add(value)
+    for info in getattr(material, "render_info", None) or []:
+        if isinstance(info, dict):
+            add(str(info.get("value") or ""))
+    for name in list(model.extra_textures or []) + list(model.string_pool or []) + list(model.images or {}):
+        add(name)
+    if not found:
+        return []
+    material_tokens = _name_tokens(material.name)
+    matched = [name for name in found if material_tokens & _name_tokens(name)]
+    if matched:
+        return matched[:4]
+    # One material may borrow a name that only shares the model. Several
+    # materials must not: every Goron texture contains "goron", and the first
+    # one in the pool (often the rock) would colour the hair, the skin, and
+    # the eyes.
+    several = len(getattr(model, "materials", None) or []) > 1
+    if not several:
+        model_tokens = _name_tokens(getattr(model, "name", "") or "")
+        shared = [name for name in found if model_tokens & _name_tokens(name)]
+        if shared:
+            return shared[:4]
+        if len(found) == 1:
+            return found
+    return []
+
+
+def _seen_texture_summary(model) -> str:
+    """Material, sampler, and texture names on this model, for a flat-colour note."""
+    binds: list[str] = []
+    names: list[str] = []
+    for material in model.materials or []:
+        label = material.name or "material"
+        for slot, tex in material.binds:
+            item = f"{label} {slot or '?'}={tex}" if tex or slot else ""
+            if item and item not in binds:
+                binds.append(item)
+            if tex and texture_rank(tex) == 0 and tex not in names:
+                names.append(tex)
+    for tex in list(model.extra_textures or []) + list(model.string_pool or []) + list(model.images or {}):
+        if tex and texture_rank(tex) == 0 and tex not in names:
+            names.append(tex)
+    parts = []
+    if binds:
+        parts.append("samplers " + ", ".join(binds[:8]))
+    if names:
+        parts.append("texture names " + ", ".join(names[:8]))
+    searched = list(getattr(model, "_companion_searched", ()) or ())
+    if searched:
+        parts.append("searched " + ", ".join(searched[:8]))
+    return ". ".join(parts)
+
+
+def _companion_filename(filename: str) -> bool:
+    lower = filename.lower()
+    if ".anim." in lower or ".bfres.mc" in lower:
+        return False
+    if not (lower.endswith(".bfres") or lower.endswith(".bfres.zs")):
+        return False
+    stem = lower
+    for suffix in (".bfres.zs", ".bfres"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    return ".tex" in stem or stem.endswith("_tex")
+
+
+def _model_filenames(dump) -> list[str]:
+    folder = dump.romfs / "Model"
     try:
         stamp = folder.stat().st_mtime_ns
     except OSError:
-        return {}
+        return []
     key = str(folder)
-    cached = _TEX_INDEX.get(key)
+    cached = _COMPANION_LIST.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    try:
+        names = [path.name for path in folder.iterdir() if path.is_file()]
+    except OSError:
+        names = []
+    _COMPANION_LIST[key] = (stamp, names)
+    return names
+
+
+def _project_prefixes(hint: str, prefixes: list[str]) -> list[str]:
+    """Prefixes of the model filename, not of every other token in the hint."""
+    names: list[str] = []
+    for piece in hint.replace("\\", "/").split():
+        if "Model/" not in piece and ".bfres" not in piece:
+            continue
+        name = piece.rsplit("/", 1)[-1]
+        for suffix in (".bfres.zs", ".bfres.mc", ".bfres"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        for token in name.split("."):
+            if token and token not in names:
+                names.append(token)
+    chosen = [prefix for prefix in prefixes if any(token == prefix or token.startswith(prefix + "_") for token in names)]
+    return chosen or list(prefixes)
+
+
+def _companion_search(dump, hint: str) -> tuple[list[str], list[str]]:
+    """Companion bfres files to open, and the paths a flat-colour note should mention."""
+    prefixes = _hint_prefixes(_hint_tokens(hint))
+    searched: list[str] = []
+    for prefix in _project_prefixes(hint, prefixes):
+        for relative in (
+            f"Model/{prefix}.Tex.bfres.zs",
+            f"Model/{prefix}_Tex.bfres.zs",
+            f"Pack/Actor/{prefix}.pack.zs",
+        ):
+            if relative not in searched:
+                searched.append(relative)
+    opened: list[str] = []
+    hint_path = hint.replace("\\", "/")
+    for filename in _model_filenames(dump):
+        if not _companion_filename(filename):
+            continue
+        relative = f"Model/{filename}"
+        if relative in hint_path:
+            continue
+        stem = filename
+        for suffix in (".bfres.zs", ".bfres", ".BFRES.ZS", ".BFRES"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        stem_lower = stem.lower()
+        if any(stem_lower.startswith(prefix.lower()) for prefix in prefixes):
+            if relative not in opened:
+                opened.append(relative)
+            if relative not in searched:
+                searched.append(relative)
+    return opened, searched
+
+
+def _companion_payload(dump, relative: str) -> tuple[dict, list[str]]:
+    path = dump.romfs / relative
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return {}, []
+    key = str(path)
+    cached = _COMPANION_IMAGES.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1], cached[2]
+    images: dict = {}
+    names: list[str] = []
+    try:
+        from ocarina_forge.formats.zsio import decompress, is_zstd
+
+        blob, _dict_id = dump.read_file(relative)
+        if is_zstd(blob):
+            blob, _dict_id = decompress(blob, dump.dicts())
+        parsed = parse(blob)
+    except (BancError, FresError, OSError, ValueError, EOFError):
+        _COMPANION_IMAGES[key] = (stamp, images, names)
+        return images, names
+    for model in parsed:
+        images.update(model.images)
+        for tex in list(model.extra_textures) + list(model.images):
+            if tex and tex not in names:
+                names.append(tex)
+        for material in model.materials:
+            for _slot, tex in material.binds:
+                if tex and tex not in names:
+                    names.append(tex)
+    _COMPANION_IMAGES[key] = (stamp, images, names)
+    return images, names
+
+
+def _merge_companions(dump, models, hint: str) -> None:
+    """Copy images named by a sibling ``Model/<prefix>.Tex.bfres`` onto the mesh."""
+    if dump is None:
+        return
+    opened, searched = _companion_search(dump, hint)
+    images: dict = {}
+    sources: dict[str, str] = {}
+    names: list[str] = []
+    for relative in opened:
+        found, found_names = _companion_payload(dump, relative)
+        for name, image in found.items():
+            if name not in images:
+                images[name] = image
+                sources[name] = relative
+        for name in found_names:
+            if name not in names:
+                names.append(name)
+    for model in models:
+        setattr(model, "_companion_searched", searched)
+        owned = getattr(model, "_companion_sources", None)
+        if not isinstance(owned, dict):
+            owned = {}
+            setattr(model, "_companion_sources", owned)
+        for name, image in images.items():
+            if name not in model.images:
+                model.images[name] = image
+                owned[name] = sources.get(name, "")
+        for name in names:
+            if name not in model.extra_textures:
+                model.extra_textures.append(name)
+
+
+def _shared_packs(dump) -> list[str]:
+    folder = dump.romfs / "Pack"
+    if not folder.is_dir():
+        return []
+    found = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return []
+    for path in entries:
+        if path.is_file() and (path.name.lower().endswith(".pack.zs") or path.name.lower().endswith(".pack")):
+            found.append(f"Pack/{path.name}")
+
+    def rank(relative: str) -> tuple:
+        lower = relative.lower()
+        if "residentcommon" in lower:
+            return (0, lower)
+        if "bootup" in lower:
+            return (1, lower)
+        if lower.endswith("/zsdic.pack.zs") or lower.endswith("/zsdic.pack"):
+            return (9, lower)
+        return (2, lower)
+
+    found.sort(key=rank)
+    return [item for item in found if not item.lower().endswith("/zsdic.pack.zs") and not item.lower().endswith("/zsdic.pack")]
+
+
+_ACTOR_PACK_LIST: dict[str, tuple[int, list[tuple[str, str]]]] = {}
+
+
+def _actor_pack_stems(dump) -> list[tuple[str, str]]:
+    """`(lowercase stem, Pack/Actor/<file>)` for every actor pack. Longest stem first."""
+    folder = dump.romfs / "Pack" / "Actor"
+    try:
+        stamp = folder.stat().st_mtime_ns
+    except OSError:
+        return []
+    key = str(folder)
+    cached = _ACTOR_PACK_LIST.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    rows: list[tuple[str, str]] = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        entries = []
+    for path in entries:
+        if not path.is_file():
+            continue
+        stem = path.name.lower()
+        for suffix in (".pack.zs", ".pack"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        if len(stem) < 8:
+            continue
+        rows.append((stem, f"Pack/Actor/{path.name}"))
+    rows.sort(key=lambda item: len(item[0]), reverse=True)
+    _ACTOR_PACK_LIST[key] = (stamp, rows)
+    return rows
+
+
+def _name_packs(dump, name: str) -> list[str]:
+    """Actor packs whose file name is inside the texture name.
+
+    ``CmnTex_Chara_Mt_Skin_Npc_Goron_GON_001_Alb`` opens
+    ``Pack/Actor/CmnTex_Chara.pack.zs`` and ``Pack/Actor/Npc_Goron.pack.zs``
+    even when the gyaml does not mention those projects. A shared character
+    texture is still ``Tex/<name>.bntx.zs`` when that loose file exists; this
+    is the archive the loose file was not copied out of.
+    """
+    if dump is None:
+        return []
+    stem = _stem(name).lower()
+    if len(stem) < 8:
+        return []
+    found: list[str] = []
+    for pack_stem, relative in _actor_pack_stems(dump):
+        if pack_stem in stem and relative not in found:
+            found.append(relative)
+    return found
+
+
+def _actor_packs(dump, hints: list[str]) -> list[str]:
+    """The actor pack, then packs named by a prefix of the model project.
+
+    ``Npc_Goron_GOU_Biggoron`` also opens ``Pack/Actor/Npc_Goron_GOU.pack.zs``
+    when that archive is the one that holds the shared goron textures.
+    """
+    found = []
+    for token in _hint_prefixes(hints):
+        for suffix in (".pack.zs", ".pack"):
+            relative = f"Pack/Actor/{token}{suffix}"
+            if relative not in found and (dump.romfs / relative).is_file():
+                found.append(relative)
+    return found
+
+
+def _pack_tex_index(dump, pack_rel: str) -> dict[str, str]:
+    path = dump.romfs / pack_rel
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return {}
+    key = str(path)
+    cached = _PACK_TEX.get(key)
     if cached and cached[0] == stamp:
         return cached[1]
     index: dict[str, str] = {}
     try:
-        entries = list(folder.iterdir())
-    except OSError:
-        return {}
-    for path in entries:
-        if not path.is_file():
+        blob, _dict_id = dump.read_file(pack_rel)
+        archive = Sarc(blob)
+    except (BancError, ValueError, OSError):
+        _PACK_TEX[key] = (stamp, index)
+        return index
+    for name in archive.names():
+        if not _is_bntx_filename(name):
             continue
-        index.setdefault(_stem(path.name).lower(), f"Tex/{path.name}")
-    _TEX_INDEX[key] = (stamp, index)
+        index.setdefault(_stem(name).lower(), _pack_ref(pack_rel, name))
+    _PACK_TEX[key] = (stamp, index)
     return index
+
+
+def _archive_tex(dump, keys: list[str], hints: list[str]) -> list[str]:
+    """Model pack first, then shared packs. Scene banc files are loose, not in here."""
+    found = []
+    packs = _actor_packs(dump, hints) + _shared_packs(dump)
+    for pack_rel in packs:
+        index = _pack_tex_index(dump, pack_rel)
+        for key in keys:
+            ref = index.get(key)
+            if ref and ref not in found:
+                found.append(ref)
+        if found:
+            break
+    return found
 
 
 def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
@@ -2367,20 +3433,29 @@ def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
         if (dump.romfs / relative).is_file():
             return relative, tried
     index = _tex_index(dump)
-    stem = _stem(name).lower()
-    keys = [stem]
-    if stem.endswith("_alb"):
-        keys.append(stem[: -len("_alb")])
-    elif stem.endswith("_albedo"):
-        keys.append(stem[: -len("_albedo")])
-    else:
-        keys.append(f"{stem}_alb")
+    keys = _stem_keys(_stem(name))
     for key in keys:
         path = index.get(key)
         if path and path not in tried:
             tried.append(path)
             if (dump.romfs / path).is_file():
                 return path, tried
+    archived = _archive_tex(dump, keys, hints)
+    for ref in archived:
+        if ref not in tried:
+            tried.append(ref)
+    if archived:
+        return archived[0], tried
+    for pack_rel in _name_packs(dump, name):
+        if pack_rel not in tried:
+            tried.append(pack_rel)
+        index = _pack_tex_index(dump, pack_rel)
+        for key in keys:
+            ref = index.get(key)
+            if ref and ref not in tried:
+                tried.append(ref)
+            if ref:
+                return ref, tried
     for hint in hints:
         key = hint.lower()
         if len(key) < 4:
@@ -2403,7 +3478,7 @@ def _resolve_tex(dump, name: str, hints: list[str]) -> tuple[str, list[str]]:
 
 def _tex_candidates(name: str) -> list[str]:
     text = name.strip().replace("\\", "/").lstrip("/")
-    if text.startswith("Work/"):
+    if text.lower().startswith("work/"):
         text = text[5:]
     paths: list[str] = []
 
@@ -2411,21 +3486,18 @@ def _tex_candidates(name: str) -> list[str]:
         if path and path not in paths and ".." not in path.split("/"):
             paths.append(path)
 
+    lower = text.lower()
     if "/" in text:
-        if text.endswith(".bntx.zs"):
+        if lower.endswith(".bntx.zs"):
             add(text)
             add(text[:-3])
-        elif text.endswith(".bntx"):
+        elif lower.endswith(".bntx"):
             add(text + ".zs")
             add(text)
         else:
             add(f"{text}.bntx.zs")
             add(f"{text}.bntx")
-    stem = text.rsplit("/", 1)[-1]
-    for suffix in (".bntx.zs", ".bntx"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
+    stem = _stem(text)
     add(f"Tex/{stem}.bntx.zs")
     add(f"Tex/{stem}.bntx")
     return paths

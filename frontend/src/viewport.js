@@ -37,7 +37,7 @@ import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { planAssetFetches, wantsMesh } from "./layers.js";
-import { applyTextureManifest, presentTextures } from "./texture-apply.js";
+import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -836,7 +836,11 @@ let convertSlots = 8;
     });
     if (!plan.textures) return textureDocs.get(gyaml);
     const pending = typeof hooks.fetchTextures === "function"
-      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch(() => ({ materials: {} }))
+      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch((error) => ({
+        materials: {},
+        status: "missing",
+        error: `file not found: texture request failed (${error && error.message ? error.message : error})`,
+      }))
       : Promise.resolve({ materials: {} });
     textureDocs.set(gyaml, pending);
     return pending;
@@ -899,6 +903,23 @@ let convertSlots = 8;
     }
   }
 
+  function refreshBlendMaps(parts) {
+    for (const part of parts || []) {
+      const material = part && part.material;
+      const blend = material && material.userData && material.userData.blend;
+      if (!material || !blend) continue;
+      if (material.userData.blendMap && material.userData.blendMapUniform) {
+        material.userData.blendMapUniform.value = material.userData.blendMap;
+      }
+      const geometry = part.geometry;
+      const hasMask = geometry && geometry.getAttribute && geometry.getAttribute("blendMask");
+      if (hasMask && !material.userData.blendShader) installBlendShader(material);
+      if (blendNodes && hasMask && material.userData.blendMap && material.map && !material.userData.blendNode) {
+        blendNodes.attachBlend(material);
+      }
+    }
+  }
+
   async function paintActorTextures(gyaml, url, generation = textureGeneration) {
     if (!url) return;
     const parsed = parsedTemplates.get(url);
@@ -906,7 +927,15 @@ let convertSlots = 8;
     const manifest = await textureManifest(gyaml);
     if (generation !== textureGeneration) return;
     if (!parsedTemplates.has(url)) return;
-    await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
+    let report;
+    try {
+      report = await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
+    } catch (error) {
+      rememberTextureNote(gyaml, `decode error: ${error && error.message ? error.message : error}`);
+      return;
+    }
+    rememberTextureNote(gyaml, formatTextureReport(report));
+    refreshBlendMaps(parsed.parts);
     if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
     presentTextures(parsed.parts, texturesShown);
     finishTextureEdit(parsed.parts);
@@ -2441,8 +2470,10 @@ let convertSlots = 8;
           geometry.setAttribute("blendUv", geometry.getAttribute("uv1"));
         }
         material.vertexColors = false;
-        installBlendShader(material);
-        if (blendNodes) blendNodes.attachBlend(material);
+        if (material.userData.blendMap) {
+          installBlendShader(material);
+          if (blendNodes) blendNodes.attachBlend(material);
+        }
       }
       const sphere = geometry.boundingSphere ? geometry.boundingSphere.clone() : new THREE.Sphere(new THREE.Vector3(), 1);
       const keepCpu = isPreviewWater(material, child.name || "", url || "");
@@ -2467,6 +2498,13 @@ let convertSlots = 8;
       });
       index += 1;
     });
+    // A stale flat glb can still share one material across shape keys. Split
+    // that object before the batch key is recorded, and keep the key on the
+    // shape so those batches do not fold back onto the first material.
+    separateSharedMaterials(parts);
+    for (const part of parts) {
+      part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey}`;
+    }
     return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
   }
 
@@ -3258,7 +3296,12 @@ let convertSlots = 8;
   blendWeight = smoothstep(0.35, 0.65, mask);
   blendMossUv = vMossUv * blendScale + blendTranslate;
   vec4 moss = texture2D(blendMap, blendMossUv);
-  diffuseColor.rgb = mix(diffuseColor.rgb, moss.rgb, blendWeight);
+  vec3 low = diffuseColor.rgb;
+  if (blendSkin > 0.5) {
+    low = blendSkinColor;
+    if (blendSkinVertex > 0.5) low *= vBlendMask.rgb;
+  }
+  diffuseColor.rgb = mix(low, moss.rgb, blendWeight);
   if (blendDebug > 0.5) diffuseColor.rgb = vec3(blendWeight);
 }`;
 
@@ -3298,6 +3341,15 @@ let convertSlots = 8;
     material.userData.blendTranslateUniform = { value: new THREE.Vector2(Number(translate[0]) || 0, Number(translate[1]) || 0) };
     material.userData.blendChannelUniform = { value: { r: 0, g: 1, b: 2, a: 3 }[blend.channel] ?? 0 };
     material.userData.blendUv1Uniform = { value: blend.uv === "_u1" || blend.uv === "u1" ? 1 : 0 };
+    const skinColor = blend.skinColor || [1, 1, 1];
+    material.userData.blendSkinUniform = { value: blend.skin ? 1 : 0 };
+    material.userData.blendSkinVertexUniform = { value: blend.skinVertex ? 1 : 0 };
+    material.userData.blendSkinColorUniform = {
+      value: new THREE.Vector3(Number(skinColor[0] ?? 1), Number(skinColor[1] ?? 1), Number(skinColor[2] ?? 1)),
+    };
+    if (!material.userData.blendMapUniform) {
+      material.userData.blendMapUniform = { value: material.userData.blendMap || null };
+    }
     if (material.userData.mossMap && !material.userData.blendMap) {
       material.userData.blendMap = material.userData.mossMap;
       material.userData.blendMap.wrapS = THREE.RepeatWrapping;
@@ -3309,6 +3361,7 @@ let convertSlots = 8;
       material.emissive.setRGB(0, 0, 0);
       material.emissiveMap = null;
     }
+    material.userData.blendMapUniform.value = material.userData.blendMap || null;
     if (!material.roughnessMap) {
       const orm = sharedOrmMap();
       material.roughnessMap = orm;
@@ -3338,7 +3391,10 @@ let convertSlots = 8;
       shader.uniforms.blendScale = material.userData.blendScaleUniform;
       shader.uniforms.blendTranslate = material.userData.blendTranslateUniform;
       shader.uniforms.blendChannel = material.userData.blendChannelUniform;
-      shader.uniforms.blendMap = { value: material.userData.blendMap };
+      shader.uniforms.blendSkin = material.userData.blendSkinUniform;
+      shader.uniforms.blendSkinVertex = material.userData.blendSkinVertexUniform;
+      shader.uniforms.blendSkinColor = material.userData.blendSkinColorUniform;
+      shader.uniforms.blendMap = material.userData.blendMapUniform;
       shader.uniforms.orm1Map = material.userData.orm1Uniform;
       shader.uniforms.normal1Map = material.userData.normal1Uniform;
       shader.vertexShader = shader.vertexShader
@@ -3352,6 +3408,9 @@ uniform sampler2D orm1Map;
 uniform sampler2D normal1Map;
 uniform float blendDebug;
 uniform float blendChannel;
+uniform float blendSkin;
+uniform float blendSkinVertex;
+uniform vec3 blendSkinColor;
 uniform vec2 blendScale;
 uniform vec2 blendTranslate;
 float blendWeight;
@@ -4030,10 +4089,23 @@ uniform float terrainLayerMissing;`
     requestRender();
   }
 
+  function rememberTextureNote(gyaml, note) {
+    const text = note || "";
+    let changed = false;
+    for (const entry of entries.values()) {
+      if (entry.gyaml !== gyaml || entry.textureNote === text) continue;
+      entry.textureNote = text;
+      changed = true;
+    }
+    if (changed && hooks.onModels) hooks.onModels();
+  }
+
   function modelInfo(id) {
     const entry = entries.get(id);
     if (!entry) return null;
-    return entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
+    const info = entry.modelMeta || { status: "loading", reason: "Looking up the model.", source: "", triangles: 0, textures: 0 };
+    if (!entry.textureNote) return info;
+    return { ...info, textureNote: entry.textureNote };
   }
 
   function auditPlacements() {
