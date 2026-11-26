@@ -93,3 +93,7 @@ From the repo, with the venv active and the dump that contains `romfs`:
 ## WebGPU compressed uploads
 
 On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r170's missing BC7 `getFormat` case is patched at init and by a Vite plugin. See `docs/rendering-performance.md`.
+
+## Batch materials
+
+The `BatchedMesh` uses the same material object the texture upload writes. The batch key includes that texture and the tint. A white clone is not used: on the Field it left the draw untextured while the GPU still held the uploaded BC7 maps (8840 textures, profile tex 3). Texture arrays are not used. See `docs/rendering-performance.md`.

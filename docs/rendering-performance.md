@@ -22,7 +22,7 @@ CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTexture
 
 ### GPU instancing
 
-Identical models already share one `BatchedMesh` per material (`batchKey`). Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Profile** shows `inst` for the live instance count.
+Identical models that share a material share one `BatchedMesh`. Geometry is uploaded once; each actor is an instance with its own matrix and visibility. The batch key is the texture, alpha mode, side, tint, and vertex layout. The material on the batch is the material the texture upload writes, so a map assigned after the mesh is built is the map the draw samples. Repeated placements stay instanced: `groupGeometryDraws` folds consecutive copies of one geometry on WebGPU. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Profile** shows `inst` for the live instance count.
 
 ### Static batching (merge vs instances)
 
@@ -56,7 +56,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of geometry plus BC7 (`__forgeMemory()`). The JS heap and a 4096-mesh count are last-resort caps. See [Residency budget](#residency-budget) |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
-| Texture arrays / atlases | Fewer binds, more meshes in one batch; needs authoring or a pack step | Not implemented |
+| Texture arrays / atlases | Fewer binds, more meshes in one batch | Not in this build. `ac3254f` put models on array layers and the Field drew white (`tex 6`). `8ab4f0f` and `2046b64` still drew white, and parking batch attributes took the Field heap from 727 MB to 4.6–6.3 GB. See [Instance tint](#instance-tint) |
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
@@ -66,7 +66,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 
 The viewer used to stop background loads at **240** unique meshes (hard evict at 280) or at **2.2 GB** of JS heap (hard **2.8 GB**), nearest first, at most 8 evictions a pass. One Field model can be about ten times another, so a count fills the tab with whatever happened to be nearby.
 
-The soft limit is now bytes. `__forgeMemory()` sums geometry CPU bytes and BC7 texture GPU bytes (`geometries.cpuBytes` + `textures.byFormat.BC7.gpu`). That total is the residency budget:
+The soft limit is bytes. `__forgeMemory()` sums geometry CPU bytes and BC7 texture GPU bytes (`geometries.cpuBytes` + `textures.byFormat.BC7.gpu`). That total is the residency budget:
 
 | Limit | Value | What it does |
 | --- | --- | --- |
@@ -90,7 +90,7 @@ This checkout has no game dump, so Hyrule Field and Kokiri Forest were not loade
 | Before | 243 | 201 | 99 | 360 | 2.46 GB | 240 |
 | After | 0 | 0 | 0 | 180 | 1.20 GB | 122 |
 
-The drop is large here because the size mix makes the byte budget bind before the count cap. On the measured Field (25 Nov 2026) 241 unique meshes were about **1.0 GB** of geometry plus BC7. That run stopped because the count cap was 240, not because the byte budget was full. The count cap is now 4096, so a Field load continues until geometry plus BC7 reaches 1.2 GB or the JS heap reaches 2.2 GB.
+The drop is large here because the size mix makes the byte budget bind before the count cap. On the measured Field (25 Nov 2026) 241 unique meshes were about **1.0 GB** of geometry plus BC7. That run stopped because the count cap was 240, not because the byte budget was full. The count cap is now 4096. A Field load continues while the live CPU copies stay under 1.2 GB and the JS heap stays under 2.2 GB. GPU BC7 is no longer what stops it.
 
 Kokiri Forest Child is about 470–482 unique models (`262 loaded` + `207 background` on an idle view, and 482 in the 25 Nov load). At 241 resident meshes the heap was **386 MB**. The 240 cap was holding the other models, including ones in view, and the HUD called that remainder `background` with `0 queued` because `canFillMap` refuses to run while the soft cap holds. `main` has the same 240 cap (`overResidentSoftCap` in `resident-budget.js`) and the same `canFillMap` check, so an idle Kokiri on main also keeps boxes for every unique model past the nearest 240. A model in the current view (tier below 4) now evicts a farther resident without waiting out the unload cooldown. Models the budget is actually holding show as `N capped` instead of `0 queued`.
 
@@ -108,6 +108,18 @@ Forge pins `three@0.170.0`. The current npm release checked for this note is **0
 
 r170's draw path still calls synchronous `createRenderPipeline` on a cache miss. Later releases have not removed that. Open reports on the 0.18x line: `compileComputeAsync` can resolve with `pipeline` unset and a later `setPipeline` throws ([#35556](https://github.com/mrdoob/three.js/issues/35556), r187), and `compileAsync` can miss the pipeline a later draw actually uses when the color format differs ([#35659](https://github.com/mrdoob/three.js/issues/35659), checked on r186 and current dev). A background-compilation pull request ([#33766](https://github.com/mrdoob/three.js/pull/33766)) was closed without merging. The BC7 `getFormat` patch, the batched-draw fold, and the rest of the r170 WebGPU shims would all have to be re-checked across 17 minor versions. That is not a small upgrade. The compile-before-attach path and the draw guard cover the race on r170.
 
+## Instance tint
+
+Tint stays in the batch key, the same as `main`. `a9755b2` took tint out of the key and drew each coalesced batch with a white clone (`prepareBatchMaterial`). On Hyrule Field that clone was not the material the BC7 upload wrote: gpu 2255 geom / 8840 tex, profile tex 3, frame 130 ms, and every model except terrain and grass was cream. The GPU already held the maps. The draw sampled the clone, which was built before the map was assigned, or compiled its node shader with no map and never rebuilt it. `setColorAt` on that clone cannot sample a map the material does not hold. Grass stayed textured because the cutout node closes over `material.map`. Terrain is not cloned.
+
+The batch material is again the material `applyTextureManifest` updates. The key is image, alpha, side, tint, indexed, and attributes (`batchKey` in `instance.js`). A compressed image cannot be drawn into a canvas, so it is keyed by its own id. Two BC7 maps of the same size do not share a batch.
+
+Texture arrays are not in this build. `ac3254f` replaced batch maps with `CompressedArrayTexture` layers. On Hyrule Field (WebGPU, Windows) that was 574 draws, gpu 30 geom / 48 tex, heap 727 MB, tex 6, and every model except terrain was flat white. `8ab4f0f` still drew white (`tex 3`, `unresolved 0`) because `copyTextureToTexture` into a BC7 array did not fail validation and did not fill the array. `2046b64` turned arrays off (`localStorage['ocarinaforge.textureArrays']` unset) and the Field was still untextured: 227 draws, gpu 28 geom / 35 tex, tex 1, heap 4629 MB. The console warning was three's `Bindings._update: binding should be available`, which fires when a node shader's texture has no GPU image. The batch material had dropped or replaced the map the shader still sampled, or `releaseTextureCpu` had cleared the bytes before that image existed. `a9755b2` dropped arrays and attribute parking. The heap came back (1366 MB, 794 loaded, 709 meshes, 0 queued) and the models stayed cream, which is the clone described above.
+
+Parking batch attributes is not in this build either. `ac3254f` (no park) was 727 MB at 252 models. `8ab4f0f` parked normals and UVs out of shared glTF buffers and the same load was 6304 MB at 160 meshes. `2046b64` still held 4629 MB. The page heap is `performance.memory.usedJSHeapSize` (this isolate's ArrayBuffers, not the GPU). Those copies were the extra gigabytes. Part clones are still released after `addGeometry`, which is the same path as `main`. Decoded texture bytes are released only after `textureGpuReady` says the GPU image exists, and then only after three frames.
+
+A unit test builds a BC7 `CompressedTexture` on a `MeshStandardMaterial` and asserts that material still holds the map and its colour, and that `batchKey` changes when the image or the tint changes. There is no white clone.
+
 ## GPU picking
 
 Clicks and hovers draw the visible pickable meshes into an offscreen RGBA8 target instead of raycasting a CPU copy of every part. `frontend/src/gpu-pick.js` packs a 24-bit actor id into the color (little-endian RGB, alpha 0 means a miss). A second mode packs the camera-to-surface distance into the same 24 bits so alt-drag can focus the point under the cursor. The readback is asynchronous. Hover is coalesced to one pick per frame; a click picks immediately. WebGL reads a single pixel. WebGPU reads a 64-pixel-wide strip, because three r170's `copyTextureToBuffer` aligns rows to 256 bytes and rejects a 1-pixel RGBA8 row. The cursor pixel is one texel of that strip.
@@ -116,9 +128,13 @@ Instanced preview meshes sample a per-instance id texture (`gl_InstanceID` / `in
 
 Alpha-tested materials discard in the id shader before the id is written, so a foliage hole is not a solid hit. Alt-click, and a second click on the same front actor, peel up to eight ids front to back. `chooseHit` still walks that stack together with volume edges.
 
-After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes. These stay on the CPU on purpose:
+After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. An interleaved buffer is released once, by clearing `data.array`, because assigning `.array` on the attribute only shadows the getter. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes. The batch geometry itself stays: snap raycasts it.
 
-- The `BatchedMesh` arrays. They are the uploaded copy and the source for the next rebuild.
+The glTF JSON, the dependency cache, and the binary chunk are dropped once the scene has been built (`gltf-release.js`). Decoded texture bytes are released after the GPU image exists (`textureGpuReady`) and three further frames have drawn it. Releasing earlier leaves WebGPU with no texture for the binding the material samples.
+
+These stay on the CPU on purpose:
+
+- The `BatchedMesh` geometry. Snap raycasts it, and a rebuild copies part attributes back out of it.
 - The selected actor's model, so selecting it does not depend on a round-trip and the mesh audit still sees its vertices.
 - Water parts. Pond fish placement raycasts the water surface.
 - Terrain meshes and their BVH. Snap uses the wasm ground sampler (`sampleGroundSurface`). It falls back to a heightmap raycast only when that sampler is absent, and it does not use the id buffer.
@@ -219,7 +235,7 @@ The RGBA column over-counts clones; unique-source accounting was added after thi
 
 ### After CPU texture release and a resident mesh budget
 
-The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. This measurement stopped further loads at **240** unique meshes (or **2.2 GB** JS heap). A farther resident was evicted only when a closer model needed the slot. The hard cap then was **280** unique or **2.8 GB** heap. The working limit now is the 1.2 GB geometry-plus-BC7 budget; 4096 meshes is only the last resort. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
+The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. This measurement stopped further loads at **240** unique meshes (or **2.2 GB** JS heap). A farther resident was evicted only when a closer model needed the slot. The hard cap then was **280** unique or **2.8 GB** heap. The working limit now is 1.2 GB of CPU copies still on the heap, or the 2.2 GB JS heap cap. GPU BC7 is reported and does not count toward the 1.2 GB. 4096 meshes is only the last resort. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
 
 Remeasured 25 Nov 2026, 10:13–10:23 AM America/New_York, same 10 GB working-set cap, 4 GB free-RAM floor, and 10 GB start-floor, only against 47241/47242. The headless wait stayed on the prepare banner until the 7-minute timeout because `foregroundSettled` still treated leftover deferred names as in-flight; the scene itself was idle at the cap after about 2.5 minutes (259 listed models, 241 unique meshes, 0 queued). Orbit, Snap, and a Field screenshot ran after that. A follow-up change marks the cap as settled so the "Scene ready" banner can hide.
 

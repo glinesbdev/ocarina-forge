@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { chooseTexture, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
   releaseTextureCpu,
-  repairCompressedTexture, VK_FORMAT } from "./gpu-texture.js";
+  repairCompressedTexture, textureGpuReady, VK_FORMAT } from "./gpu-texture.js";
 
 function makePacked() {
   const ktx = new Uint8Array(104);
@@ -286,4 +286,12 @@ test("releaseTextureCpu leaves a size stub after closing an ImageBitmap so mipLe
   const levels = Math.floor(Math.log2(Math.max(texture.image.width, texture.image.height))) + 1;
   assert.equal(Number.isFinite(levels) && levels >= 1, true);
   assert.equal(levels, 7);
+});
+
+test("texture bytes stay until the GPU image exists", () => {
+  const map = { isTexture: true };
+  assert.equal(textureGpuReady(null, map), false);
+  assert.equal(textureGpuReady({ get: () => ({}) }, map), false);
+  assert.equal(textureGpuReady({ get: () => ({ texture: {}, isDefaultTexture: true }) }, map), false);
+  assert.equal(textureGpuReady({ get: () => ({ texture: { id: 1 } }) }, map), true);
 });

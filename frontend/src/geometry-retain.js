@@ -3,7 +3,13 @@
  * Picking used to keep that clone (and a BVH) on the CPU. After addGeometry the
  * batch holds its own arrays; the clone can be dropped and copied back only if
  * a later rebuild needs it. Water surfaces and the selected model stay resident.
+ *
+ * An interleaved glTF buffer is released once. Assigning `.array` on an
+ * InterleavedBufferAttribute only shadows the getter, so the shared
+ * `data.array` is cleared directly.
  */
+
+import { BufferAttribute } from "three";
 
 export function noteGeometryBatch(geometry, mesh, geometryId) {
   if (!geometry || !mesh || geometryId === undefined || geometryId === null) return geometry;
@@ -35,25 +41,39 @@ function emptyArray(array) {
   return new Ctor(0);
 }
 
+function isInterleaved(attr) {
+  return Boolean(attr && attr.isInterleavedBufferAttribute);
+}
+
+function releaseStored(attr, seen) {
+  if (!attr) return 0;
+  if (isInterleaved(attr)) {
+    const data = attr.data;
+    if (!data || !data.array || !data.array.byteLength || seen.has(data)) return 0;
+    seen.add(data);
+    const bytes = data.array.byteLength;
+    data.array = emptyArray(data.array);
+    data.count = 0;
+    return bytes;
+  }
+  if (!attr.array || !attr.array.byteLength) return 0;
+  const bytes = attr.array.byteLength;
+  attr.array = emptyArray(attr.array);
+  attr.count = 0;
+  return bytes;
+}
+
 /** Drop CPU arrays. Returns the bytes released. No-op until a batch link exists. */
 export function releaseGeometryCpu(geometry) {
   if (!geometry || geometry.userData?.forgeCpuReleased) return 0;
   if (!geometry.userData?.forgeBatch) return 0;
   if (geometry.userData.forgeKeepCpu) return 0;
   const shape = shapeOf(geometry);
+  const seen = new Set();
   let bytes = 0;
-  for (const info of Object.values(shape.attributes)) bytes += info.bytes;
-  if (shape.index) bytes += shape.index.bytes;
+  for (const name of Object.keys(shape.attributes)) bytes += releaseStored(geometry.attributes[name], seen);
+  if (shape.index && geometry.index) bytes += releaseStored(geometry.index, seen);
   if (!bytes) return 0;
-  for (const name of Object.keys(shape.attributes)) {
-    const attr = geometry.attributes[name];
-    attr.array = emptyArray(attr.array);
-    attr.count = 0;
-  }
-  if (shape.index && geometry.index) {
-    geometry.index.array = emptyArray(geometry.index.array);
-    geometry.index.count = 0;
-  }
   if (geometry.boundsTree) {
     try {
       geometry.disposeBoundsTree?.();
@@ -99,6 +119,20 @@ export function ensureGeometryCpu(geometry) {
     const src = srcGeo.getAttribute ? srcGeo.getAttribute(name) : srcGeo.attributes?.[name];
     const dst = geometry.attributes[name];
     if (!src || !dst || !src.array?.length) return false;
+    if (isInterleaved(dst)) {
+      const Ctor = src.array && src.array.constructor ? src.array.constructor : Float32Array;
+      const packed = new Ctor(meta.count * meta.itemSize);
+      if (src.isInterleavedBufferAttribute) {
+        for (let i = 0; i < meta.count; i += 1) {
+          for (let c = 0; c < meta.itemSize; c += 1) packed[i * meta.itemSize + c] = src.getComponent(info.vertexStart + i, c);
+        }
+      } else {
+        const from = info.vertexStart * meta.itemSize;
+        packed.set(src.array.subarray(from, from + packed.length));
+      }
+      geometry.setAttribute(name, new BufferAttribute(packed, meta.itemSize, meta.normalized));
+      continue;
+    }
     copyRange(src, dst, info.vertexStart, info.vertexCount, meta.itemSize);
   }
   if (shape.index) {

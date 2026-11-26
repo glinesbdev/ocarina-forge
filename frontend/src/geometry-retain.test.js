@@ -60,3 +60,15 @@ test("a second geometry in the same batch restores its own range", () => {
   assert.deepEqual(Array.from(second.getIndex().array), [2, 0, 1]);
   mesh.dispose();
 });
+
+test("releasing an interleaved part drops the shared buffer once", () => {
+  const data = new Float32Array(600);
+  const buffer = new THREE.InterleavedBuffer(data, 6);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.InterleavedBufferAttribute(buffer, 3, 0));
+  geometry.setAttribute("normal", new THREE.InterleavedBufferAttribute(buffer, 3, 3));
+  geometry.userData.forgeBatch = { mesh: {}, geometryId: 0 };
+  const released = releaseGeometryCpu(geometry);
+  assert.equal(buffer.array.byteLength, 0);
+  assert.equal(released, data.byteLength);
+});

@@ -9,6 +9,7 @@ import {
   gpuTexturesEnabled,
   releaseTextureCpu,
   repairCompressedTexture,
+  textureGpuReady,
   textureSupport,
 } from "./gpu-texture.js";
 import { loadForgeImageSource } from "./gltf-image-source.js";
@@ -51,6 +52,7 @@ import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { releaseGltfDocument } from "./gltf-release.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -598,8 +600,16 @@ let convertSlots = 8;
     if (!textureCpuReleaseDirty || textureCpuReleaseInFlight) return;
     const live = [...collectLiveTextures()];
     const groups = new Map();
+    let waitingForGpu = false;
     for (const texture of live) {
       if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
+      // three's Bindings._update warns, and the mesh draws white, when the
+      // shader samples a texture whose GPU image was never created. That is
+      // what happens if these bytes are dropped first.
+      if (!textureGpuReady(renderer.backend, texture)) {
+        waitingForGpu = true;
+        continue;
+      }
       const key = sourceKey(texture);
       const group = groups.get(key) || [];
       group.push(texture);
@@ -619,8 +629,11 @@ let convertSlots = 8;
       if (!groups.has(key)) textureCpuReleaseFrames.delete(key);
     }
     if (!ready.length) {
-      textureCpuReleaseDirty = groups.size > 0;
+      textureCpuReleaseDirty = groups.size > 0 || waitingForGpu;
       // Keep drawing a couple of extra frames so new uploads can retire.
+      // A texture that is not on the GPU yet is checked on the next render
+      // the scene already scheduled. Forcing frames here would spin on a map
+      // that is never drawn.
       if ([...textureCpuReleaseFrames.values()].some((frames) => frames > 0 && frames < 3)) requestRender();
       return;
     }
@@ -637,8 +650,10 @@ let convertSlots = 8;
       }
     }).finally(() => {
       textureCpuReleaseInFlight = false;
-      textureCpuReleaseDirty = collectLiveTextures().size > 0
-        && [...collectLiveTextures()].some((texture) => !texture.userData?.forgeCpuReleased && !texture.source?.userData?.forgeCpuReleased);
+      textureCpuReleaseDirty = [...collectLiveTextures()].some((texture) => {
+        if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) return false;
+        return textureGpuReady(renderer.backend, texture);
+      });
       if (textureCpuReleaseDirty) requestRender();
     });
   }
@@ -867,6 +882,10 @@ let convertSlots = 8;
       seen.add(part.material);
       refreshTextureMaterial(part.material);
     }
+    // The batch already holds this material. Refreshing the key only matters
+    // for the next rebuild, so a map that arrived after the first key is part
+    // of that key and is not folded onto another texture.
+    for (const part of parts || []) assignPartBatchKey(part);
   }
 
   function loadOwnedTexture(url) {
@@ -2493,6 +2512,7 @@ let convertSlots = 8;
           }
         });
         await bindSurfaceMaps(gltf);
+        releaseGltfDocument(gltf);
         const uploaded = performance.now();
         statDownload += downloaded - started;
         statUpload += uploaded - downloaded;
@@ -2673,9 +2693,7 @@ let convertSlots = 8;
     // that object before the batch key is recorded, and keep the key on the
     // shape so those batches do not fold back onto the first material.
     separateSharedMaterials(parts);
-    for (const part of parts) {
-      part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey}`;
-    }
+    for (const part of parts) assignPartBatchKey(part);
     return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
   }
 
@@ -2720,23 +2738,31 @@ let convertSlots = 8;
     for (const url of keep) templateOrder.push(url);
   }
 
-  function clearBatches() {
-    for (const batch of batches) {
-      batch.mesh.removeFromParent();
-      disposePickTexture(batch.mesh);
-      batch.mesh.dispose();
+  function releaseBatchMesh(mesh) {
+    if (!mesh) return;
+    mesh.removeFromParent();
+    disposePickTexture(mesh);
+    const material = mesh.material;
+    if (material && material.userData && material.userData.forgeBatchClone && typeof material.dispose === "function") {
+      material.dispose();
     }
+    mesh.dispose();
+  }
+
+  function clearBatches() {
+    for (const batch of batches) releaseBatchMesh(batch.mesh);
     batches.length = 0;
     for (const entry of entries.values()) entry.slots = [];
   }
 
   const tint = new THREE.Color();
+  const selectTint = new THREE.Color(0xffe0a0);
 
   function instanceTint(entry, target) {
     if (entry.status === "recipe") target.setHex(0xc9b6f2);
     else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
     else target.setRGB(1, 1, 1);
-    if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
+    if (entry.key === selected) target.lerp(selectTint, 0.72);
     return target;
   }
 
@@ -2810,6 +2836,7 @@ let convertSlots = 8;
   }
 
   const imageKeys = new WeakMap();
+  let imageSerial = 0;
 
   function imageSignature(image) {
     if (!image) return "none";
@@ -2818,7 +2845,24 @@ let convertSlots = 8;
     const width = image.width || image.videoWidth || 0;
     const height = image.height || image.videoHeight || 0;
     if (!width || !height) return `unready:${image.src || image.uuid || ""}`;
+    // A BC7 image is `{width, height}`. drawImage throws, and the old catch
+    // labelled every same-size map "bitmap", so those materials shared one batch
+    // and one map. A non-drawable image keeps its own id.
+    const drawable = (typeof HTMLImageElement !== "undefined" && image instanceof HTMLImageElement)
+      || (typeof HTMLCanvasElement !== "undefined" && image instanceof HTMLCanvasElement)
+      || (typeof ImageBitmap !== "undefined" && image instanceof ImageBitmap)
+      || (typeof OffscreenCanvas !== "undefined" && image instanceof OffscreenCanvas)
+      || (typeof HTMLVideoElement !== "undefined" && image instanceof HTMLVideoElement);
     let key = `${width}x${height}`;
+    if (!drawable) {
+      if (!image.forgeImageId) {
+        imageSerial += 1;
+        image.forgeImageId = imageSerial;
+      }
+      key = `${key}:img${image.forgeImageId}`;
+      imageKeys.set(image, key);
+      return key;
+    }
     try {
       const canvas = document.createElement("canvas");
       canvas.width = 16;
@@ -2833,7 +2877,11 @@ let convertSlots = 8;
       }
       key = `${key}:${hash >>> 0}`;
     } catch {
-      key = `${key}:${image.src || "bitmap"}`;
+      if (!image.forgeImageId) {
+        imageSerial += 1;
+        image.forgeImageId = imageSerial;
+      }
+      key = `${key}:${image.src || `img${image.forgeImageId}`}`;
     }
     imageKeys.set(image, key);
     return key;
@@ -2862,6 +2910,11 @@ let convertSlots = 8;
       indexed: geometry.getIndex() ? "idx" : "no",
       attributes: Object.keys(geometry.attributes).sort().join(","),
     });
+  }
+
+  function assignPartBatchKey(part) {
+    if (!part || !part.material || !part.geometry) return;
+    part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey || ""}`;
   }
 
   function actorScale(entry) {
@@ -3005,10 +3058,11 @@ let convertSlots = 8;
       if (!entry.parts || !entry.parts.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
       for (const part of entry.parts) {
-        let group = groups.get(part.batchKey);
+        const key = part.batchKey;
+        let group = groups.get(key);
         if (!group) {
           group = { material: part.material, records: [], geometries: new Map() };
-          groups.set(part.batchKey, group);
+          groups.set(key, group);
         }
         group.records.push({ entry, part });
         if (!group.geometries.has(part.geometry.uuid)) group.geometries.set(part.geometry.uuid, part.geometry);
@@ -3166,6 +3220,7 @@ let convertSlots = 8;
     }
     if (stagedEntries) {
       for (const batch of nextBatches) batches.push(batch);
+      invalidateAssetBudget();
       syncPickIds();
       releaseUnselectedPartGeometry();
       return actors.every((entry) => !entry.parts?.length || entry.slots.length);
@@ -3178,6 +3233,7 @@ let convertSlots = 8;
     }
     batches.length = 0;
     for (const batch of nextBatches) batches.push(batch);
+    invalidateAssetBudget();
     naiveDraws = looseParts();
     disposeBatches(previous);
     syncBatchVisibility();
@@ -3245,11 +3301,7 @@ let convertSlots = 8;
   }
 
   function disposeBatches(oldBatches) {
-    for (const { mesh } of oldBatches) {
-      mesh.removeFromParent();
-      disposePickTexture(mesh);
-      mesh.dispose();
-    }
+    for (const { mesh } of oldBatches) releaseBatchMesh(mesh);
   }
 
   function cancelModelStage() {
