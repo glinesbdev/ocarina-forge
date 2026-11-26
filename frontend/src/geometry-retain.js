@@ -118,6 +118,69 @@ export function ensureGeometryCpu(geometry) {
   return true;
 }
 
+const PARKED_ATTRIBUTES = ["normal", "uv", "uv1", "uv2", "tangent", "color", "blendMask", "blendUv"];
+
+/**
+ * Move the attributes a rebuild needs, and a raycast does not, out of the
+ * batch geometry. Position and the index stay: snap raycasts the batch, and
+ * the bounding sphere was already computed. `park` holds the typed arrays
+ * (a worker, when the page has one) until the next rebuild.
+ */
+export async function parkGeometryAttributes(geometry, park, { ready } = {}) {
+  if (!geometry || !park || geometry.userData?.forgeParked || geometry.userData?.forgeKeepCpu) return 0;
+  const names = [];
+  const arrays = [];
+  const saved = [];
+  let bytes = 0;
+  for (const name of PARKED_ATTRIBUTES) {
+    const attr = typeof geometry.getAttribute === "function" ? geometry.getAttribute(name) : geometry.attributes?.[name];
+    if (!attr || !attr.array || !attr.array.byteLength) continue;
+    if (typeof ready === "function" && !ready(attr)) continue;
+    const ownsBuffer = attr.array.byteOffset === 0 && attr.array.buffer.byteLength === attr.array.byteLength;
+    const held = ownsBuffer ? attr.array : attr.array.slice();
+    saved.push({ attr, array: attr.array, count: attr.count });
+    attr.array = emptyArray(held);
+    names.push(name);
+    arrays.push(held);
+    bytes += held.byteLength;
+  }
+  if (!names.length) return 0;
+  const id = geometry.uuid || `geo-${names.join("-")}`;
+  if (!geometry.userData) geometry.userData = {};
+  try {
+    await park.park(id, arrays);
+  } catch (error) {
+    for (const item of saved) {
+      item.attr.array = item.array;
+      item.attr.count = item.count;
+    }
+    throw error;
+  }
+  geometry.userData.forgeParked = names;
+  geometry.userData.forgeParkId = id;
+  return bytes;
+}
+
+/** Copy parked attributes back onto the geometry before a rebuild reads them. */
+export async function unparkGeometryAttributes(geometry, park) {
+  const names = geometry?.userData?.forgeParked;
+  const id = geometry?.userData?.forgeParkId;
+  if (!names || !id || !park) return false;
+  const arrays = await park.take(id);
+  if (!arrays || arrays.length !== names.length) return false;
+  for (let i = 0; i < names.length; i += 1) {
+    const attr = typeof geometry.getAttribute === "function"
+      ? geometry.getAttribute(names[i])
+      : geometry.attributes?.[names[i]];
+    if (!attr || !arrays[i] || !arrays[i].length) return false;
+    attr.array = arrays[i];
+    attr.count = arrays[i].length / (attr.itemSize || 1);
+  }
+  geometry.userData.forgeParked = null;
+  geometry.userData.forgeParkId = null;
+  return true;
+}
+
 /** Attribute counts for audits after the CPU arrays have been released. */
 export function geometryAttributeView(geometry) {
   if (!geometry) return { attributes: {}, indexCount: null };

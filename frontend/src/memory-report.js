@@ -60,7 +60,9 @@ export function residentModelBytes(entries) {
         seenGeo.add(part.geometry);
         if (!geometries.has(part.geometry)) {
           geometries.add(part.geometry);
-          bytes += geometryBudgetBytes(part.geometry);
+          // A released clone's bytes are gone. The shape record is not still
+          // on the heap, so it does not count toward the residency budget.
+          bytes += part.geometry.userData?.forgeCpuReleased ? 0 : attributeBytes(part.geometry);
         }
       }
       const material = part.material;
@@ -73,7 +75,7 @@ export function residentModelBytes(entries) {
         if (!texture || seenTex.has(texture) || textures.has(texture)) continue;
         seenTex.add(texture);
         textures.add(texture);
-        bytes += bc7GpuBytes(texture);
+        bytes += mipCpuBytes(texture);
       }
     }
     totals.set(entry.gyaml, bytes);
@@ -83,8 +85,12 @@ export function residentModelBytes(entries) {
 
 export function budgetAssetBytes(report) {
   const geometry = (report && report.geometries && report.geometries.cpuBytes) || 0;
+  const textureCpu = (report && report.textures && report.textures.cpuBytes) || 0;
   const bc7 = (report && report.textures && report.textures.byFormat && report.textures.byFormat.BC7 && report.textures.byFormat.BC7.gpu) || 0;
-  return { geometry, bc7, total: geometry + bc7 };
+  // GPU BC7 is not JS heap. The residency total is the CPU copies still live,
+  // so a model whose geometry and textures have been uploaded can stay without
+  // counting the GPU image against the 1.2 GB brake. The 2.2 GB heap cap remains.
+  return { geometry, textureCpu, bc7, total: geometry + textureCpu };
 }
 
 function textureExtent(texture) {

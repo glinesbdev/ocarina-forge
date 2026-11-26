@@ -52,6 +52,8 @@ import { applyTextureManifest, formatTextureReport, presentTextures, separateSha
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault, stageBatchKey } from "./instance.js";
 import { applyArrayMaps, arraysReady, createTextureArrayPool, installWebGLArrayMaterial, writeLayerTexture } from "./texture-array.js";
+import { releaseGltfDocument } from "./gltf-release.js";
+import { createCpuPark } from "./cpu-park.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -63,7 +65,7 @@ import {
   groupsFromPick,
   ndcFromClient,
 } from "./gpu-pick.js";
-import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
+import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, parkGeometryAttributes, releaseGeometryCpu, unparkGeometryAttributes } from "./geometry-retain.js";
 import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSameActor, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, shouldSnapTranslate, snapExcludeId } from "./snap.js";
 import { basisFromQuaternion, defaultGridSettings, effectiveRotationSpace, gridSnapEngaged, normalizeGridSettings, snapGridLayout, snapRotation, snapScale, snapTranslation } from "./grid-snap.js";
 import { normalizeSpace, spaceForMode } from "./gizmo-space.js";
@@ -335,7 +337,17 @@ export async function createViewport(host, hooks) {
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
   const batches = [];
-  let textureArrays = createTextureArrayPool(THREE);
+  const cpuPark = createCpuPark();
+  let statUnresolved = 0;
+
+  function freshTextureArrays() {
+    const pool = createTextureArrayPool(THREE);
+    const webgpu = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+    pool.setRetainMips(!webgpu);
+    return pool;
+  }
+
+  let textureArrays = freshTextureArrays();
   const parsedTemplates = new Map();
   const templateOrder = [];
   const recentSceneTemplates = new Map();
@@ -607,6 +619,8 @@ let convertSlots = 8;
       if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
       // Bytes are copied into the array pool before forgeArray is set. Hold
       // the source until that copy exists so a 3-frame release cannot empty it.
+      // claim() copies the mips before forgeArray is set. Hold the source until
+      // that copy exists. publish() clears the hold once the GPU image is in.
       if (texture.userData?.forgeArrayHold && !texture.userData?.forgeArray) continue;
       const key = sourceKey(texture);
       const group = groups.get(key) || [];
@@ -2511,6 +2525,7 @@ let convertSlots = 8;
           }
         });
         await bindSurfaceMaps(gltf);
+        releaseGltfDocument(gltf);
         const uploaded = performance.now();
         statDownload += downloaded - started;
         statUpload += uploaded - downloaded;
@@ -2738,6 +2753,8 @@ let convertSlots = 8;
 
   function releaseBatchMesh(mesh) {
     if (!mesh) return;
+    const parkedId = mesh.geometry && mesh.geometry.userData && mesh.geometry.userData.forgeParkId;
+    if (parkedId && mesh.geometry.userData.forgeParked) cpuPark.drop(parkedId);
     mesh.removeFromParent();
     disposePickTexture(mesh);
     const layers = mesh.userData && mesh.userData.forgeLayers;
@@ -2755,7 +2772,7 @@ let convertSlots = 8;
     batches.length = 0;
     for (const entry of entries.values()) entry.slots = [];
     textureArrays.dispose();
-    textureArrays = createTextureArrayPool(THREE);
+    textureArrays = freshTextureArrays();
   }
 
   const tint = new THREE.Color();
@@ -2903,7 +2920,7 @@ let convertSlots = 8;
     part.batchKey = described.custom ? staged : described.key;
   }
 
-  function collapsedMaterial(source, spec) {
+  function collapsedMaterial(source, spec, options = {}) {
     const clone = cloneMaterialPreservingTextures(source);
     if (!clone || clone === source) return source;
     if (typeof source.onBeforeCompile === "function") clone.onBeforeCompile = source.onBeforeCompile;
@@ -2920,7 +2937,7 @@ let convertSlots = 8;
     clone.userData.arrayNode = false;
     clone.userData.forgeBatchClone = true;
     if (clone.color && clone.color.setHex) clone.color.setHex(0xffffff);
-    if (spec.whiten) applyArrayMaps(clone, spec);
+    if (spec.whiten && options.useArrays) applyArrayMaps(clone, spec);
     clone.needsUpdate = true;
     return clone;
   }
@@ -3052,6 +3069,38 @@ let convertSlots = 8;
     return job;
   }
 
+  function attributeOnGpu(attribute) {
+    const backend = renderer && renderer.backend;
+    if (!backend || typeof backend.get !== "function" || !attribute) return false;
+    try {
+      const data = backend.get(attribute);
+      return Boolean(data && data.buffer);
+    } catch {
+      return false;
+    }
+  }
+
+  async function restoreParkedFor(actors) {
+    const seen = new Set();
+    for (const entry of actors) {
+      for (const part of entry.parts || []) {
+        const link = part.geometry && part.geometry.userData && part.geometry.userData.forgeBatch;
+        const geometry = link && link.mesh && link.mesh.geometry;
+        if (!geometry || seen.has(geometry) || !geometry.userData || !geometry.userData.forgeParked) continue;
+        seen.add(geometry);
+        await unparkGeometryAttributes(geometry, cpuPark);
+      }
+    }
+  }
+
+  async function parkLiveBatches(list) {
+    for (const batch of list) {
+      const geometry = batch.mesh && batch.mesh.geometry;
+      if (!geometry) continue;
+      await parkGeometryAttributes(geometry, cpuPark, { ready: attributeOnGpu });
+    }
+  }
+
   async function rebuildBatchesNow(stagedEntries = null) {
     const sceneToken = generation;
     uvDirty = true;
@@ -3060,12 +3109,16 @@ let convertSlots = 8;
     const nextBatches = [];
     const pendingMeshes = [];
     const actors = stagedEntries || [...entries.values()];
+    await restoreParkedFor(actors);
     for (const entry of actors) entry.slots = [];
     if (collapse) {
       for (const entry of actors) {
         for (const part of entry.parts || []) assignPartKey(part);
       }
-      textureArrays.finalize();
+      const webgpu = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+      textureArrays.finalize({ concatenate: !webgpu });
+      await textureArrays.publish(renderer);
+      invalidateAssetBudget();
     }
     const groups = new Map();
     for (const entry of actors) {
@@ -3103,7 +3156,9 @@ let convertSlots = 8;
       if (!verts || !group.records.length) continue;
       if (collapse) {
         const spec = group.records[0].part.arrayBatch;
-        if (spec && spec.whiten) group.material = collapsedMaterial(group.material, spec);
+        if (spec && spec.whiten) {
+          group.material = collapsedMaterial(group.material, spec, { useArrays: arraysReady(spec) });
+        }
       }
       let mesh;
       try {
@@ -3212,6 +3267,8 @@ let convertSlots = 8;
           shown: true,
           bakeTint: bake,
           tintColor,
+          arrayWanted: Boolean(record.part.arrayBatch && record.part.arrayBatch.usesArray),
+          arrayReady: Boolean(record.part.arrayBatch && arraysReady(record.part.arrayBatch)),
         });
       }
       const batchSpec = group.records[0].part.arrayBatch;
@@ -3247,6 +3304,7 @@ let convertSlots = 8;
       if (rounded > (sceneStreamStats.maxCompileMs || 0)) sceneStreamStats.maxCompileMs = rounded;
     }
     if (sceneToken !== generation) {
+      await parkLiveBatches(batches);
       for (const item of pendingMeshes) {
         item.mesh.removeFromParent();
         disposePickTexture(item.mesh);
@@ -3262,18 +3320,32 @@ let convertSlots = 8;
     }
     if (stagedEntries) {
       for (const batch of nextBatches) batches.push(batch);
+      await parkLiveBatches(batches);
+      invalidateAssetBudget();
       syncPickIds();
       releaseUnselectedPartGeometry();
       return actors.every((entry) => !entry.parts?.length || entry.slots.length);
     }
     const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
     if (!nextBatches.length && expectMeshes && previous.length) {
+      await parkLiveBatches(previous);
       for (const entry of entries.values()) entry.slots = [];
       console.error("Actor batches failed to build; the meshes already on screen stay up.");
       return false;
     }
     batches.length = 0;
     for (const batch of nextBatches) batches.push(batch);
+    if (collapse) {
+      let unresolved = 0;
+      for (const entry of actors) {
+        for (const slot of entry.slots || []) {
+          if (slot.arrayWanted && !slot.arrayReady) unresolved += 1;
+        }
+      }
+      statUnresolved = unresolved;
+    }
+    await parkLiveBatches(batches);
+    invalidateAssetBudget();
     naiveDraws = looseParts();
     disposeBatches(previous);
     syncBatchVisibility();
@@ -5511,6 +5583,7 @@ uniform float terrainLayerMissing;`
       warmTotal: statWarmTotal,
       sceneStream: sceneStreamStats,
       server: serverHead,
+      unresolved: statUnresolved,
     };
   }
 

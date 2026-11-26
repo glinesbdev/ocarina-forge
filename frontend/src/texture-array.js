@@ -11,7 +11,7 @@
  */
 
 import { batchKey } from "./instance.js";
-import { repairCompressedTexture } from "./gpu-texture.js";
+import { releaseTextureCpu, repairCompressedTexture } from "./gpu-texture.js";
 
 export const MAX_ARRAY_LAYERS = 256;
 
@@ -54,14 +54,20 @@ export function arrayGroupKey(texture) {
   return `${texture.format}|${width}x${height}|m${maps.length}|${texture.colorSpace || ""}|uv${channel}|w${wrapS}x${wrapT}`;
 }
 
-function copyMips(texture) {
+function copyMips(texture, retain) {
   const key = arrayGroupKey(texture);
   if (!key) return null;
   const levels = [];
   for (const level of texture.mipmaps) {
-    const copy = new Uint8Array(level.data.byteLength);
-    copy.set(level.data);
-    levels.push({ width: level.width, height: level.height, data: copy });
+    const aligned = level.width % 4 === 0 && level.height % 4 === 0;
+    // WebGPU copies block-aligned mips from the 2D texture. A second CPU copy
+    // of those bytes is what kept the Field heap high until coalesce.
+    let data = null;
+    if ((retain || !aligned) && level.data && level.data.byteLength) {
+      data = new Uint8Array(level.data.byteLength);
+      data.set(level.data);
+    }
+    levels.push({ width: level.width, height: level.height, data });
   }
   return levels;
 }
@@ -115,6 +121,11 @@ export function createTextureArrayPool(THREE) {
   const groups = new Map();
   const bySource = new Map();
   const open = new Map();
+  let retainMips = true;
+
+  function setRetainMips(value) {
+    retainMips = Boolean(value);
+  }
 
   function groupFor(baseKey, texture) {
     const current = open.get(baseKey);
@@ -125,7 +136,10 @@ export function createTextureArrayPool(THREE) {
       baseKey,
       slice,
       layers: [],
+      sources: [],
       published: false,
+      gpuReady: false,
+      failed: false,
       array: null,
       format: texture.format,
       colorSpace: texture.colorSpace || "",
@@ -148,7 +162,7 @@ export function createTextureArrayPool(THREE) {
     if (!key) return null;
     texture.userData = texture.userData || {};
     texture.userData.forgeArrayHold = true;
-    const mips = copyMips(texture);
+    const mips = copyMips(texture, retainMips);
     if (!mips) {
       texture.userData.forgeArrayHold = false;
       return null;
@@ -156,6 +170,7 @@ export function createTextureArrayPool(THREE) {
     const group = groupFor(key, texture);
     const layer = group.layers.length;
     group.layers.push(mips);
+    group.sources.push(texture);
     const assignment = { layer, group, groupId: group.id };
     bySource.set(id, assignment);
     texture.userData.forgeArray = { layer, groupId: group.id };
@@ -229,7 +244,7 @@ export function createTextureArrayPool(THREE) {
     };
   }
 
-  function finalize() {
+  function finalize({ concatenate = true } = {}) {
     if (!THREE) return;
     for (const group of groups.values()) {
       if (group.published || !group.layers || !group.layers.length) continue;
@@ -237,15 +252,24 @@ export function createTextureArrayPool(THREE) {
       const mipmaps = [];
       const levels = layers[0].length;
       for (let level = 0; level < levels; level += 1) {
+        const width = layers[0][level].width;
+        const height = layers[0][level].height;
+        if (!concatenate) {
+          // WebGPU fills each layer from the source. The concatenated buffer
+          // is the upload that comes back white, so it is never built.
+          mipmaps.push({ data: new Uint8Array(0), width, height });
+          continue;
+        }
         let total = 0;
-        for (const layer of layers) total += layer[level].data.byteLength;
+        for (const layer of layers) total += layer[level].data ? layer[level].data.byteLength : 0;
         const data = new Uint8Array(total);
         let offset = 0;
         for (const layer of layers) {
+          if (!layer[level].data) continue;
           data.set(layer[level].data, offset);
           offset += layer[level].data.byteLength;
         }
-        mipmaps.push({ data, width: layers[0][level].width, height: layers[0][level].height });
+        mipmaps.push({ data, width, height });
       }
       const texture = new THREE.CompressedArrayTexture(
         mipmaps,
@@ -264,11 +288,158 @@ export function createTextureArrayPool(THREE) {
       texture.name = `forge-array-${group.slice}`;
       texture.userData.forgeArrayOwner = true;
       texture.userData.forgeArrayGroup = group.id;
-      repairCompressedTexture(texture);
+      if (concatenate) repairCompressedTexture(texture);
+      else {
+        // version 0 makes three install the 1x1 white default. Bump the version
+        // but leave dataReady false so the empty shell is not uploaded.
+        if (texture.source) texture.source.dataReady = false;
+        texture.needsUpdate = true;
+        if (texture.source) texture.source.dataReady = false;
+      }
       group.array = texture;
       group.published = true;
-      group.layers = null;
+      if (concatenate) group.layers = null;
     }
+  }
+
+  function gpuTexture(backend, texture) {
+    if (!backend || typeof backend.get !== "function" || !texture) return null;
+    try {
+      const data = backend.get(texture);
+      if (!data || !data.texture || data.isDefaultTexture === true) return null;
+      return data.texture;
+    } catch {
+      return null;
+    }
+  }
+
+  function primeArrayTexture(renderer, texture) {
+    // Creating the array must not run the concatenated writeTexture. That
+    // upload is the one that leaves a 2D-array of white blocks on WebGPU.
+    if (texture.source) texture.source.dataReady = false;
+    const textures = renderer && renderer._textures;
+    if (textures && typeof textures.updateTexture === "function") textures.updateTexture(texture);
+  }
+
+  function writeMipLayer(device, gpu, mip, layer, format) {
+    const bytes = compressedByteLength(mip.width, mip.height, format);
+    if (!bytes || !mip.data || mip.data.byteLength < bytes) {
+      throw new Error(`texture array mip is ${mip.data ? mip.data.byteLength : 0} bytes, expected ${bytes}`);
+    }
+    const blocksX = Math.ceil(mip.width / 4);
+    const blocksY = Math.ceil(mip.height / 4);
+    const blockBytes = bytes / (blocksX * blocksY);
+    device.queue.writeTexture(
+      { texture: gpu, mipLevel: mip.level ?? 0, origin: { x: 0, y: 0, z: layer } },
+      mip.data,
+      { offset: 0, bytesPerRow: blocksX * blockBytes, rowsPerImage: blocksY },
+      { width: blocksX * 4, height: blocksY * 4, depthOrArrayLayers: 1 },
+    );
+  }
+
+  function fillGroup(renderer, group) {
+    const backend = renderer.backend;
+    const device = backend && backend.device;
+    const dest = group.array;
+    primeArrayTexture(renderer, dest);
+    let gpu = gpuTexture(backend, dest);
+    const sources = group.sources || [];
+    const layers = group.layers || [];
+    const count = Math.max(layers.length, sources.length);
+    if (!count) throw new Error("texture array has no layers");
+    for (let layer = 0; layer < count; layer += 1) {
+      const source = sources[layer];
+      const stored = layers[layer] || (source && source.mipmaps) || [];
+      const cpu = source && source.mipmaps && source.mipmaps[0] && source.mipmaps[0].data && source.mipmaps[0].data.byteLength;
+      for (let level = 0; level < stored.length; level += 1) {
+        const mip = stored[level];
+        const aligned = mip.width % 4 === 0 && mip.height % 4 === 0;
+        const sourceGpu = gpuTexture(backend, source);
+        // Copy only when the 2D texture is already on the GPU, or its CPU bytes
+        // can still take the 2D upload inside copyTextureToTexture. A released
+        // source with no GPU image must not be copied: that copies the 1x1 white.
+        if (aligned && source && (sourceGpu || cpu) && typeof renderer.copyTextureToTexture === "function") {
+          renderer.copyTextureToTexture(
+            source,
+            dest,
+            { x: 0, y: 0, z: 0, width: mip.width, height: mip.height },
+            { x: 0, y: 0, z: layer },
+            level,
+          );
+          gpu = gpuTexture(backend, dest) || gpu;
+          continue;
+        }
+        if (!gpu) throw new Error("array texture was not created");
+        if (!device || !device.queue || typeof device.queue.writeTexture !== "function") {
+          throw new Error("WebGPU queue cannot write a texture array layer");
+        }
+        writeMipLayer(device, gpu, { ...mip, level }, layer, group.format);
+      }
+    }
+    if (!gpuTexture(backend, dest) && !gpu) throw new Error("array texture was not created");
+    return count;
+  }
+
+  function releaseGroupCpu(group) {
+    releaseTextureCpu(group.array);
+    for (const source of group.sources || []) {
+      if (source && source.userData) source.userData.forgeArrayHold = false;
+      // The 2D upload inside the copy has the GPU image. The CPU bytes can go.
+      if (source && source.mipmaps && source.mipmaps[0] && source.mipmaps[0].data && source.mipmaps[0].data.byteLength) {
+        releaseTextureCpu(source);
+      }
+    }
+    group.layers = null;
+  }
+
+  /**
+   * WebGPU: copy each source into its layer. A validation error, or any throw,
+   * drops the array so the batch keeps the texture that was already on screen.
+   * WebGL uploads the concatenated mips itself and does not take this path.
+   */
+  async function publish(renderer) {
+    const webgpu = renderer?.backend?.isWebGPUBackend === true;
+    let copied = 0;
+    let failed = 0;
+    for (const group of groups.values()) {
+      if (!group.published || !group.array || group.gpuReady || group.failed) continue;
+      if (!webgpu) {
+        group.gpuReady = true;
+        continue;
+      }
+      const device = renderer.backend && renderer.backend.device;
+      let scope = false;
+      try {
+        if (device && typeof device.pushErrorScope === "function") {
+          device.pushErrorScope("validation");
+          scope = true;
+        }
+        copied += fillGroup(renderer, group);
+        const error = scope ? await device.popErrorScope() : null;
+        scope = false;
+        if (error) throw error;
+        group.gpuReady = true;
+        releaseGroupCpu(group);
+      } catch (error) {
+        if (scope && device && typeof device.popErrorScope === "function") {
+          try {
+            await device.popErrorScope();
+          } catch {
+            /* the scope was already popped */
+          }
+        }
+        group.failed = true;
+        failed += 1;
+        try {
+          group.array?.dispose?.();
+        } catch {
+          /* the array is already discarded */
+        }
+        group.array = null;
+        console.warn("Texture array upload failed; models keep their own textures.", error);
+      }
+    }
+    return { copied, failed };
   }
 
   function dispose() {
@@ -276,20 +447,21 @@ export function createTextureArrayPool(THREE) {
       if (group.array && typeof group.array.dispose === "function") group.array.dispose();
       group.array = null;
       group.layers = null;
+      group.sources = null;
     }
     groups.clear();
     bySource.clear();
     open.clear();
   }
 
-  return { claim, describe, finalize, dispose, groups };
+  return { claim, describe, finalize, publish, dispose, setRetainMips, groups };
 }
 
 export function arraysReady(spec) {
   if (!spec?.usesArray || !spec.slots) return false;
   return SLOT_NAMES.some((name) => {
     const slot = spec.slots[name];
-    return Boolean(slot?.array && slot.group?.array);
+    return Boolean(slot?.array && slot.group?.array && slot.group.gpuReady && !slot.group.failed);
   });
 }
 

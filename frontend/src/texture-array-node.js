@@ -84,9 +84,22 @@ export function attachArrayMaterial(material, mesh, spec) {
     if (cutoff > 0) material.alphaTestNode = float(cutoff);
     material.colorNode = Fn((builder) => {
       const sampled = sampleArray(builder, mesh, slots.map);
-      if (!sampled) return vec4(1, 1, 1, 1);
-      if (cutoff > 0) sampled.a.lessThanEqual(float(cutoff)).discard();
-      return vec4(sampled.rgb, sampled.a);
+      if (sampled) {
+        if (cutoff > 0) sampled.a.lessThanEqual(float(cutoff)).discard();
+        return vec4(sampled.rgb, sampled.a);
+      }
+      // A missing UV used to return constant white, which is the flat cream
+      // albedo. Sample the original map, or the material colour, instead.
+      const fallback = slots.map && slots.map.texture;
+      if (fallback && fallback.isTexture === true) {
+        const flat = texture(fallback, uv());
+        if (cutoff > 0) flat.a.lessThanEqual(float(cutoff)).discard();
+        return vec4(flat.rgb, flat.a);
+      }
+      return vec4(
+        materialReference("color", "color", material),
+        materialReference("opacity", "float", material),
+      );
     })();
   }
   if (arrayTexture(slots.roughnessMap)) {

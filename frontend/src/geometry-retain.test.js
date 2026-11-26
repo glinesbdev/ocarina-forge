@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as THREE from "three";
 
-import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
+import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, parkGeometryAttributes, releaseGeometryCpu, unparkGeometryAttributes } from "./geometry-retain.js";
 
 function triangle() {
   const geometry = new THREE.BufferGeometry();
@@ -59,4 +59,31 @@ test("a second geometry in the same batch restores its own range", () => {
   assert.deepEqual(Array.from(second.getAttribute("position").array), [9, 8, 7, 6, 5, 4, 3, 2, 1]);
   assert.deepEqual(Array.from(second.getIndex().array), [2, 0, 1]);
   mesh.dispose();
+});
+
+test("parked normals and uvs leave the geometry and come back", async () => {
+  const geometry = triangle();
+  geometry.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(9).fill(1), 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 0, 1]), 2));
+  const stored = new Map();
+  const park = {
+    park(id, arrays) {
+      stored.set(id, arrays);
+      return Promise.resolve(0);
+    },
+    take(id) {
+      const arrays = stored.get(id) || null;
+      stored.delete(id);
+      return Promise.resolve(arrays);
+    },
+  };
+  const bytes = await parkGeometryAttributes(geometry, park, { ready: () => true });
+  assert.ok(bytes > 0);
+  assert.equal(geometry.getAttribute("position").array.length, 9);
+  assert.equal(geometry.getAttribute("uv").array.length, 0);
+  assert.equal(geometry.getAttribute("normal").array.length, 0);
+  assert.equal(await unparkGeometryAttributes(geometry, park), true);
+  assert.deepEqual(Array.from(geometry.getAttribute("uv").array), [0, 0, 1, 0, 0, 1]);
+  assert.equal(geometry.getAttribute("normal").array.length, 9);
+  assert.equal(geometry.userData.forgeParked, null);
 });

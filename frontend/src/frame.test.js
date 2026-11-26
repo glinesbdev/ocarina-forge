@@ -98,6 +98,14 @@ test("the profile detail keeps the counters that used to sit on the stats line",
     }),
     ["idle", "0 loading · 262 loaded · 207 capped"],
   );
+  assert.deepEqual(
+    formatProfileDetail({ rendering: true, fps: 30, unresolved: 12 }),
+    ["30 fps", "12 unresolved"],
+  );
+  assert.deepEqual(
+    formatProfileDetail({ rendering: true, fps: 30, instances: 4, unresolved: 0 }),
+    ["30 fps", "4 inst · 0 unresolved"],
+  );
 });
 
 test("a resident cap is named on the status label", () => {

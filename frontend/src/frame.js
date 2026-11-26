@@ -81,6 +81,7 @@ export function formatProfileDetail({
   warmTotal = null,
   sceneStream = null,
   server = "",
+  unresolved = null,
 } = {}) {
   const lines = [];
   lines.push(rendering ? (fps ? `${fps} fps` : "…") : "idle");
@@ -88,6 +89,7 @@ export function formatProfileDetail({
   if (instances != null) counts.push(`${instances} inst`);
   if (culled != null) counts.push(`${culled} culled`);
   if (separate != null) counts.push(`${separate} separate`);
+  if (unresolved != null) counts.push(`${unresolved} unresolved`);
   if (counts.length) lines.push(counts.join(" · "));
   const stream = [];
   if (queued != null && !(Number(queued) === 0 && Number(capped) > 0)) stream.push(`${queued} queued`);

@@ -7,6 +7,7 @@ import { stageBatchKey } from "./instance.js";
 import {
   MAX_ARRAY_LAYERS,
   arrayGroupKey,
+  arraysReady,
   compressedByteLength,
   createTextureArrayPool,
   patchArrayShader,
@@ -330,4 +331,84 @@ test("the WebGL patch samples the array at the instance layer", () => {
   assert.match(shader.fragmentShader, /texture2D\( normalMap, vNormalMapUv \)/);
   assert.match(shader.fragmentShader, /float forgeLayer\(int channel\)/);
   assert.equal(arrayGroupKey({ isCompressedTexture: false }), "");
+});
+
+function fakeWebgpu({ fail = false } = {}) {
+  const gpus = new Map();
+  const copies = [];
+  const writes = [];
+  const renderer = {
+    copies,
+    writes,
+    backend: {
+      isWebGPUBackend: true,
+      device: {
+        pushErrorScope() {},
+        popErrorScope() {
+          return Promise.resolve(fail ? { message: "validation" } : null);
+        },
+        queue: {
+          writeTexture(destination, data, _layout, size) {
+            writes.push({ origin: destination.origin, mip: destination.mipLevel, bytes: data.byteLength, size });
+          },
+        },
+      },
+      get(texture) {
+        return gpus.get(texture) || null;
+      },
+    },
+    _textures: {
+      updateTexture(texture) {
+        gpus.set(texture, { texture: { label: texture.name || "gpu" }, initialized: true, isDefaultTexture: false });
+      },
+    },
+    copyTextureToTexture(src, dst, region, position, level) {
+      this._textures.updateTexture(src);
+      this._textures.updateTexture(dst);
+      copies.push({ level, layer: position ? position.z : 0, width: region.width, height: region.height });
+    },
+  };
+  return renderer;
+}
+
+test("WebGPU copies block-aligned mips into the array and then drops CPU bytes", async () => {
+  const pool = createTextureArrayPool(THREE);
+  const map = bc7(16, 16, THREE.SRGBColorSpace, 9);
+  const spec = pool.describe(material(map), geometry());
+  pool.finalize({ concatenate: false });
+  const renderer = fakeWebgpu();
+  const result = await pool.publish(renderer);
+  assert.equal(result.failed, 0);
+  assert.equal(result.copied, 1);
+  assert.equal(arraysReady(spec), true);
+  assert.deepEqual(
+    renderer.copies.map((copy) => `${copy.level}:${copy.width}x${copy.height}`),
+    ["0:16x16", "1:8x8", "2:4x4"],
+  );
+  assert.equal(renderer.writes.length, 2);
+  assert.equal(renderer.writes[0].size.width, 4);
+  assert.equal(renderer.writes[0].size.height, 4);
+  assert.equal(map.userData.forgeCpuReleased, true);
+  assert.equal(map.mipmaps[0].data.byteLength, 0);
+  pool.dispose();
+});
+
+test("a failed array upload is not sampled, so the batch keeps its own texture", async () => {
+  const pool = createTextureArrayPool(THREE);
+  const map = bc7(16, 16, THREE.SRGBColorSpace, 4);
+  const spec = pool.describe(material(map), geometry());
+  pool.finalize({ concatenate: false });
+  const result = await pool.publish(fakeWebgpu({ fail: true }));
+  assert.equal(result.failed, 1);
+  assert.equal(arraysReady(spec), false);
+  assert.equal(spec.slots.map.group.array, null);
+  assert.equal(map.userData.forgeCpuReleased, undefined);
+  assert.ok(map.mipmaps[0].data.byteLength > 0);
+  pool.dispose();
+});
+
+test("the array colour node does not emit a constant white", () => {
+  const source = readFileSync(new URL("./texture-array-node.js", import.meta.url), "utf8");
+  assert.equal(source.includes("vec4(1, 1, 1, 1)"), false);
+  assert.equal(source.includes("vec4(1,1,1,1)"), false);
 });

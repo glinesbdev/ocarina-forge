@@ -1,12 +1,13 @@
 /** Caps how many unique scene meshes stay resident so a Field tab cannot OOM.
 
-The soft limit is geometry bytes plus BC7 texture bytes (the pair
-`__forgeMemory()` reports). The unique-mesh count and the JS heap are safety
-caps for a scene of many tiny models, or a heap that is about to hit V8's limit.
+The soft limit is the live CPU copies `__forgeMemory()` still holds: geometry
+arrays plus texture bytes that have not been released after the GPU upload.
+BC7 GPU size is reported (`bc7Bytes`) and is not part of that total, because
+it is not JS heap. The unique-mesh count and the JS heap are safety caps.
  */
 
 /**
- * Last-resort unique-mesh cap. Geometry-plus-BC7 bytes and the JS heap are the
+ * Last-resort unique-mesh cap. Live CPU bytes and the JS heap are the
  * working limits. Kokiri Child is about 470 unique models and the Field is 852.
  * A cap of 240 stopped Kokiri while the heap and the byte budget were still free,
  * and left visible models as boxes.
