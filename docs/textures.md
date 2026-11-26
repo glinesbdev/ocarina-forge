@@ -93,3 +93,9 @@ From the repo, with the venv active and the dump that contains `romfs`:
 ## WebGPU compressed uploads
 
 On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r170's missing BC7 `getFormat` case is patched at init and by a Vite plugin. See `docs/rendering-performance.md`.
+
+## Texture arrays
+
+Resident BC7/BC1/BC3 maps of one size, mip count, format, and colour space are layers of a `CompressedArrayTexture` (`frontend/src/texture-array.js`). Albedo stays sRGB. Normals and ORM stay linear, so they never share an array with an albedo. The instance's layer is an RGBA8 texel. The material samples that layer; a second slice starts when a group is already published or holds 256 layers, because the CPU mips are released after upload and this environment's WebGL2 context could not copy the GPU image.
+
+WebGL2 on headless Chrome 157 (SwiftShader) uploaded and sampled BC7 arrays, including sRGB and a mip chain. `navigator.gpu` was absent there, so the WebGPU `writeTexture` path was checked from three r170's source plus the BC7 format patch, and not executed on a device. See `docs/rendering-performance.md`.

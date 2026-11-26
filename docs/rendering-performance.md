@@ -22,7 +22,7 @@ CPU mip and ImageBitmap copies are dropped after the GPU upload (`releaseTexture
 
 ### GPU instancing
 
-Identical models already share one `BatchedMesh` per material (`batchKey`). Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Profile** shows `inst` for the live instance count.
+Identical models already share one `BatchedMesh`. Geometry is uploaded once; each actor is an instance with its own matrix, tint, and visibility. The coalesced batch key is alpha mode, side, vertex layout, and texture size class. Tint is `setColorAt` (the asset colour multiplied in), not a separate mesh. Streaming still uses the older key, including tint and the shape family, until the resident set is coalesced. Repeated placements stay instanced: `groupGeometryDraws` folds consecutive copies of one geometry on WebGPU. Picking reads an actor id from an offscreen target, including the per-instance id for preview `InstancedMesh` draws. The gizmo writes `setMatrixAt` for the selected actor only. There is no need to break an instance out of the batch to move or edit it. **Profile** shows `inst` for the live instance count.
 
 ### Static batching (merge vs instances)
 
@@ -56,10 +56,28 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented this pass: background fill stops at 240 unique meshes (or 2.2 GB JS heap). Far meshes evict past 280 unique or 2.8 GB heap |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
-| Texture arrays / atlases | Fewer binds, more meshes in one batch; needs authoring or a pack step | Not implemented |
+| Texture arrays | Fewer binds. One `BatchedMesh` per alpha mode, side, vertex layout, and texture size class | Implemented. See [Texture arrays](#texture-arrays). Field and Kokiri frame times were not remeasured in this checkout |
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
+
+## Texture arrays
+
+BC7 (and BC1/BC3) maps that share width, height, mip count, format, colour space, wrap, and UV channel become layers of one `CompressedArrayTexture`. Each instance stores its layer in an RGBA8 table, indexed the same way as `BatchedMesh`'s colour texture: channel 0 is the albedo, 1 the normal, 2 the ORM, and 3 a spare (a distinct AO, otherwise emissive, otherwise a distinct metalness). A roughness map that is also the metalness and AO map uses channel 2 for all three. Alpha-test and blend stay in different batches, and so do double-sided materials. Blend materials and terrain keep the streaming key, because their shaders are not the standard PBR graph.
+
+The node material samples `texture(array, uv).depth(layer)`. Classic WebGL's `MeshStandardMaterial` declares `sampler2D`, so `onBeforeCompile` switches those slots to `sampler2DArray`. The id-buffer pick samples the same layer, so a foliage hole is still a miss.
+
+A published array is not rewritten. `releaseTextureCpu` drops the mip bytes, and a later texture of that size opens another slice. Coalesce runs once streaming and texture assigns have gone quiet, and it does not clear the scene preview.
+
+### Spike
+
+Headless Chrome 157.0.8103.50 (SwiftShader, WebGL2) exposed `EXT_texture_compression_bptc`. `texStorage3D` + `compressedTexSubImage3D` and a `sampler2DArray` sample succeeded for BC7 unorm and sRGB: 64×64×2 (1 mip), 256×256×2 (3 mips), 32×32×2 (1 mip), and 512×256×4 (1 mip). The readback was `0,0,0,0` because the blocks were zeros. `copyImageSubData` was not a function on that context. `navigator.gpu` was missing, so the WebGPU device upload was not executed.
+
+three r170 already treats `CompressedArrayTexture` like `CompressedTexture` in `getFormat`, creates `depthOrArrayLayers`, and writes one `writeTexture` per layer. The BC7 plugin supplies the missing `RGBA_BPTC_Format` case and the `bc7-rgba-unorm-srgb` enum `_getBlockData` compares. That is the same upload 2D BC7 already uses.
+
+### What a unit scene collapses to
+
+32 compressed albedos, four sizes, two tints, one vertex layout: the streaming key (unique texture and tint) is **64** batches. The coalesced key is **4**, one array per size, 16 layers each. Alpha-test and double-sided stay split. This checkout has no game dump, so the Field and Kokiri Forest frame times were not remeasured. The last Field total on a capped load is still **50.3 ms** and about **5,600 draws**.
 
 ## GPU picking
 

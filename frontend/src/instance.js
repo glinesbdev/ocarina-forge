@@ -40,8 +40,22 @@ export function canGizmo({ id, shown, locked }) {
   return Boolean(id) && Boolean(shown) && !locked;
 }
 
-/** Copies that share a key are one BatchedMesh. The key is the material, not the actor. */
-export function batchKey({ image, alpha, side, tint, indexed, attributes }) {
+/**
+ * Copies that share a key are one BatchedMesh.
+ * Tint is per instance (`setColorAt`), so it is not part of the key.
+ * `sizeClass` is the texture-array group (or a 2D source id) and replaces `image`.
+ */
+export function batchKey({ image, alpha, side, indexed, attributes, sizeClass }) {
+  const imageKey = sizeClass || image || "flat";
+  return `${imageKey}|${alpha}|s${side}|${indexed}|${attributes}`;
+}
+
+/**
+ * Streaming still batches one model at a time, before arrays are sealed.
+ * That key keeps tint and the image signature so a texture written onto the
+ * shared material shows up immediately, and two shapes do not fold together.
+ */
+export function stageBatchKey({ image, alpha, side, tint, indexed, attributes }) {
   return `${image}|${alpha}|s${side}|c${tint}|${indexed}|${attributes}`;
 }
 

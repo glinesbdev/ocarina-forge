@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault, stageBatchKey } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -357,4 +357,7 @@ test("copies that share an albedo share a batch key", () => {
   const house = { image: "roof", alpha: "opaque", side: 0, tint: "ffffff", indexed: "idx", attributes: "position,uv" };
   assert.equal(batchKey(house), batchKey({ ...house }));
   assert.notEqual(batchKey(house), batchKey({ ...house, image: "wall" }));
+  assert.equal(batchKey(house), batchKey({ ...house, tint: "ff0000" }));
+  assert.notEqual(stageBatchKey(house), stageBatchKey({ ...house, tint: "ff0000" }));
+  assert.equal(batchKey({ ...house, sizeClass: "map:64" }), batchKey({ ...house, image: "wall", sizeClass: "map:64" }));
 });

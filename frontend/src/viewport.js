@@ -39,7 +39,8 @@ import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault, stageBatchKey } from "./instance.js";
+import { applyArrayMaps, arraysReady, createTextureArrayPool, installWebGLArrayMaterial, writeLayerTexture } from "./texture-array.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -111,11 +112,13 @@ export async function createViewport(host, hooks) {
   let mapNodes = null;
   let blendNodes = null;
   let pickNodes = null;
+  let arrayNodes = null;
   if (created.nodes) {
     terrainNodes = await import("./terrain-node.js");
     mapNodes = await import("./cutout-node.js");
     blendNodes = await import("./blend-node.js");
     pickNodes = await import("./gpu-pick-node.js");
+    arrayNodes = await import("./texture-array-node.js");
   }
   if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
   const shaderDiagnostics = observeWgsl(renderer.backend);
@@ -321,6 +324,7 @@ export async function createViewport(host, hooks) {
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
   const batches = [];
+  let textureArrays = createTextureArrayPool(THREE);
   const parsedTemplates = new Map();
   const templateOrder = [];
   const recentSceneTemplates = new Map();
@@ -481,6 +485,7 @@ let convertSlots = 8;
   const terrainWorkers = new Set();
   const sceneListeners = [];
   let rebuildTimer = 0;
+  let coalesceTimer = 0;
   let loadQueue = null;
   let modelLoads = null;
   let pendingLoads = 0;
@@ -578,6 +583,9 @@ let convertSlots = 8;
     const groups = new Map();
     for (const texture of live) {
       if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
+      // Bytes are copied into the array pool before forgeArray is set. Hold
+      // the source until that copy exists so a 3-frame release cannot empty it.
+      if (texture.userData?.forgeArrayHold && !texture.userData?.forgeArray) continue;
       const key = sourceKey(texture);
       const group = groups.get(key) || [];
       group.push(texture);
@@ -845,6 +853,8 @@ let convertSlots = 8;
       seen.add(part.material);
       refreshTextureMaterial(part.material);
     }
+    for (const part of parts || []) assignPartKey(part);
+    scheduleCoalesce();
   }
 
   function loadOwnedTexture(url) {
@@ -1038,6 +1048,10 @@ let convertSlots = 8;
     modelLoads = null;
     cancelModelStage();
     clearScenePreview();
+    if (coalesceTimer) {
+      clearTimeout(coalesceTimer);
+      coalesceTimer = 0;
+    }
     foregroundModelNames.clear();
     detailCandidates.clear();
     for (const texture of textureDetailReady.values()) disposeCachedTexture(texture);
@@ -1105,6 +1119,10 @@ let convertSlots = 8;
     if (rebuildTimer) {
       clearTimeout(rebuildTimer);
       rebuildTimer = 0;
+    }
+    if (coalesceTimer) {
+      clearTimeout(coalesceTimer);
+      coalesceTimer = 0;
     }
     transform.detach();
     clearSnapGrid();
@@ -2537,12 +2555,10 @@ let convertSlots = 8;
       index += 1;
     });
     // A stale flat glb can still share one material across shape keys. Split
-    // that object before the batch key is recorded, and keep the key on the
-    // shape so those batches do not fold back onto the first material.
+    // that object before the keys are recorded. The streaming key keeps the
+    // shape family. The coalesced key drops it once each texture has a layer.
     separateSharedMaterials(parts);
-    for (const part of parts) {
-      part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey}`;
-    }
+    for (const part of parts) assignPartKey(part);
     return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
   }
 
@@ -2587,30 +2603,44 @@ let convertSlots = 8;
     for (const url of keep) templateOrder.push(url);
   }
 
-  function clearBatches() {
-    for (const batch of batches) {
-      batch.mesh.removeFromParent();
-      disposePickTexture(batch.mesh);
-      batch.mesh.dispose();
+  function releaseBatchMesh(mesh) {
+    if (!mesh) return;
+    mesh.removeFromParent();
+    disposePickTexture(mesh);
+    const layers = mesh.userData && mesh.userData.forgeLayers;
+    if (layers && typeof layers.dispose === "function") layers.dispose();
+    if (mesh.userData) mesh.userData.forgeLayers = null;
+    const material = mesh.material;
+    if (material && material.userData && material.userData.forgeBatchClone && typeof material.dispose === "function") {
+      material.dispose();
     }
+    mesh.dispose();
+  }
+
+  function clearBatches() {
+    for (const batch of batches) releaseBatchMesh(batch.mesh);
     batches.length = 0;
     for (const entry of entries.values()) entry.slots = [];
+    textureArrays.dispose();
+    textureArrays = createTextureArrayPool(THREE);
   }
 
   const tint = new THREE.Color();
+  const selectTint = new THREE.Color(0xffe0a0);
 
-  function instanceTint(entry, target) {
+  function instanceTint(entry, target, materialColor) {
     if (entry.status === "recipe") target.setHex(0xc9b6f2);
     else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
     else target.setRGB(1, 1, 1);
-    if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
+    if (materialColor && materialColor.isColor) target.multiply(materialColor);
+    if (entry.key === selected) target.lerp(selectTint, 0.72);
     return target;
   }
 
   function tintInstance(entry) {
     if (!entry.slots) return;
     for (const slot of entry.slots) {
-      slot.mesh.setColorAt(slot.index, instanceTint(entry, tint));
+      slot.mesh.setColorAt(slot.index, instanceTint(entry, tint, slot.bakeTint ? slot.tintColor : null));
       if (slot.mesh.instanceColor) slot.mesh.instanceColor.needsUpdate = true;
     }
   }
@@ -2721,7 +2751,7 @@ let convertSlots = 8;
     const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
       ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
       : "";
-    return batchKey({
+    return stageBatchKey({
       image: image + blendKey + surfaceKey,
       alpha,
       side: material.side,
@@ -2729,6 +2759,37 @@ let convertSlots = 8;
       indexed: geometry.getIndex() ? "idx" : "no",
       attributes: Object.keys(geometry.attributes).sort().join(","),
     });
+  }
+
+  function assignPartKey(part) {
+    if (!part || !part.material || !part.geometry) return;
+    const staged = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey || ""}`;
+    part.stageKey = staged;
+    const described = textureArrays.describe(part.material, part.geometry);
+    part.arrayBatch = described;
+    part.batchKey = described.custom ? staged : described.key;
+  }
+
+  function collapsedMaterial(source, spec) {
+    const clone = cloneMaterialPreservingTextures(source);
+    if (!clone || clone === source) return source;
+    if (typeof source.onBeforeCompile === "function") clone.onBeforeCompile = source.onBeforeCompile;
+    if (typeof source.customProgramCacheKey === "function") clone.customProgramCacheKey = source.customProgramCacheKey;
+    clone.colorNode = null;
+    clone.alphaTestNode = null;
+    clone.roughnessNode = null;
+    clone.metalnessNode = null;
+    clone.aoNode = null;
+    clone.normalNode = null;
+    clone.emissiveNode = null;
+    clone.userData = clone.userData || {};
+    clone.userData.cutoutNode = false;
+    clone.userData.arrayNode = false;
+    clone.userData.forgeBatchClone = true;
+    if (clone.color && clone.color.setHex) clone.color.setHex(0xffffff);
+    if (spec.whiten) applyArrayMaps(clone, spec);
+    clone.needsUpdate = true;
+    return clone;
   }
 
   function actorScale(entry) {
@@ -2851,20 +2912,28 @@ let convertSlots = 8;
 
   function rebuildBatches(stagedEntries = null) {
     uvDirty = true;
-    const previous = stagedEntries ? [] : batches.slice();
+    const collapse = !stagedEntries;
+    const previous = collapse ? batches.slice() : [];
     const nextBatches = [];
     const actors = stagedEntries || [...entries.values()];
     for (const entry of actors) entry.slots = [];
+    if (collapse) {
+      for (const entry of actors) {
+        for (const part of entry.parts || []) assignPartKey(part);
+      }
+      textureArrays.finalize();
+    }
     const groups = new Map();
     for (const entry of actors) {
       syncGhost(entry);
       if (!entry.parts || !entry.parts.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
       for (const part of entry.parts) {
-        let group = groups.get(part.batchKey);
+        const key = collapse ? part.batchKey : (part.stageKey || part.batchKey);
+        let group = groups.get(key);
         if (!group) {
           group = { material: part.material, records: [], geometries: new Map() };
-          groups.set(part.batchKey, group);
+          groups.set(key, group);
         }
         group.records.push({ entry, part });
         if (!group.geometries.has(part.geometry.uuid)) group.geometries.set(part.geometry.uuid, part.geometry);
@@ -2888,6 +2957,10 @@ let convertSlots = 8;
         indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
       }
       if (!verts || !group.records.length) continue;
+      if (collapse) {
+        const spec = group.records[0].part.arrayBatch;
+        if (spec && spec.whiten) group.material = collapsedMaterial(group.material, spec);
+      }
       let mesh;
       try {
         mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
@@ -2972,12 +3045,17 @@ let convertSlots = 8;
         if (geometryId === undefined) continue;
         const instanceId = mesh.addInstance(geometryId);
         const placed = displayedActorMatrix(record.entry, new THREE.Matrix4());
+        const bake = Boolean(collapse && record.part.arrayBatch && record.part.arrayBatch.whiten);
+        const tintColor = bake && record.part.arrayBatch.color && record.part.arrayBatch.color.clone
+          ? record.part.arrayBatch.color.clone()
+          : null;
         mesh.setMatrixAt(instanceId, placed);
-        mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
+        mesh.setColorAt(instanceId, instanceTint(record.entry, tint, tintColor));
         ids[instanceId] = record.entry.key;
         geometries[instanceId] = record.part.geometry;
         spheres[instanceId] = record.part.sphere;
         count = Math.max(count, instanceId + 1);
+        record.instanceId = instanceId;
         record.entry.slots.push({
           actor: record.entry.key,
           mesh,
@@ -2988,7 +3066,25 @@ let convertSlots = 8;
           sphere: record.part.sphere,
           matrix: placed,
           shown: true,
+          bakeTint: bake,
+          tintColor,
         });
+      }
+      const batchSpec = group.records[0].part.arrayBatch;
+      if (collapse && batchSpec && arraysReady(batchSpec)) {
+        writeLayerTexture(THREE, mesh, group.records);
+        if (arrayNodes) arrayNodes.attachArrayMaterial(group.material, mesh, batchSpec);
+        else installWebGLArrayMaterial(group.material, mesh, batchSpec);
+      } else if (
+        collapse
+        && batchSpec
+        && batchSpec.whiten
+        && arrayNodes
+        && mapNodes
+        && group.material.alphaTest > 0
+        && group.material.map
+      ) {
+        mapNodes.attachCutout(group.material);
       }
       mesh.userData.pick = { ids, geometries, spheres, count };
       mesh.userData.forgeIndirect = mesh._indirectTexture;
@@ -3077,11 +3173,7 @@ let convertSlots = 8;
   }
 
   function disposeBatches(oldBatches) {
-    for (const { mesh } of oldBatches) {
-      mesh.removeFromParent();
-      disposePickTexture(mesh);
-      mesh.dispose();
-    }
+    for (const { mesh } of oldBatches) releaseBatchMesh(mesh);
   }
 
   function cancelModelStage() {
@@ -3165,12 +3257,17 @@ let convertSlots = 8;
           hooks.onModelsReady?.({ batchesBuilt: true });
           noteLoadedMemory();
         }
+        scheduleCoalesce();
       }
     });
   }
 
   function queueRebuild() {
     if (rebuildTimer) clearTimeout(rebuildTimer);
+    if (coalesceTimer) {
+      clearTimeout(coalesceTimer);
+      coalesceTimer = 0;
+    }
     rebuildTimer = window.setTimeout(() => {
       rebuildTimer = 0;
       clearScenePreview();
@@ -3179,6 +3276,22 @@ let convertSlots = 8;
       if (hooks.onModelsReady) hooks.onModelsReady({ batchesBuilt: ready });
       if (ready) noteLoadedMemory();
     }, 100);
+  }
+
+  // Full rebuild once streaming and texture assigns have gone quiet. This does
+  // not clear the scene preview: the batches on screen are replaced in place.
+  function scheduleCoalesce() {
+    if (coalesceTimer) clearTimeout(coalesceTimer);
+    coalesceTimer = window.setTimeout(() => {
+      coalesceTimer = 0;
+      if (modelStage && (!modelStage.done || modelStage.pending.size || modelStage.timer)) {
+        scheduleCoalesce();
+        return;
+      }
+      if (!entries.size) return;
+      rebuildBatches();
+      requestRender();
+    }, 180);
   }
 
   function attachModel(entry, template, url) {
@@ -5671,6 +5784,7 @@ uniform float terrainLayerMissing;`
       hoverToken += 1;
       if (hoverFrame) cancelAnimationFrame(hoverFrame);
       if (rebuildTimer) clearTimeout(rebuildTimer);
+      if (coalesceTimer) clearTimeout(coalesceTimer);
       if (frameHandle) cancelAnimationFrame(frameHandle);
       gpuPicker.dispose();
       if (gpuPoll) cancelAnimationFrame(gpuPoll);
