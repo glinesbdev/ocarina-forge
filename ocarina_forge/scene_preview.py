@@ -27,8 +27,8 @@ KOKIRI_CHILD = "Banc/KokiriForest/KokiriForest_Child_"
 WORKER = Path(__file__).resolve().parents[1] / "frontend" / "tools" / "scene-preview-worker.mjs"
 PREVIEW_VERSION = "scene-preview-v2"
 # Hyrule Field has its own terrain pack. Both folders are current.
-TERRAIN_VERSION = "scene-terrain-v10"
-TERRAIN_FIELD_VERSION = "scene-terrain-v11"
+TERRAIN_VERSION = "scene-terrain-v11"
+TERRAIN_FIELD_VERSION = "scene-terrain-v12"
 
 
 def preview_bank(dump, banc: str, known: set[str] | None = None) -> str:

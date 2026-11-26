@@ -302,7 +302,11 @@ def _sample(report: dict, x: float, z: float) -> dict:
                 "worldY": world,
             }
         )
-    hits.sort(key=lambda item: (item["edge"], item["layer"], item["name"]))
+    # Main walkable floor first, finest tile first. The _sub overlay is a
+    # separate heightmap and must not replace the main scene when main has a
+    # real sample. A finer tile with no height (all 0 / non-finite) is skipped
+    # so a coarser tile that still has ground can be used.
+    hits.sort(key=lambda item: (0 if item["layer"] == "main" else 1, item["edge"], item["name"]))
     drawn = next((item for item in hits if item["worldY"] is not None), None)
     return {"x": x, "z": z, "unit": [unit_x, unit_z], "hits": hits, "drawn": drawn}
 

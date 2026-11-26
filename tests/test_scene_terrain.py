@@ -235,8 +235,8 @@ def test_hyrule_field_fit_cache_uses_a_new_generation(tmp_path, monkeypatch):
     dump = SimpleNamespace(root=tmp_path / "dump")
     field = scene_preview.corrected_terrain_path(dump, "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs", "base")
     other = scene_preview.corrected_terrain_path(dump, "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs", "base")
-    assert "scene-terrain-v11" in field.parts
-    assert "scene-terrain-v10" in other.parts
+    assert "scene-terrain-v12" in field.parts
+    assert "scene-terrain-v11" in other.parts
 
 
 def test_islands_are_not_queued_as_visible_terrain_cutouts(tmp_path, monkeypatch):
