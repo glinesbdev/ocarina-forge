@@ -8,6 +8,8 @@
  * `userData.name`; parts store that family as `materialKey`.
  */
 
+import { noteTexturePipelineError } from "./texture-debug.js";
+
 const SRGB = "srgb";
 const LINEAR = "srgb-linear";
 // three.js RepeatWrapping. A character albedo whose UVs or SRT leave 0–1 has to tile.
@@ -212,7 +214,10 @@ async function assignSlot(material, slot, loadTexture) {
     if (!pending.has(url)) {
       pending.set(url, Promise.resolve()
         .then(() => loadTexture(url))
-        .catch(() => null));
+        .catch((error) => {
+          noteTexturePipelineError(error || `texture download failed (${url})`);
+          return null;
+        }));
     }
     return pending.get(url);
   };

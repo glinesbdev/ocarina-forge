@@ -11,6 +11,30 @@ export function textureDebugEnabled(search, stored) {
   return stored === "1";
 }
 
+let firstPipelineError = "";
+const warnedPipelineErrors = new Set();
+
+/** One console warning for a dropped texture. Later copies of the same message stay quiet. */
+export function noteTexturePipelineError(error) {
+  const message = String((error && error.message) || error || "").trim();
+  if (!message) return "";
+  if (!firstPipelineError) firstPipelineError = message;
+  if (!warnedPipelineErrors.has(message)) {
+    warnedPipelineErrors.add(message);
+    console.warn(`Texture pipeline: ${message}`);
+  }
+  return message;
+}
+
+export function texturePipelineError() {
+  return firstPipelineError;
+}
+
+export function resetTexturePipelineError() {
+  firstPipelineError = "";
+  warnedPipelineErrors.clear();
+}
+
 export function formatTextureDebug(report) {
   const row = report || {};
   const line = [
@@ -24,7 +48,14 @@ export function formatTextureDebug(report) {
     `foreign=${Number(row.foreign) || 0}`,
     `uploaded=${Number(row.uploaded) || 0}`,
     `profileTex=${Number(row.profileTex) || 0}`,
-  ].join(" ");
+    `allow=${row.allow ? 1 : 0}`,
+    `requested=${Number(row.requested) || 0}`,
+    `fetched=${Number(row.fetched) || 0}`,
+    `decoded=${Number(row.decoded) || 0}`,
+    `assigned=${Number(row.assigned) || 0}`,
+  ];
+  if (row.error) line.push(`error=${row.error}`);
+  const text = line.join(" ");
   const samples = [];
   for (const sample of row.samples || []) {
     samples.push(
@@ -41,5 +72,5 @@ export function formatTextureDebug(report) {
       ].join(" "),
     );
   }
-  return [line, ...samples].join("\n");
+  return [text, ...samples].join("\n");
 }

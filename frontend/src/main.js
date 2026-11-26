@@ -169,7 +169,14 @@ function geometryRequest() {
 viewport = await createViewport($("viewport"), {
   fetchModel: (gyaml, options) => api.model(gyaml, { ...(options || {}), ...geometryRequest() }),
   fetchModels: (names, prefetch, options) => api.models(names, prefetch, { ...geometryRequest(), signal: options && options.signal }),
-  fetchTextures: (gyaml, signal) => api.actorTextures(gyaml, { load: loadQuery(state.load || fullLoad()), signal }),
+  fetchTextures: (gyaml, signal) => {
+    const load = state.load || fullLoad();
+    return api.actorTextures(gyaml, {
+      load: loadQuery(load),
+      textures: load.textures ? "1" : "0",
+      signal,
+    });
+  },
   fetchTerrain: (banc, refine, signal) => api.terrain(banc, refine, { ...loadRequest(), signal }),
   fetchGround: (banc, x, z, exclude, signal) => api.ground(banc, x, z, exclude, { ...loadRequest(), signal }),
   fetchSurface: (banc) => api.groundSurface(banc, loadRequest()),

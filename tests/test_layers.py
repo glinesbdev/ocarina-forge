@@ -66,6 +66,13 @@ def test_presets_and_query():
     assert parse_load_query("layout").preset == "layout"
     flat = parse_load_query("models", "0")
     assert flat is not None and flat.textures is False and flat.layers == frozenset({"models"})
+    # The editor turns Layout's textures on without changing the layer list.
+    # That list is Layout, which skips BNTX, unless textures=1 is sent too.
+    layout_layers = "models,terrain,water,collision,decorations,lights"
+    implied = parse_load_query(layout_layers)
+    assert implied is not None and implied.preset == "layout" and implied.textures is False
+    forced = parse_load_query(layout_layers, "1")
+    assert forced is not None and forced.textures is True and forced.preset == "custom"
 
 
 def _rich_document():
@@ -358,6 +365,15 @@ def test_texture_route_does_not_convert_geometry(tmp_path, monkeypatch):
     body = loaded.json()
     assert body["materials"]["Body:0"]["map"] == "/api/model-textures/abc.ktx2"
     assert calls == ["Npc_Kokiri_F_01"]
+    layout = "models,terrain,water,collision,decorations,lights"
+    implied = client.get(f"/api/models/Npc_Kokiri_F_01/textures?load={layout}")
+    assert implied.status_code == 200
+    assert implied.json()["skipped"] is True
+    assert calls == ["Npc_Kokiri_F_01"]
+    forced = client.get(f"/api/models/Npc_Kokiri_F_01/textures?load={layout}&textures=1")
+    assert forced.status_code == 200
+    assert forced.json()["materials"]["Body:0"]["map"] == "/api/model-textures/abc.ktx2"
+    assert calls == ["Npc_Kokiri_F_01", "Npc_Kokiri_F_01"]
 
 
 def test_flat_models_do_not_decode_textures(tmp_path, monkeypatch):

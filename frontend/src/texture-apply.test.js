@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { pickMask } from "./gpu-pick.js";
+import { resetTexturePipelineError, texturePipelineError } from "./texture-debug.js";
 import { applyTextureManifest, clearTextureMaps, formatTextureReport, materialKey, presentTextures, restoreShownMaps } from "./texture-apply.js";
 import { createTextureQueue, orderTextureJobs, simulateTextureWave, textureSlotLimit } from "./texture-stream.js";
 
@@ -42,6 +43,30 @@ function material() {
 function texture(url) {
   return { url, isTexture: true, disposed: false, dispose() { this.disposed = true; } };
 }
+
+test("a failed image request warns once and leaves the material untextured", async () => {
+  resetTexturePipelineError();
+  const warns = [];
+  const original = console.warn;
+  console.warn = (message) => warns.push(String(message));
+  try {
+    const mesh = material();
+    const report = await applyTextureManifest(
+      [{ materialKey: "Body:0", material: mesh }],
+      { materials: { "Body:0": { map: "/api/model-textures/albedo.ktx2" } } },
+      async () => {
+        throw new Error("texture download failed (404)");
+      },
+    );
+    assert.equal(mesh.map, null);
+    assert.equal(report[0].status, "not-applied");
+    assert.equal(texturePipelineError(), "texture download failed (404)");
+    assert.deepEqual(warns, ["Texture pipeline: texture download failed (404)"]);
+  } finally {
+    console.warn = original;
+    resetTexturePipelineError();
+  }
+});
 
 test("a manifest keys the glTF node without its lod prefix", () => {
   assert.equal(materialKey("lod0:Body:0"), "Body:0");
@@ -224,6 +249,7 @@ test("the texture toggle does not ask the model loader to run", () => {
   assert.match(geometry, /flat: "1"/);
   assert.doesNotMatch(geometry, /textures/);
   assert.match(main, /fetchTextures:/);
+  assert.match(main, /textures: load\.textures \? "1" : "0"/);
   assert.match(main, /id="show-textures"|show-textures/);
   assert.match(main, /setTextureShown/);
   assert.match(main, /Load textures/);

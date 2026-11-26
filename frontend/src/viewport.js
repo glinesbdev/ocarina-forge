@@ -51,7 +51,7 @@ import { buildCapture, countTextures, createProfileWindow, formatProfileHud, rec
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
-import { formatTextureDebug, textureDebugEnabled } from "./texture-debug.js";
+import { formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -398,8 +398,23 @@ export async function createViewport(host, hooks) {
   }
 
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
-  ktx2Loader.detectSupport(renderer);
-  const gpuCaps = textureSupport(renderer.getContext(), renderer);
+  // r187's detectSupport calls renderer.hasFeature, which throws until init().
+  // createBackendRenderer already awaits init. A renderer handed in later still
+  // has to be ready before the transcoder reads BC7 support.
+  if (renderer.isWebGPURenderer && typeof renderer.hasInitialized === "function" && !renderer.hasInitialized() && typeof renderer.init === "function") {
+    await renderer.init();
+  }
+  try {
+    ktx2Loader.detectSupport(renderer);
+  } catch (error) {
+    noteTexturePipelineError(error);
+  }
+  let gpuCaps = { s3tc: false, bptc: false, astc: false, webgpu: Boolean(renderer.isWebGPURenderer) };
+  try {
+    gpuCaps = textureSupport(renderer.getContext(), renderer);
+  } catch (error) {
+    noteTexturePipelineError(error);
+  }
   const gl = renderer.getContext();
   let loadingGyaml = "";
   function reportGpuFallback(reason) {
@@ -482,6 +497,10 @@ let convertSlots = 8;
   };
   let statLayersOff = [];
   let textureAllow = true;
+  let textureRequested = 0;
+  let textureFetched = 0;
+  let textureDecoded = 0;
+  let textureAssigned = 0;
   let texturesShown = true;
   let texturesShownArmed = false;
   let textureGeneration = 0;
@@ -958,10 +977,17 @@ let convertSlots = 8;
         else reject(new Error("decoded image is not a three.js texture"));
       }, undefined, reject);
     })).then((texture) => {
-      if (!texture || texture.isTexture !== true || typeof texture.clone !== "function") return null;
+      if (!texture || texture.isTexture !== true || typeof texture.clone !== "function") {
+        noteTexturePipelineError("decoded image is not a three.js texture");
+        return null;
+      }
       const copy = texture.clone();
-      if (!copy || copy.isTexture !== true) return null;
+      if (!copy || copy.isTexture !== true) {
+        noteTexturePipelineError("decoded image could not be cloned");
+        return null;
+      }
       copy.needsUpdate = true;
+      textureDecoded += 1;
       return copy;
     });
   }
@@ -975,12 +1001,12 @@ let convertSlots = 8;
     });
     if (!plan.textures) return textureDocs.get(gyaml);
     const pending = typeof hooks.fetchTextures === "function"
-      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch((error) => ({
-        materials: {},
-        status: "missing",
-        error: `file not found: texture request failed (${error && error.message ? error.message : error})`,
-      }))
-      : Promise.resolve({ materials: {} });
+      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch((error) => {
+        const message = `file not found: texture request failed (${error && error.message ? error.message : error})`;
+        noteTexturePipelineError(message);
+        return { materials: {}, status: "missing", error: message };
+      })
+      : Promise.resolve({ materials: {}, error: "texture request is not connected" });
     textureDocs.set(gyaml, pending);
     return pending;
   }
@@ -1015,7 +1041,9 @@ let convertSlots = 8;
     const generation = textureGeneration;
     for (const job of textureQueue.take(room)) {
       textureActive += 1;
-      void paintActorTextures(job.gyaml, job.url, generation).catch(() => {}).finally(() => {
+      void paintActorTextures(job.gyaml, job.url, generation).catch((error) => {
+        noteTexturePipelineError(error);
+      }).finally(() => {
         textureActive = Math.max(0, textureActive - 1);
         if (generation !== textureGeneration) return;
         textureQueue.finish(job.gyaml);
@@ -1030,6 +1058,7 @@ let convertSlots = 8;
     if (!textureAllow || !gyaml || !url) return;
     const rank = textureRank(gyaml);
     if (!textureQueue.note({ gyaml, url, distance: rank.distance, visible: rank.visible })) return;
+    textureRequested += 1;
     pumpTextures();
   }
 
@@ -1062,17 +1091,25 @@ let convertSlots = 8;
   async function paintActorTextures(gyaml, url, generation = textureGeneration) {
     if (!url) return;
     const parsed = parsedTemplates.get(url);
-    if (!parsed) return;
+    if (!parsed) {
+      noteTexturePipelineError(`texture job for ${gyaml || "a model"} ran before its mesh was parsed`);
+      return;
+    }
     const manifest = await textureManifest(gyaml);
+    textureFetched += 1;
+    if (manifest && manifest.skipped) noteTexturePipelineError(manifest.reason || "Textures are not loaded.");
+    else if (manifest && manifest.error && !Object.keys(manifest.materials || {}).length) noteTexturePipelineError(manifest.error);
     if (generation !== textureGeneration) return;
     if (!parsedTemplates.has(url)) return;
     let report;
     try {
       report = await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
     } catch (error) {
+      noteTexturePipelineError(error);
       rememberTextureNote(gyaml, `decode error: ${error && error.message ? error.message : error}`);
       return;
     }
+    textureAssigned += (report || []).filter((row) => row && row.status === "applied").length;
     rememberTextureNote(gyaml, formatTextureReport(report));
     refreshBlendMaps(parsed.parts);
     if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
@@ -2601,7 +2638,10 @@ let convertSlots = 8;
   function bindNamedTexture(parser, index, imageName) {
     const slot = resolveTextureIndex(parser.json, index, imageName);
     if (slot < 0) return Promise.resolve(null);
-    return parser.getDependency("texture", slot).catch(() => null);
+    return parser.getDependency("texture", slot).catch((error) => {
+      noteTexturePipelineError(error || "glTF texture dependency failed");
+      return null;
+    });
   }
 
   async function bindSurfaceMaps(gltf) {
@@ -5504,6 +5544,7 @@ uniform float terrainLayerMissing;`
     }
     const report = {
       shown: texturesShown,
+      allow: textureAllow,
       batches: batches.length,
       meshMaps,
       partMaps,
@@ -5512,6 +5553,11 @@ uniform float terrainLayerMissing;`
       foreign,
       uploaded,
       profileTex: profileTextureCount(),
+      requested: textureRequested,
+      fetched: textureFetched,
+      decoded: textureDecoded,
+      assigned: textureAssigned,
+      error: texturePipelineError(),
       samples,
     };
     const text = formatTextureDebug(report);
