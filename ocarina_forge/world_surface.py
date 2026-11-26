@@ -24,7 +24,7 @@ from ocarina_forge.models import _actor_plan
 KOKIRI_CHILD = "Banc/KokiriForest/KokiriForest_Child_"
 
 _SURFACE = re.compile(
-    r"(?:ground|floor|road|path|terrain|rockarea|island|cliff|soil|riverbank|slope|hill)",
+    r"(?:ground|floor|road|path|terrain|rockarea|island|cliff|soil|riverbank|slope|hill|mountain)",
     re.IGNORECASE,
 )
 _SCENERY = re.compile(

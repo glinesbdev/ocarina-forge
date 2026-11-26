@@ -363,9 +363,57 @@ def _fill_isolated_zeros(values: list[float]) -> list[float]:
     return out
 
 
+# Packed leftovers and empty parent cells under a missing finer tile can be
+# a tiny non-zero (1e-5 .. 1e-3) instead of an exact 0. At height scale 800
+# that is still under a metre, and meshing it produces a flat ground sheet at
+# the origin. The same rule is used when sampling.
+_HEIGHT_HOLE = 1e-3
+
+
 def _uncover_sentinel_zeros(values: list[float]) -> list[float]:
-    """Exact 0 left after dashed-column repair is uncovered, not a height at the origin."""
-    return [float("nan") if value == 0.0 else value for value in values]
+    """Exact 0, or a near-zero leftover, is uncovered, not a height at the origin."""
+    return [float("nan") if not _finite(value) or abs(value) <= _HEIGHT_HOLE else value for value in values]
+
+def _plausible_height_max(values) -> float | None:
+    """Largest finite sample in the normalised 0..1 height range, excluding 0."""
+    best = None
+    for value in values:
+        if value == value and 0.0 < value < 2.0:
+            if best is None or value > best:
+                best = value
+    return best
+
+
+def _packed_height_max(block: bytes) -> float | None:
+    """Max plausible height already present in the packed (still swizzled) block."""
+    if len(block) < 4:
+        return None
+    return _plausible_height_max(struct.unpack_from(f"<{len(block) // 4}f", block))
+
+
+def _recovers_packed_range(values: list[float], packed_max: float | None) -> bool:
+    """True when a deswizzle still contains the highs that were in the packed block."""
+    if packed_max is None or packed_max <= 0:
+        return True
+    decoded_max = _plausible_height_max(values)
+    return decoded_max is not None and decoded_max >= packed_max * 0.9
+
+
+def _choose_height_decode(default: list[float], alternatives: list[list[float]], packed_max: float | None) -> list[float]:
+    """Keep the default GOB layout unless it dropped the packed height range.
+
+    A sparse tile can have tens of thousands of real zeros. The older "fewer
+    zeros, smoother field" guess then prefers an almost-flat wrong log2
+    (decoded max ~1/256) over the layout that still has the highs recorded
+    in the TSCB resource rawMax and in the packed block itself.
+    """
+    if _recovers_packed_range(default, packed_max):
+        return default
+    recovered = [alt for alt in alternatives if _recovers_packed_range(alt, packed_max)]
+    if not recovered:
+        return default
+    return min(recovered, key=_roughness)
+
 
 def _as_floats(block: bytes) -> list[float] | None:
     tight = SIZE * SIZE * 4
@@ -390,6 +438,12 @@ def _as_floats(block: bytes) -> list[float] | None:
                 best_zeros = alt_zeros
                 best_rough = alt_rough
         chosen = best
+    alternatives = []
+    for log2 in (0, 1, 2, 3, 5):
+        alt = _decode_block(block, log2)
+        if alt is not None:
+            alternatives.append(alt)
+    chosen = _choose_height_decode(chosen, alternatives, _packed_height_max(block))
     return _uncover_sentinel_zeros(_fill_isolated_zeros(chosen))
 
 

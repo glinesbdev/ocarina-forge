@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from ocarina_forge import scene_preview, server
@@ -160,7 +162,7 @@ def test_entrance_refines_at_the_matching_start_without_a_floor_model(tmp_path, 
     monkeypatch.setattr(scene_preview, "_run_worker", lambda request: requests.append(request) or b"fitted")
     result = scene_preview.prepare_scene_terrain(dump, banc, terrain, actors=actors)
     assert result.read_bytes() == b"fitted"
-    assert requests[0]["entrances"] == [[-10, -11, 20, 19]]
+    assert requests[0]["entrances"] == [[-11, -11, 20, 20]]
     assert requests[0]["heightTiles"] == ["fine samples"]
     assert requests[0]["cutout"] == {}
 
@@ -197,6 +199,22 @@ def test_entrance_uses_nearby_land_collision_with_no_model_name_override(tmp_pat
     actor, = request["actors"]
     assert actor["gyaml"] == "Land_UnnamedApproach"
     assert actor["entranceIndices"] == [0]
+
+def test_entrance_pairs_a_start_just_beyond_the_old_twenty_metre_limit():
+    actors = [
+        {"gyaml": "FieldAndDungeonEntranceEventRequestActor", "name": "HyruleField_FrontOfMarket",
+         "translate": [0.01, 162.66, 53.63]},
+        {"gyaml": "StartPos", "name": "HyruleField_FrontOfMarket", "translate": [-0.04, 150.66, 32.16]},
+        {"gyaml": "StartPos", "name": "HyruleField_FrontOfMarket", "translate": [200.0, 150.0, 200.0]},
+    ]
+    starts, boxes = scene_preview._entrance_regions(actors)
+    assert starts == [[-0.04, 150.66, 32.16]]
+    left, top, right, bottom = boxes[0]
+    assert left == pytest.approx(-15.04)
+    assert top == pytest.approx(17.16)
+    assert right == pytest.approx(15.01)
+    assert bottom == pytest.approx(68.63)
+
 
 def test_default_scene_preview_includes_all_cached_drawable_model_types(tmp_path, monkeypatch):
     dump = SimpleNamespace(root=tmp_path)
@@ -235,8 +253,8 @@ def test_hyrule_field_fit_cache_uses_a_new_generation(tmp_path, monkeypatch):
     dump = SimpleNamespace(root=tmp_path / "dump")
     field = scene_preview.corrected_terrain_path(dump, "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs", "base")
     other = scene_preview.corrected_terrain_path(dump, "Banc/KokiriForest/KokiriForest_Child_Static.bcett.byml.zs", "base")
-    assert "scene-terrain-v11" in field.parts
-    assert "scene-terrain-v10" in other.parts
+    assert "scene-terrain-v13" in field.parts
+    assert "scene-terrain-v12" in other.parts
 
 
 def test_islands_are_not_queued_as_visible_terrain_cutouts(tmp_path, monkeypatch):

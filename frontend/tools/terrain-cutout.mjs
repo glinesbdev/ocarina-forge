@@ -84,10 +84,9 @@ export async function buildCorrectedTerrain(io, terrain, sources, actors, height
   for (const approach of approaches) {
     const triangles = connectedApproach(approach);
     if (!triangles.length) continue;
-    groundHeight ||= terrainSampler(document);
-    const buried = triangles.some(([x, y, z]) =>
-      groundHeight(x, z) + Math.max(0, authoredDelta(x, z)) > y + 0.02);
-    if (buried) clips.push(rasterizeCutout(triangles, 3));
+    // Raise a too-low approach as well as cutting a coarse mesh that bridges
+    // a depression. The earlier buried-only path left floating gate floors.
+    clips.push(rasterizeCutout(triangles, 3, { lift: true }));
   }
   if (knownFloor.length) clips.push({ ...rasterizeCutout(knownFloor), authoredDelta });
   for (const bounds of entrances) {
@@ -332,8 +331,9 @@ export function confirmedTerrainOverlap(triangles, groundHeight) {
   return patches;
 }
 
-export function rasterizeCutout(triangles, margin = 8) {
+export function rasterizeCutout(triangles, margin = 8, options = {}) {
   if (!triangles.length) return null;
+  const lift = Boolean(options.lift);
   const [min, max] = footprintBounds(triangles);
   const step = Math.max(0.125, (max[0] - min[0]) / 510, (max[2] - min[2]) / 510);
   const padding = Math.ceil(margin / step) * step;
@@ -394,13 +394,14 @@ export function rasterizeCutout(triangles, margin = 8) {
       if (i < 0 || i >= width || j < 0 || j >= height) return y;
       const edge = Math.min(i, width - 1 - i, j, height - 1 - j) * step;
       const t = Math.min(1, edge / 3);
-      return y + t * t * (3 - 2 * t) * Math.min(0, heights[j * width + i] - 0.02 - y);
+      const delta = heights[j * width + i] - 0.02 - y;
+      return y + t * t * (3 - 2 * t) * (lift ? delta : Math.min(0, delta));
     };
     const upper = (1 - dx) * at(column, row) + dx * at(column + 1, row);
     const lower = (1 - dx) * at(column, row + 1) + dx * at(column + 1, row + 1);
     return (1 - dz) * upper + dz * lower;
   };
-  return { sample, step, bounds: [x0, z0, x0 + width * step, z0 + height * step],
+  return { sample, step, lift, bounds: [x0, z0, x0 + width * step, z0 + height * step],
     detailBounds: [min[0] - 1, min[2] - 1, max[0] + 1, max[2] + 1] };
 }
 
@@ -533,7 +534,11 @@ export function deformTerrainPrimitive(primitive, matrix, fit) {
     }
     base += detailWeight * delta;
     let y = base;
-    for (const clip of clips) if (clip.sample && intersects(clip.bounds, x, z, x, z)) y = Math.min(y, clip.sample(x, base, z));
+    for (const clip of clips) {
+      if (!clip.sample || !intersects(clip.bounds, x, z, x, z)) continue;
+      const next = clip.sample(x, y, z);
+      y = clip.lift ? next : Math.min(y, next);
+    }
     if (Math.abs(y - point.y) < 1e-6) continue;
     point.y = y;
     point.applyMatrix4(inverse).toArray(positions, index * 3);

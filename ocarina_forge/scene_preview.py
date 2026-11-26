@@ -27,8 +27,8 @@ KOKIRI_CHILD = "Banc/KokiriForest/KokiriForest_Child_"
 WORKER = Path(__file__).resolve().parents[1] / "frontend" / "tools" / "scene-preview-worker.mjs"
 PREVIEW_VERSION = "scene-preview-v2"
 # Hyrule Field has its own terrain pack. Both folders are current.
-TERRAIN_VERSION = "scene-terrain-v10"
-TERRAIN_FIELD_VERSION = "scene-terrain-v11"
+TERRAIN_VERSION = "scene-terrain-v12"
+TERRAIN_FIELD_VERSION = "scene-terrain-v13"
 
 
 def preview_bank(dump, banc: str, known: set[str] | None = None) -> str:
@@ -93,20 +93,53 @@ def _scene_actors(dump, banc, known):
                 yield actor
 
 
-def _entrance_starts(actors: list[dict]) -> list[list[float]]:
-    """A named exit trigger and its matching start locate an authored approach."""
-    entrances = {}
+_ENTRANCE_MATCH = 40.0
+_ENTRANCE_PAD = 15.0
+
+
+def _entrance_regions(actors: list[dict]) -> tuple[list[list[float]], list[list[float]]]:
+    """Pair a named exit trigger with a nearby start, and keep unpaired triggers.
+
+    The box is the union of 15 m pads around the start and every same-name
+    trigger within 40 m. A 20 m limit missed Hyrule Field's Market gate, where
+    the start sits about 21.5 m from the trigger. Unpaired triggers still get
+    a pad so fine height can be restored when no start is in range.
+    """
+    triggers: dict[str, list[list[float]]] = {}
     for actor in actors:
         if actor.get("gyaml") == "FieldAndDungeonEntranceEventRequestActor" and actor.get("name"):
-            entrances.setdefault(actor["name"], []).append(actor["translate"])
+            triggers.setdefault(actor["name"], []).append(actor["translate"])
     starts = []
+    boxes = []
+    used = set()
     for actor in actors:
-        if actor.get("gyaml") != "StartPos" or actor.get("name") not in entrances:
+        if actor.get("gyaml") != "StartPos" or actor.get("name") not in triggers:
             continue
         x, _, z = actor["translate"]
-        if any((x - trigger_x) ** 2 + (z - trigger_z) ** 2 <= 20 ** 2
-               for trigger_x, _, trigger_z in entrances[actor["name"]]):
-            starts.append(actor["translate"])
+        near = []
+        for trigger in triggers[actor["name"]]:
+            if (x - trigger[0]) ** 2 + (z - trigger[2]) ** 2 <= _ENTRANCE_MATCH ** 2:
+                near.append(trigger)
+                used.add((actor["name"], trigger[0], trigger[2]))
+        if not near:
+            continue
+        starts.append(actor["translate"])
+        xs = [x] + [item[0] for item in near]
+        zs = [z] + [item[2] for item in near]
+        boxes.append([min(xs) - _ENTRANCE_PAD, min(zs) - _ENTRANCE_PAD,
+                      max(xs) + _ENTRANCE_PAD, max(zs) + _ENTRANCE_PAD])
+    for name, items in triggers.items():
+        for trigger in items:
+            if (name, trigger[0], trigger[2]) in used:
+                continue
+            x, _, z = trigger
+            boxes.append([x - _ENTRANCE_PAD, z - _ENTRANCE_PAD, x + _ENTRANCE_PAD, z + _ENTRANCE_PAD])
+    return starts, boxes
+
+
+def _entrance_starts(actors: list[dict]) -> list[list[float]]:
+    """Starts that still have a named trigger within the entrance match radius."""
+    starts, _boxes = _entrance_regions(actors)
     return starts
 
 
@@ -125,8 +158,7 @@ def prepare_scene_terrain(dump, banc: str, terrain: dict, *, actors=None, prepar
         actors = _scene_actors(dump, banc, {scene["path"] for scene in dump.list_scenes()})
     actors = list(actors)
     pond = next((actor for actor in actors if actor["gyaml"] == FISHING_POND_WATER), None)
-    starts = _entrance_starts(actors)
-    entrances = [[x - 15, z - 15, x + 15, z + 15] for x, _, z in starts]
+    starts, entrances = _entrance_regions(actors)
     collision = {}
     floors = []
     for actor in actors:
