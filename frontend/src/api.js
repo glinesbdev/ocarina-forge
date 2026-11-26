@@ -1,10 +1,36 @@
+let tokenPromise;
+
+function launchToken() {
+  if (!tokenPromise) {
+    tokenPromise = fetch("/api/health")
+      .then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || !body.token) {
+          tokenPromise = null;
+          throw new Error(body.message || "The editor could not get an API token.");
+        }
+        return body.token;
+      })
+      .catch((error) => {
+        tokenPromise = null;
+        throw error;
+      });
+  }
+  return tokenPromise;
+}
+
 export async function request(path, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (method !== "GET" && method !== "HEAD" && !headers["X-Ocarina-Forge-Token"]) {
+    headers["X-Ocarina-Forge-Token"] = await launchToken();
+  }
   const response = await fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
+    headers,
   });
   const text = await response.text();
   let data = {};

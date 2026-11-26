@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from ocarina_forge.actors import format_hash, parse_hash
+from ocarina_forge.dump import lexical_dump_relative
 from ocarina_forge.errors import BancError
 
 FORMAT = 1
@@ -169,7 +170,14 @@ class Project:
         self.manifest = self._load_manifest()
 
     def scene_path(self, banc: str) -> Path:
-        return self.root / scene_filename(banc)
+        """The scene diff for ``banc``, confined to this project's scenes folder."""
+        lexical_dump_relative(banc)
+        relative = scene_filename(banc)
+        root = self.root.resolve()
+        candidate = (self.root / relative).resolve()
+        if relative.is_absolute() or not candidate.is_relative_to(root):
+            raise BancError("That scene path is not in this project.", "not_found")
+        return candidate
 
     def load_scene_diff(self, banc: str) -> dict:
         path = self.scene_path(banc)

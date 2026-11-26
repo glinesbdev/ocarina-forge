@@ -327,7 +327,7 @@ def test_texture_manifest_does_not_rewrite_geometry(tmp_path, monkeypatch):
 
 
 def test_texture_route_does_not_convert_geometry(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
+    from ocarina_forge.local_api import editor_client
     import ocarina_forge.server as server
 
     monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
@@ -345,7 +345,7 @@ def test_texture_route_does_not_convert_geometry(tmp_path, monkeypatch):
 
     monkeypatch.setattr(server, "describe_actor", boom)
     monkeypatch.setattr(server, "describe_actor_textures", manifest)
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     saved = client.put("/api/config", json={"dump": str(dump.root), "project": str(project.root)})
     assert saved.status_code == 200
     skipped = client.get("/api/models/Npc_Kokiri_F_01/textures?textures=0")
@@ -380,7 +380,7 @@ def test_flat_models_do_not_decode_textures(tmp_path, monkeypatch):
 
 
 def test_endpoints_skip_a_layer_that_is_off(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
+    from ocarina_forge.local_api import editor_client
 
     monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.chdir(tmp_path)
@@ -388,7 +388,7 @@ def test_endpoints_skip_a_layer_that_is_off(tmp_path, monkeypatch):
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     project = Project.create(tmp_path / "mod", name="layer-notes", title="Layers", author="Ada", version="0.1.0")
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     saved = client.put("/api/config", json={"dump": str(dump.root), "project": str(project.root)})
     assert saved.status_code == 200
 

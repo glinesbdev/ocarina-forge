@@ -62,6 +62,13 @@ const threeWebgpu = path.resolve("node_modules/three/build/three.webgpu.js").rep
 const apiPort = process.env.OCARINA_FORGE_PORT || process.env.BANCWRIGHT_PORT || "47232";
 const forge = forgeRevision();
 
+// Loopback unless OCARINA_FORGE_DEV_HOST is set (for example 0.0.0.0). The
+// API still only accepts a loopback Host and the editor's own origin.
+function devHost() {
+  const chosen = (process.env.OCARINA_FORGE_DEV_HOST || "").trim();
+  return chosen || "127.0.0.1";
+}
+
 export default defineConfig(({ mode }) => ({
   define: {
     __FORGE_REVISION__: JSON.stringify(forge.revision),
@@ -89,7 +96,7 @@ export default defineConfig(({ mode }) => ({
     target: "es2022",
   },
   server: {
-    host: "0.0.0.0",
+    host: devHost(),
     port: 47231,
     strictPort: true,
     headers: isolationHeaders,
@@ -98,7 +105,7 @@ export default defineConfig(({ mode }) => ({
     },
   },
   preview: {
-    host: "0.0.0.0",
+    host: devHost(),
     port: 47231,
     strictPort: true,
     headers: isolationHeaders,

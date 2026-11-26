@@ -39,6 +39,8 @@ python -m ocarina_forge profile --dump ~/Games/Longshot/rc/v3.0.0 --model Land_K
 
 The API listens on 127.0.0.1:47232. The editor on 47231 proxies `/api` to it. `build.bat` and `./build.sh` start both and stop the API when you quit.
 
+The API answers only a loopback `Host` (`localhost`, `127.0.0.1`, or `::1`). A write (anything other than GET or HEAD) must come from the editor: its `Origin`, or `Referer` when `Origin` is absent, has to be `http://127.0.0.1`, `http://localhost`, or `http://[::1]` on port 47231, 47232, or a port named in `frontend/vite.config.js`. A non-default Vite port is allowed when `OCARINA_FORGE_DEV_PORT` (or a comma-separated `OCARINA_FORGE_DEV_PORTS`) names it. Each launch also requires the header `X-Ocarina-Forge-Token`. The editor reads that value from `GET /api/health` and sends it on writes. Another website cannot create a project, point a folder at an arbitrary path, or delete files through this API. `npm run dev` and `npm run preview` bind to 127.0.0.1. Set `OCARINA_FORGE_DEV_HOST` (for example `0.0.0.0`) to listen on another interface. Open the editor at `http://127.0.0.1:47231` either way: a page opened by a LAN address is not an allowed origin.
+
 The first screen asks for the dump folder, the one that contains `romfs`. On a typical Longshot install that is:
 
 ```text

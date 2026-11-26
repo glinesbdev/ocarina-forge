@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from ocarina_forge.buildstamp import read_build
 from ocarina_forge.editor_static import cache_control_for
+from ocarina_forge.local_api import editor_client
 from ocarina_forge.server import app
 
 
@@ -49,7 +50,7 @@ def test_read_build_uses_git_or_unknown(tmp_path):
 
 
 def test_health_includes_the_server_build():
-    body = TestClient(app).get("/api/health").json()
+    body = editor_client(app).get("/api/health").json()
     assert body["ok"] is True
     assert body["version"]
     assert len(body["build"]["revision"]) == 40

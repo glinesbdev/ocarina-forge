@@ -5,6 +5,7 @@ Ocarina Forge never writes into the dump. Mods are built beside it, under mods/.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections import deque
 from pathlib import Path
@@ -12,6 +13,11 @@ from pathlib import Path
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import loads
 from ocarina_forge.formats.zsio import DictSet, decompress
+
+# A user path that is not a file inside romfs. Absolute paths, drive letters,
+# and ``..`` never reach the filesystem.
+DUMP_PATH_MESSAGE = "That scene path is not in the dump."
+_DRIVE = re.compile(r"^[A-Za-z]:")
 
 RSTB_REL = "System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs"
 
@@ -53,6 +59,29 @@ def _remember_read(key: tuple, payload: bytes, dict_id: int | None) -> None:
         _READ_CACHE[key] = (payload, dict_id)
         _READ_ORDER.append(key)
         _READ_BYTES += size
+
+
+def lexical_dump_relative(relative: str) -> str:
+    """A dump-relative path with no absolute prefix, drive letter, or ``..``.
+
+    The result uses forward slashes. It does not touch the filesystem, so a
+    request for ``/etc/hostname`` is rejected before that file is opened.
+    """
+    if not isinstance(relative, str):
+        raise BancError(DUMP_PATH_MESSAGE, "not_found")
+    text = relative.replace("\\", "/").strip()
+    if not text or "\x00" in text or text.startswith("/") or _DRIVE.match(text):
+        raise BancError(DUMP_PATH_MESSAGE, "not_found")
+    parts: list[str] = []
+    for part in text.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            raise BancError(DUMP_PATH_MESSAGE, "not_found")
+        parts.append(part)
+    if not parts:
+        raise BancError(DUMP_PATH_MESSAGE, "not_found")
+    return "/".join(parts)
 
 
 def resolve_dump(path: Path) -> tuple[Path, Path]:
@@ -128,8 +157,21 @@ class Dump:
             return []
         return sorted(file.name.removesuffix(".pack.zs") for file in folder.glob("*.pack.zs"))
 
+    def resolve_relative(self, relative: str) -> Path:
+        """The file ``relative`` would name inside romfs.
+
+        Absolute paths, drive letters, ``..``, and a symlink that leaves romfs
+        are rejected. The file does not have to exist yet.
+        """
+        cleaned = lexical_dump_relative(relative)
+        root = self.romfs.resolve()
+        candidate = (root / cleaned).resolve()
+        if not candidate.is_relative_to(root):
+            raise BancError(DUMP_PATH_MESSAGE, "not_found")
+        return candidate
+
     def read_file(self, relative: str) -> tuple[bytes, int | None]:
-        path = self.romfs / relative
+        path = self.resolve_relative(relative)
         if not path.is_file():
             raise BancError(
                 f"{relative} is not in this dump ({self.romfs}).",

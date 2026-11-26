@@ -25,6 +25,8 @@ Both scripts install missing tools only after a yes. They then run `python -m oc
 
 The editor is Vite's preview of `frontend/dist`. It proxies `/api` to the API, and it sends the same cross-origin headers the dev server uses, so the wasm worker pool can start. `OCARINA_FORGE_HOST` and `OCARINA_FORGE_PORT` override the API address. `BANCWRIGHT_HOST` and `BANCWRIGHT_PORT` are still read when the new names are unset.
 
+`npm run dev` and `npm run preview` bind to 127.0.0.1. `OCARINA_FORGE_DEV_HOST` is the opt-in for another interface (`0.0.0.0` listens on every interface). The API still requires a loopback `Host`. Writes are accepted only from the editor origin (`http://127.0.0.1`, `http://localhost`, or `http://[::1]` on 47231, 47232, or a Vite port in `frontend/vite.config.js`) and only with `X-Ocarina-Forge-Token`. The page loads that token from `GET /api/health`. Set `OCARINA_FORGE_DEV_PORT` when the dev server is not on 47231, so that origin is allowed. A page opened as a LAN address is not an allowed origin; use `http://127.0.0.1:47231`.
+
 A later run skips installs and builds that are already current, and it does not ask for the dump again.
 
 ## Flags

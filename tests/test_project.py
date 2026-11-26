@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import yaml
-from fastapi.testclient import TestClient
+from ocarina_forge.local_api import editor_client
 
 from ocarina_forge.actors import actor_id, format_hash, read_vec
 from ocarina_forge.dump import Dump
@@ -225,7 +225,7 @@ def test_api_sample_edit_and_export(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from ocarina_forge.server import app
 
-    client = TestClient(app)
+    client = editor_client(app)
     missing = client.get("/api/scenes")
     assert missing.status_code == 409
     assert missing.json()["error"] == "dump_missing"
@@ -310,7 +310,7 @@ def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch
     from ocarina_forge.server import app, describe_actor
 
     dump = _dump(tmp_path)
-    client = TestClient(app)
+    client = editor_client(app)
     client.put("/api/config", json={"dump": str(dump.root), "project": ""})
     listed = client.post("/api/models/batch", json={"names": ["Npc_Kokiri_F_01", "Npc_Kokiri_F_01", "Not_An_Actor"]})
     assert listed.status_code == 200, listed.text
@@ -334,7 +334,7 @@ def test_model_batch_is_one_round_trip_and_glbs_are_cached(tmp_path, monkeypatch
 
     async def both():
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as http:
+        async with AsyncClient(transport=transport, base_url="http://127.0.0.1") as http:
             return await asyncio.gather(
                 http.get("/api/models/Npc_Kokiri_F_01/model.glb"),
                 http.get("/api/models/Npc_Kokiri_F_01/model.glb"),

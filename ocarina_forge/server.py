@@ -1,4 +1,9 @@
-"""Local HTTP API for the Ocarina Forge editor. It binds to localhost in normal use."""
+"""Local HTTP API for the Ocarina Forge editor.
+
+It binds to localhost. Writes are accepted only from the editor's own origin,
+and only with the launch token from ``GET /api/health``. See
+``ocarina_forge.local_api``.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +19,6 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -25,7 +29,8 @@ from ocarina_forge.actors import is_marker
 from ocarina_forge.changes import project_report, scene_changes
 from ocarina_forge.cache_prune import cache_public, note_access, start_maintenance, stop_maintenance
 from ocarina_forge.config import load_config, parse_cache_limit, save_config
-from ocarina_forge.dump import Dump
+from ocarina_forge.dump import Dump, lexical_dump_relative
+from ocarina_forge.local_api import LAUNCH_TOKEN, LocalApiMiddleware
 from ocarina_forge.errors import BancError
 from ocarina_forge.export import build
 from ocarina_forge.fixtures import build_fixture
@@ -99,12 +104,7 @@ _BUILD = read_build()
 
 app = FastAPI(title="Ocarina Forge", version=__version__, lifespan=_lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(LocalApiMiddleware)
 
 _dump_cache: dict = {"key": None, "dump": None}
 _POOL = None
@@ -605,7 +605,7 @@ def _project_status() -> dict | None:
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": __version__, "build": _BUILD}
+    return {"ok": True, "version": __version__, "build": _BUILD, "token": LAUNCH_TOKEN}
 
 
 @app.get("/api/stream")
@@ -624,6 +624,7 @@ async def start_warm(body: dict):
     nearest = [name for name in (body.get("names") or []) if isinstance(name, str) and name]
     if not banc:
         raise BancError("Which scene?", "edit")
+    banc = lexical_dump_relative(banc)
     dump = _open_dump()
 
     try:
@@ -932,6 +933,7 @@ def project_changes():
 def scene_change_list(banc: str):
     if not banc:
         raise BancError("Which scene?", "edit")
+    banc = lexical_dump_relative(banc)
     dump = _open_dump()
     project = _open_project()
     return scene_changes(dump, project, banc)
@@ -982,6 +984,7 @@ def _attach_recipes(view: dict, banc: str) -> dict:
 def scene_problems(banc: str):
     if not banc:
         raise BancError("Which scene?", "edit")
+    banc = lexical_dump_relative(banc)
     from ocarina_forge.validate import diagnose
 
     return diagnose(_open_dump(), _open_project(), banc)
@@ -991,6 +994,7 @@ def scene_problems(banc: str):
 def scene_mesh_audit(banc: str):
     from ocarina_forge.meshaudit import audit_scene_meshes
 
+    banc = lexical_dump_relative(banc)
     dump = _open_dump()
 
     def view(bank):
@@ -1040,6 +1044,7 @@ def _layer_allowed(gyaml: str, spec) -> bool:
 
 @app.get("/api/scene")
 def get_scene(banc: str, load: str = "", textures: str = ""):
+    banc = lexical_dump_relative(banc)
     dump = _open_dump()
     document, _dict_id, _raw = dump.read_byml(banc)
     diff = _diff_for(banc)
@@ -1059,6 +1064,7 @@ def get_scene(banc: str, load: str = "", textures: str = ""):
 
 @app.get("/api/scene/preview.glb")
 def scene_preview_file(banc: str, request: Request):
+    banc = lexical_dump_relative(banc)
     path = preview_path(_open_dump(), banc)
     try:
         version = str(path.stat().st_mtime_ns)
@@ -1072,6 +1078,7 @@ def edit_scene(body: dict):
     banc = body.get("banc")
     if not banc:
         raise BancError("Which scene? Open one from the list.", "edit")
+    banc = lexical_dump_relative(str(banc))
     dump = _open_dump()
     project = _open_project()
     command = body.get("command") or {}
@@ -1102,6 +1109,7 @@ def put_diff(body: dict):
     banc = body.get("banc")
     if not banc:
         raise BancError("Which scene?", "edit")
+    banc = lexical_dump_relative(str(banc))
     dump = _open_dump()
     project = _open_project()
     document, _dict_id, _raw = dump.read_byml(banc)
@@ -1122,6 +1130,7 @@ def put_recipes(body: dict):
     banc = body.get("banc")
     if not banc:
         raise BancError("Which scene?", "edit")
+    banc = lexical_dump_relative(str(banc))
     dump = _open_dump()
     project = _open_project()
     from ocarina_forge.recipes import replace_recipes
@@ -1251,16 +1260,14 @@ def _exclude_ids(value) -> list[str]:
 @app.get("/api/lighting")
 def scene_lighting(banc: str):
     """Emitters, GameBancParam key names, and an imported capture when one exists."""
-    if not banc or ".." in banc or banc.startswith("/"):
-        raise BancError("That scene path is not in the dump.", "not_found")
+    banc = lexical_dump_relative(banc)
     return lighting_report(_open_dump(), banc)
 
 
 @app.get("/api/ground")
 async def ground_at(banc: str, x: float, z: float, exclude: str = "", load: str = "", textures: str = ""):
     """Composed walkable height at one XZ: height tile plus Land_* island/cliff/hill meshes."""
-    if not banc or ".." in banc or banc.startswith("/"):
-        raise BancError("That scene path is not in the dump.", "not_found")
+    banc = lexical_dump_relative(banc)
     spec = _load_spec(load, textures)
     if spec is not None and "terrain" not in spec.layers:
         return {"status": "skipped", "reason": "Terrain is not loaded.", "hit": False}
@@ -1272,8 +1279,7 @@ async def ground_at(banc: str, x: float, z: float, exclude: str = "", load: str 
 @app.get("/api/ground/surface")
 async def ground_surface(banc: str, load: str = "", textures: str = ""):
     """Gzipped walkable-surface pack for local Snap in the viewer."""
-    if not banc or ".." in banc or banc.startswith("/"):
-        raise BancError("That scene path is not in the dump.", "not_found")
+    banc = lexical_dump_relative(banc)
     spec = _load_spec(load, textures)
     if spec is not None and "terrain" not in spec.layers:
         return {"status": "skipped", "reason": "Terrain is not loaded."}
@@ -1292,6 +1298,7 @@ async def ground_surface(banc: str, load: str = "", textures: str = ""):
 
 @app.get("/api/terrain")
 async def terrain_info(banc: str, refine: bool = False, load: str = "", textures: str = ""):
+    banc = lexical_dump_relative(banc)
     spec = _load_spec(load, textures)
     if spec is not None and "terrain" not in spec.layers:
         return {"banc": banc, "status": "skipped", "reason": "Terrain is not loaded.", "url": None}
@@ -1325,6 +1332,7 @@ def _corrected_terrain(dump, banc: str, info: dict) -> tuple[Path | None, str]:
 
 @app.get("/api/terrain/model.glb")
 async def terrain_file(banc: str, request: Request, load: str = "", textures: str = ""):
+    banc = lexical_dump_relative(banc)
     spec = _load_spec(load, textures)
     if spec is not None and "terrain" not in spec.layers:
         raise BancError("Terrain is not loaded.", "not_found")
@@ -1342,6 +1350,8 @@ async def terrain_file(banc: str, request: Request, load: str = "", textures: st
 
 @app.get("/api/behavior")
 def behavior(gyaml: str = "", banc: str = "", id: str = "", load: str = "", textures: str = ""):
+    if banc:
+        banc = lexical_dump_relative(banc)
     spec = _load_spec(load, textures)
     if spec is not None and "behavior" not in spec.layers:
         return {"gyaml": gyaml, "skipped": True, "reason": "Behavior is not loaded.", "nodes": [], "edges": []}

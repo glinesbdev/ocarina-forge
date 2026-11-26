@@ -8,7 +8,7 @@
     "prebuild": "node tools/prepare-longshot-shaders.mjs",
     "build": "vite build",
     "build:webgl": "vite build --mode webgl",
-    "preview": "vite preview --host 127.0.0.1 --port 47231 --strictPort"
+    "preview": "vite preview --port 47231 --strictPort"
   },
   "dependencies": {
     "@gltf-transform/core": "^4.5.1",
