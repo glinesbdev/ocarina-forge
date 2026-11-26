@@ -53,13 +53,60 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Compressed GPU textures (BC7/BC1) | **4–8×** texture memory vs RGBA; often the difference between a Field tab surviving and OOM | Implemented this pass |
 | Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented. Template sources are disposed, and part clones are released after the batch copy exists (GPU picking, below) |
 | Frustum culling | Already removing off-screen instance draws | Already present |
-| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented this pass: background fill stops at 240 unique meshes (or 2.2 GB JS heap). Far meshes evict past 280 unique or 2.8 GB heap |
+| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of geometry plus BC7 (`__forgeMemory()`). The JS heap and a 4096-mesh count are last-resort caps. See [Residency budget](#residency-budget) |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
 | Texture arrays | Fewer binds. One `BatchedMesh` per alpha mode, side, vertex layout, and texture size class | Implemented. See [Texture arrays](#texture-arrays). Field and Kokiri frame times were not remeasured in this checkout |
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
+| Async pipeline compile before a batch is attached | Removes 50–300 ms stream-in hitches. No steady-state frame change | Implemented. WebGPU awaits `compileAsync` with at most 6 in flight, then attaches. See [Shader pipelines](#shader-pipelines) |
+
+## Residency budget
+
+The viewer used to stop background loads at **240** unique meshes (hard evict at 280) or at **2.2 GB** of JS heap (hard **2.8 GB**), nearest first, at most 8 evictions a pass. One Field model can be about ten times another, so a count fills the tab with whatever happened to be nearby.
+
+The soft limit is now bytes. `__forgeMemory()` sums geometry CPU bytes and BC7 texture GPU bytes (`geometries.cpuBytes` + `textures.byFormat.BC7.gpu`). That total is the residency budget:
+
+| Limit | Value | What it does |
+| --- | --- | --- |
+| Soft byte budget | 1.2 GB | Stop loading. Evict farthest residents down toward 1.0 GB |
+| Hard byte budget | 1.5 GB | Emergency eviction, still after the unload cooldown |
+| Count safety cap | 4096 soft / 4608 hard | Last resort for a scene of many tiny meshes. Kokiri (~470) and the Field (852) are not stopped by this |
+| JS heap safety cap | 2.2 GB soft / 2.8 GB hard | The V8 limit. A hard heap overrun evicts immediately |
+
+Models behind the camera have their distance multiplied by **1.5**, so the view ahead is loaded and kept first. The queue is not re-sorted on every small orbit step. Priorities change only after the camera moves more than **2 m** or turns more than **30°**. A model that falls out of the wanted set is armed and then left alone for **90 frames**. Looking back at it cancels that wait, so a swing of the camera does not evict and reload the same mesh. The JS-heap emergency brake does not wait.
+
+`__forgeMemory().resident` reports `assetBytes`, `geometryBytes`, `bc7Bytes`, `evictions`, `reloads`, and whether the soft or hard cap is holding. `__forgeMemory().stream.maxFrameMs` is the longest tick gap while models are still streaming. `maxCompileMs` is the longest wait for `compileAsync` before a batch was attached. That wait is off the draw path.
+
+Far proxies (a 2–5% mesh kept resident so the cap never shows a box) are not in this change. Building one per Field model is a cache-format change, and the meshes that already have a coarse level still use it.
+
+### Policy simulation (not a Field tab)
+
+This checkout has no game dump, so Hyrule Field and Kokiri Forest were not loaded in a browser for this change. The comparison below is `simulateFieldOrbit()` in `frontend/src/resident-budget.js`: 852 unique models on a 600 m disk, 30% of them 12–40 MB and the rest 1–5 MB, camera orbiting a 25 m radius for 3 turns at 3° per frame (360 frames). The "before" column is the old rule (240 nearest, re-sort after 1 m or about 3.6°). The "after" column is the byte budget, the 1.5× behind penalty, the 2 m / 30° gate, and the 90-frame cooldown. A rapid reload is an unload and a load of the same name within 60 frames.
+
+| | Evictions | Reloads | Rapid reloads | Priority updates | Peak asset bytes | Peak unique meshes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Before | 243 | 201 | 99 | 360 | 2.46 GB | 240 |
+| After | 0 | 0 | 0 | 180 | 1.20 GB | 122 |
+
+The drop is large here because the size mix makes the byte budget bind before the count cap. On the measured Field (25 Nov 2026) 241 unique meshes were about **1.0 GB** of geometry plus BC7. That run stopped because the count cap was 240, not because the byte budget was full. The count cap is now 4096, so a Field load continues until geometry plus BC7 reaches 1.2 GB or the JS heap reaches 2.2 GB.
+
+Kokiri Forest Child is about 470–482 unique models (`262 loaded` + `207 background` on an idle view, and 482 in the 25 Nov load). At 241 resident meshes the heap was **386 MB**. The 240 cap was holding the other models, including ones in view, and the HUD called that remainder `background` with `0 queued` because `canFillMap` refuses to run while the soft cap holds. `main` has the same 240 cap (`overResidentSoftCap` in `resident-budget.js`) and the same `canFillMap` check, so an idle Kokiri on main also keeps boxes for every unique model past the nearest 240. A model in the current view (tier below 4) now evicts a farther resident without waiting out the unload cooldown. Models the budget is actually holding show as `N capped` instead of `0 queued`.
+
+## Shader pipelines
+
+three r170 builds a render pipeline on the thread that is drawing when the cache misses. `Pipelines` publishes the cache entry before `createRenderPipelineAsync` assigns `pipelineData.pipeline`. A draw in that window calls `setPipeline(undefined)`. `warmWebGLPrograms` stays on WebGL and does not call `compileAsync` on the live WebGPU renderer.
+
+A new `BatchedMesh` is compiled with `compileAsync(batch, camera, scene)` (r170's `targetScene` argument is the live scene, so its lights are included) and only then added. At most **6** of those compiles run at once. More than that stalls the browser's GPU process. Terrain uses the same wait inside `warmTerrain`, after the WebGL warm call, and is still added only once that returns. `guardWebgpuSetPipeline` wraps `backend.draw` and skips a render object whose native pipeline is still missing.
+
+r170's `compileAsync` calls `_renderTransparents(list, camera, scene, lights)`. `render()` calls the same method as `(list, doublePassList, camera, scene, lights)`. On a transparent batch the lights node arrives as the scene, `overrideMaterial` is undefined, and `renderObject` throws `Cannot read properties of undefined (reading 'isShadowNodeMaterial')`. Opaque batches never take that path. `repairCompileAsyncTransparents` puts the empty double-pass list back in the missing slot, and if a compile still throws it puts `_handleObjectFunction` back to `_renderObjectDirect` so later frames keep drawing. The failure is logged once and the batch is attached anyway.
+
+### three.js upgrade
+
+Forge pins `three@0.170.0`. The current npm release checked for this note is **0.187.0** (26 Nov 2026). An upgrade is not in this change.
+
+r170's draw path still calls synchronous `createRenderPipeline` on a cache miss. Later releases have not removed that. Open reports on the 0.18x line: `compileComputeAsync` can resolve with `pipeline` unset and a later `setPipeline` throws ([#35556](https://github.com/mrdoob/three.js/issues/35556), r187), and `compileAsync` can miss the pipeline a later draw actually uses when the color format differs ([#35659](https://github.com/mrdoob/three.js/issues/35659), checked on r186 and current dev). A background-compilation pull request ([#33766](https://github.com/mrdoob/three.js/pull/33766)) was closed without merging. The BC7 `getFormat` patch, the batched-draw fold, and the rest of the r170 WebGPU shims would all have to be re-checked across 17 minor versions. That is not a small upgrade. The compile-before-attach path and the draw guard cover the race on r170.
 
 ## Texture arrays
 
@@ -143,6 +190,8 @@ This checkout has no game dump, so there is no new Field split recorded here. Th
 
 `tools/measure-field-memory.mjs` is a headless Chrome run against the already-running 47241 server. It records heap, Chrome working set, the status label, `__forgeMemory()` when present, and a screenshot. It leaves 47231/47232 alone. Defaults: `FORGE_WASM_MAX_WS_MB=10240` (kill the Chrome tree at that working set), `FORGE_WASM_MIN_FREE_MB=4096` (stop if system free RAM falls this low), `FORGE_WASM_MIN_FREE_START_MB=10240` (refuse to launch below that floor).
 
+To check the residency budget and stream-in hitches on a dump: `npm run build --prefix frontend`, then restart the editor server so it serves that build. Open Hyrule Field Child, orbit in place until streaming settles, and read `__forgeMemory().resident` (`evictions`, `reloads`, `assetBytes`, `peakHeapBytes`) and `__forgeMemory().stream.maxFrameMs`. Do the same on Kokiri Forest Child. `node tools/measure-streaming-policy.mjs` reprints the synthetic orbit table; it does not open a scene.
+
 ## Measured numbers
 
 Dates and clock times are America/New_York, 25 Nov 2026, headless Chrome against `http://127.0.0.1:47241/` and the `ray-test` dump. Those runs read draw counts from the viewport overlay. It stayed `idle` until the camera moved, so frame time was not on the line during streaming. The under-4 GB working-set goal is met at the 240 unique-mesh resident cap; see the last section.
@@ -188,7 +237,7 @@ The RGBA column over-counts clones; unique-source accounting was added after thi
 
 ### After CPU texture release and a resident mesh budget
 
-The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. Unique meshes now have a residency budget: **240** (or **2.2 GB** JS heap) stops further loads. A farther resident is evicted only when a closer model needs the slot. A hard cap (**280** unique or **2.8 GB** heap) is the emergency brake. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
+The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. This measurement stopped further loads at **240** unique meshes (or **2.2 GB** JS heap). A farther resident was evicted only when a closer model needed the slot. The hard cap then was **280** unique or **2.8 GB** heap. The working limit now is the 1.2 GB geometry-plus-BC7 budget; 4096 meshes is only the last resort. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
 
 Remeasured 25 Nov 2026, 10:13–10:23 AM America/New_York, same 10 GB working-set cap, 4 GB free-RAM floor, and 10 GB start-floor, only against 47241/47242. The headless wait stayed on the prepare banner until the 7-minute timeout because `foregroundSettled` still treated leftover deferred names as in-flight; the scene itself was idle at the cap after about 2.5 minutes (259 listed models, 241 unique meshes, 0 queued). Orbit, Snap, and a Field screenshot ran after that. A follow-up change marks the cap as settled so the "Scene ready" banner can hide.
 
