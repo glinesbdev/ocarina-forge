@@ -1,0 +1,2 @@
+build.bat text eol=crlf
+scripts/builder.ps1 text eol=crlf

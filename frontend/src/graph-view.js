@@ -196,13 +196,21 @@ export function minimapLayout(bounds, camera, view, map) {
   };
 }
 
-export function mountGraph(stage, spec) {
+export function clearGraphCameras() {
+  cameras.clear();
+}
+
+export function releaseDisconnectedGraphs() {
   for (let index = live.length - 1; index >= 0; index -= 1) {
-    if (!live[index].stage.isConnected) {
-      live[index].stop();
-      live.splice(index, 1);
-    }
+    const entry = live[index];
+    if (entry.stage.isConnected) continue;
+    entry.stop();
+    live.splice(index, 1);
   }
+}
+
+export function mountGraph(stage, spec) {
+  releaseDisconnectedGraphs();
   bindSpaceKeys();
   const key = spec.key || "graph";
   let camera = cameras.get(key) ? { ...cameras.get(key) } : null;

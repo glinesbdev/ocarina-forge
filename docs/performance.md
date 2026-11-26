@@ -48,7 +48,21 @@ The field is one atlas: up to 16 MaterialAlb layers plus an earth cell, each res
 
 Before: every terrain rebuild packed the cells. A 17-cell solid atlas took 16 ms. After: the same cells read back in 0.7 ms. The sample scene has no MaterialAlb, so this shows up on a real dump when the glb cache misses and the layers have not changed.
 
-Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene detaches the old field before showing the new scene. The two most recently assembled fields can be reused when switching maps. Preview packs include the main terrain layer only.
+Check: open a scene with a heightmap, quit, pull this build, and open it again. The field should look the same. A second rebuild of that scene (for example after the `models-22` miss) should not repack the atlas; `atlas/` in the model cache gains one file per distinct layer set and then stays put. Drag an actor and release. The field should not go black while the edit saves. Opening a different scene disposes the previous field. A refine of the field that is already loading can still reuse the two most recently assembled meshes for that load. Preview packs include the main terrain layer only.
+
+## Unload on map change
+
+`openScene` calls `viewport.unloadScene()` before the scene request, including a reload of the same banc. That runs before `setActors`. An actor edit or undo still patches in place and does not unload the map.
+
+`unloadScene` bumps the model, terrain, and texture generations and replaces the scene `AbortController`. In-flight model, texture, terrain, ground, lighting, behavior, and surface fetches for the old map are aborted. A result whose generation does not match is dropped. The terrain index worker is terminated. Geometry decode jobs are cancelled. The behavior panel's graph hooks are cleared and its DOM is replaced. The graph view removes its document keydown listener when that stage is no longer connected, so the previous actor's graph is not kept by the listener closure.
+
+Geometries, `BatchedMesh` objects (including their matrix, indirect, and color textures), materials, decoded and compressed textures, and per-map pick targets are disposed. The link from a template geometry back to its batch (`userData.forgeBatch`) is cleared before the geometry is disposed, so a disposed batch is not kept alive by the template. Shared viewport resources stay: the actor box, the edge geometry, the effect gizmo, and the sub-terrain material. Actor entries, parsed templates, the template cache, `metaCache`, the texture queue, ground samples, the selection, and the gizmo are cleared. The wasm ground pack is freed with `disposeGroundSurface`, including when the next map has no terrain.
+
+The shared image cache stays capped at 128. URIs the unloaded map touched are evicted, so the next map does not keep the previous map's decoded images. The two-field terrain cache still applies while one field is loading and refining. A map change disposes that field instead of holding it for the next map.
+
+The status label includes `gpu N geom / N tex · heap XMB` when `performance.memory` is available (Chrome, including with precise memory info). Otherwise the heap reads `n/a`. Each unload, and the first settled model load of a generation, logs `forge memory unload:` or `forge memory load:` with the same counts, plus the wasm pack size when a surface is still resident. In a dev build, `__forgeMemory().gpu` is the same `renderer.info.memory` pair.
+
+Check: with the bundled sample dump, open Kokiri Forest, then Hyrule Field, then Kokiri again, and click Kokiri a few more times. After each switch the status line and the console log should sit near the single-map counts, not climb. On a real dump, do the same between two large maps and watch the browser process in Task Manager. `frontend/src/scene-unload.test.js` loads a stand-in map, unloads it, and checks that no per-map object is still referenced.
 
 ## Shared texture cache
 

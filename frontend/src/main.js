@@ -14,6 +14,7 @@ import {
   virtualSlice,
 } from "./outliner.js";
 import { graphHistory, historyStep, renderBehavior } from "./behavior.js";
+import { clearGraphCameras, releaseDisconnectedGraphs } from "./graph-view.js";
 import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { modelLine } from "./inspector.js";
@@ -70,6 +71,7 @@ function $(id) {
 let onShortcut = () => {};
 let viewport = null;
 let sceneOpenToken = 0;
+let sceneFetch = new AbortController();
 let sceneVisualLoad = 0;
 let sceneVisualBoxes = 0;
 let sceneVisualDeferred = 0;
@@ -153,10 +155,10 @@ function geometryRequest() {
 
 viewport = await createViewport($("viewport"), {
   fetchModel: (gyaml, options) => api.model(gyaml, { ...(options || {}), ...geometryRequest() }),
-  fetchModels: (names, prefetch) => api.models(names, prefetch, geometryRequest()),
-  fetchTextures: (gyaml) => api.actorTextures(gyaml, { load: loadQuery(state.load || fullLoad()) }),
-  fetchTerrain: (banc, refine) => api.terrain(banc, refine, loadRequest()),
-  fetchGround: (banc, x, z, exclude) => api.ground(banc, x, z, exclude, loadRequest()),
+  fetchModels: (names, prefetch, options) => api.models(names, prefetch, { ...geometryRequest(), signal: options && options.signal }),
+  fetchTextures: (gyaml, signal) => api.actorTextures(gyaml, { load: loadQuery(state.load || fullLoad()), signal }),
+  fetchTerrain: (banc, refine, signal) => api.terrain(banc, refine, { ...loadRequest(), signal }),
+  fetchGround: (banc, x, z, exclude, signal) => api.ground(banc, x, z, exclude, { ...loadRequest(), signal }),
   fetchSurface: (banc) => api.groundSurface(banc, loadRequest()),
   onProgress: (info) => {
     const box = $("model-progress");
@@ -176,6 +178,32 @@ viewport = await createViewport($("viewport"), {
     box.hidden = Boolean(info.finished);
   },
   onModelsReady: (result) => finishSceneViewerLoad(result),
+  onUnload: () => {
+    state.view = null;
+    state.raw = null;
+    state.selected = null;
+    state.behavior = null;
+    state.behaviorKey = "";
+    state.behaviorNode = "";
+    state.behaviorFile = "";
+    state.behaviorEntry = "";
+    state.behaviorQuery = "";
+    state.behaviorError = "";
+    state.behaviorTrail = [];
+    state.behaviorAhead = [];
+    state.behaviorFrame = "";
+    state.behaviorLoading = false;
+    const host = $("behavior-panel");
+    if (host) {
+      host.__fitGraph = null;
+      host.__clearGraph = null;
+      host.__spotlight = null;
+      host.replaceChildren();
+      releaseDisconnectedGraphs();
+      clearGraphCameras();
+    }
+    renderOutliner();
+  },
   onModels: () => renderProps(),
   onModelError: (gyaml, message) => {
     noteModelError(gyaml, message);
@@ -776,7 +804,7 @@ async function refreshHotReload() {
     state.hot = {
       enabled: false,
       status: "error",
-      message: missing ? "Restart the editor (./scripts/dev.sh) so hot reload can run." : error.message,
+      message: missing ? "Restart the editor (./build.sh or build.bat) so the API can run." : error.message,
     };
   }
   renderHotStatus();
@@ -1445,8 +1473,13 @@ async function applyLoadChange(next) {
 }
 
 async function openScene(banc, options = {}) {
+  sceneFetch.abort();
+  sceneFetch = new AbortController();
+  const signal = sceneFetch.signal;
   const token = ++sceneOpenToken;
   const terrainAlreadyReady = state.banc === banc && sceneTerrainReady;
+  if (!options.keepHistory) state.history = blankHistory(null);
+  if (viewport) viewport.unloadScene();
   sceneVisualLoad = 0;
   sceneVisualBoxes = 0;
   sceneVisualDeferred = 0;
@@ -1455,8 +1488,8 @@ async function openScene(banc, options = {}) {
   sceneTerrainReady = (state.load && state.load.layers.terrain === false) ? true : terrainAlreadyReady;
   setScenePreparation(`Preparing ${banc.split("/").pop()}`, "Reading scene and companion assets…");
   try {
-    const view = await api.scene(banc, { query: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
-    if (token !== sceneOpenToken) return;
+    const view = await api.scene(banc, { query: loadQuery(state.load), textures: state.load.textures ? "1" : "0", signal });
+    if (signal.aborted || token !== sceneOpenToken) return;
     sceneVisualLoad = token;
     setScenePreparation("Loading scene in viewer", "Preparing and streaming scene models…", 0, 1);
     $("viewport-empty").hidden = true;
@@ -1470,6 +1503,7 @@ async function openScene(banc, options = {}) {
     updateHistoryButtons();
     renderChanges();
   } catch (error) {
+    if (error && error.name === "AbortError") return;
     if (token === sceneOpenToken) {
       sceneVisualLoad = 0;
       clearScenePreparation();
@@ -1556,12 +1590,14 @@ function loadLighting(banc) {
   if (!banc || banc === lightingBanc) return;
   lightingBanc = banc;
   const note = $("lighting-note");
-  api.lighting(banc).then((data) => {
-    if (banc !== lightingBanc) return;
+  const signal = sceneFetch.signal;
+  api.lighting(banc, { signal }).then((data) => {
+    if (signal.aborted || banc !== lightingBanc) return;
     const text = viewport.applyLighting(data);
     if (note) note.textContent = text || "";
-  }).catch(() => {
-    if (banc !== lightingBanc) return;
+  }).catch((error) => {
+    if (error && error.name === "AbortError") return;
+    if (signal.aborted || banc !== lightingBanc) return;
     if (note) note.textContent = viewport.applyLighting(null) || "";
   });
 }
@@ -3122,7 +3158,7 @@ async function loadProblems(banc) {
     state.problems = {
       banc,
       diagnostics: [],
-      error: missing ? "Restart the editor (./scripts/dev.sh) so validation can run." : error.message,
+      error: missing ? "Restart the editor (./build.sh or build.bat) so validation can run." : error.message,
     };
   }
   renderProblems();
@@ -3885,6 +3921,7 @@ function refreshBehavior() {
   if (!host) return;
   if (!state.load || !state.load.layers.behavior) {
     host.replaceChildren();
+    releaseDisconnectedGraphs();
     const note = document.createElement("p");
     note.className = "muted";
     note.textContent = "Behavior is not loaded. Turn the Behavior layer on to read the graph.";
@@ -3910,7 +3947,7 @@ function refreshBehavior() {
     if (actor) {
       const requestKey = key;
       api
-        .behavior({ banc, id, gyaml: actor.gyaml || "", load: loadQuery(state.load) })
+        .behavior({ banc, id, gyaml: actor.gyaml || "", load: loadQuery(state.load), signal: sceneFetch.signal })
         .then((graph) => {
           if (state.behaviorKey !== requestKey) return;
           state.behavior = graph;
@@ -3918,6 +3955,7 @@ function refreshBehavior() {
           drawBehavior();
         })
         .catch((error) => {
+          if (error && error.name === "AbortError") return;
           if (state.behaviorKey !== requestKey) return;
           state.behaviorError = error.message || "The behavior graph could not be read.";
           state.behaviorLoading = false;

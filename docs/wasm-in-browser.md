@@ -1,9 +1,9 @@
 # Running the editor in the browser
 
 This is an exploration of issue #13. It does not change the default workflow.
-`scripts/dev.bat`, `scripts/dev-wasm.bat`, and the committed module under
-`frontend/wasm/` stay the way they are. A later change should not start until
-this recommendation is accepted.
+`build.bat`, `./build.sh`, and the committed module under `frontend/wasm/`
+are how a checkout runs. A later change should not start until this
+recommendation is accepted.
 
 **Recommendation: keep the local Python server, and treat the browser as a
 viewer plus a few bytes-in/bytes-out kernels.** A fully in-browser editor is

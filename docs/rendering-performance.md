@@ -1,6 +1,6 @@
 # Rendering performance
 
-This note is the Field-scale memory and draw path: what the viewer already does, what this pass fixed, and which game-engine techniques are still on the table. Measured numbers at the end are from a headless Chrome load of Hyrule Field Child on the `ray-test` dump through `scripts/dev-wasm.bat` (ports 47241/47242). `docs/performance.md` covers the earlier Kokiri-scale instancing and on-demand render work.
+This note is the Field-scale memory and draw path: what the viewer already does, what this pass fixed, and which game-engine techniques are still on the table. Measured numbers at the end are from a headless Chrome load of Hyrule Field Child on the `ray-test` dump with the editor on ports 47241/47242. `docs/performance.md` covers the earlier Kokiri-scale instancing and on-demand render work.
 
 ## What was blowing the tab
 
@@ -118,7 +118,7 @@ This checkout has no game dump, so there is no new Field split recorded here. Th
 
 ## How to measure
 
-1. Start `scripts/dev-wasm.bat` so Vite is on 47241 and the API on 47242. That launcher does not run pip or maturin, and it leaves 47231/47232 free. `scripts/dev.sh` and `scripts/dev.bat` are the normal launchers on 47231/47232.
+1. Start `./build.sh` or `build.bat` so the editor is on 47231 and the API on 47232. The numbers below were taken with the editor on 47241 and the API on 47242, which left 47231/47232 free for another window.
 2. Open the viewer and load Hyrule Field Child. The status label names the backend that actually started (`WebGPU`, or `WebGL (WebGPU unavailable: …)` with the reason) and ends with the short revision. A plain `WebGL` from a stale `frontend/dist` or a cached module is not a WebGPU fallback. The revision should match `/api/health`. See [troubleshooting.md](troubleshooting.md). Turn **Profile** on and orbit so frames keep coming. The HUD then shows the CPU and GPU split beside the draw, instance, and streaming counts.
 3. In the devtools console, `copy(__forgeMemory())` after the background load finishes. The report includes texture format counts, geometry roles, unique models vs instances, draws, frame time, and the profile block. `copy(JSON.stringify(__forgeProfile(), null, 2))` is the short frame capture.
 4. Chrome's task manager (or a headless script using `--enable-precise-memory-info`) is the working-set number. JS heap alone under-reports GPU textures.

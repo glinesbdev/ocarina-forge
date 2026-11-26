@@ -37,6 +37,7 @@ test("the memory report counts actors, instanced slots, and compressed textures"
       subDraws: 4,
       profile: { enabled: true, gpuTiming: "webgpu" },
     },
+    renderer: { info: { render: { drawCalls: 12, triangles: 30 }, memory: { geometries: 4, textures: 2 } } },
   });
   assert.equal(report.actors.total, 3);
   assert.equal(report.actors.instanced, 2);
@@ -54,4 +55,5 @@ test("the memory report counts actors, instanced slots, and compressed textures"
   assert.equal(report.frame.subDraws, 4);
   assert.equal(report.profile.gpuTiming, "webgpu");
   assert.ok(report.textures.gpuBytes > 0);
+  assert.deepEqual(report.gpu, { geometries: 4, textures: 2 });
 });

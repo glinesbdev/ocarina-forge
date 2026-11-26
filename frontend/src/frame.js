@@ -30,6 +30,7 @@ export function formatStatusLabel({
   texturesDone = null,
   texturesTotal = null,
   layersOff = null,
+  memory = null,
 } = {}) {
   const parts = [];
   if (backend) parts.push(backend);
@@ -42,7 +43,16 @@ export function formatStatusLabel({
   const texDone = Number(texturesDone) || 0;
   if (texTotal > 0 && texDone < texTotal) parts.push(`textures ${texDone}/${texTotal}`);
   if (layersOff && layersOff.length) parts.push(`off: ${layersOff.join(", ")}`);
+  if (memory) parts.push(formatMemoryNote(memory));
   return parts.join(" · ");
+}
+
+/** renderer.info.memory plus the JS heap, for the status line and the unload log. */
+export function formatMemoryNote({ geometries = null, textures = null, heapBytes = null } = {}) {
+  const geom = geometries == null ? "?" : String(Number(geometries) || 0);
+  const tex = textures == null ? "?" : String(Number(textures) || 0);
+  const heap = heapBytes == null ? "n/a" : `${Math.round(Number(heapBytes) / 1048576)}MB`;
+  return `gpu ${geom} geom / ${tex} tex · heap ${heap}`;
 }
 
 /**
