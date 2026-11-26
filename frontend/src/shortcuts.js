@@ -20,7 +20,10 @@ export const SHORTCUT_GROUPS = [
     id: "selection",
     label: "Selection and editing",
     items: [
-      { keys: "Click", action: "Select the actor under the cursor" },
+      { keys: "Click", action: "Select the actor under the cursor. That replaces the selection" },
+      { keys: "Shift-click", action: "Add or remove that actor. The gizmo then moves and rotates every selected actor around the selection center, as one undo step" },
+      { keys: "Left-drag on empty space", action: "Draw a rectangle and select every actor whose screen box meets it. Shift-drag adds to the selection" },
+      { keys: "Ctrl-click or Command-click a decoration", action: "Attach it to the selected parent piece, or detach it. The parent stays selected. Grouped decorations show a teal outline while that parent is selected" },
       { keys: "Alt-click, or click again", action: "Cycle overlapping actors" },
       { keys: "H", action: "Hide or show the selection" },
       { keys: "Delete", action: "Delete the selection" },
@@ -45,7 +48,8 @@ export const SHORTCUT_GROUPS = [
       { keys: "G", action: "Move" },
       { keys: "R", action: "Rotate" },
       { keys: "Scale button", action: "Scale the selection. S stays fly-back, so scale has no letter." },
-      { keys: "Drag a handle", action: "Transform the selection" },
+      { keys: "L", action: "Toggle world space and local space. Move and rotate follow it. With several actors selected, local axes match the primary actor. Scale stays local. The toolbar shows the current space, and this browser remembers it" },
+      { keys: "Drag a handle", action: "Transform the selection. Grid snap and ground snap apply to that same move, including a multi-selection" },
     ],
   },
   {
@@ -61,6 +65,10 @@ export const SHORTCUT_GROUPS = [
     label: "Snap",
     items: [
       { keys: "V", action: "Toggle snap to ground and collision" },
+      { keys: "Shift+V", action: "Toggle grid snap. Move uses 0.25, 0.5, 1, 5, or 10 metres. Rotate uses 5, 15, 45, or 90 degrees. Scale snap is the separate checkbox" },
+      { keys: "Ctrl while dragging", action: "Flip grid snap for that drag. The toolbar toggle stays as it was" },
+      { keys: "Arrow keys in a transform field", action: "With grid snap on, nudge position by the move increment and rotation by the degree increment. Scale nudges only when scale snap is on" },
+      { keys: "Grid lines", action: "Draw a grid at the move increment, in world space or in the actor's local space" },
       { keys: "X, Z, or XZ drag", action: "With Snap on, change only the height. X and Z stay on the drag. The surface is the ground, a collision mesh, or the room model when the map has no ground. A hit more than a couple of metres above the actor is ignored. A miss keeps the current height. Releasing any translate handle except Y does the same" },
       { keys: "Y drag", action: "With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up" },
       { keys: "Dragged mesh", action: "Left out of the snap query: every submesh, batched instance, proxy, and companion copy of that actor, including a Land_ piece" },

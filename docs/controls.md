@@ -16,7 +16,10 @@ The editor shows this same list with ? or the Shortcuts button.
 
 ## Selection and editing
 
-- Click: Select the actor under the cursor
+- Click: Select the actor under the cursor. That replaces the selection
+- Shift-click: Add or remove that actor. The gizmo then moves and rotates every selected actor around the selection center, as one undo step
+- Left-drag on empty space: Draw a rectangle and select every actor whose screen box meets it. Shift-drag adds to the selection
+- Ctrl-click or Command-click a decoration: Attach it to the selected parent piece, or detach it. The parent stays selected. Grouped decorations show a teal outline while that parent is selected
 - Alt-click, or click again: Cycle overlapping actors
 - H: Hide or show the selection
 - Delete: Delete the selection
@@ -35,7 +38,8 @@ The editor shows this same list with ? or the Shortcuts button.
 - G: Move
 - R: Rotate
 - Scale button: Scale the selection. S stays fly-back, so scale has no letter.
-- Drag a handle: Transform the selection
+- L: Toggle world space and local space. Move and rotate follow it. With several actors selected, local axes match the primary actor. Scale stays local. The toolbar shows the current space, and this browser remembers it
+- Drag a handle: Transform the selection. Grid snap and ground snap apply to that same move, including a multi-selection
 
 ## Undo and redo
 
@@ -45,6 +49,10 @@ The editor shows this same list with ? or the Shortcuts button.
 ## Snap
 
 - V: Toggle snap to ground and collision
+- Shift+V: Toggle grid snap. Move uses 0.25, 0.5, 1, 5, or 10 metres. Rotate uses 5, 15, 45, or 90 degrees. Scale snap is the separate checkbox
+- Ctrl while dragging: Flip grid snap for that drag. The toolbar toggle stays as it was
+- Arrow keys in a transform field: With grid snap on, nudge position by the move increment and rotation by the degree increment. Scale nudges only when scale snap is on
+- Grid lines: Draw a grid at the move increment, in world space or in the actor's local space
 - X, Z, or XZ drag: With Snap on, change only the height. X and Z stay on the drag. The surface is the ground, a collision mesh, or the room model when the map has no ground. A hit more than a couple of metres above the actor is ignored. A miss keeps the current height. Releasing any translate handle except Y does the same
 - Y drag: With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up
 - Dragged mesh: Left out of the snap query: every submesh, batched instance, proxy, and companion copy of that actor, including a Land_ piece
