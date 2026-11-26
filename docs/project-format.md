@@ -75,6 +75,8 @@ domains:
 
 `target.version` is the game the diffs were written against. Export warns when it is not `1.1.1`, because the size-table rule was checked against that version.
 
+`collisionFollow` is optional: `off` (the default), `srt`, or `bake`. `off` moves the mesh and leaves the bake. `srt` mints a new `SRTHash` on a pose move and ships no shape file. `bake` patches the static-compound instance transform and keeps the shape bytes. The scene diff does not store the mode. [formats.md](formats.md) has the layout and what each mode writes.
+
 `domains` lists the kinds of patch the project may contain. A format 1 project exports `scenes` and stores `text`, `events`, and `tables` for a later editor. See `ocarina_forge/domains.py`. `behaviors/` is the behavior editor's op list. It is not one of those reserved domains.
 
 `engine` defaults to `scenes`. `after-ocarina` builds the project with the vendored pipeline instead of the scene rewriter. That project root is the pipeline's `src` directory:
@@ -177,7 +179,7 @@ Only changed fields are stored.
 | `name` | Replaces `Name`. `null` clears it. |
 | `set` | Dotted paths into the actor, for anything that is not a header field. `Dynamic.TalkCount`, `Links[0].Ref`. |
 
-Header fields are `Gyaml`, `Hash`, `SRTHash`, `Translate`, `Rotate`, `Scale`, `Name`. `Hash`, `SRTHash`, and `Phive.Placement.ID` cannot be edited. The id is how the project finds the actor.
+Header fields are `Gyaml`, `Hash`, `SRTHash`, `Translate`, `Rotate`, `Scale`, `Name`. `Hash`, `SRTHash`, and `Phive.Placement.ID` cannot be edited in the inspector. The id is how the project finds the actor. Export can mint a new `SRTHash` when `collisionFollow` is `srt`. That mint does not change `Hash` or `Phive.Placement.ID`.
 
 `set` values use plain YAML scalars, or a one-key tag when the BYML type is not the obvious one:
 

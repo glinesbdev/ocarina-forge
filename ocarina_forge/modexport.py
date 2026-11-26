@@ -219,14 +219,17 @@ def _preserve_imported_patches(project, out: Path, source_info: dict, written: l
         })
 
 
-def export_mod(project, dump, *, install: bool = False, game: Path | None = None) -> dict:
+def export_mod(project, dump, *, install: bool = False, game: Path | None = None,
+               collision_follow: str | None = None, level: int = 19) -> dict:
     """Write ``<project>/build/mod``. Install copies it to ``<game>/mods/local/<slug>``.
 
     An unchanged new project writes no files. Imported mods retain their source
     files even when their placement patches have been removed.
     """
+    from ocarina_forge.collision_follow import collision_mode
     from ocarina_forge.projects import game_root, install_dir
 
+    mode = collision_mode(project, collision_follow)
     out = project.root / "build" / "mod"
     source_mod = project.root / ".longshot-source"
     source_info = None
@@ -248,10 +251,20 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         if old_patches.exists():
             shutil.rmtree(old_patches)
 
+    from ocarina_forge.collision_follow import (
+        assign_srts,
+        bake_tiles,
+        compound_files,
+        pose_moves,
+        srt_ops,
+    )
+
     log: list[dict] = []
     written: list[str] = []
     warnings: list[str] = []
     generated: set[tuple[str, str, str]] = set()
+    baked: list[tuple[str, bytes, int | None]] = []
+    bake_jobs: list[tuple[str, list]] = []
     slug = mod_slug(project.manifest["name"])
     imported_ids: dict[str, set[str]] = {}
     if source_info:
@@ -265,6 +278,30 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         except BancError as exc:
             raise BancError(f"{banc}: {exc.message}", exc.code) from exc
         ops, notes = placement_ops(document, diff, imported_ids.get(banc, set()))
+        moves = pose_moves(document, diff) if mode != "off" else []
+        if mode == "srt" and moves:
+            assign_srts(document, moves)
+            ops.extend(srt_ops(moves))
+            for move in moves:
+                message = (
+                    f"{banc}: {move.gyaml} ({move.hash}) collisionFollow srt. "
+                    f"SRTHash 0x{0 if move.srt_old is None else move.srt_old:08x} -> 0x{move.srt_new:08x}. "
+                    "Hash and Phive.Placement.ID stay. No .bphsh and no .bphsc is written. "
+                    "The shape is unchanged. On the Kokiri sign, srt does not move the baked row."
+                )
+                log.append({"level": "info", "message": message})
+        elif mode == "bake" and moves:
+            found_dir, _paths = compound_files(dump, banc)
+            if not found_dir:
+                message = (
+                    f"{banc}: collisionFollow bake found no Phive/StaticCompoundBody directory "
+                    "for this scene. No tile was written. Unbaked actors are a follow-up; "
+                    "the class .bphsh was not rewritten."
+                )
+                warnings.append(message)
+                log.append({"level": "warn", "message": message})
+            else:
+                bake_jobs.append((banc, moves))
         for note in notes:
             warnings.append(f"{banc}: {note}")
             log.append({"level": "warn", "message": f"{banc}: {note}"})
@@ -284,8 +321,31 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         written.append(destination.relative_to(out).as_posix())
         log.append({"level": "info", "message": f"Wrote {destination.name} with {len(ops)} op{'s' if len(ops) != 1 else ''}."})
 
+    if bake_jobs:
+        baked.extend(bake_tiles(dump, bake_jobs))
+        for banc, moves in bake_jobs:
+            for move in moves:
+                if move.tiles:
+                    message = (
+                        f"{banc}: {move.gyaml} ({move.hash}) collisionFollow bake. "
+                        f"SRTHash stays 0x{0 if move.srt_old is None else move.srt_old:08x}. "
+                        f"Instance transform updated in {', '.join(move.tiles)}. "
+                        "The actor record and the shape bytes were not changed."
+                    )
+                    log.append({"level": "info", "message": message})
+                else:
+                    message = (
+                        f"{banc}: {move.gyaml} ({move.hash}) is not in a static-compound tile "
+                        "under this scene. No bake was written for it. The class .bphsh was not rewritten."
+                    )
+                    warnings.append(message)
+                    log.append({"level": "warn", "message": message})
+
     if source_info is not None:
         _preserve_imported_patches(project, out, source_info, written, generated, log, warnings)
+
+    if baked:
+        _write_baked(out, dump, baked, log, written, level)
 
     if written or source_mod.is_dir():
         (out / "mod.json").write_text(
@@ -305,7 +365,7 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
                 "level": "info",
                 "message": "Preserved the imported mod's runtime files and original manifest fields.",
             })
-        elif written:
+        elif written and not baked:
             (out / "romfs").mkdir(parents=True, exist_ok=True)
             log.append({
                 "level": "info",
@@ -313,6 +373,14 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
                     "romfs/ is an empty directory. The game indexes a manifest mod's patches only when that "
                     "directory exists. romfs/.keep is not written: the loader would serve it as a RomFS file, "
                     "and longshot mod check does not require the file. No src/main.ts: a patch-only mod has no runtime."
+                ),
+            })
+        elif baked:
+            log.append({
+                "level": "info",
+                "message": (
+                    "romfs/ holds the patched static-compound tiles and the resource size table. "
+                    "Each tile is the same length unpacked. Only instance position, rotation, and scale changed."
                 ),
             })
         if written:
@@ -353,6 +421,58 @@ def export_mod(project, dump, *, install: bool = False, game: Path | None = None
         "warnings": warnings,
         "log": log,
     }
+
+
+def _write_baked(out, dump, baked, log, written, level) -> None:
+    """Copy patched tiles into the mod and raise their size-table rows.
+
+    Unpacked length does not change. The entry still grows by 1024, the same
+    rule as any other file whose bytes differ from the dump. A missing row is
+    not invented.
+    """
+    from ocarina_forge.formats.restbl import entry_for_byml, load_table, save_table
+    from ocarina_forge.formats.zsio import compress
+
+    rstb_rel = dump.rstb_relative()
+    if not rstb_rel:
+        raise BancError(
+            "This dump has no resource size table. A patched static compound needs a bigger entry "
+            "or the game can sit on the load. Nothing further was installed.",
+            "rstb",
+        )
+    try:
+        table = load_table((dump.romfs / rstb_rel).read_bytes())
+    except BancError:
+        raise
+    except Exception as exc:
+        raise BancError(f"Could not read the resource size table {rstb_rel}: {exc}", "rstb") from exc
+    romfs = out / "romfs"
+    for relative, payload, dict_id in baked:
+        old_entry = table.get(relative) or 0
+        if not old_entry:
+            raise BancError(
+                f"{relative} has no hashed or named entry in the resource size table. "
+                "A changed bake is raised in place. A missing entry is not invented.",
+                "rstb",
+            )
+        new_entry = entry_for_byml(old_entry, len(payload), len(payload))
+        before, after = table.raise_to(relative, new_entry)
+        destination = romfs / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(compress(payload, dict_id, dump.dicts(), level=level))
+        written.append(destination.relative_to(out).as_posix())
+        log.append({
+            "level": "info",
+            "message": (
+                f"{relative}: instance transform patched, unpacked size still {len(payload)}. "
+                f"Size table {before} -> {after}. Shape bytes were not written."
+            ),
+        })
+    table_path = romfs / rstb_rel
+    table_path.parent.mkdir(parents=True, exist_ok=True)
+    table_path.write_bytes(save_table(table, level=level))
+    written.append(table_path.relative_to(out).as_posix())
+    log.append({"level": "info", "message": f"Wrote {rstb_rel}. Entries are only ever raised."})
 
 
 def _describe(ops: list[dict]) -> str:
