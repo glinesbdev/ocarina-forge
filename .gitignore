@@ -12,6 +12,7 @@ fixtures/dump/
 frontend/node_modules/
 frontend/dist/
 build/
+examples/collision-follow-test/scenes/
 native/target/
 tools/wgsl/target/
 *.zip

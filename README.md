@@ -116,6 +116,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. New renderer work follows [docs/design/mod-editor.md](docs/design/mod-editor.md). |
 | `docs/design/mod-editor.md` | How an edit becomes a Longshot mod, and the milestone plan. |
 | `examples/sample-project/` | A small project in the format. |
+| `examples/collision-follow-test/` | Variant B for issue #10. The scene yaml is generated from a dump and is not committed. |
 | `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the simple scene importer. |
 | `examples/after-the-ocarina/` | The imported After the Ocarina project (Bradyn's YAML only). |
 | `vendor/after_ocarina/` | Bradyn's build library, plus the MIT community tools the pipeline shells out to. |
@@ -132,7 +133,7 @@ python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 
 ## Not in this version
 
-This build writes a Longshot mod folder (`mod.json`, `patches/`, and an empty `romfs/` when a patch was written) and can install it under the test game. It does not run `longshot mod check`, `dev`, `teleport`, or `shot`. Skeletal animation, a dialog editor, desktop packaging, blueprint phase B (connecting and adding nodes), baked lighting, and an asset browser are later milestones, not this slice. See [docs/design/mod-editor.md](docs/design/mod-editor.md) and [ROADMAP.md](ROADMAP.md). Panels dock, and a field on an existing behavior node can be edited. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
+This build writes a Longshot mod folder (`mod.json`, `patches/`, and an empty `romfs/` when a patch was written) and can install it under the test game. `collisionFollow: bake` is the exception: that mode puts the patched static-compound tiles and the size table in `romfs/`. The shape bytes are not rewritten. It does not run `longshot mod check`, `dev`, `teleport`, or `shot`. Skeletal animation, a dialog editor, desktop packaging, blueprint phase B (connecting and adding nodes), baked lighting, and an asset browser are later milestones, not this slice. See [docs/design/mod-editor.md](docs/design/mod-editor.md) and [ROADMAP.md](ROADMAP.md). Panels dock, and a field on an existing behavior node can be edited. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
 
 ## License
 

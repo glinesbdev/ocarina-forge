@@ -74,7 +74,7 @@ These belong to the in-game editor. Forge does not call them.
 - The in-game gizmos. `gfx.world` lines, boxes, circles, and billboards, and the W / E / R handles drawn in the game view. Forge draws its own gizmos on its own meshes.
 - Memory actor hooks. `actors.write` (`setPosition`, `setRotation`, and the rest) writes the live actor by guest address and does not write the banc. `actors.spawn` / `actors.remove` only cover actors that mod spawned, and a co-op room has no spawner. The live registry, the ActorLink walk, and the physics ray stay in the game. Forge selects and moves the actor in its own scene, then writes a patch.
 
-Placement and collision research used by that in-game editor is Hyblitze's and Zirem's, from Heros Legacy (`heros-legacy/v3.0.0` at `6ce46cc7`). Hyblitze traced the actor-pack path and the physics ray. Zirem wrote the spawn request block that follows those notes. `docs/editor-bridge.md` on `editor-mod` records the layouts. Forge's preview does not use them. A later milestone that snaps against the game's collision, or that matches that actor layout, names them again. Their code is not copied into this repo.
+Placement and collision research used by that in-game editor is Hyblitze's and Zirem's, from Heros Legacy (`heros-legacy/v3.0.0` at `6ce46cc7`). Hyblitze traced the actor-pack path and the physics ray. Zirem wrote the spawn request block that follows those notes. `docs/editor-bridge.md` on `editor-mod` records the layouts. Forge's preview does not use them. The static-compound bake is a different file from that ray. [formats.md](../formats.md) names them again for the bake, and their code is not copied into this repo.
 
 ## Mapping
 
@@ -86,6 +86,8 @@ Forge's typed records stay the source. The exporter writes the mod. [longshot-ma
 | `edited` + `rotate` | placements `set` of `Rotate`, three radians | Do not emit `content.place`'s degrees. |
 | `edited` + `scale`, key already present | placements `set` of `Scale` | Same-size, hot reload. |
 | `edited` + `scale`, key absent | placements `add` of `Scale` | Grows the file. Next process start. |
+| `collisionFollow: srt` on a pose move | placements `set` of `SRTHash` (an `add` if the key is missing) | `Hash` and `Phive.Placement.ID` stay. No `.bphsh` and no `.bphsc`. Variant B. The in-game result is not known yet. |
+| `collisionFollow: bake` on a pose move | the pose ops, plus the patched `.bphsc` tiles in `romfs` | `SRTHash` stays. Only the instance transform changes. The shape bytes stay. |
 | `set` of an existing `Dynamic.*` scalar (string, number, bool) | `content.change({ file, placement, params })` | `placement` in the API text is the id without `0x` (`00a1b2c3d4e5f607`). The patch `hash` keeps `0x`. Applied at the next game start, because the content module runs then. A missing key is a stage error and the mod's content is not added. |
 | `gyaml` on an existing actor | `content.change({ file, placement, actor })` | Same start rule. This changes what is placed there. It does not move it. |
 | `added` | `content.place({ id, map, age, actor, position, rotation, scale, params, layer })` or a placements `add` of the whole actor | `content.place` adds a second actor and leaves the original. `rotation` is degrees. `layer` is `"static"` or `"dynamic"` (dynamic when omitted). `map` is `KokiriForest_Child`, not a new map name. New maps are refused: terrain, baked collision, and lighting are not something a mod can make yet. The in-game editor's new-actor hash sets bit 63. Forge mints bit 62. This slice warns and does not write an add. |

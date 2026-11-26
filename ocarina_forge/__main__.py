@@ -15,6 +15,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``lighting-import <results.json>`` splits a lighting-capture storage JSON into per-scene files in the user data directory.
 ``lighting-survey <banc>`` lists effect actors and GameBancParam key names. It does not invent light values.
 ``lighting-mod`` prints how to run the capture mod. ``--install`` copies it into the game's mods/local folder.
+``collision-follow-test`` writes the Kokiri variant B scene from a dump and exports it. ``--collision-follow off`` is the control. ``--romfs`` also writes a whole-banc mod. Do not enable both at once.
 With no subcommand, the server starts, which is what the builder runs.
 """
 
@@ -55,6 +56,7 @@ def main(argv: list[str] | None = None) -> None:
             "project",
             "edit",
             "mod-export",
+            "collision-follow-test",
             "profile",
             "height-diff",
             "lighting-import",
@@ -101,6 +103,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rotate", default="", help="x,y,z radians for edit.")
     parser.add_argument("--scale", default="", help="x,y,z for edit.")
     parser.add_argument("--install", action="store_true", help="mod-export copies the mod into the game's mods/local folder.")
+    parser.add_argument(
+        "--collision-follow",
+        choices=["off", "srt", "bake"],
+        default="",
+        help="Override manifest collisionFollow for this export. off leaves the bake. srt mints SRTHash (variant B) and writes no shape. bake moves the compound instance and keeps the shape bytes.",
+    )
+    parser.add_argument(
+        "--romfs",
+        action="store_true",
+        help="collision-follow-test also writes a whole-banc romfs mod. Do not enable it together with the patch mod.",
+    )
     parser.add_argument("--gfx-probe", action="store_true", help="lighting-mod --install copies the entry that static-imports longshot/gfx. Use it on a build that already reports has(\"gfx.world\").")
     parser.add_argument("--game", default="", help="Game install. Default ~/Games/Longshot/mod-test, or config game, or OCARINA_FORGE_GAME.")
     parser.add_argument("--all", action="store_true", help="Prepare every scene with warm or scene-preview.")
@@ -208,6 +221,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(print_edit(args))
     if args.command == "mod-export":
         raise SystemExit(print_mod_export(args))
+    if args.command == "collision-follow-test":
+        raise SystemExit(print_collision_follow_test(args))
     if args.command == "profile":
         raise SystemExit(print_profile(args))
     if args.static:
@@ -1038,6 +1053,7 @@ def print_mod_export(args) -> int:
             Dump(dump_path),
             install=args.install,
             game=Path(args.game).expanduser() if args.game else None,
+            collision_follow=args.collision_follow or None,
         )
     except BancError as exc:
         print(exc.message, file=sys.stderr)
@@ -1051,6 +1067,69 @@ def print_mod_export(args) -> int:
             print("files: " + ", ".join(result["files"]))
         else:
             print("files: (none)")
+    return 0
+
+
+def print_collision_follow_test(args) -> int:
+    """Write variant B (SRTHash re-mint) for the Kokiri sign and the nearest Land_."""
+    from ocarina_forge.collision_follow import SIGN_BANC, prepare_variant_b
+    from ocarina_forge.config import load_config
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+    from ocarina_forge.export import build
+    from ocarina_forge.modexport import export_mod
+    from ocarina_forge.project import Project
+
+    config = load_config()
+    dump_path = args.dump or config.get("dump") or ""
+    if not dump_path:
+        print("collision-follow-test needs --dump (the Longshot folder that contains romfs/).", file=sys.stderr)
+        return 2
+    root = Path(args.project).expanduser() if args.project else Path(__file__).resolve().parents[1] / "examples" / "collision-follow-test"
+    if not (root / "manifest.yaml").is_file():
+        print(f"{root} has no manifest.yaml.", file=sys.stderr)
+        return 2
+    try:
+        dump = Dump(dump_path)
+        project = Project(root)
+        lines = prepare_variant_b(dump, project, only_hash=args.id or None, banc=args.banc or SIGN_BANC)
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    print("Variant B moves each actor 4 m on +X and, unless --collision-follow off, mints a new SRTHash.")
+    for line in lines:
+        print(line)
+    mode = args.collision_follow or None
+    try:
+        result = export_mod(
+            project,
+            dump,
+            install=args.install,
+            game=Path(args.game).expanduser() if args.game else None,
+            collision_follow=mode,
+        )
+    except BancError as exc:
+        print(exc.message, file=sys.stderr)
+        return 2
+    for line in result["log"]:
+        print(f"{line['level']}: {line['message']}")
+    if result["files"]:
+        print("files: " + ", ".join(result["files"]))
+    print("In-game steps are in examples/collision-follow-test/README.md.")
+    if args.romfs:
+        print(
+            "Writing a whole-banc romfs mod as well. Disable local/collision-follow-test before you test it, "
+            "and do not leave both enabled."
+        )
+        try:
+            built = build(project, dump, install=args.install, collision_follow=mode, level=19)
+        except BancError as exc:
+            print(exc.message, file=sys.stderr)
+            return 2
+        for line in built["log"]:
+            print(f"romfs {line['level']}: {line['message']}")
+        if built.get("installed"):
+            print(f"romfs installed: {built['installed']}")
     return 0
 
 

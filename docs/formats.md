@@ -135,7 +135,59 @@ Each section:
 
 A primitive is four vertex indexes. The fourth index equal to the third is one triangle. Otherwise the record is a quad and becomes two triangles. Vertices are three u16s, dequantized as `(value + origin) * inverse_scale`. If the first origin word is `0x7fffffff`, the vertices are three floats instead. A non-finite float rejects the whole shape.
 
-This reader does not open `Phive/StaticCompoundBody`. Those per-scene `.bphsc` bakes are the collision copy discussed in [#10](https://github.com/glinesbdev/ocarina-forge/issues/10) and in the asset-library note. No offset inside a `.bphsc` is implemented here.
+The class `.bphsh` is not the collision the game uses for a baked static. That copy is the per-tile compound below. `read_mesh_shape` still does not open those files.
+
+## Static compound bakes
+
+Longshot's modding API was checked before this layout was written down. Spec revision 4 (2026-11-19) and the schema that generates `longshot.d.ts` (commit `563ca4e55b1306dd93ad57377020c463dd524c7f` on `mod-api`) have no `has()` name that writes Phive, a `.bphsc`, or a static-compound transform. `world.ray` and `world.rayAll` are collision queries against Havok `hknpWorld::castRay`. On the build already recorded in this file, both `has()` calls were false. A ray does not edit a bake. `actors.setPosition` and `actors.setRotation` write the live actor. They do not write the banc and they do not write `StaticCompoundBody`. A placement patch can set `Translate`, `Rotate`, `Scale`, and `SRTHash`. That is a banc edit.
+
+Hyblitze traced the actor-pack path and the physics ray. Zirem wrote the spawn request. That ray is the query `world.ray` would call. It is not this file. Their notes are from Heros Legacy (`heros-legacy/v3.0.0` at `6ce46cc7`). Their code is not copied.
+
+The byte layout below is the one published by reading the files, in oot-texture-tool `phive_compound.py` (GPL-3.0, ToxicToucan). This repo reimplements that description. It does not copy the program. No retail `.bphsc` was opened here. A file that does not match fails closed, and the export stops.
+
+The file starts with `Phive`. A mesh file uses `Phive\0`. At `+0x10` there are five little-endian u32s: actor-table start, actor-table end, a word that reader does not use, body-table start, body-table end.
+
+An actor record is `0x20` bytes. That is the per-actor record issue [#10](https://github.com/glinesbdev/ocarina-forge/issues/10) calls section 1.
+
+| Offset | Field |
+| --- | --- |
+| `+0x00` | u32 first body index |
+| `+0x04` | u32 last body index, inclusive |
+| `+0x08` | u64 layout `Hash` |
+| `+0x10` | 16 bytes the published reader does not interpret |
+
+`0xFFFFFFFF` in the first body index means this tile has no body for that actor. Issue #10 says the record carries the hash, the `SRTHash`, and a shape range. The 16-byte tail is the only unread span, so an `SRTHash` could sit there. Those bytes are not written. No retail tile was measured, so the offset of `SRTHash` inside the record is not established.
+
+Breath of the Wild's `ksys::phys::ActorInfo` is a different struct: 16 bytes, `HashId`, `SRTHash`, shape start, shape end, and `getActorIdx` matches hash and `SRTHash`. That SDK is not this file. Those offsets are not used.
+
+A body record is `0x14` bytes. The u16 at `+0x0A` is the compound instance index. The record does not name which tagfile. One compound with that index and a non-zero shape pointer is the instance. Several compounds, and exactly one of those instances within `0.01` of the actor position, is also accepted. Anything else fails closed. A hash that appears twice fails closed.
+
+One or more big-endian Havok `TAG0` tagfiles follow. The patcher uses a tagfile whose `SDKV` is `20250200` and whose second item record is `hknpCompoundShape`. Another SDK is skipped. A gap of more than 7 bytes inside a chunk fails closed.
+
+Inside that compound, `+0x38` is a u32 offset from that field to the instance array, and `+0x40` is the count. Each instance is `0x40` bytes. Positions are world space.
+
+| Offset | Field |
+| --- | --- |
+| `+0x00` | quaternion, xyzw, four floats |
+| `+0x10` | position, three floats |
+| `+0x1C` | padding, not written |
+| `+0x20` | scale, three floats |
+| `+0x2C` | padding, not written |
+| `+0x30` | u64 shape offset from this field |
+
+`patch_compound_transform` writes the quaternion, the position, and the scale. It then checks that every changed byte is inside those three spans and that the file length is unchanged. The shape pointer and the shape bytes stay. If the instance already matches the actor pose (position within `1e-3`, scale within `1e-4`, quaternion dot above `0.9999`), the new pose is written directly. Otherwise the actor's delta is applied, `new * inverse(old) * instance`, so an offset piece follows. Rotate is extrinsic XYZ, the same composition as a placement `Rotate`. A non-positive scale fails closed. `Ry(+90°)` takes local `+X` to world `-Z`.
+
+The scene directory is not a fixed grid. Kokiri's 4×4 per age and Hyrule Field's 256 tiles per age are the issue's counts. They were not re-counted. Under `Phive/StaticCompoundBody/`, Forge looks for the banc stem (`KokiriForest_Child_Static`), that stem without `_Static` or `_Dynamic` (`KokiriForest_Child`), and the area folder (`KokiriForest`). Every directory that exists is searched. Only `*.bphsc` and `*.bphsc.zs` are read. Symlinks are skipped. Child and Adult are separate bancs. Only the banc being edited is patched.
+
+### What `collisionFollow` writes
+
+The manifest key is `collisionFollow` (`collision_follow` is accepted). The CLI flag is `--collision-follow`. `POST /api/export` and `POST /api/mod-export` take `collisionFollow` in the body. A typo is an error. The default is `off`, which is today's export: the mesh moves and the bake stays.
+
+`srt` is variant B. A pose move keeps `Hash` and `Phive.Placement.ID`. Export mints a new `SRTHash`: the CRC-32 of `ocarina-forge-collision-follow-b:` plus the 16-digit actor hash, skipping 0, bumped until no other actor in the banc has it. Save Longshot mod adds a placements `set` of `SRTHash` (an `add` only when the key was missing). Build mod writes that same u32 into the banc. No `.bphsh` and no `.bphsc` is shipped. The shape is unchanged. Re-minting the hash is a new value in the data structure, not a new shape. Whether the game then ignores the old bake is not known. The game was not launched.
+
+`bake` leaves `SRTHash` alone, so a lookup by hash and `SRTHash` can still hit the same row. Each tile that contains the actor is copied and the instance transform is moved. A tile that does not mention the actor is left out. A tile that mentions the actor and cannot be patched fails the export, so a half-updated world is not shipped. The unpacked length stays the same. The bytes differ, so the size-table entry still grows by 1024 (`align8(old + 1024)`), and the whole table is shipped. A missing row is an error. It is not invented. The frame is recompressed with the dictionary id from the source frame. `.bphsc.zs` is not in the suffix table, so the id is not assumed to be 1. A scene with no `StaticCompoundBody` directory warns and does not fail. An actor that is in no tile is logged. The class `.bphsh` is not rewritten in either mode. Whether an unbaked actor's collision follows the placement is still an in-game question.
+
+`examples/collision-follow-test` is variant B. Its scene yaml is generated from the dump when the command runs, and that folder is gitignored. Do not commit it. The in-game steps are in that example's README. The result of the run is still open.
 
 ## BFRES models (version 10)
 

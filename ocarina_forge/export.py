@@ -36,10 +36,21 @@ class Log:
         self.lines.append({"level": "error", "message": message})
 
 
-def build(project, dump, *, install: bool = False, make_zip: bool = False, level: int = 19) -> dict:
+def build(project, dump, *, install: bool = False, make_zip: bool = False, level: int = 19,
+          collision_follow: str | None = None) -> dict:
     if project.manifest.get("engine") == "after-ocarina":
         return _build_after_ocarina(project, dump, install=install, make_zip=make_zip)
+    from ocarina_forge.collision_follow import (
+        apply_srts,
+        assign_srts,
+        bake_tiles,
+        collision_mode,
+        compound_files,
+        pose_moves,
+    )
+
     log = Log()
+    mode = collision_mode(project, collision_follow)
     out_root = project.root / "build" / "romfs"
     if out_root.exists():
         shutil.rmtree(out_root)
@@ -86,10 +97,44 @@ def build(project, dump, *, install: bool = False, make_zip: bool = False, level
             document, dict_id, original = dump.read_byml(banc)
         except BancError as exc:
             raise BancError(f"{banc}: {exc.message}", exc.code) from exc
+        moves = pose_moves(document, diff) if mode != "off" else []
+        if mode == "srt" and moves:
+            assign_srts(document, moves)
         try:
             exported, warnings = export_document(document, diff)
         except BancError as exc:
             raise BancError(f"{banc}: {exc.message}", exc.code) from exc
+        if mode == "srt" and moves:
+            apply_srts(exported, moves)
+            for move in moves:
+                log.info(
+                    f"{banc}: {move.gyaml} ({move.hash}) collisionFollow srt. "
+                    f"SRTHash 0x{0 if move.srt_old is None else move.srt_old:08x} -> 0x{move.srt_new:08x}. "
+                    "Hash and Phive.Placement.ID stay. No .bphsh and no .bphsc is written."
+                )
+        elif mode == "bake" and moves:
+            found_dir, _paths = compound_files(dump, banc)
+            if not found_dir:
+                log.warn(
+                    f"{banc}: collisionFollow bake found no Phive/StaticCompoundBody directory "
+                    "for this scene. No tile was written. The class .bphsh was not rewritten."
+                )
+            else:
+                for relative, compound, compound_dict in bake_tiles(dump, banc, moves):
+                    _write_compound(out_root, dump, table, relative, compound, compound_dict, log, level)
+                    table_raised = True
+                for move in moves:
+                    if move.tiles:
+                        log.info(
+                            f"{banc}: {move.gyaml} ({move.hash}) collisionFollow bake. "
+                            f"Instance transform updated in {', '.join(move.tiles)}. "
+                            "SRTHash stays. The actor record and the shape bytes were not changed."
+                        )
+                    else:
+                        log.warn(
+                            f"{banc}: {move.gyaml} ({move.hash}) is not in a static-compound tile. "
+                            "The class .bphsh was not rewritten."
+                        )
         for warning in warnings:
             log.warn(f"{banc}: {warning}")
         if same(exported, document):
@@ -267,6 +312,32 @@ def _build_after_ocarina(project, dump, *, install: bool, make_zip: bool) -> dic
         "zip": zip_path,
         "files": written,
     }
+
+
+def _write_compound(out_root, dump, table, relative, payload, dict_id, log, level) -> None:
+    """Write one patched tile. The unpacked length matches the dump. The entry grows by 1024."""
+    if table is None:
+        raise BancError(
+            "A patched static compound needs the resource size table, and this dump has none. "
+            "Nothing else from this bake was installed.",
+            "rstb",
+        )
+    old_entry = table.get(relative) or 0
+    if not old_entry:
+        raise BancError(
+            f"{relative} has no hashed or named entry in the resource size table. "
+            "A changed bake is raised in place. A missing entry is not invented.",
+            "rstb",
+        )
+    new_entry = entry_for_byml(old_entry, len(payload), len(payload))
+    before, after = table.raise_to(relative, new_entry)
+    destination = out_root / relative
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(compress(payload, dict_id, dump.dicts(), level=level))
+    log.info(
+        f"{relative}: instance transform patched, unpacked size still {len(payload)}. "
+        f"Size table {before} -> {after}. Shape bytes were not written."
+    )
 
 
 def _text(log: Log) -> str:
