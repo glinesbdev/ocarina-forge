@@ -11,6 +11,7 @@ import {
   compressedByteLength,
   createTextureArrayPool,
   patchArrayShader,
+  textureArraysEnabled,
   writeLayerTexture,
 } from "./texture-array.js";
 
@@ -371,7 +372,7 @@ function fakeWebgpu({ fail = false } = {}) {
   return renderer;
 }
 
-test("WebGPU copies block-aligned mips into the array and then drops CPU bytes", async () => {
+test("WebGPU writes every mip from that layer's own bytes", async () => {
   const pool = createTextureArrayPool(THREE);
   const map = bc7(16, 16, THREE.SRGBColorSpace, 9);
   const spec = pool.describe(material(map), geometry());
@@ -381,15 +382,45 @@ test("WebGPU copies block-aligned mips into the array and then drops CPU bytes",
   assert.equal(result.failed, 0);
   assert.equal(result.copied, 1);
   assert.equal(arraysReady(spec), true);
-  assert.deepEqual(
-    renderer.copies.map((copy) => `${copy.level}:${copy.width}x${copy.height}`),
-    ["0:16x16", "1:8x8", "2:4x4"],
-  );
-  assert.equal(renderer.writes.length, 2);
-  assert.equal(renderer.writes[0].size.width, 4);
-  assert.equal(renderer.writes[0].size.height, 4);
+  assert.equal(renderer.copies.length, 0);
+  assert.deepEqual(renderer.writes.map((write) => write.size.width), [16, 8, 4, 4, 4]);
+  assert.ok(renderer.writes.every((write) => write.bytes > 0 && write.origin.z === 0));
   assert.equal(map.userData.forgeCpuReleased, true);
   assert.equal(map.mipmaps[0].data.byteLength, 0);
+  pool.dispose();
+});
+
+test("an array with no texel bytes stays unresolved", async () => {
+  const pool = createTextureArrayPool(THREE);
+  pool.setRetainMips(false);
+  const map = bc7(16, 16, THREE.SRGBColorSpace, 4);
+  const spec = pool.describe(material(map), geometry());
+  for (const level of map.mipmaps) level.data = new Uint8Array(0);
+  pool.finalize({ concatenate: false });
+  const result = await pool.publish(fakeWebgpu());
+  assert.equal(result.failed, 1);
+  assert.equal(arraysReady(spec), false);
+  assert.equal(spec.slots.map.group.filled, false);
+  assert.equal(spec.slots.map.group.array, null);
+  pool.dispose();
+});
+
+test("texture arrays are off unless the page opts in, and a disabled pool does not copy mips", () => {
+  assert.equal(textureArraysEnabled("", null), false);
+  assert.equal(textureArraysEnabled("?arrays=1", null), true);
+  assert.equal(textureArraysEnabled("?textureArrays=0", "1"), false);
+  assert.equal(textureArraysEnabled("", "1"), true);
+  const pool = createTextureArrayPool(THREE);
+  pool.setEnabled(false);
+  const map = bc7(16, 16, THREE.SRGBColorSpace, 4);
+  const before = map.mipmaps[0].data.byteLength;
+  const spec = pool.describe(material(map), geometry());
+  assert.equal(spec.usesArray, false);
+  assert.equal(spec.whiten, true);
+  assert.equal(spec.slots.map.array, false);
+  assert.equal(map.mipmaps[0].data.byteLength, before);
+  assert.equal(map.userData.forgeArrayHold, undefined);
+  assert.equal(arraysReady(spec), false);
   pool.dispose();
 });
 

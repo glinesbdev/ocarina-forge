@@ -51,7 +51,7 @@ import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault, stageBatchKey } from "./instance.js";
-import { applyArrayMaps, arraysReady, createTextureArrayPool, installWebGLArrayMaterial, writeLayerTexture } from "./texture-array.js";
+import { applyArrayMaps, arraysReady, createTextureArrayPool, installWebGLArrayMaterial, textureArraysEnabled, writeLayerTexture } from "./texture-array.js";
 import { releaseGltfDocument } from "./gltf-release.js";
 import { createCpuPark } from "./cpu-park.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -342,6 +342,9 @@ export async function createViewport(host, hooks) {
 
   function freshTextureArrays() {
     const pool = createTextureArrayPool(THREE);
+    const search = typeof window !== "undefined" ? window.location.search : "";
+    const stored = typeof window !== "undefined" ? window.localStorage.getItem("ocarinaforge.textureArrays") : null;
+    pool.setEnabled(textureArraysEnabled(search, stored));
     const webgpu = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
     pool.setRetainMips(!webgpu);
     return pool;
@@ -617,11 +620,9 @@ let convertSlots = 8;
     const groups = new Map();
     for (const texture of live) {
       if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
-      // Bytes are copied into the array pool before forgeArray is set. Hold
-      // the source until that copy exists so a 3-frame release cannot empty it.
-      // claim() copies the mips before forgeArray is set. Hold the source until
-      // that copy exists. publish() clears the hold once the GPU image is in.
-      if (texture.userData?.forgeArrayHold && !texture.userData?.forgeArray) continue;
+      // publish() clears the hold after the layer bytes are on the GPU.
+      // Releasing earlier uploads the 1x1 white default into the array.
+      if (texture.userData?.forgeArrayHold) continue;
       const key = sourceKey(texture);
       const group = groups.get(key) || [];
       group.push(texture);

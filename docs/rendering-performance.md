@@ -120,23 +120,27 @@ A published array is not rewritten. `releaseTextureCpu` drops the mip bytes, and
 
 Bradyn loaded Hyrule Field on WebGPU at `ac3254f` (Windows). The HUD was 574 draws, 542 background, gpu 30 geom / 48 tex, heap 727 MB, 252 loaded, tex 6. Terrain kept its textures. Cliffs, ranch buildings, fences, and rocks were flat white or cream.
 
-`tex 6` is the number of texture objects on the batch and terrain materials, not six images uploaded. The arrays had replaced the per-model maps. The generated WGSL does sample `texture_2d_array` with the instance's RGBA8 layer (the same indirect id the matrices use, and the matrices were in the right place). A wrong layer would show the wrong albedo. Flat cream is an untextured white albedo under the scene lights.
+`tex 6` is the number of texture objects on the batch and terrain materials, not six images uploaded. The arrays had replaced the per-model maps. Flat cream is an untextured white albedo under the scene lights. Terrain is excluded from arrays, which is why it stayed textured.
 
-The difference from the 2D path, which already displayed those BC7 maps, is the array upload. three r170 writes every layer with one `writeTexture` into the concatenated mip. That call was checked from source and had not been executed on a device. On Windows the array stays the 1×1 white default, or uninitialized BC7, which D3D12 shows as white. Sampling it paints every model that shares the array. Terrain is excluded from arrays, which is why it stayed textured.
+At `8ab4f0f` the same scene was still white, with `tex 3` and `unresolved 0`. `copyTextureToTexture` from the 2D BC7 image into the array did not fail validation, so the group was marked ready, but the array stayed the uninitialized white image. `unresolved` only counted a missing layer, so a white array looked resolved.
 
-The coalesce now copies each 2D GPU texture into its layer (`copyTextureToTexture` for mips whose size is a multiple of 4, `writeTexture` of that layer's own bytes for 2×2 and 1×1). A validation error drops the array and the batch keeps the maps it had, with the material colour still whitened only for the instanced tint. The profile line `unresolved N` counts instances that wanted a layer and are on that fallback. `0` means every such instance is sampling an array.
+Texture arrays are off unless the page opts in (`?arrays=1`, or `localStorage['ocarinaforge.textureArrays'] = '1'`). The batch keeps each compressed map. Repeated meshes stay instanced, and tint is still the per-instance colour. With the flag on, each layer is `queue.writeTexture` of that layer's own bytes, the same call the 2D path uses. A layer with no bytes, a missing GPU texture, or a validation error drops the array. `unresolved` counts those instances. An empty array is not ready.
 
 ### Spike
 
 Headless Chrome 157.0.8103.50 (SwiftShader, WebGL2) exposed `EXT_texture_compression_bptc`. `texStorage3D` + `compressedTexSubImage3D` and a `sampler2DArray` sample succeeded for BC7 unorm and sRGB: 64×64×2 (1 mip), 256×256×2 (3 mips), 32×32×2 (1 mip), and 512×256×4 (1 mip). The readback was `0,0,0,0` because the blocks were zeros. `copyImageSubData` was not a function on that context. `navigator.gpu` was missing, so the WebGPU device upload was not executed. The Windows result above is that missing run.
 
-three r170 already treats `CompressedArrayTexture` like `CompressedTexture` in `getFormat`, creates `depthOrArrayLayers`, and writes one `writeTexture` per layer. The BC7 plugin supplies the missing `RGBA_BPTC_Format` case and the `bc7-rgba-unorm-srgb` enum `_getBlockData` compares. That is the same upload 2D BC7 already uses. The array path no longer relies on it for WebGPU.
+three r170 already treats `CompressedArrayTexture` like `CompressedTexture` in `getFormat`, creates `depthOrArrayLayers`, and writes one `writeTexture` per layer of a concatenated mip. The BC7 plugin supplies the missing `RGBA_BPTC_Format` case and the `bc7-rgba-unorm-srgb` enum `_getBlockData` compares. That concatenated upload is what came back white. The opt-in WebGPU path writes each layer from its own byte range instead.
 
 ### What a unit scene collapses to
 
 32 compressed albedos, four sizes, two tints, one vertex layout: the streaming key (unique texture and tint) is **64** batches. The coalesced key is **4**, one array per size, 16 layers each. Alpha-test and double-sided stay split. This checkout has no game dump and no WebGPU device, so the Field and Kokiri Forest were not remeasured here.
 
-Bradyn's WebGPU Field at `ac3254f`, before this fix, was **252 of 852** models, **727 MB** JS heap, gpu 30 geom / 48 tex, tex 6, cpu 28.7 ms, frame 34.2 ms. That partial load is the before number. The after number has to be read on that machine: heap on the status line, and `__forgeMemory()` for `geometries.cpuMB`, `textures.cpuMB`, and `resident.assetBytes`, with all 852 models resident. The target is the whole Field under the 2.2 GB heap cap. At the 25 Nov cap, 241 meshes held about 426 MB of geometry CPU and 136 MB of texture CPU after the three-frame release (heap 0.62 GB). Dropping the texture CPU after the GPU copy, and parking normals and UVs off the page heap, is what leaves room for the other 600 models. Position and index stay, so the batch CPU does not go to zero.
+The status-line heap is `performance.memory.usedJSHeapSize`. That is the page isolate's V8 heap, including ArrayBuffers it still references. It is not GPU memory, and it does not include a worker isolate. A number in the gigabytes means the page thread is still holding those bytes.
+
+Bradyn's WebGPU Field at `ac3254f` was **252 of 852** models and **727 MB**. At `8ab4f0f` the same load was **245** models, **160** meshes, and **6304 MB**. Parking sliced every normal and UV out of a shared glTF buffer while position still held that buffer, and a failed `postMessage` sliced them again into a map on the page. An interleaved attribute was "cleared" by assigning `.array`, which only shadows the getter; `data.array` kept the whole buffer. Those copies are what the heap reported.
+
+Parking now keeps one packed range per attribute. Position and the index are copied off a shared buffer first, so the original buffer can be dropped. The page-side map does not slice a second time. `frontend/src/geometry-retain.test.js` fails if a shared buffer's live bytes grow. Position and the index stay on the batch for snap. The target is still the whole Field under the 2.2 GB heap cap. Read it on that machine: the status-line heap, and `__forgeMemory()` for `geometries.cpuMB`, `textures.cpuMB`, and `resident.assetBytes`.
 
 ## GPU picking
 
@@ -146,13 +150,13 @@ Instanced preview meshes sample a per-instance id texture (`gl_InstanceID` / `in
 
 Alpha-tested materials discard in the id shader before the id is written, so a foliage hole is not a solid hit. Alt-click, and a second click on the same front actor, peel up to eight ids front to back. `chooseHit` still walks that stack together with volume edges.
 
-After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. Once that batch has been uploaded, normals, UVs, tangents, and vertex colours are moved to a worker (`cpu-park.js`) so `performance.memory.usedJSHeapSize` no longer counts them. Position and the index stay on the batch: snap raycasts `BatchedMesh`, and the next rebuild copies the range back after the worker returns those attributes. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes, and a parked attribute does too.
+After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. Once that batch has been uploaded, normals, UVs, tangents, and vertex colours are moved out of the batch (`cpu-park.js`). An owned buffer is transferred. A glTF view is packed once, and position is copied off that buffer first so the shared allocation can be dropped. The page heap is `performance.memory.usedJSHeapSize` (this isolate's ArrayBuffers, not the worker and not the GPU). Position and the index stay on the batch: snap raycasts `BatchedMesh`. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes, and a parked attribute does too.
 
-The glTF JSON, the dependency cache, and the binary chunk are dropped once the scene has been built (`gltf-release.js`). Decoded texture bytes are released after the GPU image exists: on WebGPU that is the array copy, and the 2D source is released in the same step. WebGL still waits out the three-frame flush.
+The glTF JSON, the dependency cache, and the binary chunk are dropped once the scene has been built (`gltf-release.js`). Decoded texture bytes are released after the GPU image exists. With arrays off, that is the three-frame flush. With arrays on, it is the per-layer write, and the 2D source is held until that write finishes so it cannot be swapped for the 1×1 white default. WebGL still waits out the three-frame flush.
 
 These stay on the CPU on purpose:
 
-- The `BatchedMesh` arrays. They are the uploaded copy and the source for the next rebuild.
+- The `BatchedMesh` position and index. Snap raycasts them, and a rebuild copies the other attributes back from the park.
 - The selected actor's model, so selecting it does not depend on a round-trip and the mesh audit still sees its vertices.
 - Water parts. Pond fish placement raycasts the water surface.
 - Terrain meshes and their BVH. Snap uses the wasm ground sampler (`sampleGroundSurface`). It falls back to a heightmap raycast only when that sampler is absent, and it does not use the id buffer.

@@ -2,16 +2,42 @@
  * Park uploaded vertex attributes off the page's JS heap. The browser keeps
  * them in a worker. Tests and a worker that fails to start keep a map on this
  * thread instead, so a rebuild can still restore the attributes.
+ *
+ * The map stores the typed arrays it was given. It does not slice them again.
+ * A second slice, on top of a shared glTF buffer that position still held,
+ * is what multiplied the Field heap.
  */
-export function createCpuPark() {
+export function createCpuPark({ worker: allowWorker = true } = {}) {
   const local = new Map();
   let worker = null;
   let failed = false;
   let seq = 0;
   const pending = new Map();
 
+  function retainedBytes() {
+    let total = 0;
+    for (const arrays of local.values()) {
+      for (const array of arrays || []) total += array.byteLength || 0;
+    }
+    return total;
+  }
+
+  function uniqueOwned(arrays) {
+    const held = [];
+    const seen = new Set();
+    for (const array of arrays || []) {
+      if (!array || !array.byteLength) continue;
+      const owned = array.byteOffset === 0 && array.buffer.byteLength === array.byteLength;
+      const view = owned && !seen.has(array.buffer) ? array : array.slice();
+      if (seen.has(view.buffer)) continue;
+      seen.add(view.buffer);
+      held.push(view);
+    }
+    return held;
+  }
+
   function thread() {
-    if (failed || typeof Worker !== "function") return null;
+    if (!allowWorker || failed || typeof Worker !== "function") return null;
     if (worker) return worker;
     try {
       worker = new Worker(new URL("./cpu-park-worker.js", import.meta.url), { type: "module" });
@@ -37,11 +63,7 @@ export function createCpuPark() {
 
   return {
     park(id, arrays) {
-      const held = (arrays || []).map((array) => (
-        array && array.byteOffset === 0 && array.buffer.byteLength === array.byteLength
-          ? array
-          : array.slice()
-      ));
+      const held = uniqueOwned(arrays);
       const bytes = held.reduce((sum, array) => sum + array.byteLength, 0);
       const active = thread();
       if (!active) {
@@ -53,9 +75,14 @@ export function createCpuPark() {
         pending.set(token, { resolve: () => resolve(bytes) });
         try {
           active.postMessage({ op: "park", id, token, buffers: held }, held.map((array) => array.buffer));
+          if (held.some((array) => array.byteLength !== 0)) {
+            pending.delete(token);
+            local.set(id, held);
+            resolve(bytes);
+          }
         } catch {
           pending.delete(token);
-          local.set(id, held.map((array) => array.slice()));
+          local.set(id, held);
           resolve(bytes);
         }
       });
@@ -75,6 +102,7 @@ export function createCpuPark() {
         }
       });
     },
+    retainedBytes,
     take(id) {
       if (local.has(id)) {
         const arrays = local.get(id);

@@ -49,7 +49,12 @@ export function formatStatusLabel({
   return parts.join(" · ");
 }
 
-/** renderer.info.memory plus the JS heap, for the status line and the unload log. */
+/**
+ * renderer.info.memory plus the JS heap, for the status line and the unload log.
+ * `heapBytes` is `performance.memory.usedJSHeapSize`: the page isolate's V8
+ * heap, including ArrayBuffers it still references. It is not GPU memory and
+ * it does not include a worker isolate.
+ */
 export function formatMemoryNote({ geometries = null, textures = null, heapBytes = null } = {}) {
   const geom = geometries == null ? "?" : String(Number(geometries) || 0);
   const tex = textures == null ? "?" : String(Number(textures) || 0);

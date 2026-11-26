@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as THREE from "three";
 
+import { createCpuPark } from "./cpu-park.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, parkGeometryAttributes, releaseGeometryCpu, unparkGeometryAttributes } from "./geometry-retain.js";
 
 function triangle() {
@@ -86,4 +87,80 @@ test("parked normals and uvs leave the geometry and come back", async () => {
   assert.deepEqual(Array.from(geometry.getAttribute("uv").array), [0, 0, 1, 0, 0, 1]);
   assert.equal(geometry.getAttribute("normal").array.length, 9);
   assert.equal(geometry.userData.forgeParked, null);
+});
+
+function sharedGeometry() {
+  const verts = 1024;
+  const pos = verts * 3;
+  const nrm = verts * 3;
+  const uv = verts * 2;
+  const buffer = new ArrayBuffer((pos + nrm + uv) * 4);
+  const geometry = new THREE.BufferGeometry();
+  const position = new Float32Array(buffer, 0, pos);
+  const normal = new Float32Array(buffer, pos * 4, nrm);
+  const coords = new Float32Array(buffer, (pos + nrm) * 4, uv);
+  position.fill(1);
+  normal.fill(2);
+  coords.fill(3);
+  geometry.setAttribute("position", new THREE.BufferAttribute(position, 3));
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(coords, 2));
+  geometry.setIndex([0, 1, 2]);
+  return { geometry, sharedBytes: buffer.byteLength, normal, coords };
+}
+
+test("parking a shared vertex buffer keeps one copy of each attribute", async () => {
+  const { geometry, sharedBytes, normal, coords } = sharedGeometry();
+  const park = createCpuPark({ worker: false });
+  const bytes = await parkGeometryAttributes(geometry, park, { ready: () => true });
+  const parked = park.retainedBytes();
+  const position = geometry.getAttribute("position").array;
+  assert.equal(bytes, normal.byteLength + coords.byteLength);
+  assert.equal(parked, normal.byteLength + coords.byteLength);
+  assert.equal(position.byteLength + parked, sharedBytes);
+  assert.equal(geometry.getAttribute("normal").array.byteLength, 0);
+  assert.equal(geometry.getAttribute("uv").array.byteLength, 0);
+  assert.notEqual(position.buffer, normal.buffer);
+  assert.equal(position[0], 1);
+  assert.equal(geometry.getAttribute("position").count, 1024);
+  const start = position.byteLength + geometry.getIndex().array.byteLength;
+  for (let i = 0; i < 4; i += 1) {
+    await unparkGeometryAttributes(geometry, park);
+    await parkGeometryAttributes(geometry, park, { ready: () => true });
+    assert.equal(park.retainedBytes(), normal.byteLength + coords.byteLength);
+    assert.equal(geometry.getAttribute("position").array.byteLength + park.retainedBytes(), sharedBytes);
+  }
+  await unparkGeometryAttributes(geometry, park);
+  assert.equal(park.retainedBytes(), 0);
+  const live = ["position", "normal", "uv"].reduce((sum, name) => sum + geometry.getAttribute(name).array.byteLength, 0);
+  assert.equal(live, sharedBytes);
+  assert.equal(geometry.getAttribute("position").array.byteLength + geometry.getIndex().array.byteLength, start);
+  assert.equal(geometry.getAttribute("normal").array[0], 2);
+  assert.equal(geometry.getAttribute("uv").array[0], 3);
+});
+
+test("an owned attribute is moved, not copied, into the park", async () => {
+  const geometry = triangle();
+  const normal = new Float32Array(9).fill(4);
+  const uv = new Float32Array([0, 0, 1, 0, 0, 1]);
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normal, 3));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
+  const park = createCpuPark({ worker: false });
+  await parkGeometryAttributes(geometry, park, { ready: () => true });
+  assert.equal(park.retainedBytes(), normal.byteLength + uv.byteLength);
+  const back = await park.take(geometry.userData.forgeParkId);
+  assert.equal(back[0], normal);
+  assert.equal(back[1], uv);
+});
+
+test("releasing an interleaved part drops the shared buffer once", () => {
+  const data = new Float32Array(600);
+  const buffer = new THREE.InterleavedBuffer(data, 6);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.InterleavedBufferAttribute(buffer, 3, 0));
+  geometry.setAttribute("normal", new THREE.InterleavedBufferAttribute(buffer, 3, 3));
+  geometry.userData.forgeBatch = { mesh: {}, geometryId: 0 };
+  const released = releaseGeometryCpu(geometry);
+  assert.equal(buffer.array.byteLength, 0);
+  assert.equal(released, data.byteLength);
 });

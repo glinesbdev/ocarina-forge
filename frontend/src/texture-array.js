@@ -8,12 +8,28 @@
  * A published group is not rewritten. releaseTextureCpu drops the mip bytes,
  * and this machine's WebGL2 context has no copyImageSubData, so a texture
  * that arrives after publish opens a new slice instead of reading empty mips.
+ * WebGPU writes each layer with queue.writeTexture of that layer's own bytes.
+ * An array with no bytes stays unfilled, and the batch keeps the 2D map.
  */
 
 import { batchKey } from "./instance.js";
 import { releaseTextureCpu, repairCompressedTexture } from "./gpu-texture.js";
 
 export const MAX_ARRAY_LAYERS = 256;
+
+/**
+ * Texture arrays are off unless the page asks for them. The per-texture
+ * materials stay on, so a model keeps the albedo that already uploaded.
+ * `?arrays=1` or `localStorage['ocarinaforge.textureArrays']='1'` opts in.
+ */
+export function textureArraysEnabled(search, stored) {
+  const params = new URLSearchParams(String(search || "").replace(/^\?/, ""));
+  const flag = params.get("arrays") || params.get("textureArrays");
+  if (flag === "1" || flag === "on") return true;
+  if (flag === "0" || flag === "off") return false;
+  if (stored === "1" || stored === "on") return true;
+  return false;
+}
 
 const SLOT_NAMES = ["map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap"];
 
@@ -122,9 +138,14 @@ export function createTextureArrayPool(THREE) {
   const bySource = new Map();
   const open = new Map();
   let retainMips = true;
+  let enabled = true;
 
   function setRetainMips(value) {
     retainMips = Boolean(value);
+  }
+
+  function setEnabled(value) {
+    enabled = Boolean(value);
   }
 
   function groupFor(baseKey, texture) {
@@ -139,6 +160,7 @@ export function createTextureArrayPool(THREE) {
       sources: [],
       published: false,
       gpuReady: false,
+      filled: false,
       failed: false,
       array: null,
       format: texture.format,
@@ -178,6 +200,7 @@ export function createTextureArrayPool(THREE) {
   }
 
   function take(texture, channel) {
+    if (!enabled) return identitySlot(texture);
     const assignment = claim(texture);
     if (!assignment) return identitySlot(texture);
     return {
@@ -337,46 +360,46 @@ export function createTextureArrayPool(THREE) {
     );
   }
 
+  function mipSource(stored, source, level) {
+    const kept = stored && stored[level];
+    if (kept && kept.data && kept.data.byteLength) return kept;
+    const live = source && source.mipmaps && source.mipmaps[level];
+    if (live && live.data && live.data.byteLength) return live;
+    return null;
+  }
+
   function fillGroup(renderer, group) {
+    // copyTextureToTexture into a BC7 array reports success on D3D12 while the
+    // destination stays the 1x1 white default. Write each layer from its own
+    // bytes, the same queue.writeTexture the 2D BC7 path already uses. A layer
+    // with no bytes is a failure, not an empty-but-ready array.
     const backend = renderer.backend;
     const device = backend && backend.device;
+    if (!device || !device.queue || typeof device.queue.writeTexture !== "function") {
+      throw new Error("WebGPU queue cannot write a texture array layer");
+    }
     const dest = group.array;
     primeArrayTexture(renderer, dest);
-    let gpu = gpuTexture(backend, dest);
+    const gpu = gpuTexture(backend, dest);
+    if (!gpu) throw new Error("array texture was not created");
     const sources = group.sources || [];
     const layers = group.layers || [];
     const count = Math.max(layers.length, sources.length);
     if (!count) throw new Error("texture array has no layers");
+    let wrote = 0;
     for (let layer = 0; layer < count; layer += 1) {
       const source = sources[layer];
-      const stored = layers[layer] || (source && source.mipmaps) || [];
-      const cpu = source && source.mipmaps && source.mipmaps[0] && source.mipmaps[0].data && source.mipmaps[0].data.byteLength;
-      for (let level = 0; level < stored.length; level += 1) {
-        const mip = stored[level];
-        const aligned = mip.width % 4 === 0 && mip.height % 4 === 0;
-        const sourceGpu = gpuTexture(backend, source);
-        // Copy only when the 2D texture is already on the GPU, or its CPU bytes
-        // can still take the 2D upload inside copyTextureToTexture. A released
-        // source with no GPU image must not be copied: that copies the 1x1 white.
-        if (aligned && source && (sourceGpu || cpu) && typeof renderer.copyTextureToTexture === "function") {
-          renderer.copyTextureToTexture(
-            source,
-            dest,
-            { x: 0, y: 0, z: 0, width: mip.width, height: mip.height },
-            { x: 0, y: 0, z: layer },
-            level,
-          );
-          gpu = gpuTexture(backend, dest) || gpu;
-          continue;
-        }
-        if (!gpu) throw new Error("array texture was not created");
-        if (!device || !device.queue || typeof device.queue.writeTexture !== "function") {
-          throw new Error("WebGPU queue cannot write a texture array layer");
-        }
+      const stored = layers[layer] || [];
+      const levels = Math.max(stored.length, (source && source.mipmaps && source.mipmaps.length) || 0);
+      if (!levels) throw new Error("texture array layer has no mips");
+      for (let level = 0; level < levels; level += 1) {
+        const mip = mipSource(stored, source, level);
+        if (!mip) throw new Error("texture array layer has no bytes");
         writeMipLayer(device, gpu, { ...mip, level }, layer, group.format);
+        wrote += mip.data.byteLength;
       }
     }
-    if (!gpuTexture(backend, dest) && !gpu) throw new Error("array texture was not created");
+    if (!wrote) throw new Error("texture array write was empty");
     return count;
   }
 
@@ -405,6 +428,7 @@ export function createTextureArrayPool(THREE) {
       if (!group.published || !group.array || group.gpuReady || group.failed) continue;
       if (!webgpu) {
         group.gpuReady = true;
+        group.filled = Boolean(group.array && group.array.mipmaps && group.array.mipmaps.length);
         continue;
       }
       const device = renderer.backend && renderer.backend.device;
@@ -419,6 +443,7 @@ export function createTextureArrayPool(THREE) {
         scope = false;
         if (error) throw error;
         group.gpuReady = true;
+        group.filled = true;
         releaseGroupCpu(group);
       } catch (error) {
         if (scope && device && typeof device.popErrorScope === "function") {
@@ -454,14 +479,20 @@ export function createTextureArrayPool(THREE) {
     open.clear();
   }
 
-  return { claim, describe, finalize, publish, dispose, setRetainMips, groups };
+  return { claim, describe, finalize, publish, dispose, setEnabled, setRetainMips, groups };
 }
 
 export function arraysReady(spec) {
   if (!spec?.usesArray || !spec.slots) return false;
   return SLOT_NAMES.some((name) => {
     const slot = spec.slots[name];
-    return Boolean(slot?.array && slot.group?.array && slot.group.gpuReady && !slot.group.failed);
+    return Boolean(
+      slot?.array
+      && slot.group?.array
+      && slot.group.gpuReady
+      && slot.group.filled
+      && !slot.group.failed,
+    );
   });
 }
 
