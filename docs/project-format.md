@@ -164,7 +164,21 @@ Hashes the project mints set bit 62 (`secrets.randbits(64) | (1 << 62)`), matchi
 | `hidden` | Omitted from the exported Actors array. The record stays, so the editor can show it again. Edits on that record are kept and come back on unhide. |
 | `removed` | Same omission as hidden, but the editor lists it under Removed. Restore deletes the record. |
 
-An empty `actors` map deletes the file. A diff that round-trips to the vanilla actor is dropped, so the file stays small.
+An empty `actors` map deletes the file, unless `decorationGroups` still has an include or an exclude. A diff that round-trips to the vanilla actor is dropped, so the file stays small.
+
+### Decoration groups
+
+`decorationGroups` is editor metadata. It is not written into the banc.
+
+```yaml
+decorationGroups:
+  include:
+    "0x0000000000000030": "0x0000000000000010"
+  exclude:
+    - "0x0000000000000032"
+```
+
+`include` maps a decoration hash to the piece it should follow. `exclude` lists decorations that stay independent even when they sit inside that piece’s box. The rules are in [formats.md](formats.md#decoration-groups). Export writes each actor’s `Translate` and `Rotate`. It does not copy this key.
 
 ### Edited fields
 
@@ -194,7 +208,7 @@ Added actors put the same extra fields under `params` instead of `set`. `params`
 
 ### What a scene diff does not do
 
-Group lists (`AiGroups`, `FarDeleteGroups`, `SimultaneousGroups`, `PlgGdTable`, `PhiveHeader.PlacementGroups`) and `Links` are not rewritten. If a hidden or removed hash is still mentioned, export warns and leaves the reference. Check that scene in Longshot.
+Group lists (`AiGroups`, `FarDeleteGroups`, `SimultaneousGroups`, `PlgGdTable`, `PhiveHeader.PlacementGroups`) and `Links` are not rewritten. If a hidden or removed hash is still mentioned, export warns and leaves the reference. Check that scene in Longshot. `decorationGroups` is not one of those lists. It stays in the scene diff.
 
 Actors with no `Hash` are shown as locked and copied through unchanged.
 

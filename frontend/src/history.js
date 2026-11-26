@@ -81,6 +81,11 @@ export function editLabel(command, actor, options = {}) {
     if (scaled && !moved && !turned) return `Scale ${name}`;
     return `Move ${name}`;
   }
+  if (kind === "transform_set") {
+    const extra = Array.isArray(command.actors) ? Math.max(0, command.actors.length - 1) : 0;
+    return extra ? `Move ${name} · ${extra} decoration${extra === 1 ? "" : "s"}` : `Move ${name}`;
+  }
+  if (kind === "decoration_group") return command.parent ? `Group ${name}` : `Ungroup ${name}`;
   if (kind === "set") return `Edit ${name}`;
   if (kind === "set_name") return `Rename ${name}`;
   if (kind === "set_gyaml") return `Change ${name}`;

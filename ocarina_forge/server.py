@@ -1095,10 +1095,16 @@ def put_diff(body: dict):
     project = _open_project()
     document, _dict_id, _raw = dump.read_byml(banc)
     stored = project.load_scene_diff(banc)
-    if isinstance(body.get("loaded"), list):
-        updated = keep_unloaded_diff(document, banc, body.get("actors") or {}, stored, body.get("loaded"))
+    if "decorationGroups" in body:
+        groups = body.get("decorationGroups") or {}
     else:
-        updated = replace_diff(document, banc, (body.get("actors") or {}))
+        groups = stored.get("decorationGroups")
+    if isinstance(body.get("loaded"), list):
+        updated = keep_unloaded_diff(
+            document, banc, body.get("actors") or {}, stored, body.get("loaded"), groups,
+        )
+    else:
+        updated = replace_diff(document, banc, (body.get("actors") or {}), groups)
     project.save_scene_diff(updated)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc

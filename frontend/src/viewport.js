@@ -37,6 +37,7 @@ import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { planAssetFetches, wantsMesh } from "./layers.js";
+import { followDecoration } from "./decoration-groups.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
@@ -485,6 +486,8 @@ let convertSlots = 8;
   let grid = null;
   let selected = null;
   let hovered = null;
+  let groupHighlight = new Set();
+  let followHome = null;
   let showLabels = false;
   let showHidden = false;
   let looking = false;
@@ -1202,15 +1205,69 @@ let convertSlots = 8;
     }
   }
 
+  function poseOf(entry) {
+    return {
+      translate: entry.pivot.position.toArray(),
+      rotate: fileRotate(entry.pivot),
+      scale: pivotScale(entry.pivot),
+    };
+  }
+
+  function captureFollow(entry) {
+    followHome = null;
+    if (!entry || !entry.id || transform.mode === "scale") return;
+    const ids = hooks.decorationFollowers ? hooks.decorationFollowers(entry.key) : [];
+    const children = (ids || [])
+      .map((id) => entries.get(id))
+      .filter((child) => child && child.pivot && child.key !== entry.key)
+      .map((child) => ({ key: child.key, id: child.id, before: poseOf(child) }));
+    if (!children.length) return;
+    followHome = { key: entry.key, before: poseOf(entry), children };
+  }
+
+  function syncFollow(entry) {
+    if (!followHome || !entry || entry.key !== followHome.key || transform.mode === "scale") return;
+    const after = poseOf(entry);
+    for (const child of followHome.children) {
+      const target = entries.get(child.key);
+      if (!target) continue;
+      const next = followDecoration(followHome.before, after, child.before);
+      target.pivot.position.fromArray(next.translate);
+      target.pivot.rotation.set(next.rotate[0], next.rotate[1], next.rotate[2]);
+      syncPreviewPlacement(target);
+      syncInstanceMatrix(target);
+    }
+  }
+
+  function followerPoses() {
+    if (!followHome) return [];
+    return followHome.children.map((child) => {
+      const target = entries.get(child.key);
+      const pose = target ? poseOf(target) : child.before;
+      return { id: child.id, key: child.key, translate: pose.translate, rotate: pose.rotate };
+    });
+  }
+
+  function setGroupHighlight(ids) {
+    const next = new Set(ids || []);
+    const same = next.size === groupHighlight.size && [...next].every((id) => groupHighlight.has(id));
+    if (same) return;
+    groupHighlight = next;
+    for (const entry of entries.values()) paint(entry);
+    syncLabels();
+    requestRender();
+  }
+
   function paint(entry) {
     const on = entry.key === selected;
+    const grouped = groupHighlight.has(entry.key);
     const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
     const ghost = !entry.parts || !entry.parts.length;
     entry.material.depthWrite = false;
     if (!(ghost && entry.volume)) {
-      entry.material.opacity = on ? 0.1 : entry.status === "hidden" ? 0.02 : 0.04;
-      entry.edgeMaterial.color.set(on || marked ? 0xf2d7a2 : entry.color);
-      entry.edgeMaterial.opacity = on ? 1 : 0.82;
+      entry.material.opacity = on ? 0.1 : grouped ? 0.08 : entry.status === "hidden" ? 0.02 : 0.04;
+      entry.edgeMaterial.color.set(on || grouped || marked ? 0xf2d7a2 : entry.color);
+      entry.edgeMaterial.opacity = on ? 1 : grouped ? 0.95 : 0.82;
     }
     syncGhost(entry);
     tintInstance(entry);
@@ -1232,6 +1289,7 @@ let convertSlots = 8;
     const wanted = new Set();
     if (selected) wanted.add(selected);
     if (hovered) wanted.add(hovered);
+    for (const id of groupHighlight) wanted.add(id);
     if (showLabels) {
       const ranked = [...entries.values()].filter(
         (entry) =>
@@ -1252,6 +1310,7 @@ let convertSlots = 8;
       ensureLabel(entry);
       entry.label.visible = true;
       entry.label.element.classList.toggle("is-selected", entry.key === selected);
+      entry.label.element.classList.toggle("is-grouped", groupHighlight.has(entry.key));
     }
   }
 
@@ -2566,6 +2625,7 @@ let convertSlots = 8;
     else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
     else target.setRGB(1, 1, 1);
     if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
+    else if (groupHighlight.has(entry.key)) target.lerp(new THREE.Color(0xf2d7a2), 0.45);
     return target;
   }
 
@@ -4302,8 +4362,10 @@ uniform float terrainLayerMissing;`
     if (!snapOn || !entries.get(entry.id) || !Number.isFinite(worldY)) return false;
     const cur = entry.pivot.position;
     if (!shouldApplyGroundReply(requestX, requestZ, cur.x, cur.z, latest && latest.x, latest && latest.z)) return false;
+    if (!followHome) captureFollow(entry);
     const next = surfaceAt(cur.x, worldY, cur.z, entry.id);
     cur.y = next == null ? worldY : next;
+    syncFollow(entry);
     syncPreviewPlacement(entry);
     hooks.onPreview(entry.id, [cur.x, cur.y, cur.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
     syncInstanceMatrix(entry);
@@ -4630,6 +4692,7 @@ uniform float terrainLayerMissing;`
     const p = entry.pivot.position;
     hooks.onPreview(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
     syncInstanceMatrix(entry);
+    syncFollow(entry);
     requestRender();
   });
 
@@ -4637,13 +4700,17 @@ uniform float terrainLayerMissing;`
     orbit.enabled = !event.value;
     if (event.value) {
       gizmoUsed = true;
+      captureFollow(selected ? entries.get(selected) : null);
       return;
     }
     const entry = selected ? entries.get(selected) : null;
     if (!entry || !entry.id) return;
     const finish = () => {
+      syncFollow(entry);
       const p = entry.pivot.position;
-      hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot));
+      const followers = followerPoses();
+      followHome = null;
+      hooks.onTransform(entry.id, [p.x, p.y, p.z], fileRotate(entry.pivot), pivotScale(entry.pivot), followers);
     };
     const pending = maybeSnap(entry);
     const wait = pending && typeof pending.then === "function"
@@ -5256,6 +5323,7 @@ uniform float terrainLayerMissing;`
       snapOn = Boolean(on);
     },
     select,
+    setGroupHighlight,
     setGizmo,
     setFlags,
     applyLighting,

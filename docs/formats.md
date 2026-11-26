@@ -85,6 +85,26 @@ Everything else (`Dynamic`, `Links`, `Presence`, `Bakeable`, `Phive`, …) is a 
 
 These root keys are group lists, not actors: `AiGroups`, `FarDeleteGroups`, `SimultaneousGroups`, `PlgGdTable`, and `PhiveHeader.PlacementGroups`. Export copies them through from the source banc. It does not add a new hash to them. A removed actor whose u64 still appears in one of those lists, or in some other actor’s `Links`, is left in place and the export log warns.
 
+### Decoration groups
+
+Ivy, grass, and the other dressing actors have no parent in the banc. Longshot’s modding API agrees. Spec revision 4 and `longshot.d.ts` give `content.place` a position, a rotation, and a scale, and no parent. `read.placements` returns the same kind of row. `has()` has `actors.attach`, `actors.attached`, and `actors.detach`, which are a live bone bind (`ModelBind`, at most 16 per mod), not a placement. There is no placement-group feature. `$parent` in a parameter file is inheritance of that file, not an actor.
+
+`Links` and the group lists above are not a substitute. A decoration can carry a `Links` entry, and it can sit in `AiGroups` with an NPC. On the measured fixture that link does not name a `Land_` / `Obj_` / `FldObj_` piece, and the group list does not share a hash with one. The editor does not read either when it decides who moves together.
+
+The editor infers a group:
+
+- A decoration is a Gyaml whose load layer is `decorations` (the tokens in the table below, including `ivy`). `Land_IvyClimbable` is a decoration, so it follows a piece. It is not a parent.
+- A parent piece is a `Land_`, `Obj_`, or `FldObj_` actor on the models layer. Regions are not parents. A placeholder volume (any scale axis of 8 m or more) is not a parent until a mesh bound exists. After that, the smallest box wins, so a field mesh does not take a decoration that also sits on a house.
+- The parent’s mesh bounds are transformed by its scale, then its extrinsic XYZ rotation (`R = Rz·Ry·Rx`), then its translation. The box grows by 1.5 m on every side. A decoration whose `Translate` is inside that box is grouped with it. Until the mesh bound has loaded, the stand-in is a 3 m cube on the pivot (6 m on a side), and a volume is skipped so a town-sized placeholder does not swallow the scene.
+- Each decoration has one parent. An override wins over the box. An exclusion drops the automatic group and is not replaced by the next box.
+- A shared name token or a shared pack is not used. Packs are one file per Gyaml (`Pack/Actor/<Gyaml>.pack.zs`), so a decoration never shares a pack with a different piece. A shared token misses and false-hits. Ivy on a house shares no token with that house, and the box still groups them. `Obj_Fern_Kokiri` sitting on `Land_Field` shares `kokiri` with a distant `Land_Kokiri_Shrine`, which the box does not group. `Land_FernCliff` is itself a decoration, because `fern` is a decoration token, so a name match cannot turn it into a parent. `decoration-report` prints the counts. `nameHeuristicReliable` and `packHeuristicReliable` stay false unless that cue matches proximity with no counterexample.
+
+Moving the parent writes `Translate` and `Rotate` on the parent and on each grouped decoration. The decoration’s scale is left alone, and scaling the parent does not move the group. Dragging a decoration by itself moves only that decoration. The next parent move applies the delta from the new offset. One undo step restores the parent and the decorations. Export writes those transforms into the banc. It does not write a parent field, and it does not add the decoration to a group list.
+
+The override is editor metadata on the scene diff, under `decorationGroups` (`include` maps a decoration hash to a parent hash, `exclude` lists decorations that stay independent). It is not a banc field. Static and Dynamic are both considered while both are shown. The properties panel lists the group, and Add / Remove / Remove all change it. A decoration has to be in the loaded view, so the Decorations layer has to be on, or it will not move.
+
+`python -m ocarina_forge decoration-report <banc>` prints the link counts, the group-list counts, and how the 3 m stand-in treats that file. It does not convert meshes. The editor’s groups use the loaded bounds.
+
 Category colors use the pack-name prefix: `Npc_` / `Shop_`, `Enemy_`, `Animal_`, `Eft`, `Land_`, `Area_` / `Area`, `Obj_` / `FldObj_` / `Item_` / `Weapon_` / `Dm_`, and system names (`StartPos`, `Player`, `Sound`, `AirWall`, `Ground`, anything with `Anchor` or ending in `Actor`).
 
 ### Load layers

@@ -34,6 +34,11 @@ import { groupModelErrors, isMarker } from "./problems.js";
 import { SHORTCUT_GROUPS } from "./shortcuts.js";
 import { createViewport } from "./viewport.js";
 import {
+  followersFor,
+  groupPanel,
+  resolveDecorationGroups,
+} from "./decoration-groups.js";
+import {
   LAYERS,
   LAYER_LABELS,
   PRESETS,
@@ -204,7 +209,10 @@ viewport = await createViewport($("viewport"), {
     }
     renderOutliner();
   },
-  onModels: () => renderProps(),
+  onModels: () => {
+    renderProps();
+    renderOutliner();
+  },
   onModelError: (gyaml, message) => {
     noteModelError(gyaml, message);
   },
@@ -264,14 +272,18 @@ viewport = await createViewport($("viewport"), {
   onFrame() {
     refreshStreamLog();
   },
-  onTransform: (id, translate, rotate, scale) => {
-    edit({
-      command: "transform",
-      id,
+  decorationFollowers: (id) => followersFor(id, currentDecorationGroups()),
+  onTransform: (id, translate, rotate, scale, followers) => {
+    const pose = {
       translate: translate.map(round4),
       rotate: rotate.map(round4),
       scale: (scale || [1, 1, 1]).map(round4),
-    });
+    };
+    if (!followers || !followers.length) {
+      edit({ command: "transform", id, ...pose });
+      return;
+    }
+    moveWithDecorations(id, pose, followers);
   },
 });
 
@@ -1564,6 +1576,130 @@ function actorRecord(id) {
   return ((state.view && state.view.actors) || []).find((actor) => actor.id === id) || null;
 }
 
+function diffTouched(diff) {
+  if (!diff) return false;
+  if (Object.keys(diff.actors || {}).length) return true;
+  const groups = diff.decorationGroups || {};
+  return Object.keys(groups.include || {}).length > 0 || (groups.exclude || []).length > 0;
+}
+
+function placementHash(actor) {
+  return (actor && (actor.placementId || actor.id)) || null;
+}
+
+function findViewId(hash) {
+  const actors = (state.view && state.view.actors) || [];
+  const found = actors.find((actor) => actor.id === hash || actor.placementId === hash);
+  return found ? found.id : hash;
+}
+
+function storedDecorationGroups() {
+  const include = {};
+  const exclude = new Set();
+  const raw = state.raw || {};
+  const absorb = (diff, prefix) => {
+    const groups = (diff && diff.decorationGroups) || {};
+    for (const [child, parent] of Object.entries(groups.include || {})) include[prefix + child] = findViewId(parent);
+    for (const child of groups.exclude || []) exclude.add(prefix + child);
+  };
+  absorb(raw.diff, "");
+  for (const extra of raw.companions || []) absorb(extra.diff, `${extra.banc}::`);
+  return { include, exclude };
+}
+
+function currentDecorationGroups() {
+  const actors = (state.view && state.view.actors) || [];
+  const stored = storedDecorationGroups();
+  return resolveDecorationGroups(actors, {
+    boundsFor: (actor) => {
+      const info = viewport && viewport.modelInfo(actor.id);
+      return info && info.bounds ? info.bounds : null;
+    },
+    include: stored.include,
+    exclude: stored.exclude,
+  });
+}
+
+let decorationSelection = new Set();
+
+function syncDecorationSelection() {
+  const ids = state.view ? followersFor(state.selected, currentDecorationGroups()) : [];
+  decorationSelection = new Set(ids);
+  if (viewport && viewport.setGroupHighlight) viewport.setGroupHighlight(ids);
+}
+
+function moveWithDecorations(id, pose, followers) {
+  const parent = actorRecord(id);
+  const parentBanc = (parent && parent.banc) || state.banc;
+  const parentHash = parent ? placementHash(parent) : id;
+  const rows = [{
+    banc: parentBanc,
+    id: parentHash,
+    translate: pose.translate,
+    rotate: pose.rotate,
+    scale: pose.scale,
+  }];
+  for (const child of followers) {
+    const actor = actorRecord(child.id) || actorRecord(child.key);
+    rows.push({
+      banc: (actor && actor.banc) || parentBanc,
+      id: actor ? placementHash(actor) : child.id,
+      translate: (child.translate || []).map(round4),
+      rotate: (child.rotate || []).map(round4),
+    });
+  }
+  const byBanc = new Map();
+  for (const row of rows) {
+    const list = byBanc.get(row.banc) || [];
+    list.push(row);
+    byBanc.set(row.banc, list);
+  }
+  const count = followers.length;
+  const name = (parent && (parent.name || parent.gyaml)) || "piece";
+  const label = `Move ${name} · ${count} decoration${count === 1 ? "" : "s"}`;
+  const commands = [...byBanc.entries()].map(([banc, actors]) => ({
+    banc,
+    command: {
+      command: "transform_set",
+      id: actors.some((row) => row.id === parentHash) ? parentHash : actors[0].id,
+      actors: actors.map((row) => {
+        const next = { id: row.id, translate: row.translate, rotate: row.rotate };
+        if (row.scale) next.scale = row.scale;
+        return next;
+      }),
+    },
+  }));
+  editBundle(commands, label, id);
+}
+
+function setDecorationParent(childIds, parentViewId) {
+  const parent = parentViewId ? actorRecord(parentViewId) : null;
+  const parentHash = parent ? placementHash(parent) : null;
+  const byBanc = new Map();
+  const ordered = [];
+  for (const childId of childIds) {
+    const child = actorRecord(childId);
+    if (!child) continue;
+    ordered.push(child);
+    const banc = child.banc || state.banc;
+    const list = byBanc.get(banc) || [];
+    list.push(placementHash(child));
+    byBanc.set(banc, list);
+  }
+  if (!ordered.length) return;
+  const childName = ordered[0].name || ordered[0].gyaml || "decoration";
+  const parentName = parent ? (parent.name || parent.gyaml) : "";
+  const label = parent
+    ? (ordered.length > 1 ? `Group ${ordered.length} with ${parentName}` : `Group ${childName} with ${parentName}`)
+    : (ordered.length > 1 ? `Ungroup ${ordered.length}` : `Ungroup ${childName}`);
+  const commands = [...byBanc.entries()].map(([banc, ids]) => ({
+    banc,
+    command: { command: "decoration_group", id: ids[0], ids, parent: parentHash },
+  }));
+  if (commands.length === 1) edit({ ...commands[0].command, banc: commands[0].banc }, label);
+  else editBundle(commands, label, state.selected);
+}
+
 function noteCompanion() {
   const scene = state.scenes.find((item) => item.banks.includes(state.banc));
   const base = scene ? pretty(scene.name) : pretty((state.banc || "").split("/").pop() || "");
@@ -1630,10 +1766,9 @@ function applyView(view, { frame = false, select, forceSceneLoad = false } = {})
   loadChanges(view.banc || state.banc);
   loadProblems(view.banc || state.banc);
   if (state.banc) state.modified.add(state.banc);
-  if (view.diff && Object.keys(view.diff.actors || {}).length === 0) state.modified.delete(state.banc);
+  if (!diffTouched(view.diff)) state.modified.delete(state.banc);
   for (const extra of view.companions || []) {
-    const touched = extra.diff && Object.keys(extra.diff.actors || {}).length;
-    if (touched) state.modified.add(extra.banc);
+    if (diffTouched(extra.diff)) state.modified.add(extra.banc);
     else state.modified.delete(extra.banc);
   }
   noteCompanion();
@@ -1656,10 +1791,12 @@ function snapshot() {
     }));
   return {
     actors,
+    decorationGroups: structuredClone((raw.diff && raw.diff.decorationGroups) || { include: {}, exclude: [] }),
     recipes,
     companions: (raw.companions || []).map((item) => ({
       banc: item.banc,
       actors: structuredClone((item.diff && item.diff.actors) || {}),
+      decorationGroups: structuredClone((item.diff && item.diff.decorationGroups) || { include: {}, exclude: [] }),
       recipes: (item.actors || [])
         .filter((actor) => actor.status === "recipe")
         .map((actor) => ({
@@ -1716,11 +1853,14 @@ function shotHasRecipes(shot) {
 async function writeShot(banc, shot, writeRecipes) {
   if (!banc || !shot) return;
   const loaded = { loaded: enabledLayers(state.load), ...loadRequest() };
-  await api.putDiff(banc, shot.actors || {}, loaded);
+  await api.putDiff(banc, shot.actors || {}, { ...loaded, decorationGroups: shot.decorationGroups || { include: {}, exclude: [] } });
   if (writeRecipes) await api.putRecipes(banc, shot.recipes || []);
   for (const item of shot.companions || []) {
     if (!item.banc || item.banc === banc) continue;
-    await api.putDiff(item.banc, item.actors || {}, loaded);
+    await api.putDiff(item.banc, item.actors || {}, {
+      ...loaded,
+      decorationGroups: item.decorationGroups || { include: {}, exclude: [] },
+    });
     if (writeRecipes && Array.isArray(item.recipes)) await api.putRecipes(item.banc, item.recipes);
   }
   if (state.banc === banc) {
@@ -1755,14 +1895,24 @@ function applyLocal(shot) {
   state.raw = {
     ...state.raw,
     actors: hostActors,
-    diff: { ...(state.raw.diff || {}), actors: structuredClone(shot.actors || {}) },
+    diff: {
+      ...(state.raw.diff || {}),
+      actors: structuredClone(shot.actors || {}),
+      decorationGroups: structuredClone(shot.decorationGroups || { include: {}, exclude: [] }),
+    },
     recipes: structuredClone(shot.recipes || []),
     companions: (state.raw.companions || []).map((item) => {
       const saved = (shot.companions || []).find((entry) => entry.banc === item.banc);
       const listed = companionActors.get(item.banc);
       return {
         ...item,
-        ...(saved ? { diff: { ...(item.diff || {}), actors: structuredClone(saved.actors || {}) } } : {}),
+        ...(saved ? {
+          diff: {
+            ...(item.diff || {}),
+            actors: structuredClone(saved.actors || {}),
+            decorationGroups: structuredClone(saved.decorationGroups || { include: {}, exclude: [] }),
+          },
+        } : {}),
         ...(listed ? { actors: listed } : {}),
       };
     }),
@@ -1775,9 +1925,8 @@ function applyLocal(shot) {
   }
   state.selected = shot.select && nextActors.some((actor) => actor.id === shot.select) ? shot.select : null;
   viewport.select(state.selected);
-  const diff = (state.raw.diff && state.raw.diff.actors) || {};
   if (state.banc) {
-    if (Object.keys(diff).length) state.modified.add(state.banc);
+    if (diffTouched(state.raw.diff)) state.modified.add(state.banc);
     else state.modified.delete(state.banc);
   }
   renderOutliner();
@@ -1787,7 +1936,7 @@ function applyLocal(shot) {
   noteCompanion();
 }
 
-async function edit(command) {
+async function edit(command, labelOverride) {
   if (!state.banc) return;
   if (!projectReady()) {
     toast("Open a project first. Looking around does not write anything.");
@@ -1796,7 +1945,7 @@ async function edit(command) {
   }
   const target = commandTarget(command);
   const subject = actorRecord(command.id) || { gyaml: command.actor || command.gyaml || "" };
-  const label = editLabel(command, subject, { gizmo: state.gizmo });
+  const label = labelOverride || editLabel(command, subject, { gizmo: state.gizmo });
   await persistChain;
   try {
     const view = await api.edit(target.banc, target.command, { load: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
@@ -1823,6 +1972,45 @@ async function edit(command) {
     if (state.view && !viewport.patchActors(state.view.actors)) {
       viewport.setActors(state.view.actors, { frame: false, banc: state.banc });
     }
+    viewport.select(state.selected);
+  }
+  updateHistoryButtons();
+}
+
+async function editBundle(commands, label, selectId) {
+  if (!state.banc) return;
+  if (!projectReady()) {
+    toast("Open a project first. Looking around does not write anything.");
+    openProjectDialog();
+    return;
+  }
+  await persistChain;
+  const before = captureShot();
+  try {
+    let hostView = null;
+    const patched = new Map();
+    for (const item of commands) {
+      const view = await api.edit(item.banc, item.command, { load: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
+      if (item.banc === state.banc) hostView = view;
+      else patched.set(item.banc, view);
+    }
+    const base = hostView || state.raw;
+    if (base) {
+      const source = hostView ? ((state.raw && state.raw.companions) || []) : (base.companions || []);
+      const companions = source.map((item) => {
+        const next = patched.get(item.banc);
+        return next ? { banc: item.banc, actors: next.actors, removed: next.removed, diff: next.diff } : item;
+      });
+      applyView(hostView ? { ...hostView, companions } : { ...base, companions }, { select: selectId });
+    }
+    state.history = pushEdit(state.history, { label, shot: captureShot() });
+    renderScenes();
+    renderChanges();
+    noteHotReload();
+  } catch (error) {
+    toast(error.message);
+    applyLocal(before);
+    persistShot(before);
     viewport.select(state.selected);
   }
   updateHistoryButtons();
@@ -2048,10 +2236,13 @@ function renderOutliner({ reveal = null } = {}) {
   outlinerScrollToken += 1;
   if (!state.view) {
     outlinerVirtualRows = null;
+    decorationSelection = new Set();
+    if (viewport && viewport.setGroupHighlight) viewport.setGroupHighlight([]);
     list.replaceChildren(empty("Open a scene to see its actors."));
     setOutlinerHint("");
     return;
   }
+  syncDecorationSelection();
   const query = $("actor-search").value.trim().toLowerCase();
   if (!state.outlinerCollapsed) state.outlinerCollapsed = {};
   const actors = state.view.actors || [];
@@ -2205,6 +2396,7 @@ function actorRow(actor) {
   button.setAttribute("role", "option");
   button.setAttribute("aria-selected", actor.id && actor.id === state.selected ? "true" : "false");
   if (actor.id) button.setAttribute("data-actor-id", String(actor.id));
+  if (decorationSelection.has(actor.id)) button.classList.add("is-grouped");
   const swatch = document.createElement("i");
   swatch.className = `swatch ${actor.category}`;
   const text = document.createElement("span");
@@ -2298,9 +2490,74 @@ function renderFilters() {
   }
 }
 
+function renderDecorationGroup(panel, actor) {
+  const info = groupPanel(actor, (state.view && state.view.actors) || [], currentDecorationGroups());
+  if (!info) return;
+  const box = document.createElement("section");
+  box.className = "decoration-group";
+  const title = document.createElement("h3");
+  title.textContent = "Decorations";
+  const note = document.createElement("p");
+  note.className = "muted";
+  box.append(title, note);
+  if (info.role === "decoration") {
+    title.textContent = "Moves with";
+    if (info.parentId) {
+      note.textContent = `${info.parentName}. Dragging that piece moves this one. Dragging this one leaves the piece where it is.`;
+      const row = document.createElement("div");
+      row.className = "actions";
+      row.append(action("Remove from group", () => setDecorationParent([actor.id], null)));
+      box.append(row);
+    } else {
+      note.textContent = "This decoration moves on its own. Group it with a nearby piece to drag them together.";
+    }
+    for (const parent of info.alternatives.slice(0, 8)) {
+      const row = document.createElement("div");
+      row.className = "actions";
+      row.append(action(`Group with ${parent.name || parent.gyaml}`, () => setDecorationParent([actor.id], parent.id)));
+      box.append(row);
+    }
+    panel.append(box);
+    return;
+  }
+  const count = info.members.length;
+  note.textContent = count
+    ? `${count} decoration${count === 1 ? "" : "s"} move and turn with this piece. Scale does not. The Decorations layer has to be loaded.`
+    : "No decoration is grouped with this piece. Nearby ones can be added. The Decorations layer has to be loaded.";
+  const shown = info.members.slice(0, 24);
+  for (const member of shown) {
+    const row = document.createElement("div");
+    row.className = "actions";
+    const label = document.createElement("span");
+    label.textContent = member.name || member.gyaml;
+    row.append(label, action("Remove", () => setDecorationParent([member.id], null)));
+    box.append(row);
+  }
+  if (count > shown.length) {
+    const more = document.createElement("p");
+    more.className = "muted";
+    more.textContent = `${count - shown.length} more. Remove all clears every one.`;
+    box.append(more);
+  }
+  if (count) {
+    const row = document.createElement("div");
+    row.className = "actions";
+    row.append(action("Remove all", () => setDecorationParent(info.members.map((member) => member.id), null)));
+    box.append(row);
+  }
+  for (const candidate of info.candidates.slice(0, 8)) {
+    const row = document.createElement("div");
+    row.className = "actions";
+    row.append(action(`Add ${candidate.name || candidate.gyaml}`, () => setDecorationParent([candidate.id], actor.id)));
+    box.append(row);
+  }
+  panel.append(box);
+}
+
 function renderProps() {
   if (dock.isOpen("behavior")) refreshBehavior();
   renderDetails();
+  syncDecorationSelection();
   const panel = $("props-panel");
   panel.replaceChildren();
   const actor = selectedActor();
@@ -2375,6 +2632,7 @@ function renderProps() {
     if (actor.status !== "vanilla") actions.append(action("Revert", () => edit({ command: "revert", id: actor.id })));
   }
   panel.append(actions);
+  renderDecorationGroup(panel, actor);
 
   const nameField = document.createElement("div");
   nameField.className = "field";

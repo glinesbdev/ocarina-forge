@@ -72,4 +72,10 @@ test("every edit kind gets a history label", () => {
   assert.equal(editLabel({ command: "unhide" }, actor), "Show Fado");
   assert.equal(editLabel({ command: "revert" }, actor), "Revert Fado");
   assert.equal(editLabel({ command: "lock" }, null, { category: "Areas" }), "Lock Areas");
+  assert.equal(editLabel({
+    command: "transform_set",
+    actors: [{ id: "0x1" }, { id: "0x2" }, { id: "0x3" }],
+  }, actor), "Move Fado · 2 decorations");
+  assert.equal(editLabel({ command: "decoration_group", parent: "0x10" }, actor), "Group Fado");
+  assert.equal(editLabel({ command: "decoration_group", parent: null }, actor), "Ungroup Fado");
 });
