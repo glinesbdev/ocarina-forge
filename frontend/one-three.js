@@ -27,6 +27,9 @@ export function mark(id) {
 
 /** r187 keeps TSL in three.tsl.js. three.webgpu.js imports that file; it does not re-export `reference`. */
 export function tslBuild(webgpuFile) {
+  // three.webgpu.js imports this sibling. Aliasing `three/tsl` onto the WebGPU
+  // build drops `reference`, and pointing it at any other file duplicates the
+  // Node class and its id counter.
   return path.join(path.dirname(webgpuFile), "three.tsl.js");
 }
 

@@ -10,12 +10,14 @@
  * the uniform, because wrapping the uniform in reference(..., "texture") and
  * then textureLoad() stores the reference itself as the texture.
  */
-import { NodeMaterial } from "three/webgpu";
+import { Node, NodeMaterial } from "three/webgpu";
 import {
   Fn,
+  Node as TslNode,
   cameraPosition,
   drawIndex,
   float,
+  glslFn,
   instanceIndex,
   int,
   ivec2,
@@ -25,9 +27,18 @@ import {
   texture,
   textureSize,
   uint,
-  vec4,
+  wgslFn,
 } from "three/tsl";
 import { pickMask, resolvePickTexture } from "./gpu-pick.js";
+
+// One Node class means one id counter. A second copy (three/webgpu importing a
+// different three.tsl.js than this file) restarts that counter, and the builder
+// then treats our nodes as the camera uniforms that share those ids.
+if (Node !== TslNode) {
+  throw new Error(
+    "WebGPU loaded two copies of three's node system (three/webgpu and three/tsl). Pick ids would be written as camera matrices.",
+  );
+}
 
 function texelNode(tex) {
   const node = texture(tex).setSampler(false).setUpdateMatrix(false);
@@ -94,7 +105,7 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
     selecting.and(id.lessThanEqual(float(0.5))).and(depthOnly.lessThan(float(0.5))).discard();
     const distance = positionWorld.sub(cameraPosition).length();
     const t = distance.div(far.max(float(0.001))).clamp(0, 1);
-    return selecting.select(pack24(id.add(0.5)), pack24(t.mul(16777215).add(0.5)));
+    return selecting.select(pack24(id.add(0.5), builder), pack24(t.mul(16777215).add(0.5), builder));
   })();
   material.customProgramCacheKey = () => {
     const object = getActiveObject ? getActiveObject() : null;
@@ -115,17 +126,36 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
   return material;
 }
 
-// 24-bit little-endian unpack. r187's `>>` retypes the shift amount with
-// changeComponentType(..., 'uint'). Overlapped compileAsync builds (the old
-// limit of 6) yield between shader stages while `currentStack` is process-global,
-// and those assignable `int(8)` / `int(16)` consts were emitted as
-// `render.cameraViewMatrix`. Division by 256 and 65536 is the same split, and
-// this Fn only sees the id, so a camera matrix cannot be an operand.
-const pack24 = Fn(([n]) => {
+// 24-bit little-endian unpack, as shader source rather than a TSL expression.
+// A Field render of the TSL form (shifts, then unsigned division) still wrote
+// the camera projection and view uniforms in place of two children of this
+// vec4. Those names are emitted only by the camera uniform nodes. The built
+// dist has one Node class, and a headless build of the same graph does not
+// swap them, so the substitution happens inside the browser's node build of
+// those children. A function body is text: the builder cannot
+// retarget an operand inside it. The WebGL backend of the node test parses GLSL.
+const PACK24_WGSL = `
+fn pack24(value: u32) -> vec4<f32> {
+	let r = f32(value & 255u) / 255.0;
+	let g = f32((value / 256u) & 255u) / 255.0;
+	let b = f32((value / 65536u) & 255u) / 255.0;
+	return vec4<f32>(r, g, b, 1.0);
+}
+`;
+const PACK24_GLSL = `
+vec4 pack24(uint value) {
+	float r = float(value & 255u) / 255.0;
+	float g = float((value / 256u) & 255u) / 255.0;
+	float b = float((value / 65536u) & 255u) / 255.0;
+	return vec4(r, g, b, 1.0);
+}
+`;
+const pack24Wgsl = wgslFn(PACK24_WGSL);
+const pack24Glsl = glslFn(PACK24_GLSL);
+
+function pack24(n, builder) {
   const value = uint(n);
-  const mask = uint(255);
-  const r = float(value.bitAnd(mask)).div(255);
-  const g = float(value.div(uint(256)).bitAnd(mask)).div(255);
-  const b = float(value.div(uint(65536)).bitAnd(mask)).div(255);
-  return vec4(r, g, b, float(1));
-});
+  // WebGLBackend leaves this unset. Only an explicit WebGPU backend gets WGSL.
+  const webgpu = builder?.renderer?.backend?.isWebGPUBackend === true || builder?.renderer?.backend == null;
+  return (webgpu ? pack24Wgsl : pack24Glsl)({ value });
+}

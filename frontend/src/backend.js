@@ -257,11 +257,11 @@ export async function warmWebGLPrograms(renderer, root, camera, scene) {
  * r187 keeps one `_precompilationState` on the renderer. `compileAsync` writes
  * it, awaits `buildAsync` (which yields between shader stages), then
  * `_finishPreCompile` destructures it. A second call in that gap nulls the
- * field and the first throws `useFrameBufferTarget of null`. The same gap
- * shares TSL's process-global `currentStack`, which is how id-unpack consts
- * were emitted as camera matrices. One compile at a time. `compileAsync` still
- * yields, so the frame loop is not blocked, and three still compiles that
- * call's pipelines in parallel.
+ * field and the first throws `useFrameBufferTarget of null`. One compile at a
+ * time. `compileAsync` still yields, so the frame loop is not blocked, and
+ * three still compiles that call's pipelines in parallel. The id-buffer pack
+ * is a native function for a separate reason: a later Field render, with this
+ * limit already at 1, still substituted camera uniforms into the TSL unpack.
  */
 export const PIPELINE_COMPILE_LIMIT = 1;
 

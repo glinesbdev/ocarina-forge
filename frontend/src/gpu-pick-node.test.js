@@ -47,14 +47,18 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
   const plainShader = shaderFor(webgpu, new THREE.Mesh(geometry, plain));
   assert.match(plainShader, /textureLoad/);
   assert.doesNotMatch(plainShader, /Need a three\.js texture/);
-  // 24-bit unpack is unsigned division, not a shift. r187 emitted
-  // `nodeConst >> render.cameraViewMatrix` when shift amounts were TSL consts.
-  assert.match(plainShader, /\( nodeConst\d+ & 255u \)/);
-  assert.match(plainShader, /\( nodeConst\d+ \/ 256u \) & 255u/);
-  assert.match(plainShader, /\( nodeConst\d+ \/ 65536u \) & 255u/);
-  assert.doesNotMatch(plainShader, />>/);
-  assert.doesNotMatch(plainShader, /vec4<f32>\(\s*render\./);
-  assert.doesNotMatch(plainShader, />>\s*render\./);
+  // The unpack is a native function. Its body is the source string, so a node
+  // build cannot replace an operand with render.cameraProjectionMatrix.
+  const packBody = plainShader.slice(plainShader.indexOf("fn pack24"), plainShader.indexOf("@fragment"));
+  assert.match(packBody, /fn pack24\s*\(\s*value\s*:\s*u32\s*\)\s*->\s*vec4<f32>/);
+  assert.match(packBody, /f32\(value & 255u\) \/ 255\.0/);
+  assert.match(packBody, /f32\(\(value \/ 256u\) & 255u\) \/ 255\.0/);
+  assert.match(packBody, /f32\(\(value \/ 65536u\) & 255u\) \/ 255\.0/);
+  assert.doesNotMatch(packBody, /camera|render\./);
+  assert.match(plainShader, /pack24\s*\(\s*u32\s*\(/);
+  assert.doesNotMatch(plainShader, /pack24\s*\(\s*render\./);
+  assert.doesNotMatch(plainShader, /camera(?:Projection|View)Matrix\s*\//);
+  assert.doesNotMatch(plainShader, /\/\s*render\.camera(?:Projection|View)Matrix/);
 
   const mapped = createNodePickMaterial({ uniforms, getActiveObject: () => null });
   mapped.alphaTest = 0.4;
@@ -109,4 +113,7 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
   const glShader = shaderFor(webglBackend, new THREE.Mesh(geometry, fallback));
   assert.match(glShader, /discard/);
   assert.match(glShader, /texture/);
+  assert.match(glShader, /vec4 pack24\s*\(\s*uint value\s*\)/);
+  assert.match(glShader, /float\(\(value \/ 256u\) & 255u\)/);
+  assert.doesNotMatch(glShader, /pack24\s*\(\s*render\./);
 });

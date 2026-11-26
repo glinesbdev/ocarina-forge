@@ -85,6 +85,19 @@ export default defineConfig(({ mode }) => ({
   ],
   build: {
     target: "es2022",
+    rollupOptions: {
+      output: {
+        // Keep each three build file in one chunk. Inlining three.tsl.js into
+        // both the viewport chunk and the gpu-pick chunk would be two Node
+        // classes and two id counters.
+        manualChunks(id) {
+          const file = id.split("?")[0];
+          if (file.endsWith("/three.tsl.js") || file.endsWith("\\three.tsl.js")) return "three.tsl";
+          if (file.endsWith("/three.webgpu.js") || file.endsWith("\\three.webgpu.js")) return "three.webgpu";
+          if (file.endsWith("/three.core.js") || file.endsWith("\\three.core.js")) return "three.core";
+        },
+      },
+    },
   },
   server: {
     host: "0.0.0.0",
