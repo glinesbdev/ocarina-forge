@@ -3,8 +3,7 @@ import test from "node:test";
 
 import * as THREE from "three";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, materialSharesTint, patchBatchedDraw, prepareBatchMaterial, presentByDefault, stageBatchKey } from "./instance.js";
-import { textureGpuReady } from "./gpu-texture.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -356,46 +355,47 @@ test("dropMapWithoutUv logs once per material at debug level", () => {
   }
 });
 
-test("a coalesced batch keeps the material map after upload when arrays are off", () => {
+test("the material that received the upload is the one the batch draws", () => {
   const data = new Uint8Array(16).fill(9);
   const map = new THREE.CompressedTexture([{ data, width: 4, height: 4 }], 4, 4, 36492);
   map.needsUpdate = true;
   const material = new THREE.MeshStandardMaterial({ map, color: 0x884422 });
-  material.alphaTest = 0.4;
-  material.colorNode = { captured: material };
-  let sampled = null;
-  const batch = prepareBatchMaterial(material, {
-    attachCutout(next) {
-      sampled = next.map;
-      next.userData.cutoutNode = true;
-      return next;
-    },
+  const key = batchKey({
+    image: "tex:roof",
+    alpha: "opaque",
+    side: material.side,
+    tint: material.color.getHexString(),
+    indexed: "idx",
+    attributes: "position,uv",
   });
-  assert.notEqual(batch, material);
-  assert.equal(batch.map, map);
-  assert.notEqual(batch.map.isCompressedArrayTexture, true);
-  assert.equal(batch.map.mipmaps[0].data, data);
-  assert.equal(batch.map.mipmaps[0].data.byteLength, 16);
-  assert.equal(batch.color.getHex(), 0xffffff);
-  assert.equal(material.color.getHex(), 0x884422);
   assert.equal(material.map, map);
-  assert.equal(sampled, map);
-  assert.equal(batch.userData.cutoutNode, true);
-  assert.equal(textureGpuReady(null, map), false);
-  assert.equal(textureGpuReady({ get: () => ({}) }, map), false);
-  assert.equal(textureGpuReady({ get: () => ({ texture: {}, isDefaultTexture: true }) }, map), false);
-  assert.equal(textureGpuReady({ get: () => ({ texture: { id: 1 } }) }, map), true);
-  assert.equal(map.mipmaps[0].data.byteLength, 16);
-  assert.equal(materialSharesTint(material), true);
-  assert.equal(materialSharesTint({ userData: { banc: "terrain" } }), false);
-  assert.equal(materialSharesTint({ userData: { blend: { channel: "r" } } }), false);
+  assert.notEqual(material.map.isCompressedArrayTexture, true);
+  assert.equal(material.map.mipmaps[0].data, data);
+  assert.equal(material.map.mipmaps[0].data.byteLength, 16);
+  assert.equal(material.color.getHex(), 0x884422);
+  assert.match(key, /tex:roof/);
+  assert.match(key, /884422/);
+  assert.notEqual(key, batchKey({
+    image: "tex:wall",
+    alpha: "opaque",
+    side: material.side,
+    tint: "884422",
+    indexed: "idx",
+    attributes: "position,uv",
+  }));
+  assert.notEqual(key, batchKey({
+    image: "tex:roof",
+    alpha: "opaque",
+    side: material.side,
+    tint: "ffffff",
+    indexed: "idx",
+    attributes: "position,uv",
+  }));
 });
 
 test("copies that share an albedo share a batch key", () => {
   const house = { image: "roof", alpha: "opaque", side: 0, tint: "ffffff", indexed: "idx", attributes: "position,uv" };
   assert.equal(batchKey(house), batchKey({ ...house }));
   assert.notEqual(batchKey(house), batchKey({ ...house, image: "wall" }));
-  assert.equal(batchKey(house), batchKey({ ...house, tint: "ff0000" }));
-  assert.notEqual(stageBatchKey(house), stageBatchKey({ ...house, tint: "ff0000" }));
-  assert.equal(batchKey({ ...house, sizeClass: "map:64" }), batchKey({ ...house, image: "wall", sizeClass: "map:64" }));
+  assert.notEqual(batchKey(house), batchKey({ ...house, tint: "ff0000" }));
 });

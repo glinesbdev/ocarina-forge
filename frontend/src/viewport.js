@@ -51,7 +51,7 @@ import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, materialSharesTint, patchBatchedDraw, prepareBatchMaterial, presentByDefault, stageBatchKey, batchKey } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { releaseGltfDocument } from "./gltf-release.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
@@ -494,7 +494,6 @@ let convertSlots = 8;
   const terrainWorkers = new Set();
   const sceneListeners = [];
   let rebuildTimer = 0;
-  let coalesceTimer = 0;
   let loadQueue = null;
   let modelLoads = null;
   let pendingLoads = 0;
@@ -883,8 +882,10 @@ let convertSlots = 8;
       seen.add(part.material);
       refreshTextureMaterial(part.material);
     }
-    for (const part of parts || []) assignPartKey(part);
-    scheduleCoalesce();
+    // The batch already holds this material. Refreshing the key only matters
+    // for the next rebuild, so a map that arrived after the first key is part
+    // of that key and is not folded onto another texture.
+    for (const part of parts || []) assignPartBatchKey(part);
   }
 
   function loadOwnedTexture(url) {
@@ -1078,10 +1079,6 @@ let convertSlots = 8;
     modelLoads = null;
     cancelModelStage();
     clearScenePreview();
-    if (coalesceTimer) {
-      clearTimeout(coalesceTimer);
-      coalesceTimer = 0;
-    }
     foregroundModelNames.clear();
     detailCandidates.clear();
     for (const texture of textureDetailReady.values()) disposeCachedTexture(texture);
@@ -1157,10 +1154,6 @@ let convertSlots = 8;
     if (rebuildTimer) {
       clearTimeout(rebuildTimer);
       rebuildTimer = 0;
-    }
-    if (coalesceTimer) {
-      clearTimeout(coalesceTimer);
-      coalesceTimer = 0;
     }
     transform.detach();
     clearSnapGrid();
@@ -2697,10 +2690,10 @@ let convertSlots = 8;
       index += 1;
     });
     // A stale flat glb can still share one material across shape keys. Split
-    // that object before the keys are recorded. The streaming key keeps the
-    // shape family. The coalesced key drops it once each texture has a layer.
+    // that object before the batch key is recorded, and keep the key on the
+    // shape so those batches do not fold back onto the first material.
     separateSharedMaterials(parts);
-    for (const part of parts) assignPartKey(part);
+    for (const part of parts) assignPartBatchKey(part);
     return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
   }
 
@@ -2765,11 +2758,10 @@ let convertSlots = 8;
   const tint = new THREE.Color();
   const selectTint = new THREE.Color(0xffe0a0);
 
-  function instanceTint(entry, target, materialColor) {
+  function instanceTint(entry, target) {
     if (entry.status === "recipe") target.setHex(0xc9b6f2);
     else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
     else target.setRGB(1, 1, 1);
-    if (materialColor && materialColor.isColor) target.multiply(materialColor);
     if (entry.key === selected) target.lerp(selectTint, 0.72);
     return target;
   }
@@ -2777,7 +2769,7 @@ let convertSlots = 8;
   function tintInstance(entry) {
     if (!entry.slots) return;
     for (const slot of entry.slots) {
-      slot.mesh.setColorAt(slot.index, instanceTint(entry, tint, slot.bakeTint ? slot.tintColor : null));
+      slot.mesh.setColorAt(slot.index, instanceTint(entry, tint));
       if (slot.mesh.instanceColor) slot.mesh.instanceColor.needsUpdate = true;
     }
   }
@@ -2844,6 +2836,7 @@ let convertSlots = 8;
   }
 
   const imageKeys = new WeakMap();
+  let imageSerial = 0;
 
   function imageSignature(image) {
     if (!image) return "none";
@@ -2852,7 +2845,24 @@ let convertSlots = 8;
     const width = image.width || image.videoWidth || 0;
     const height = image.height || image.videoHeight || 0;
     if (!width || !height) return `unready:${image.src || image.uuid || ""}`;
+    // A BC7 image is `{width, height}`. drawImage throws, and the old catch
+    // labelled every same-size map "bitmap", so those materials shared one batch
+    // and one map. A non-drawable image keeps its own id.
+    const drawable = (typeof HTMLImageElement !== "undefined" && image instanceof HTMLImageElement)
+      || (typeof HTMLCanvasElement !== "undefined" && image instanceof HTMLCanvasElement)
+      || (typeof ImageBitmap !== "undefined" && image instanceof ImageBitmap)
+      || (typeof OffscreenCanvas !== "undefined" && image instanceof OffscreenCanvas)
+      || (typeof HTMLVideoElement !== "undefined" && image instanceof HTMLVideoElement);
     let key = `${width}x${height}`;
+    if (!drawable) {
+      if (!image.forgeImageId) {
+        imageSerial += 1;
+        image.forgeImageId = imageSerial;
+      }
+      key = `${key}:img${image.forgeImageId}`;
+      imageKeys.set(image, key);
+      return key;
+    }
     try {
       const canvas = document.createElement("canvas");
       canvas.width = 16;
@@ -2867,13 +2877,17 @@ let convertSlots = 8;
       }
       key = `${key}:${hash >>> 0}`;
     } catch {
-      key = `${key}:${image.src || "bitmap"}`;
+      if (!image.forgeImageId) {
+        imageSerial += 1;
+        image.forgeImageId = imageSerial;
+      }
+      key = `${key}:${image.src || `img${image.forgeImageId}`}`;
     }
     imageKeys.set(image, key);
     return key;
   }
 
-  function batchKeyFor(material, geometry, { tint = true } = {}) {
+  function batchKeyFor(material, geometry) {
     const image = material.map && material.map.image
       ? imageSignature(material.map.image)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
@@ -2888,39 +2902,19 @@ let convertSlots = 8;
     const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
       ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
       : "";
-    const indexed = geometry.getIndex() ? "idx" : "no";
-    const attributes = Object.keys(geometry.attributes).sort().join(",");
-    const imageKey = image + blendKey + surfaceKey;
-    if (!tint) {
-      return batchKey({
-        image: imageKey,
-        alpha,
-        side: material.side,
-        indexed,
-        attributes,
-      });
-    }
-    return stageBatchKey({
-      image: imageKey,
+    return batchKey({
+      image: image + blendKey + surfaceKey,
       alpha,
       side: material.side,
       tint: material.color ? material.color.getHexString() : "fff",
-      indexed,
-      attributes,
+      indexed: geometry.getIndex() ? "idx" : "no",
+      attributes: Object.keys(geometry.attributes).sort().join(","),
     });
   }
 
-  function assignPartKey(part) {
+  function assignPartBatchKey(part) {
     if (!part || !part.material || !part.geometry) return;
-    const family = part.materialKey || "";
-    const staged = `${batchKeyFor(part.material, part.geometry)}|${family}`;
-    part.stageKey = staged;
-    const share = materialSharesTint(part.material);
-    part.shareTint = share;
-    part.tintColor = share && part.material.color && part.material.color.clone
-      ? part.material.color.clone()
-      : null;
-    part.batchKey = share ? `${batchKeyFor(part.material, part.geometry, { tint: false })}|${family}` : staged;
+    part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey || ""}`;
   }
 
   function actorScale(entry) {
@@ -3053,24 +3047,18 @@ let convertSlots = 8;
   async function rebuildBatchesNow(stagedEntries = null) {
     const sceneToken = generation;
     uvDirty = true;
-    const collapse = !stagedEntries;
-    const previous = collapse ? batches.slice() : [];
+    const previous = stagedEntries ? [] : batches.slice();
     const nextBatches = [];
     const pendingMeshes = [];
     const actors = stagedEntries || [...entries.values()];
     for (const entry of actors) entry.slots = [];
-    if (collapse) {
-      for (const entry of actors) {
-        for (const part of entry.parts || []) assignPartKey(part);
-      }
-    }
     const groups = new Map();
     for (const entry of actors) {
       syncGhost(entry);
       if (!entry.parts || !entry.parts.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
       for (const part of entry.parts) {
-        const key = collapse ? part.batchKey : (part.stageKey || part.batchKey);
+        const key = part.batchKey;
         let group = groups.get(key);
         if (!group) {
           group = { material: part.material, records: [], geometries: new Map() };
@@ -3098,11 +3086,6 @@ let convertSlots = 8;
         indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
       }
       if (!verts || !group.records.length) continue;
-      if (collapse && group.records[0].part.shareTint) {
-        group.material = prepareBatchMaterial(group.material, {
-          attachCutout: mapNodes && mapNodes.attachCutout,
-        });
-      }
       let mesh;
       try {
         mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
@@ -3187,15 +3170,12 @@ let convertSlots = 8;
         if (geometryId === undefined) continue;
         const instanceId = mesh.addInstance(geometryId);
         const placed = displayedActorMatrix(record.entry, new THREE.Matrix4());
-        const bake = Boolean(collapse && record.part.shareTint);
-        const tintColor = bake ? record.part.tintColor : null;
         mesh.setMatrixAt(instanceId, placed);
-        mesh.setColorAt(instanceId, instanceTint(record.entry, tint, tintColor));
+        mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
         ids[instanceId] = record.entry.key;
         geometries[instanceId] = record.part.geometry;
         spheres[instanceId] = record.part.sphere;
         count = Math.max(count, instanceId + 1);
-        record.instanceId = instanceId;
         record.entry.slots.push({
           actor: record.entry.key,
           mesh,
@@ -3206,8 +3186,6 @@ let convertSlots = 8;
           sphere: record.part.sphere,
           matrix: placed,
           shown: true,
-          bakeTint: bake,
-          tintColor,
         });
       }
       mesh.userData.pick = { ids, geometries, spheres, count };
@@ -3415,7 +3393,6 @@ let convertSlots = 8;
           hooks.onModelsReady?.({ batchesBuilt: true });
           noteLoadedMemory();
         }
-        scheduleCoalesce();
       }
       })().catch((error) => {
         console.error(error);
@@ -3428,10 +3405,6 @@ let convertSlots = 8;
 
   function queueRebuild() {
     if (rebuildTimer) clearTimeout(rebuildTimer);
-    if (coalesceTimer) {
-      clearTimeout(coalesceTimer);
-      coalesceTimer = 0;
-    }
     rebuildTimer = window.setTimeout(() => {
       rebuildTimer = 0;
       void (async () => {
@@ -3442,22 +3415,6 @@ let convertSlots = 8;
         if (ready) noteLoadedMemory();
       })().catch((error) => console.error(error));
     }, 100);
-  }
-
-  // Full rebuild once streaming and texture assigns have gone quiet. This does
-  // not clear the scene preview: the batches on screen are replaced in place.
-  function scheduleCoalesce() {
-    if (coalesceTimer) clearTimeout(coalesceTimer);
-    coalesceTimer = window.setTimeout(() => {
-      coalesceTimer = 0;
-      if (modelStage && (!modelStage.done || modelStage.pending.size || modelStage.timer)) {
-        scheduleCoalesce();
-        return;
-      }
-      if (!entries.size) return;
-      rebuildBatches();
-      requestRender();
-    }, 180);
   }
 
   function attachModel(entry, template, url) {
@@ -5989,7 +5946,6 @@ uniform float terrainLayerMissing;`
       hoverToken += 1;
       if (hoverFrame) cancelAnimationFrame(hoverFrame);
       if (rebuildTimer) clearTimeout(rebuildTimer);
-      if (coalesceTimer) clearTimeout(coalesceTimer);
       if (frameHandle) cancelAnimationFrame(frameHandle);
       gpuPicker.dispose();
       if (gpuPoll) cancelAnimationFrame(gpuPoll);

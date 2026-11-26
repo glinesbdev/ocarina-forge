@@ -96,4 +96,4 @@ On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `text
 
 ## Batch materials
 
-Repeated meshes share a `BatchedMesh` across tints. The coalesced material is a clone with colour white and the original compressed `map` still set. `setColorAt` carries the tint. Texture arrays are not used: on WebGPU they left the Field untextured, and the node shader then warned `Bindings._update: binding should be available` because the texture it sampled had no GPU image. See `docs/rendering-performance.md`.
+The `BatchedMesh` uses the same material object the texture upload writes. The batch key includes that texture and the tint. A white clone is not used: on the Field it left the draw untextured while the GPU still held the uploaded BC7 maps (8840 textures, profile tex 3). Texture arrays are not used. See `docs/rendering-performance.md`.
