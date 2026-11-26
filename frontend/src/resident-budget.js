@@ -5,8 +5,16 @@ The soft limit is geometry bytes plus BC7 texture bytes (the pair
 caps for a scene of many tiny models, or a heap that is about to hit V8's limit.
  */
 
-export const RESIDENT_MODEL_SOFT_CAP = 240;
-export const RESIDENT_MODEL_HARD_CAP = 280;
+/**
+ * Last-resort unique-mesh cap. Geometry-plus-BC7 bytes and the JS heap are the
+ * working limits. Kokiri Child is about 470 unique models and the Field is 852.
+ * A cap of 240 stopped Kokiri while the heap and the byte budget were still free,
+ * and left visible models as boxes.
+ */
+export const RESIDENT_MODEL_SOFT_CAP = 4096;
+export const RESIDENT_MODEL_HARD_CAP = 4608;
+/** The count cap this viewer used before the byte budget. The orbit comparison still uses it. */
+export const RESIDENT_LEGACY_COUNT_CAP = 240;
 export const RESIDENT_HEAP_SOFT = Math.round(2.2 * 1024 * 1024 * 1024);
 export const RESIDENT_HEAP_HARD = Math.round(2.8 * 1024 * 1024 * 1024);
 export const RESIDENT_BYTE_SOFT = Math.round(1.2 * 1024 * 1024 * 1024);
@@ -130,6 +138,39 @@ export function modelsToEvict(candidates, options = {}) {
   return planEvictions(candidates, options).evict;
 }
 
+/** A model in the current view (tier below 4) may evict a farther resident without waiting out the unload cooldown. */
+export function evictImmediatelyFor(tier) {
+  const value = Number(tier);
+  return Number.isFinite(value) && value < 4;
+}
+
+/**
+ * Split a priority-sorted load queue.
+ * Names that can launch are `queued`. Names the background filler will still
+ * take, while the budget is open, are `background`. Names the budget is holding,
+ * including a background tail stuck behind the cap, are `capped`.
+ * `canLaunch` is consulted only for eligible names until one cannot launch.
+ */
+export function classifyResidentQueue(names, { eligible, canLaunch, atCap = false } = {}) {
+  let queued = 0;
+  let background = 0;
+  let capped = 0;
+  let blocked = false;
+  for (const name of names || []) {
+    const isEligible = typeof eligible === "function" && eligible(name);
+    if (!blocked && isEligible) {
+      if (typeof canLaunch === "function" && canLaunch(name)) {
+        queued += 1;
+        continue;
+      }
+      blocked = true;
+    }
+    if (atCap || blocked) capped += 1;
+    else background += 1;
+  }
+  return { queued, background, capped };
+}
+
 export function isWorsePriority(candidate, incoming) {
   const left = candidate || { tier: 5, distance: Infinity };
   const right = incoming || { tier: 5, distance: Infinity };
@@ -227,10 +268,11 @@ function runOrbitPolicy(models, { mode, steps, stepDegrees, orbitRadius }) {
       ranked.sort((left, right) => (
         mode === "bytes" ? effectiveDistance(left) - effectiveDistance(right) : left.distance - right.distance
       ));
+      const countCap = mode === "bytes" ? RESIDENT_MODEL_SOFT_CAP : RESIDENT_LEGACY_COUNT_CAP;
       const wanted = [];
       let bytes = 0;
       for (const item of ranked) {
-        if (wanted.length >= RESIDENT_MODEL_SOFT_CAP) break;
+        if (wanted.length >= countCap) break;
         if (mode === "bytes" && wanted.length > 0 && bytes + item.bytes > RESIDENT_BYTE_SOFT) break;
         wanted.push(item);
         bytes += item.bytes;
@@ -260,7 +302,7 @@ function runOrbitPolicy(models, { mode, steps, stepDegrees, orbitRadius }) {
         if (resident.has(item.name)) continue;
         const room = mode === "bytes"
           ? resident.size < RESIDENT_MODEL_SOFT_CAP && (resident.size === 0 || residentBytes + item.bytes <= RESIDENT_BYTE_SOFT)
-          : resident.size < RESIDENT_MODEL_SOFT_CAP;
+          : resident.size < RESIDENT_LEGACY_COUNT_CAP;
         if (!room) continue;
         if (seen.has(item.name)) {
           reloads += 1;

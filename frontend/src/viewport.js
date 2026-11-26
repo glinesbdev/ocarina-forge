@@ -18,10 +18,13 @@ import {
   RESIDENT_BYTE_SOFT,
   RESIDENT_BYTE_TARGET,
   RESIDENT_HEAP_HARD,
+  RESIDENT_HEAP_SOFT,
   RESIDENT_MODEL_SOFT_CAP,
   RESIDENT_UNLOAD_COOLDOWN_FRAMES,
   cameraNeedsPriorityUpdate,
+  classifyResidentQueue,
   effectiveDistance,
+  evictImmediatelyFor,
   isWorsePriority,
   overResidentHardCap,
   overResidentSoftCap,
@@ -2142,6 +2145,9 @@ let convertSlots = 8;
       targetCount: countCap ? pressure.count - 1 : pressure.count,
       targetBytes: byteCap ? RESIDENT_BYTE_TARGET : pressure.assetBytes,
       maxEvict: 4,
+      // A model in view replaces a farther one now. The cooldown still stops a
+      // background model from leaving and coming back on a camera swing.
+      ignoreCooldown: evictImmediatelyFor(incomingPri.tier) || foregroundModelNames.has(incoming),
     });
   }
 
@@ -2200,6 +2206,7 @@ let convertSlots = 8;
     loadQueue = queue;
     statQueued = 0;
     statDeferred = 0;
+    statCapped = 0;
     statBackgroundLoading = 0;
     statLoading = 0;
     statLoaded = 0;
@@ -2213,19 +2220,25 @@ let convertSlots = 8;
     const foregroundInFlight = () => active.size - backgroundInFlight();
     const publish = (foregroundSettled) => {
       const atCap = softCapped();
-      let queued = 0;
-      for (const name of queue) {
-        if (!eligible(name)) continue;
-        if (atCap && !proposeEvictForIncoming(name).length) break;
-        queued += 1;
-      }
+      const groups = classifyResidentQueue(queue, {
+        atCap,
+        eligible,
+        canLaunch(name) {
+          if (!atCap) return true;
+          return proposeEvictForIncoming(name).length > 0;
+        },
+      });
+      const queued = groups.queued;
+      const deferred = groups.background;
+      const capped = groups.capped;
       const loading = foregroundInFlight();
-      const deferred = queue.length - queued;
       const backgroundLoading = backgroundInFlight();
       if (!foregroundSettled && queued === statQueued && loading === statLoading
-          && deferred === statDeferred && backgroundLoading === statBackgroundLoading && resolved.size === statLoaded) return;
+          && deferred === statDeferred && capped === statCapped
+          && backgroundLoading === statBackgroundLoading && resolved.size === statLoaded) return;
       statQueued = queued;
       statDeferred = deferred;
+      statCapped = capped;
       statLoading = loading;
       statBackgroundLoading = backgroundLoading;
       statLoaded = resolved.size;
@@ -5261,6 +5274,7 @@ uniform float terrainLayerMissing;`
   let statCulled = 0;
   let statQueued = 0;
   let statDeferred = 0;
+  let statCapped = 0;
   let statBackgroundLoading = 0;
   let statLoading = 0;
   let statLoaded = 0;
@@ -5375,6 +5389,7 @@ uniform float terrainLayerMissing;`
       loaded: statLoaded,
       deferred: statDeferred,
       backgroundLoading,
+      capped: statCapped,
       convertMs: statConvert,
       textureMs: statTexture,
       downloadMs: statDownload,
@@ -5468,6 +5483,7 @@ uniform float terrainLayerMissing;`
       queued: statQueued,
       loading: statLoading,
       background,
+      capped: statCapped,
       texturesDone: statTexturesDone,
       texturesTotal: statTexturesTotal,
       layersOff: statLayersOff,
@@ -5667,6 +5683,7 @@ uniform float terrainLayerMissing;`
       loaded: statLoaded,
       deferred: statDeferred,
       backgroundLoading: statBackgroundLoading,
+      capped: statCapped,
     };
     report.backend = backendName;
     report.gpuCaps = gpuCaps;
@@ -5681,6 +5698,7 @@ uniform float terrainLayerMissing;`
       byteSoft: RESIDENT_BYTE_SOFT,
       byteTarget: RESIDENT_BYTE_TARGET,
       countSoft: RESIDENT_MODEL_SOFT_CAP,
+      capped: statCapped,
       evictions: statEvictions,
       reloads: statReloads,
       cooldown: unloadAfter.size,

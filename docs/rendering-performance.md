@@ -53,7 +53,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Compressed GPU textures (BC7/BC1) | **4–8×** texture memory vs RGBA; often the difference between a Field tab surviving and OOM | Implemented this pass |
 | Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented. Template sources are disposed, and part clones are released after the batch copy exists (GPU picking, below) |
 | Frustum culling | Already removing off-screen instance draws | Already present |
-| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of geometry plus BC7 (`__forgeMemory()`). The 240-mesh count and the 2.2 GB JS heap are safety caps. See [Residency budget](#residency-budget) |
+| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of geometry plus BC7 (`__forgeMemory()`). The JS heap and a 4096-mesh count are last-resort caps. See [Residency budget](#residency-budget) |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
 | Texture arrays / atlases | Fewer binds, more meshes in one batch; needs authoring or a pack step | Not implemented |
@@ -72,7 +72,7 @@ The soft limit is now bytes. `__forgeMemory()` sums geometry CPU bytes and BC7 t
 | --- | --- | --- |
 | Soft byte budget | 1.2 GB | Stop loading. Evict farthest residents down toward 1.0 GB |
 | Hard byte budget | 1.5 GB | Emergency eviction, still after the unload cooldown |
-| Count safety cap | 240 soft / 280 hard | A scene of many tiny meshes cannot slip past the byte budget |
+| Count safety cap | 4096 soft / 4608 hard | Last resort for a scene of many tiny meshes. Kokiri (~470) and the Field (852) are not stopped by this |
 | JS heap safety cap | 2.2 GB soft / 2.8 GB hard | The V8 limit. A hard heap overrun evicts immediately |
 
 Models behind the camera have their distance multiplied by **1.5**, so the view ahead is loaded and kept first. The queue is not re-sorted on every small orbit step. Priorities change only after the camera moves more than **2 m** or turns more than **30°**. A model that falls out of the wanted set is armed and then left alone for **90 frames**. Looking back at it cancels that wait, so a swing of the camera does not evict and reload the same mesh. The JS-heap emergency brake does not wait.
@@ -90,7 +90,9 @@ This checkout has no game dump, so Hyrule Field and Kokiri Forest were not loade
 | Before | 243 | 201 | 99 | 360 | 2.46 GB | 240 |
 | After | 0 | 0 | 0 | 180 | 1.20 GB | 122 |
 
-The drop is large here because the size mix makes the byte budget bind before the count cap. On the measured Field (25 Nov 2026) 241 unique meshes were about **1.0 GB** of geometry plus BC7, under the 1.2 GB soft budget, so the **240 count cap still binds** for that scene and the JS heap should stay near the **0.62 GB** already recorded. The byte cap is what stops a nearer set of large meshes from passing that. Re-measure both on a dump with the steps at the end of this note.
+The drop is large here because the size mix makes the byte budget bind before the count cap. On the measured Field (25 Nov 2026) 241 unique meshes were about **1.0 GB** of geometry plus BC7. That run stopped because the count cap was 240, not because the byte budget was full. The count cap is now 4096, so a Field load continues until geometry plus BC7 reaches 1.2 GB or the JS heap reaches 2.2 GB.
+
+Kokiri Forest Child is about 470–482 unique models (`262 loaded` + `207 background` on an idle view, and 482 in the 25 Nov load). At 241 resident meshes the heap was **386 MB**. The 240 cap was holding the other models, including ones in view, and the HUD called that remainder `background` with `0 queued` because `canFillMap` refuses to run while the soft cap holds. `main` has the same 240 cap (`overResidentSoftCap` in `resident-budget.js`) and the same `canFillMap` check, so an idle Kokiri on main also keeps boxes for every unique model past the nearest 240. A model in the current view (tier below 4) now evicts a farther resident without waiting out the unload cooldown. Models the budget is actually holding show as `N capped` instead of `0 queued`.
 
 ## Shader pipelines
 
@@ -217,7 +219,7 @@ The RGBA column over-counts clones; unique-source accounting was added after thi
 
 ### After CPU texture release and a resident mesh budget
 
-The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. Unique meshes now have a residency budget: **240** (or **2.2 GB** JS heap) stops further loads. A farther resident is evicted only when a closer model needs the slot. A hard cap (**280** unique or **2.8 GB** heap) is the emergency brake. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
+The previous unlimited `canFillMap` path is what would have OOM'd a full 852-unique-model load. This measurement stopped further loads at **240** unique meshes (or **2.2 GB** JS heap). A farther resident was evicted only when a closer model needed the slot. The hard cap then was **280** unique or **2.8 GB** heap. The working limit now is the 1.2 GB geometry-plus-BC7 budget; 4096 meshes is only the last resort. After the GPU queue is idle for three frames, `releaseTextureCpu` drops mip/ImageBitmap buffers in place so three does not re-upload emptied data.
 
 Remeasured 25 Nov 2026, 10:13–10:23 AM America/New_York, same 10 GB working-set cap, 4 GB free-RAM floor, and 10 GB start-floor, only against 47241/47242. The headless wait stayed on the prepare banner until the 7-minute timeout because `foregroundSettled` still treated leftover deferred names as in-flight; the scene itself was idle at the cap after about 2.5 minutes (259 listed models, 241 unique meshes, 0 queued). Orbit, Snap, and a Field screenshot ran after that. A follow-up change marks the cap as settled so the "Scene ready" banner can hide.
 

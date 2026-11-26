@@ -88,6 +88,23 @@ test("the profile detail keeps the counters that used to sit on the stats line",
     }),
     ["idle", "0 queued · 0 loading · 5 loaded · 3 background · 1 background loading"],
   );
+  assert.deepEqual(
+    formatProfileDetail({
+      rendering: false,
+      queued: 0,
+      loading: 0,
+      loaded: 262,
+      capped: 207,
+    }),
+    ["idle", "0 loading · 262 loaded · 207 capped"],
+  );
+});
+
+test("a resident cap is named on the status label", () => {
+  assert.equal(
+    formatStatusLabel({ backend: "WebGPU", draws: 773, capped: 207 }),
+    "WebGPU · 773 draws · 207 capped",
+  );
 });
 
 test("unloaded layers are named on the status label", () => {

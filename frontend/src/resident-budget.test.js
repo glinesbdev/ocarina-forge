@@ -5,9 +5,12 @@ import {
   RESIDENT_BYTE_SOFT,
   RESIDENT_BYTE_TARGET,
   RESIDENT_HEAP_HARD,
+  RESIDENT_LEGACY_COUNT_CAP,
   RESIDENT_MODEL_SOFT_CAP,
   RESIDENT_UNLOAD_COOLDOWN_FRAMES,
   cameraNeedsPriorityUpdate,
+  classifyResidentQueue,
+  evictImmediatelyFor,
   isWorsePriority,
   modelsToEvict,
   overResidentHardCap,
@@ -144,6 +147,44 @@ test("priority is recomputed after more than 2 m or 30 degrees", () => {
   const turn31 = { position: [0, 0, 0], direction: [Math.sin((31 * Math.PI) / 180), 0, -Math.cos((31 * Math.PI) / 180)] };
   assert.equal(cameraNeedsPriorityUpdate(origin, turn20), false);
   assert.equal(cameraNeedsPriorityUpdate(origin, turn31), true);
+});
+
+test("a Kokiri-sized scene loads while bytes and heap are under budget", () => {
+  const unique = 262 + 207;
+  const heap = 386 * 1024 * 1024;
+  const assetBytes = unique * 1024 * 1024;
+  assert.equal(unique, 469);
+  assert.ok(assetBytes < RESIDENT_BYTE_SOFT);
+  assert.ok(heap < 2.2 * 1024 * 1024 * 1024);
+  assert.ok(unique >= RESIDENT_LEGACY_COUNT_CAP);
+  assert.equal(overResidentSoftCap(unique, heap, assetBytes), false);
+  assert.ok(RESIDENT_MODEL_SOFT_CAP > 852);
+  assert.equal(evictImmediatelyFor(1), true);
+  assert.equal(evictImmediatelyFor(3), true);
+  assert.equal(evictImmediatelyFor(4), false);
+  assert.equal(evictImmediatelyFor(5), false);
+});
+
+test("models the budget is holding are capped, and the background tail is not starved while the budget is open", () => {
+  const waiting = Array.from({ length: 207 }, (_, index) => `m${index}`);
+  const held = classifyResidentQueue(waiting, {
+    eligible: () => false,
+    canLaunch: () => false,
+    atCap: true,
+  });
+  assert.deepEqual(held, { queued: 0, background: 0, capped: 207 });
+  const open = classifyResidentQueue(waiting, {
+    eligible: () => false,
+    canLaunch: () => true,
+    atCap: false,
+  });
+  assert.deepEqual(open, { queued: 0, background: 207, capped: 0 });
+  const near = classifyResidentQueue(["bush", "cliff"], {
+    eligible: (name) => name === "bush",
+    canLaunch: (name) => name === "bush",
+    atCap: true,
+  });
+  assert.deepEqual(near, { queued: 1, background: 0, capped: 1 });
 });
 
 test("orbiting a Field-sized set does not evict and reload the same models", () => {

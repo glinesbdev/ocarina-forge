@@ -27,6 +27,7 @@ export function formatStatusLabel({
   queued = 0,
   loading = 0,
   background = 0,
+  capped = 0,
   texturesDone = null,
   texturesTotal = null,
   layersOff = null,
@@ -39,6 +40,7 @@ export function formatStatusLabel({
   if (queued) parts.push(`${queued} queued`);
   if (loading) parts.push(`${loading} loading`);
   if (background) parts.push(`${background} background`);
+  if (capped) parts.push(`${capped} capped`);
   const texTotal = Number(texturesTotal) || 0;
   const texDone = Number(texturesDone) || 0;
   if (texTotal > 0 && texDone < texTotal) parts.push(`textures ${texDone}/${texTotal}`);
@@ -70,6 +72,7 @@ export function formatProfileDetail({
   loaded = null,
   deferred = 0,
   backgroundLoading = 0,
+  capped = 0,
   convertMs = null,
   textureMs = null,
   downloadMs = null,
@@ -87,9 +90,10 @@ export function formatProfileDetail({
   if (separate != null) counts.push(`${separate} separate`);
   if (counts.length) lines.push(counts.join(" · "));
   const stream = [];
-  if (queued != null) stream.push(`${queued} queued`);
+  if (queued != null && !(Number(queued) === 0 && Number(capped) > 0)) stream.push(`${queued} queued`);
   if (loading != null) stream.push(`${loading} loading`);
   if (loaded != null) stream.push(`${loaded} loaded`);
+  if (capped) stream.push(`${capped} capped`);
   const background = (Number(deferred) || 0) + (Number(backgroundLoading) || 0);
   if (background) {
     stream.push(`${background} background`);
