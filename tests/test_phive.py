@@ -444,3 +444,200 @@ def test_static_and_dynamic_edits_merge_into_one_tile(tmp_path):
     assert patched[inst_a + 0x30:inst_a + 0x38] == raw[inst_a + 0x30:inst_a + 0x38]
     assert patched[inst_b + 0x30:inst_b + 0x38] == raw[inst_b + 0x30:inst_b + 0x38]
     assert patched[0x40:0x80] == raw[0x40:0x80]
+
+
+_FLT = struct.unpack("<f", struct.pack("<I", 0x7F7FFFFF))[0]
+
+
+def _empty_lane():
+    return ((_FLT, _FLT, _FLT), (-_FLT, -_FLT, -_FLT), 0, 0)
+
+
+def _pack_node(lanes):
+    node = bytearray(128)
+    for slot, (mins, maxs, data, is_leaf) in enumerate(lanes):
+        for axis, base in enumerate((0x00, 0x20, 0x40)):
+            struct.pack_into("<f", node, base + 4 * slot, mins[axis])
+        for axis, base in enumerate((0x10, 0x30, 0x50)):
+            struct.pack_into("<f", node, base + 4 * slot, maxs[axis])
+        struct.pack_into("<I", node, 0x60 + 4 * slot, data)
+        struct.pack_into("<I", node, 0x70 + 4 * slot, is_leaf)
+    return node
+
+
+def _read_lane(buf, node_at, slot):
+    mins = tuple(struct.unpack_from("<f", buf, node_at + base + 4 * slot)[0] for base in (0x00, 0x20, 0x40))
+    maxs = tuple(struct.unpack_from("<f", buf, node_at + base + 4 * slot)[0] for base in (0x10, 0x30, 0x50))
+    return mins, maxs
+
+
+def _box_contains(outer, inner, eps=1e-4):
+    omin, omax = outer
+    imin, imax = inner
+    return all(omin[axis] - eps <= imin[axis] and imax[axis] <= omax[axis] + eps for axis in range(3))
+
+
+def _point_in(box, point, eps=1e-4):
+    mins, maxs = box
+    return all(mins[axis] - eps <= point[axis] <= maxs[axis] + eps for axis in range(3))
+
+
+def _near(box, expected):
+    assert box[0] + box[1] == pytest.approx(expected[0] + expected[1])
+
+
+def _simd_file(instances, nodes, *, actors, bodies, node_at=None):
+    """One compound whose SIMD tree is an ITEM view of hkcdSimdTreeNamespace::Node."""
+    array_end = 0x80 + len(instances) * 0x40
+    if node_at is None:
+        node_at = array_end
+    decoy_at = node_at + len(nodes) * 128
+    data = bytearray(decoy_at + 16)
+    struct.pack_into("<I", data, 0x38, 0x80 - 0x38)
+    struct.pack_into("<I", data, 0x40, len(instances))
+    for index, (position, scale) in enumerate(instances):
+        at = 0x80 + index * 0x40
+        struct.pack_into("<4f", data, at, 0.0, 0.0, 0.0, 1.0)
+        struct.pack_into("<3f", data, at + 0x10, *position)
+        struct.pack_into("<3f", data, at + 0x20, *scale)
+        struct.pack_into("<Q", data, at + 0x30, 0x10)
+    for index, node in enumerate(nodes):
+        data[node_at + index * 128:node_at + (index + 1) * 128] = node
+    data[decoy_at:decoy_at + 16] = b"\xEE" * 16
+    strings = b"hknpCompoundShape\0hkcdSimdTreeNamespace::Node\0hknpAabb8TreeNode\0"
+    types = _chunk(b"TST1", strings) + _chunk(b"TNA1", bytes([4, 0, 0, 1, 0, 2, 0]))
+    records = [(0, 0, 0), (1, 0, 1), (2, node_at, len(nodes)), (3, decoy_at, 2)]
+    items = b"".join(struct.pack("<III", *record) for record in records)
+    tag = _chunk(b"TAG0", (
+        _chunk(b"SDKV", b"20250200")
+        + _chunk(b"DATA", bytes(data))
+        + _chunk(b"TYPE", types)
+        + _chunk(b"INDX", _chunk(b"ITEM", items))
+    ))
+    actor_bytes = b"".join(
+        struct.pack("<IIQ", first, last, hash_value) + _TAIL for hash_value, first, last in actors
+    )
+    body_bytes = bytearray()
+    for index in bodies:
+        body = bytearray(0x14)
+        struct.pack_into("<H", body, 0x0A, index)
+        body_bytes += body
+    body_at = 0x40 + len(actor_bytes)
+    body_end = body_at + len(body_bytes)
+    pad = (16 - (body_end % 16)) % 16
+    header = bytearray(0x40)
+    header[:6] = b"Phive\0"
+    struct.pack_into("<5I", header, 0x10, 0x40, 0x40 + len(actor_bytes), 0, body_at, body_end)
+    raw = bytes(header) + actor_bytes + bytes(body_bytes) + bytes(pad) + tag
+    data_at = len(header) + len(actor_bytes) + len(body_bytes) + pad
+    data_at += 8 + len(_chunk(b"SDKV", b"20250200")) + 8
+    return raw, data_at
+
+
+def test_simd_refit_contains_moved_instances_and_leaves_the_rest():
+    empty = _empty_lane()
+    nodes = [
+        _pack_node([((0.0, 0.0, 0.0), (21.0, 1.0, 1.0), 1, 0), empty, empty, empty]),
+        _pack_node([
+            ((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 0, 1),
+            ((2.0, 0.0, 0.0), (3.0, 1.0, 1.0), 1, 1),
+            ((20.0, 0.0, 0.0), (21.0, 1.0, 1.0), 2, 1),
+            empty,
+        ]),
+    ]
+    raw, data_at = _simd_file(
+        [((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)), ((2.0, 0.0, 0.0), (1.0, 1.0, 1.0)), ((20.0, 0.0, 0.0), (1.0, 1.0, 1.0))],
+        nodes,
+        actors=[(0xA, 0, 1), (0xB, 2, 2)],
+        bodies=[0, 1, 2],
+    )
+    node0 = data_at + 0x80 + 3 * 0x40
+    node1 = node0 + 128
+    decoy = node1 + 128
+    unmoved = _read_lane(raw, node1, 2)
+    empty_root = _read_lane(raw, node0, 3)
+
+    moved = patch_compound_transform(raw, 0xA, _pose((0.0, 0.0, 0.0)), _pose((4.0, 0.0, 0.0)))
+    assert len(moved) == len(raw)
+    leaf0 = _read_lane(moved, node1, 0)
+    leaf1 = _read_lane(moved, node1, 1)
+    _near(leaf0, ((4.0, 0.0, 0.0), (5.0, 1.0, 1.0)))
+    _near(leaf1, ((6.0, 0.0, 0.0), (7.0, 1.0, 1.0)))
+    assert _point_in(leaf0, (4.0, 0.0, 0.0))
+    assert _point_in(leaf1, (6.0, 0.0, 0.0))
+    parent = _read_lane(moved, node0, 0)
+    assert _box_contains(parent, leaf0)
+    assert _box_contains(parent, leaf1)
+    assert _box_contains(parent, _read_lane(moved, node1, 2))
+    assert _read_lane(moved, node1, 2) == unmoved
+    assert _read_lane(moved, node0, 3) == empty_root
+    assert moved[node0 + 0x60:node0 + 128] == raw[node0 + 0x60:node0 + 128]
+    assert moved[node1 + 0x60:node1 + 128] == raw[node1 + 0x60:node1 + 128]
+    assert moved[0x40:0x80] == raw[0x40:0x80]
+    assert moved[data_at + 0xB0:data_at + 0xB8] == raw[data_at + 0xB0:data_at + 0xB8]
+    assert moved[decoy:decoy + 16] == b"\xEE" * 16
+
+    again = patch_compound_transform(moved, 0xB, _pose((20.0, 0.0, 0.0)), _pose((24.0, 0.0, 0.0)))
+    assert len(again) == len(raw)
+    assert _read_lane(again, node1, 0) == leaf0
+    leaf2 = _read_lane(again, node1, 2)
+    _near(leaf2, ((24.0, 0.0, 0.0), (25.0, 1.0, 1.0)))
+    assert _point_in(leaf2, (24.0, 0.0, 0.0))
+    parent = _read_lane(again, node0, 0)
+    assert _box_contains(parent, _read_lane(again, node1, 0))
+    assert _box_contains(parent, _read_lane(again, node1, 1))
+    assert _box_contains(parent, leaf2)
+    assert again[node1 + 0x60:node1 + 128] == raw[node1 + 0x60:node1 + 128]
+    assert again[decoy:decoy + 16] == b"\xEE" * 16
+
+
+def test_simd_refit_matches_a_leaf_by_its_old_box_and_rotates_the_corners():
+    empty = _empty_lane()
+    nodes = [
+        _pack_node([((0.0, 0.0, -1.0), (2.0, 0.0, 2.0), 1, 0), empty, empty, empty]),
+        _pack_node([((0.0, 0.0, 0.0), (1.0, 0.0, 2.0), 50, 1), empty, empty, empty]),
+    ]
+    raw, data_at = _simd_file(
+        [((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))],
+        nodes,
+        actors=[(0xA, 0, 0)],
+        bodies=[0],
+    )
+    node0 = data_at + 0xC0
+    node1 = node0 + 128
+    moved = patch_compound_transform(
+        raw, 0xA, _pose((0.0, 0.0, 0.0)), _pose((0.0, 0.0, 0.0), rotate=(0.0, math.pi / 2, 0.0)),
+    )
+    assert len(moved) == len(raw)
+    leaf = _read_lane(moved, node1, 0)
+    _near(leaf, ((0.0, 0.0, -1.0), (2.0, 0.0, 0.0)))
+    assert _point_in(leaf, (0.0, 0.0, 0.0))
+    assert _box_contains(_read_lane(moved, node0, 0), leaf)
+    assert moved[node1 + 0x60:node1 + 128] == raw[node1 + 0x60:node1 + 128]
+    assert _read_lane(moved, node1, 1) == _read_lane(raw, node1, 1)
+
+
+def test_simd_refit_fails_closed_when_the_leaf_or_the_tree_is_missing():
+    empty = _empty_lane()
+    nodes = [
+        _pack_node([((0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 1, 0), empty, empty, empty]),
+        _pack_node([((100.0, 100.0, 100.0), (101.0, 101.0, 101.0), 7, 1), empty, empty, empty]),
+    ]
+    raw, _data_at = _simd_file(
+        [((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))],
+        nodes,
+        actors=[(0xA, 0, 0)],
+        bodies=[0],
+    )
+    with pytest.raises(CompoundLayoutError, match="no broadphase leaf"):
+        patch_compound_transform(raw, 0xA, _pose((0.0, 0.0, 0.0)), _pose((4.0, 0.0, 0.0)))
+
+    unbound, _data_at = _simd_file(
+        [((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))],
+        nodes,
+        actors=[(0xA, 0, 0)],
+        bodies=[0],
+        node_at=0x200,
+    )
+    with pytest.raises(CompoundLayoutError, match="not tied"):
+        patch_compound_transform(unbound, 0xA, _pose((0.0, 0.0, 0.0)), _pose((4.0, 0.0, 0.0)))

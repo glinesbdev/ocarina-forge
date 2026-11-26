@@ -2,8 +2,8 @@
 
 `read_mesh_shape` is the actor-local `hknpMeshShape` in a `.bphsh`. The game
 does not use that file for a baked static. The bake is a `.bphsc` compound.
-`patch_compound_transform` moves that actor's compound instances and leaves
-the shape bytes alone.
+`patch_compound_transform` moves that actor's compound instances, refits the
+compound broadphase, and leaves the shape bytes alone.
 
 The compound layout is the one published by reading files in
 oot-texture-tool `phive_compound.py` (GPL-3.0, ToxicToucan). This module
@@ -128,8 +128,10 @@ _TABLE = 0x10
 _ACTOR_STRIDE = 0x20
 _BODY_STRIDE = 0x14
 _INSTANCE_STRIDE = 0x40
+_NODE_STRIDE = 128
 _NO_BODY = 0xFFFFFFFF
 _SDK = b"20250200"
+_SIMD_NODE = b"hkcdSimdTreeNamespace::Node"
 
 
 class CompoundLayoutError(ValueError):
@@ -148,8 +150,12 @@ def _walk_chunks(raw, start, end):
         raise CompoundLayoutError("Invalid Havok chunk length")
 
 
+def _is_simd_node(name):
+    return name == _SIMD_NODE or name.startswith(_SIMD_NODE + b"<")
+
+
 def _compound_roots(raw):
-    """Absolute offsets of each tagfile's hknpCompoundShape, SDK 20250200."""
+    """Each tagfile's hknpCompoundShape and its SIMD-node views, SDK 20250200."""
     roots = []
     start = 0
     while True:
@@ -180,7 +186,8 @@ def _compound_roots(raw):
                 name = names[kind] if 0 < kind < len(names) else b""
                 parsed.append((name, data_at + offset, count))
             if len(parsed) > 1 and parsed[1][0] == b"hknpCompoundShape":
-                roots.append(parsed[1][1])
+                trees = [(start, count) for name, start, count in parsed if _is_simd_node(name)]
+                roots.append({"at": parsed[1][1], "trees": trees})
             start = chunk_end
         except (CompoundLayoutError, ValueError, KeyError, IndexError, StopIteration, struct.error):
             start = at + 4
@@ -206,12 +213,26 @@ def _instances(raw, compound_at):
             raise CompoundLayoutError("Compound instance has a non-finite transform")
         instances.append({
             "offset": offset,
+            "index": index,
             "quat": quat,
             "position": position,
             "scale": scale,
             "shape": shape,
         })
-    return instances
+    return instances, array + count * _INSTANCE_STRIDE
+
+
+def _bind_tree(array_end, trees):
+    """The node array that starts at this compound's instance array, if the tagfile has one."""
+    exact = [tree for tree in trees if tree[0] == array_end]
+    if len(exact) > 1:
+        raise CompoundLayoutError("more than one SIMD tree starts at the instance array")
+    if len(exact) == 1:
+        return exact[0]
+    padded = [tree for tree in trees if 0 < tree[0] - array_end <= 16]
+    if len(padded) == 1:
+        return padded[0]
+    return None
 
 
 def compound_actor_spans(raw: bytes) -> dict[int, tuple[int, int]] | None:
@@ -263,7 +284,12 @@ def _parse_compound(raw: bytes):
         offset += _BODY_STRIDE
     compounds = []
     for root in _compound_roots(raw):
-        compounds.append(_instances(raw, root))
+        instances, array_end = _instances(raw, root["at"])
+        tree = _bind_tree(array_end, root["trees"])
+        for instance in instances:
+            instance["tree"] = tree
+            instance["simd_present"] = bool(root["trees"])
+        compounds.append(instances)
     return actors, bodies, compounds
 
 
@@ -470,12 +496,186 @@ def _new_instance(instance, old_pose, new_pose):
     return _matrix_to_instance(moved)
 
 
+def _slot_aabb(buf, node_at, slot):
+    def axis(base):
+        return struct.unpack_from("<f", buf, node_at + base + 4 * slot)[0]
+
+    return (axis(0x00), axis(0x20), axis(0x40)), (axis(0x10), axis(0x30), axis(0x50))
+
+
+def _slot_words(buf, node_at, slot):
+    data = struct.unpack_from("<I", buf, node_at + 0x60 + 4 * slot)[0]
+    is_leaf = struct.unpack_from("<I", buf, node_at + 0x70 + 4 * slot)[0]
+    return data, is_leaf
+
+
+def _slot_empty(mins, maxs):
+    if not all(math.isfinite(value) for value in (*mins, *maxs)):
+        return True
+    return mins[0] > maxs[0] or mins[1] > maxs[1] or mins[2] > maxs[2]
+
+
+def _check_tree(buf, tree):
+    start, count = tree
+    if count > 1_000_000 or start < 0 or start + count * _NODE_STRIDE > len(buf):
+        raise CompoundLayoutError("SIMD tree is outside the file")
+
+
+def _node_at(tree, index):
+    start, count = tree
+    if index < 0 or index >= count:
+        raise CompoundLayoutError("SIMD tree node index is outside the array")
+    return start + index * _NODE_STRIDE
+
+
+def _write_slot_aabb(out, node_at, slot, mins, maxs, allowed):
+    for base, value in (
+        (0x00, mins[0]), (0x10, maxs[0]),
+        (0x20, mins[1]), (0x30, maxs[1]),
+        (0x40, mins[2]), (0x50, maxs[2]),
+    ):
+        at = node_at + base + 4 * slot
+        struct.pack_into("<f", out, at, float(value))
+        allowed.update(range(at, at + 4))
+
+
+def _transform_point(matrix, point):
+    x, y, z = point
+    return tuple(
+        matrix[row][0] * x + matrix[row][1] * y + matrix[row][2] * z + matrix[row][3]
+        for row in range(3)
+    )
+
+
+def _map_aabb(mins, maxs, delta):
+    corners = [
+        _transform_point(delta, (x, y, z))
+        for x in (mins[0], maxs[0])
+        for y in (mins[1], maxs[1])
+        for z in (mins[2], maxs[2])
+    ]
+    mapped_min = tuple(min(corner[axis] for corner in corners) for axis in range(3))
+    mapped_max = tuple(max(corner[axis] for corner in corners) for axis in range(3))
+    if not all(math.isfinite(value) for value in (*mapped_min, *mapped_max)):
+        raise CompoundLayoutError("refit AABB is not finite")
+    return mapped_min, mapped_max
+
+
+def _contains_point(mins, maxs, point, tol=1e-3):
+    return all(mins[axis] - tol <= point[axis] <= maxs[axis] + tol for axis in range(3))
+
+
+def _find_leaf_slots(buf, tree, instance_index, old_position):
+    """Leaf lanes for one instance: payload index first, then the tightest old box."""
+    _check_tree(buf, tree)
+    start, count = tree
+    by_payload = []
+    by_box = []
+    for node in range(count):
+        node_at = start + node * _NODE_STRIDE
+        for slot in range(4):
+            mins, maxs = _slot_aabb(buf, node_at, slot)
+            data, is_leaf = _slot_words(buf, node_at, slot)
+            if _slot_empty(mins, maxs) or not is_leaf:
+                continue
+            if data == instance_index:
+                by_payload.append((node, slot, mins, maxs))
+            elif _contains_point(mins, maxs, old_position):
+                span = tuple(maxs[axis] - mins[axis] for axis in range(3))
+                by_box.append((node, slot, mins, maxs, abs(span[0] * span[1] * span[2])))
+    if by_payload:
+        return by_payload
+    if not by_box:
+        return []
+    by_box.sort(key=lambda item: item[4])
+    tight = [item for item in by_box if item[4] <= by_box[0][4] + 1e-6]
+    if len(tight) != 1:
+        return []
+    node, slot, mins, maxs, _volume = tight[0]
+    return [(node, slot, mins, maxs)]
+
+
+def _parent_links(buf, tree):
+    """Child node index to the internal slot that names it. Empty lanes are not children."""
+    start, count = tree
+    parents = {}
+    for node in range(count):
+        node_at = start + node * _NODE_STRIDE
+        for slot in range(4):
+            mins, maxs = _slot_aabb(buf, node_at, slot)
+            data, is_leaf = _slot_words(buf, node_at, slot)
+            if _slot_empty(mins, maxs) or is_leaf or data >= count:
+                continue
+            if data in parents:
+                raise CompoundLayoutError("SIMD tree node has two parents")
+            parents[data] = (node, slot)
+    return parents
+
+
+def _union_slots(buf, node_at):
+    mins = None
+    maxs = None
+    for slot in range(4):
+        slot_min, slot_max = _slot_aabb(buf, node_at, slot)
+        if _slot_empty(slot_min, slot_max):
+            continue
+        if mins is None:
+            mins, maxs = slot_min, slot_max
+            continue
+        mins = tuple(min(mins[axis], slot_min[axis]) for axis in range(3))
+        maxs = tuple(max(maxs[axis], slot_max[axis]) for axis in range(3))
+    return mins, maxs
+
+
+def _refit_simd_tree(out, tree, updates, allowed):
+    """Move each instance's leaf, then set every parent slot to its child's union.
+
+    ``updates`` is ``(instance index, old matrix, new matrix, old position)``.
+    A leaf is the lane whose payload is that index, or the unique tightest leaf
+    whose box contains the old instance position. The new box is the min/max of
+    the old leaf's eight corners through ``new * inverse(old)``. Only those six
+    SoA floats are written. The eight u32s, and every other lane, stay.
+    """
+    _check_tree(out, tree)
+    parents = _parent_links(out, tree)
+    dirty = set()
+    for instance_index, old_matrix, new_matrix, old_position in updates:
+        leaves = _find_leaf_slots(out, tree, instance_index, old_position)
+        if not leaves:
+            raise CompoundLayoutError(f"instance {instance_index} has no broadphase leaf")
+        delta = _mul(new_matrix, _invert_trs(old_matrix))
+        for node, slot, mins, maxs in leaves:
+            mapped_min, mapped_max = _map_aabb(mins, maxs, delta)
+            _write_slot_aabb(out, _node_at(tree, node), slot, mapped_min, mapped_max, allowed)
+            dirty.add(node)
+    guard = 0
+    while dirty:
+        guard += 1
+        if guard > tree[1] + 1:
+            raise CompoundLayoutError("SIMD tree parent walk did not reach the root")
+        nxt = set()
+        for node in dirty:
+            parent = parents.get(node)
+            if parent is None:
+                continue
+            parent_node, parent_slot = parent
+            union_min, union_max = _union_slots(out, _node_at(tree, node))
+            if union_min is None:
+                raise CompoundLayoutError("SIMD tree child has no bounds")
+            _write_slot_aabb(out, _node_at(tree, parent_node), parent_slot, union_min, union_max, allowed)
+            nxt.add(parent_node)
+        dirty = nxt
+
+
 def patch_compound_transform(raw: bytes, actor_hash: int, old_pose: dict, new_pose: dict) -> bytes | None:
     """Move one actor's compound instances. Return None when this tile has no bodies for it.
 
-    The actor record (hash and shape range) and every byte that is not an
-    instance quaternion, position, or scale are copied through. The shape
-    pointer at instance +0x30 is one of those bytes.
+    Writes the instance quaternion, position, and scale, then refits that
+    instance's leaf in ``hkcdSimdTreeNamespace::Node`` and the parent slots
+    above it. A tagfile with no such array is left as an instance-only edit.
+    A tagfile that has the array and no leaf for a moved instance fails closed.
+    The shape pointer at instance +0x30, the actor-table tail, ``SRTHash``,
+    and per-mesh ``hknpAabb8TreeNode`` arrays are not written.
     """
     actors, bodies, compounds = _parse_compound(raw)
     hash_value = int(actor_hash) & 0xFFFFFFFFFFFFFFFF
@@ -504,8 +704,11 @@ def patch_compound_transform(raw: bytes, actor_hash: int, old_pose: dict, new_po
 
     out = bytearray(raw)
     allowed = set()
+    refits = {}
     for instance in chosen:
+        old_matrix = _instance_matrix(instance["position"], instance["quat"], instance["scale"])
         position, quat, scale = _new_instance(instance, old_pose, new_pose)
+        new_matrix = _instance_matrix(position, quat, scale)
         offset = instance["offset"]
         struct.pack_into("<4f", out, offset, *quat)
         struct.pack_into("<3f", out, offset + 0x10, *position)
@@ -513,9 +716,17 @@ def patch_compound_transform(raw: bytes, actor_hash: int, old_pose: dict, new_po
         allowed.update(range(offset, offset + 16))
         allowed.update(range(offset + 0x10, offset + 0x10 + 12))
         allowed.update(range(offset + 0x20, offset + 0x20 + 12))
+        tree = instance["tree"]
+        if tree is None:
+            if instance["simd_present"]:
+                raise CompoundLayoutError("SIMD tree is not tied to the instance array")
+            continue
+        refits.setdefault(tree, []).append((instance["index"], old_matrix, new_matrix, instance["position"]))
+    for tree, updates in refits.items():
+        _refit_simd_tree(out, tree, updates, allowed)
     for index, (before, after) in enumerate(zip(raw, out)):
         if before != after and index not in allowed:
-            raise CompoundLayoutError("a byte outside the instance transform changed")
+            raise CompoundLayoutError("a byte outside the instance transform and the refit bounds changed")
     if len(out) != len(raw):
         raise CompoundLayoutError("the bake changed size")
     return bytes(out)

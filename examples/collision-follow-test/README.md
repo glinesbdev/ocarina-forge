@@ -17,6 +17,8 @@ A `.bphsc` actor-table record with `first == last == 0xFFFFFFFF` has no body. `L
 
 `Land_Kokiri_House_Outside_B_02` (`0xd471946eaeb8e44f`) is only the front facade, not the whole house. This command replaces `scenes/` and exports that actor alone. It looks on Kokiri Child Static, then the paired Dynamic banc. `--banc` overrides both.
 
+The facade is bake-only. An earlier bake moved instance 290 and left the compound broadphase leaf on the old box, so only a thin strip collided at the new pose. This build refits that `hkcdSimdTreeNamespace::Node` array. The same command is the retest. It has not been run in game on this build.
+
 ```bash
 python -m ocarina_forge collision-follow-test --dump ~/Games/Longshot/rc/v3.0.0 --install --collision-follow bake --id 0xd471946eaeb8e44f
 ```

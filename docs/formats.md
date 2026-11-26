@@ -176,7 +176,28 @@ Inside that compound, `+0x38` is a u32 offset from that field to the instance ar
 | `+0x2C` | padding, not written |
 | `+0x30` | u64 shape offset from this field |
 
-`patch_compound_transform` writes the quaternion, the position, and the scale. It then checks that every changed byte is inside those three spans and that the file length is unchanged. The shape pointer and the shape bytes stay. If the instance already matches the actor pose (position within `1e-3`, scale within `1e-4`, quaternion dot above `0.9999`), the new pose is written directly. Otherwise the actor's delta is applied, `new * inverse(old) * instance`, so an offset piece follows. Rotate is extrinsic XYZ, the same composition as a placement `Rotate`. A non-positive scale fails closed. `Ry(+90°)` takes local `+X` to world `-Z`.
+`patch_compound_transform` writes the quaternion, the position, and the scale. If the instance already matches the actor pose (position within `1e-3`, scale within `1e-4`, quaternion dot above `0.9999`), the new pose is written directly. Otherwise the actor's delta is applied, `new * inverse(old) * instance`, so an offset piece follows. Rotate is extrinsic XYZ, the same composition as a placement `Rotate`. A non-positive scale fails closed. `Ry(+90°)` takes local `+X` to world `-Z`. The shape pointer and the shape bytes stay.
+
+The compound broadphase is an `hkcdSimdTreeNamespace::Node` array. On `KokiriForest_Child_X1_Z2` it is 222 nodes of 128 bytes, immediately after the 555-instance array. The ITEM view with that type name is the one that starts at the end of the instance array (a gap of at most 16 bytes still binds). Per-mesh `hknpAabb8TreeNode` arrays are a different type and are not this tree.
+
+One node is four children, structure of arrays, then eight u32s:
+
+| Offset | Field |
+| --- | --- |
+| `+0x00` | `lx`, four floats, one per child |
+| `+0x10` | `hx`, four floats |
+| `+0x20` | `ly`, four floats |
+| `+0x30` | `hy`, four floats |
+| `+0x40` | `lz`, four floats |
+| `+0x50` | `hz`, four floats |
+| `+0x60` | u32 `data[4]`. A leaf holds the instance index. An internal slot holds the child node index |
+| `+0x70` | u32 `isLeaf[4]`. Non-zero means that slot is a leaf |
+
+An empty slot is the inverted box `+FLT_MAX` / `-FLT_MAX` (`min > max`). It is not a child. The patcher does not write the eight u32s, so the payload, the leaf flag, and the child index stay.
+
+Moving the instance without this tree leaves the leaf on the old world box. A query only reaches the moved shape where that stale box still overlaps it. On the house facade that overlap was about 0.49 m, so only a strip collided. After the instance write, the patcher refits. The leaf is the slot whose payload is the instance index, or, when no payload matches, the unique tightest leaf whose box contains the old instance position. The new box is the min and max of the old leaf's eight corners through `new_instance * inverse(old_instance)`. On the cooked house leaf that matched to about 0.2 mm. Every parent slot that names that node is then set to the union of its child node's four slots, skipping empty ones, and that walk continues to the root. Several moved instances in one tile are applied to their leaves first, then the parents, so a parent sees every sibling that this call already moved. A second call, from another banc that shares the tile, sees those updated boxes and refits only its own instances.
+
+A tagfile with no `hkcdSimdTreeNamespace::Node` array is an instance-only edit. A tagfile that has the array, and a moved instance with no leaf, fails the export. The same is true when the array is present and does not start at the instance array. The file length stays the same. Every changed byte has to be an instance quaternion, position, or scale, or one of those six SoA floats.
 
 The scene directory is not a fixed grid. Kokiri's 4×4 per age and Hyrule Field's 256 tiles per age are the issue's counts. They were not re-counted. Under `Phive/StaticCompoundBody/`, Forge looks for the banc stem (`KokiriForest_Child_Static`), that stem without `_Static` or `_Dynamic` (`KokiriForest_Child`), and the area folder (`KokiriForest`). Every directory that exists is searched. Only `*.bphsc` and `*.bphsc.zs` are read. Symlinks are skipped. Child and Adult are separate bancs. Only the banc being edited is patched.
 
@@ -186,7 +207,7 @@ The manifest key is `collisionFollow` (`collision_follow` is accepted). The CLI 
 
 `srt` is variant B. A pose move keeps `Hash` and `Phive.Placement.ID`. Export mints a new `SRTHash`: the CRC-32 of `ocarina-forge-collision-follow-b:` plus the 16-digit actor hash, skipping 0, bumped until no other actor in the banc has it. Save Longshot mod adds a placements `set` of `SRTHash` (an `add` only when the key was missing). Build mod writes that same u32 into the banc. No `.bphsh` and no `.bphsc` is shipped. The shape is unchanged. Re-minting the hash is a new value in the data structure, not a new shape. It does not move the baked row.
 
-`bake` leaves `SRTHash` alone, so a lookup by hash and `SRTHash` can still hit the same row. Each tile that contains the actor is copied and the instance transform is moved. Static and Dynamic bancs that share a tile are applied to that tile together. One starts from the dump, and the next does not overwrite it with a fresh copy. A tile that does not mention the actor is left out. A tile that mentions the actor and cannot be patched fails the export, so a half-updated world is not shipped. The unpacked length stays the same. The bytes differ, so the size-table entry still grows by 1024 (`align8(old + 1024)`), and the whole table is shipped. A missing row is an error. It is not invented. The frame is recompressed with the dictionary id from the source frame. `.bphsc.zs` is not in the suffix table, so the id is not assumed to be 1. A scene with no `StaticCompoundBody` directory warns and does not fail. An actor that is in no tile is logged. The class `.bphsh` is not rewritten in either mode.
+`bake` leaves `SRTHash` alone, so a lookup by hash and `SRTHash` can still hit the same row. Each tile that contains the actor is copied, the instance transform is moved, and that compound's SIMD tree is refit. Static and Dynamic bancs that share a tile are applied to that tile together. One starts from the dump, and the next does not overwrite it with a fresh copy. A tile that does not mention the actor is left out. A tile that mentions the actor and cannot be patched fails the export, so a half-updated world is not shipped. The unpacked length stays the same. The bytes differ, so the size-table entry still grows by 1024 (`align8(old + 1024)`), and the whole table is shipped. A missing row is an error. It is not invented. The frame is recompressed with the dictionary id from the source frame. `.bphsc.zs` is not in the suffix table, so the id is not assumed to be 1. A scene with no `StaticCompoundBody` directory warns and does not fail. An actor that is in no tile is logged. The class `.bphsh` is not rewritten in either mode.
 
 ### Kokiri sign, in game
 
@@ -195,7 +216,9 @@ The manifest key is `collisionFollow` (`collision_follow` is accepted). The CLI 
 - An actor-side ControllerSet. It follows `Translate`. That is why `off` still has collision at the new spot.
 - A baked compound row in `KokiriForest_Child_X1_Z2.bphsc`.
 
-`off` moves the mesh and the ControllerSet. The vanilla bake row stays where it was, and that is an invisible box at the old spot. `bake` moves that row. The old spot is clear. Bake mode is required for this sign, and it works. The shape bytes were not rewritten.
+`off` moves the mesh and the ControllerSet. The vanilla bake row stays where it was, and that is an invisible box at the old spot. `bake` moves that row. The old spot is clear. Bake mode is required for this sign. The sign still felt solid at the new pose because the ControllerSet follows `Translate`. That did not show that the broadphase had moved.
+
+`Land_Kokiri_House_Outside_B_02` (`0xd471946eaeb8e44f`) is only the front facade, and its collision is bake-only. In `KokiriForest_Child_X1_Z2` the actor is one compound row, `first = last = 322`, instance 290. Writing the new instance transform cleared the old spot, and the leaf stayed put: node 45, slot 1, world box `[-12.327, 111.089, 10.580]`–`[-7.840, 115.976, 13.766]`. That box overlaps the moved facade by about 0.49 m, which is the strip that still collided. The refit above is what moves that leaf and the parents above it. The shape bytes were not rewritten.
 
 `examples/collision-follow-test` generates `scenes/` from the dump on each run and deletes the previous scene yaml first, so an earlier `--id` is not exported again. That folder is gitignored. Do not commit it. The steps, including the house-facade command, are in that example's README.
 
