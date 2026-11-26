@@ -259,8 +259,8 @@ export function dropMapWithoutUv(root) {
 
 /**
  * Write `matrix` onto the slots owned by `actorKey`. A shared slots list, or a
- * second copy of the same model, does not get the write. Hidden slots keep the
- * matrix for when they show again, and skip the GPU update.
+ * second copy of the same model, does not get the write. Hidden slots get the
+ * same matrix: the draw can still be showing the previous one.
  * Returns how many instance matrices were sent to the mesh.
  */
 export function applyActorMatrix(slots, actorKey, matrix) {
@@ -269,7 +269,9 @@ export function applyActorMatrix(slots, actorKey, matrix) {
   for (const slot of slots) {
     if (!slot || slot.actor !== actorKey || !slot.mesh || typeof slot.mesh.setMatrixAt !== "function") continue;
     if (slot.matrix && typeof slot.matrix.copy === "function") slot.matrix.copy(matrix);
-    if (slot.shown === false) continue;
+    // Hidden slots used to skip the GPU write. The cull can mark a slot hidden
+    // while the draw still shows the last matrix, and the next Y drag was the
+    // first setMatrixAt that caught the mesh up. Write every owned slot.
     slot.mesh.setMatrixAt(slot.index, matrix);
     dirty.push(slot.mesh);
   }

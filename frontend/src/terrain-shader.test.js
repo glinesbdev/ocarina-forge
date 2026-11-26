@@ -82,7 +82,9 @@ test("sub terrain is an opt-in wireframe, excluded from snapping", () => {
   assert.match(source, /let showSub = false/);
   assert.match(source, /wireframe: true, transparent: true, opacity: .*depthWrite: false/);
   assert.match(source, /\(isSub \? sub : ground\)\.push\(a, b, c\)/);
-  assert.match(source, /!child\.geometry \|\| child\.userData\.subTerrain/);
+  const surface = readFileSync(new URL("./snap-surface.js", import.meta.url), "utf8");
+  assert.match(surface, /data\.subTerrain/);
+  assert.match(surface, /!mesh\.geometry/);
   assert.match(source, /material\.side = THREE\.FrontSide/);
 });
 

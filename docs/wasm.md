@@ -230,8 +230,9 @@ Then:
    a multi-second `/api/ground` wait.
 3. Check (−195.2242, 519.2956) ≈ 131.551, the field at (0, 0) ≈ 147.441,
    and (−250, 400) on Dynamic ≈ 151.780.
-4. Drag a `Land_` island mesh; it should not snap to its own moving
-   surface.
+4. Drag a `Land_` island mesh sideways; it should sit on the ground under
+   it, not on its own surface. A Y-axis lift stays at the height you leave
+   it, and the gizmo stays on the mesh.
 
 To rebuild the wasm module:
 

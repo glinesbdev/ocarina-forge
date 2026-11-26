@@ -45,6 +45,9 @@ The editor shows this same list with ? or the Shortcuts button.
 ## Snap
 
 - V: Toggle snap to ground and collision
+- X, Z, or XZ drag: With Snap on, change only the height. X and Z stay on the drag. The surface is the ground, a collision mesh, or the room model when the map has no ground. A hit more than a couple of metres above the actor is ignored. A miss keeps the current height. Releasing any translate handle except Y does the same
+- Y drag: With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up
+- Dragged mesh: Left out of the snap query: every submesh, batched instance, proxy, and companion copy of that actor, including a Land_ piece
 
 ## Search
 

@@ -238,7 +238,7 @@ def test_api_sample_edit_and_export(tmp_path, monkeypatch):
     scenes = client.get("/api/scenes")
     assert scenes.status_code == 200
     areas = {scene["area"] for scene in scenes.json()["scenes"]}
-    assert areas == {"KokiriForest", "HyruleField"}
+    assert areas == {"KokiriForest", "HyruleField", "BossRush"}
 
     scene = client.get("/api/scene", params={"banc": KOKIRI_STATIC})
     assert scene.status_code == 200
