@@ -34,6 +34,8 @@ def test_rank_albedo_keeps_runtime_slots_flat_and_accepts_an_alb_name():
     assert rank_albedo([("_a0", "Field_Water_Nrm"), ("_n0", "Field_Water_N0")]) == []
     assert rank_albedo([("s0", "Tree_Alb")]) == []
     assert rank_albedo([("tex0", "Slot_Alb"), ("_n0", "Slot_Nrm")]) == [("tex0", "Slot_Alb")]
+    assert rank_albedo([("_t0", "Mt_Skin")]) == [("_t0", "Mt_Skin")]
+    assert rank_albedo([("_n0", "Mt_Skin")]) == []
     assert rank_albedo([("_a0", "Field_Water_Nrm"), ("tex0", "Field_Water_Alb")]) == [("tex0", "Field_Water_Alb")]
     assert rank_albedo([("_a0", "Rock_Alb"), ("_n0", "Rock_Nrm")])[0] == ("_a0", "Rock_Alb")
 
@@ -309,6 +311,129 @@ def test_an_unlinked_shape_does_not_take_the_first_textured_material():
     assert "did not match a material by name" in model.parts[2].texture_error
     assert "Mt_Back" in model.parts[2].texture_error
     assert "Rock_Alb" in model.parts[2].texture_error
+
+
+def test_biggoron_materials_each_take_their_own_tex_file(tmp_path, monkeypatch):
+    """Six Biggoron materials, each bound to its own Tex/<name> file.
+
+    Longshot reads the texture-name count from FMAT +0xA2. One material uses
+    that layout with +0xA3 left at 0 and a sampler name that is not _a0. One
+    material stores a short count at +0xA3 so the normal is the only name a
+    reader of that byte keeps. The other four use the usual _a0 bind. A second
+    goron reuses the skin file. An empty bind list must not paint every
+    material with the first Goron albedo in the pool.
+    """
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    from ocarina_forge.formats.bfres import parse
+    from ocarina_forge.models import _COMPANION_IMAGES, _COMPANION_LIST, _PACK_TEX, _TEX_INDEX, _convert_cached
+
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    _COMPANION_LIST.clear()
+    _COMPANION_IMAGES.clear()
+
+    names = {
+        "Mt_Hair": "Mt_Hair",
+        "Mt_Skin": "Mt_Skin_Npc_Goron_GOU_Alb",
+        "Mt_Eye_Inner": "Mt_Eye_Inner_Alb",
+        "Mt_Face": "Mt_Face_Npc_Goron_GOU_Alb",
+        "Mt_Rock": "Mt_Rock_Npc_Goron_GOU_Alb",
+        "Mt_Teeth": "Mt_Teeth_Npc_Goron_GOU_Alb",
+    }
+    materials = [
+        {"name": "Mt_Hair", "counts": "longshot", "samplers": [("_t0", names["Mt_Hair"])]},
+        {"name": "Mt_Skin", "samplers": [("_a0", names["Mt_Skin"])]},
+        {
+            "name": "Mt_Eye_Inner",
+            "counts": "decoy",
+            "samplers": [("_n0", "Mt_Eye_Inner_Nrm"), ("_a0", names["Mt_Eye_Inner"])],
+        },
+        {"name": "Mt_Face", "samplers": [("_a0", names["Mt_Face"])]},
+        {"name": "Mt_Rock", "samplers": [("_a0", names["Mt_Rock"])]},
+        {"name": "Mt_Teeth", "samplers": [("_a0", names["Mt_Teeth"])]},
+    ]
+    shapes = [{"name": name, "material": index} for index, name in enumerate(names)]
+    mesh = sample_v10_bfres("Npc_Goron_GOU_Biggoron", materials, shapes=shapes)
+    parsed = parse(mesh)
+    by_name = {material.name: material for material in parsed[0].materials}
+    assert [slot_tex[1] for slot_tex in by_name["Mt_Hair"].albedo] == [names["Mt_Hair"]]
+    assert by_name["Mt_Hair"].albedo[0][0] == "_t0"
+    assert by_name["Mt_Eye_Inner"].albedo[0] == ("_a0", names["Mt_Eye_Inner"])
+    for material_name, texture_name in names.items():
+        assert by_name[material_name].albedo[0][1] == texture_name
+
+    tex = dump.romfs / "Tex"
+    tex.mkdir(parents=True, exist_ok=True)
+    for index, texture_name in enumerate(names.values()):
+        pixel = bytes([40 + index * 30, 80, 90, 255]) * 4
+        (tex / f"{texture_name}.bntx.zs").write_bytes(compress(write_rgba(texture_name, 2, 2, pixel), 1, dicts, level=3))
+
+    hint = "Npc_Goron_Biggoron_Adult Model/Npc_Goron_GOU_Biggoron.Npc_Goron_GOU_Biggoron.bfres.zs"
+    _external, log, _raws = _resolve_materials(dump, parse(mesh), hint, False)
+    rows = {row["material"]: row for row in log}
+    assert set(rows) == set(names)
+    for material_name, texture_name in names.items():
+        row = rows[material_name]
+        assert row["via"] == "sampler"
+        assert row["wanted"] == texture_name
+        assert row["decoded"] is True
+        assert f"Tex/{texture_name}.bntx.zs" in " ".join(row.get("tried") or [])
+        assert "No albedo sampler was usable" not in (row.get("error") or "")
+
+    decoded = []
+    import ocarina_forge.models as models
+
+    original = models._decode_bntx_cached
+
+    def counting(*args, **kwargs):
+        decoded.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_decode_bntx_cached", counting)
+    _digest, info = _convert_cached(mesh, dump, hint=hint, flat=True)
+    assert decoded == []
+    assert info["textures"] == 0
+    note = " ".join(info.get("notes") or [])
+    assert "No albedo sampler was usable" not in note
+    for texture_name in names.values():
+        assert texture_name in note
+        assert f"Tex/{texture_name}.bntx.zs" in note
+
+    child = sample_v10_bfres(
+        "Npc_Goron_GOU_Child",
+        [{"name": "Mt_Skin", "samplers": [("_a0", names["Mt_Skin"])]}],
+    )
+    _external, child_log, _raws = _resolve_materials(
+        dump,
+        parse(child),
+        "Npc_Goron_GOU_Child Model/Npc_Goron_GOU_Child.Npc_Goron_GOU_Child.bfres.zs",
+        False,
+    )
+    assert child_log[0]["via"] == "sampler"
+    assert child_log[0]["wanted"] == names["Mt_Skin"]
+    assert child_log[0]["decoded"] is True
+
+
+def test_separate_goron_materials_do_not_share_the_rock_albedo():
+    """A shared 'goron' token must not paint the skin with the rock file."""
+    skin = Texture("Mt_Skin_Npc_Goron_GOU_Alb", 1, 1, bytes([240, 200, 80, 255]), 0)
+    rock = Texture("Mt_Rock_Npc_Goron_GOU_Alb", 1, 1, bytes([90, 80, 70, 255]), 0)
+    triangle = ([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)])
+    model = Model(
+        "Npc_Goron_GOU_Biggoron",
+        parts=[
+            Part("Body", *triangle, "", "", 0),
+            Part("Back", *triangle, "", "", 1),
+        ],
+        materials=[Material("Mt_Skin"), Material("Mt_Rock")],
+        images={skin.name: skin, rock.name: rock},
+        extra_textures=[rock.name, skin.name],
+    )
+    _resolve_materials(None, [model], "Npc_Goron_Biggoron", False)
+    assert model.parts[0].texture == skin.name
+    assert model.parts[1].texture == rock.name
 
 
 def json_blob(report: dict) -> str:

@@ -725,8 +725,10 @@ class _File:
 
         +0x08 name, +0x20 texture-name pointer array, +0x38 sampler-name
         dictionary, +0x40 render-state string array. +0xA0 is 0 or 1 and is not
-        that array's length. +0xA2 sampler count, +0xA3 texture count. Sampler names and texture
-        names are in the same order.
+        that array's length. Longshot reads the texture-name count from the
+        byte at +0xA2. Files this module writes put the sampler count there
+        and the texture count at +0xA3. Sampler names and texture names are
+        in the same order.
         """
         if at + 0xB0 > len(self.data) or self.data[at : at + 4] != b"FMAT":
             return Material(fallback)
@@ -735,15 +737,9 @@ class _File:
         sampler_dict = self.u64(at + 0x38)
         state_at = self.u64(at + 0x40)
         render_count = self.u16(at + 0xA0)
-        sampler_count = self.data[at + 0xA2]
-        texture_count = self.data[at + 0xA3]
-        textures = self._name_list(texture_at, texture_count)
-        if not textures and sampler_count:
-            textures = self._name_list(texture_at, sampler_count)
-        try:
-            sampler_names = self.dict_keys(sampler_dict) if sampler_dict else []
-        except FresError:
-            sampler_names = []
+        sampler_names, textures = self._v10_texture_names(at, texture_at, sampler_dict)
+        texture_count = len(textures)
+        sampler_count = len(sampler_names)
         # +0xA0 is 0 or 1 on these files. It is not the length of the string array.
         del render_count
         states = self._state_strings(state_at, 31)
@@ -805,6 +801,39 @@ class _File:
                     material.options.setdefault(f"option{index}", choice)
         material.base_color = color_from_params(material.params)
         return material
+
+    def _v10_texture_names(self, at: int, texture_at: int, sampler_dict: int) -> tuple[list[str], list[str]]:
+        """Sampler names, then the texture names those samplers bind.
+
+        Longshot `host/bfres_edit.c` `tex_array` reads the texture-name count
+        from the byte at FMAT +0xA2. Files written by `sample_v10_bfres` store
+        the sampler count in that byte and the texture count at +0xA3. The
+        sampler dictionary carries its own length. The longest list of real
+        names is the array the material stores. When every count is zero and
+        the pointer is live, the array is walked until a pointer is not a
+        BFRES string.
+        """
+        try:
+            sampler_names = self.dict_keys(sampler_dict) if sampler_dict else []
+        except FresError:
+            sampler_names = []
+        lists: list[list[str]] = []
+        for count in (self.data[at + 0xA2], self.data[at + 0xA3], len(sampler_names)):
+            names = self._name_list(texture_at, count)
+            if names:
+                lists.append(names)
+        if (
+            not lists
+            and texture_at
+            and not sampler_names
+            and self.data[at + 0xA2] == 0
+            and self.data[at + 0xA3] == 0
+        ):
+            walked = self._name_list(texture_at, 16)
+            if walked:
+                lists.append(walked)
+        textures = max(lists, key=len) if lists else []
+        return sampler_names, textures
 
     def _render_info_note(self, at: int) -> str:
         """Why a v10 material has no render-info keys.
@@ -2934,6 +2963,11 @@ def _rank_named_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
         named = _sampler_says_albedo(token)
         if trank == 0 or (named and trank < 2):
             found.append((0 if named else 1, trank, index, sampler, texture))
+        elif trank < 2 and _sampler_rank(sampler) is None and token:
+            # The slot is not _a0 and it is not a known non-color slot.
+            # A character sampler outside that table still names a colour
+            # texture, and the texture's own name may omit _Alb.
+            found.append((2, trank, index, sampler, texture))
     found.sort()
     return [(sampler, texture) for _named, _trank, _index, sampler, texture in found]
 
@@ -3659,8 +3693,10 @@ def sample_v10_bfres(
     """A version-10 BFRES with stride-0xB0 materials. Synthetic, for tests.
 
     Each material dict may set ``name``, ``samplers`` (``(slot, texture)`` in
-    file order), ``mode`` (``opaque`` / ``mask`` / ``translucent``), and
-    ``cull`` (``front`` / ``both``). Shapes are ``{name, material}`` and share
+    file order), ``mode`` (``opaque`` / ``mask`` / ``translucent``), ``cull``
+    (``front`` / ``both``), and ``counts`` (``longshot`` puts the texture-name
+    count at +0xA2 and leaves +0xA3 at 0; ``decoy`` puts the full count at
+    +0xA2 and 1 at +0xA3). Shapes are ``{name, material}`` and share
     one triangle unless ``positions`` is passed. ``with_uvs`` false writes only
     ``_p0``, which is the dummy terrain layout.
     """
@@ -3724,7 +3760,7 @@ def sample_v10_bfres(
         words[11] = mode
         words[15] = "true" if mode == "mask" else "false"
         state_offs = [add_string(word) for word in words]
-        prepared.append((mat_name, pairs, tex_offs, samp_offs, state_offs, item.get("shader") or None))
+        prepared.append((mat_name, pairs, tex_offs, samp_offs, state_offs, item.get("shader") or None, str(item.get("counts") or "")))
 
     align(8)
     attr_at = len(blob)
@@ -3805,7 +3841,7 @@ def sample_v10_bfres(
     shape_dict = add_dict(shape_names)
 
     built = []
-    for mat_name, pairs, tex_offs, samp_offs, state_offs, shader in prepared:
+    for mat_name, pairs, tex_offs, samp_offs, state_offs, shader, counts in prepared:
         align(8)
         tex_ptr = 0
         if tex_offs:
@@ -3823,12 +3859,25 @@ def sample_v10_bfres(
         if shader:
             assign_ptr, param_array, param_dict_at, param_data, _count = _pack_shader(blob, add_string, add_dict, shader)
         built.append(
-            (mat_name, tex_ptr, sampler_dict, state_ptr, len(samp_offs), len(tex_offs), len(state_offs), assign_ptr, param_array, param_dict_at, param_data)
+            (
+                mat_name,
+                tex_ptr,
+                sampler_dict,
+                state_ptr,
+                len(samp_offs),
+                len(tex_offs),
+                len(state_offs),
+                assign_ptr,
+                param_array,
+                param_dict_at,
+                param_data,
+                counts,
+            )
         )
 
     align(8)
     mat_at = len(blob)
-    for mat_name, tex_ptr, sampler_dict, state_ptr, sampler_count, texture_count, state_count, assign_ptr, param_array, param_dict_at, param_data in built:
+    for mat_name, tex_ptr, sampler_dict, state_ptr, sampler_count, texture_count, state_count, assign_ptr, param_array, param_dict_at, param_data, counts in built:
         header = bytearray(0xB0)
         header[0:4] = b"FMAT"
         struct.pack_into("<I", header, 0x04, 1)
@@ -3842,8 +3891,20 @@ def sample_v10_bfres(
         struct.pack_into("<Q", header, 0x58, param_data)
         # Real files store 0 or 1 here. It is not the render-state array length.
         struct.pack_into("<H", header, 0xA0, 1 if state_count else 0)
-        header[0xA2] = sampler_count & 0xFF
-        header[0xA3] = texture_count & 0xFF
+        # "longshot": the texture-name count lives at +0xA2 and +0xA3 is 0,
+        # which is what host/bfres_edit.c reads. "decoy": +0xA2 is the full
+        # count and +0xA3 is 1, so a reader that trusts only +0xA3 keeps the
+        # first texture and drops the albedo. The default keeps the sampler
+        # count at +0xA2 and the texture count at +0xA3.
+        if counts == "longshot":
+            header[0xA2] = texture_count & 0xFF
+            header[0xA3] = 0
+        elif counts == "decoy":
+            header[0xA2] = texture_count & 0xFF
+            header[0xA3] = 1 if texture_count else 0
+        else:
+            header[0xA2] = sampler_count & 0xFF
+            header[0xA3] = texture_count & 0xFF
         blob.extend(header)
     mat_dict = add_dict(mat_names)
     # A one-name dictionary in the qword after the real dict. Readers that still

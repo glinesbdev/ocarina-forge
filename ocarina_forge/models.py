@@ -16,8 +16,8 @@ project name (`Pack/Actor/Npc_Goron_GOU.pack.zs` for
 `Npc_Goron_GOU_Biggoron`), and a sibling `Model/<prefix>.Tex.bfres` is read
 for images the mesh bfres only names. Older `Model/<name>.bfres` paths and a
 bfres stored in the pack are still accepted. Vertex colours do not mean the
-material has no texture. On a character material they are the mask: the albedo
-is the rock, and a const-colour uniform is the skin underneath it.
+material has no texture. Each material's own texture name is a file under
+`Tex/`. A rock albedo is a second layer only when that name is the rock.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-59\0"
+_CACHE_VERSION = b"models-60\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -525,6 +525,34 @@ def _convert_cached_timed(blob: bytes, dump, hint: str, terrain: bool, convert: 
         _READ_MEM.reset(read_token)
 
 
+def _stamp_flat_sources(models) -> None:
+    """Remember each material's texture name before the geometry file drops images.
+
+    The editor draws `?flat=1` and reads this note. Dropping the binds first
+    made every material say that no albedo sampler was usable, including a
+    character whose FMAT names a real `Tex/` file. This does not decode BNTX.
+    """
+    for model in models:
+        materials = model.materials or []
+        for part in model.parts:
+            if not (0 <= part.material_index < len(materials)):
+                continue
+            material = materials[part.material_index]
+            sources = _albedo_sources(material)
+            if not sources:
+                loose = _loose_albedo_names(model, material)
+                sources = [("", name) for name in loose]
+            if not sources:
+                continue
+            slot, name = sources[0]
+            shown = ", ".join(f"{item or '?'}={tex}" for item, tex in sources[:6])
+            part.texture_error = (
+                f"albedo {slot or 'texture'} {name}. "
+                f"Longshot serves that name as Tex/{name}.bntx.zs. "
+                f"seen {shown}"
+            )
+
+
 def _drop_textures(models) -> None:
     """Layout loads the mesh and does not decode BNTX.
 
@@ -556,6 +584,7 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
     try:
         if flat:
             _plan_layer_blends(models)
+            _stamp_flat_sources(models)
             _drop_textures(models)
             external, log, raws = {}, [], []
         else:
@@ -1785,7 +1814,10 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
     # The string pool is what painted later shapes magenta. Dummy terrain
     # (no textures, no UVs) is a solid colour, not a Tex lookup.
     proxy = bool(terrain and not sources and not has_samplers)
-    if not sources and not has_samplers and not proxy:
+    # Several materials cannot share one pool hit. Every Goron albedo contains
+    # the model name, and the first hit (the rock) would colour all of them.
+    several = len(getattr(model, "materials", None) or []) > 1
+    if not sources and not has_samplers and not proxy and not several:
         pooled = _pool_albedo(model.string_pool or model.extra_textures, _tex_index(dump) if dump is not None else {})
         if not pooled:
             pooled = base_color_name([name for name in model.extra_textures if texture_rank(name) < 2])
@@ -2934,12 +2966,22 @@ def _loose_albedo_names(model, material) -> list[str]:
         add(name)
     if not found:
         return []
-    tokens = _name_tokens(material.name) | _name_tokens(getattr(model, "name", "") or "")
-    matched = [name for name in found if tokens & _name_tokens(name)]
+    material_tokens = _name_tokens(material.name)
+    matched = [name for name in found if material_tokens & _name_tokens(name)]
     if matched:
         return matched[:4]
-    if len(found) == 1:
-        return found
+    # One material may borrow a name that only shares the model. Several
+    # materials must not: every Goron texture contains "goron", and the first
+    # one in the pool (often the rock) would colour the hair, the skin, and
+    # the eyes.
+    several = len(getattr(model, "materials", None) or []) > 1
+    if not several:
+        model_tokens = _name_tokens(getattr(model, "name", "") or "")
+        shared = [name for name in found if model_tokens & _name_tokens(name)]
+        if shared:
+            return shared[:4]
+        if len(found) == 1:
+            return found
     return []
 
 

@@ -163,6 +163,12 @@ def skin_overlay_plan(material, span: list[tuple[float, float]] | None = None) -
     options = getattr(material, "options", None) or {}
     if not (_wide(span) or _option_requests_blend(options)):
         return None
+    # One albedo plus a wide vertex colour is AO on hair, skin, and eyes.
+    # The rock layer is the material whose texture name is the rock, or a
+    # shader option that asks for the blend. Treating every such albedo as
+    # rock painted Biggoron's skin, face, and teeth with the rock map.
+    if not _rock_albedo(material, texture) and not _option_requests_blend(options):
+        return None
     channel, reason = _skin_channel(material, span)
     color = _skin_color(material)
     if color is None and channel != "a":
@@ -187,6 +193,11 @@ def skin_overlay_plan(material, span: list[tuple[float, float]] | None = None) -
         "archive": getattr(material, "archive", "") or "",
     }
     return plan
+
+
+def _rock_albedo(material, texture: str) -> bool:
+    """True when this albedo is the rock layer, not the skin, hair, or eyes."""
+    return "rock" in f"{getattr(material, 'name', '')} {texture}".lower()
 
 
 def _skin_color(material) -> tuple[float, float, float, float] | None:
