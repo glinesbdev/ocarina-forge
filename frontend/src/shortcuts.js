@@ -20,7 +20,10 @@ export const SHORTCUT_GROUPS = [
     id: "selection",
     label: "Selection and editing",
     items: [
-      { keys: "Click", action: "Select the actor under the cursor" },
+      { keys: "Click", action: "Select the actor under the cursor. That replaces the selection" },
+      { keys: "Shift-click", action: "Add or remove that actor. The gizmo then moves and rotates every selected actor around the selection center, as one undo step" },
+      { keys: "Left-drag on empty space", action: "Draw a rectangle and select every actor whose screen box meets it. Shift-drag adds to the selection" },
+      { keys: "Ctrl-click or Command-click a decoration", action: "Attach it to the selected parent piece, or detach it. The parent stays selected. Grouped decorations show a teal outline while that parent is selected" },
       { keys: "Alt-click, or click again", action: "Cycle overlapping actors" },
       { keys: "H", action: "Hide or show the selection" },
       { keys: "Delete", action: "Delete the selection" },
@@ -45,8 +48,8 @@ export const SHORTCUT_GROUPS = [
       { keys: "G", action: "Move" },
       { keys: "R", action: "Rotate" },
       { keys: "Scale button", action: "Scale the selection. S stays fly-back, so scale has no letter." },
-      { keys: "L", action: "Toggle world space and the selected actor's local space. Move and rotate follow it. Scale stays local. The toolbar shows the current space, and this browser remembers it" },
-      { keys: "Drag a handle", action: "Transform the selection" },
+      { keys: "L", action: "Toggle world space and local space. Move and rotate follow it. With several actors selected, local axes match the primary actor. Scale stays local. The toolbar shows the current space, and this browser remembers it" },
+      { keys: "Drag a handle", action: "Transform the selection. Grid snap and ground snap apply to that same move, including a multi-selection" },
     ],
   },
   {

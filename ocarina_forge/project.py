@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from ocarina_forge.actors import format_hash, parse_hash
+from ocarina_forge.decoration_groups import groups_or_none
 from ocarina_forge.errors import BancError
 
 FORMAT = 1
@@ -187,7 +188,11 @@ class Project:
         actors = data.get("actors") or {}
         if not isinstance(actors, dict):
             raise BancError(f"{path} should list actors as a mapping of hash to edit.", "project")
-        return {"format": FORMAT, "banc": banc, "actors": normalize_ids(actors)}
+        loaded = {"format": FORMAT, "banc": banc, "actors": normalize_ids(actors)}
+        groups = groups_or_none(data.get("decorationGroups"))
+        if groups:
+            loaded["decorationGroups"] = groups
+        return loaded
 
     def behavior_path(self, gyaml: str) -> Path:
         safe = (gyaml or "").replace("/", "_").replace("\\", "_")
@@ -250,11 +255,14 @@ class Project:
         banc = diff["banc"]
         path = self.scene_path(banc)
         actors = diff.get("actors") or {}
-        if not actors:
+        groups = groups_or_none(diff.get("decorationGroups"))
+        if not actors and not groups:
             if path.is_file():
                 path.unlink()
             return
         payload = {"format": FORMAT, "banc": banc, "actors": normalize_ids(actors)}
+        if groups:
+            payload["decorationGroups"] = groups
         atomic_write(path, dump_yaml(payload))
 
     def modified_scenes(self) -> list[str]:

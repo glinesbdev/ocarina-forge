@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import multiprocessing
 import os
 import shutil
@@ -42,7 +43,15 @@ from ocarina_forge.models import (
 )
 from ocarina_forge.project import Project
 from ocarina_forge.recipes import recipe_actors
-from ocarina_forge.scene import apply_command, keep_unloaded_diff, replace_diff, scene_view, sibling_bancs
+from ocarina_forge.scene import (
+    apply_command,
+    decoration_group_result,
+    keep_unloaded_diff,
+    replace_diff,
+    scene_view,
+    sibling_bancs,
+    write_decoration_group,
+)
 from ocarina_forge.streamlog import STREAM
 from ocarina_forge.grounddebug import query_ground
 from ocarina_forge.lighting import lighting_report
@@ -1075,6 +1084,13 @@ def edit_scene(body: dict):
         view["focus"] = focus
         _schedule_hot_reload()
         return _apply_load_filter(_attach_recipes(view, banc), str(body.get("load") or ""), str(body.get("textures") or ""))
+    if command.get("command") == "decoration_group":
+        # Membership is editor metadata. The banc bytes do not change, so this
+        # does not rebuild the scene or schedule a hot-reload encode.
+        diff = deepcopy(project.load_scene_diff(banc))
+        focus = write_decoration_group(diff, command, set(dump.actor_hashes(banc)))
+        project.save_scene_diff(diff)
+        return decoration_group_result(banc, diff, focus)
     document, _dict_id, _raw = dump.read_byml(banc)
     diff = project.load_scene_diff(banc)
     updated, focus = apply_command(document, diff, command)
@@ -1095,10 +1111,16 @@ def put_diff(body: dict):
     project = _open_project()
     document, _dict_id, _raw = dump.read_byml(banc)
     stored = project.load_scene_diff(banc)
-    if isinstance(body.get("loaded"), list):
-        updated = keep_unloaded_diff(document, banc, body.get("actors") or {}, stored, body.get("loaded"))
+    if "decorationGroups" in body:
+        groups = body.get("decorationGroups") or {}
     else:
-        updated = replace_diff(document, banc, (body.get("actors") or {}))
+        groups = stored.get("decorationGroups")
+    if isinstance(body.get("loaded"), list):
+        updated = keep_unloaded_diff(
+            document, banc, body.get("actors") or {}, stored, body.get("loaded"), groups,
+        )
+    else:
+        updated = replace_diff(document, banc, (body.get("actors") or {}), groups)
     project.save_scene_diff(updated)
     view = scene_view(document, project.load_scene_diff(banc))
     view["banc"] = banc

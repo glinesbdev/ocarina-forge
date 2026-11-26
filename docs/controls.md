@@ -16,7 +16,10 @@ The editor shows this same list with ? or the Shortcuts button.
 
 ## Selection and editing
 
-- Click: Select the actor under the cursor
+- Click: Select the actor under the cursor. That replaces the selection
+- Shift-click: Add or remove that actor. The gizmo then moves and rotates every selected actor around the selection center, as one undo step
+- Left-drag on empty space: Draw a rectangle and select every actor whose screen box meets it. Shift-drag adds to the selection
+- Ctrl-click or Command-click a decoration: Attach it to the selected parent piece, or detach it. The parent stays selected. Grouped decorations show a teal outline while that parent is selected
 - Alt-click, or click again: Cycle overlapping actors
 - H: Hide or show the selection
 - Delete: Delete the selection
@@ -35,8 +38,8 @@ The editor shows this same list with ? or the Shortcuts button.
 - G: Move
 - R: Rotate
 - Scale button: Scale the selection. S stays fly-back, so scale has no letter.
-- L: Toggle world space and the selected actor's local space. Move and rotate follow it. Scale stays local. The toolbar shows the current space, and this browser remembers it
-- Drag a handle: Transform the selection
+- L: Toggle world space and local space. Move and rotate follow it. With several actors selected, local axes match the primary actor. Scale stays local. The toolbar shows the current space, and this browser remembers it
+- Drag a handle: Transform the selection. Grid snap and ground snap apply to that same move, including a multi-selection
 
 ## Undo and redo
 

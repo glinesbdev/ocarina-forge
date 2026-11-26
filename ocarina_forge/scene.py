@@ -19,6 +19,7 @@ from ocarina_forge.actors import (
     view_actor,
     write_vec,
 )
+from ocarina_forge.decoration_groups import groups_or_none, normalize_groups
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import U64
 from ocarina_forge.values import flatten, from_yaml, set_path, to_yaml, untag
@@ -248,12 +249,14 @@ def scene_view(document: dict, diff: dict) -> dict:
         # becomes an add op, which waits for the next process start.
         row["scaleInFile"] = status == "added" or bool(original and "Scale" in original)
         rows.append(row)
+    groups = normalize_groups(diff.get("decorationGroups"))
     return {
         "banc": diff.get("banc"),
         "actors": rows,
         "removed": removed,
         "warnings": warnings,
-        "diff": {"actors": diff.get("actors") or {}},
+        "decorationGroups": groups,
+        "diff": {"actors": diff.get("actors") or {}, "decorationGroups": groups},
     }
 
 
@@ -320,6 +323,67 @@ def _merged_by_id(document: dict, diff: dict) -> dict[str, dict]:
     return {actor_id(actor): actor for actor, status in zip(actors, statuses) if actor_id(actor) and status != "locked"}
 
 
+def write_decoration_group(diff: dict, command: dict, placed: set[str]) -> str:
+    """Record a membership override. ``placed`` is the hashes already in the banc.
+
+    The caller has already copied ``diff``. This does not read or rebuild actors.
+    """
+    actors = diff.setdefault("actors", {})
+    raw_ids = command.get("ids") if isinstance(command.get("ids"), list) else [command.get("id")]
+    if not raw_ids or raw_ids == [None]:
+        raise BancError("Which decoration should change group?", "edit")
+    parent = command.get("parent")
+    parent_id = format_hash(parse_hash(parent)) if parent else None
+    groups = normalize_groups(diff.get("decorationGroups"))
+    focus = None
+    for raw in raw_ids:
+        child = format_hash(parse_hash(raw))
+        if child not in placed and not _is_added(actors.get(child)):
+            raise BancError(f"No actor {child} is placed in this scene.", "edit")
+        if parent_id:
+            if child == parent_id:
+                raise BancError("A decoration cannot be grouped with itself.", "edit")
+            groups["include"][child] = parent_id
+            groups["exclude"] = [item for item in groups["exclude"] if item != child]
+        else:
+            groups["include"].pop(child, None)
+            if child not in groups["exclude"]:
+                groups["exclude"].append(child)
+        if focus is None:
+            focus = child
+    stored = groups_or_none(groups)
+    if stored:
+        diff["decorationGroups"] = stored
+    else:
+        diff.pop("decorationGroups", None)
+    return focus
+
+
+def decoration_group_result(banc: str, diff: dict, focus: str | None) -> dict:
+    """The edit reply for a membership change. It is not a scene view."""
+    groups = normalize_groups(diff.get("decorationGroups"))
+    return {
+        "banc": banc,
+        "incremental": "decorationGroups",
+        "focus": focus,
+        "decorationGroups": groups,
+        "diff": {"actors": diff.get("actors") or {}, "decorationGroups": groups},
+    }
+
+
+def _apply_transform(base: dict, actors: dict, command: dict) -> str:
+    ident = format_hash(parse_hash(command.get("id")))
+    record = _ensure(base, actors, ident)
+    if "translate" in command:
+        record["translate"] = _three(command["translate"], "Position")
+    if "rotate" in command:
+        record["rotate"] = _three(command["rotate"], "Rotation")
+    if "scale" in command:
+        record["scale"] = _three(command["scale"], "Scale")
+    _prune(base.get(ident), actors, ident, record)
+    return ident
+
+
 def apply_command(document: dict, diff: dict, command: dict) -> tuple[dict, str | None]:
     """Return (new diff, id to select). `document` is the vanilla banc."""
     require_banc(document, diff.get("banc") or "this scene")
@@ -332,16 +396,20 @@ def apply_command(document: dict, diff: dict, command: dict) -> tuple[dict, str 
     focus = None
 
     if name == "transform":
-        ident = format_hash(parse_hash(command.get("id")))
-        record = _ensure(base, actors, ident)
-        if "translate" in command:
-            record["translate"] = _three(command["translate"], "Position")
-        if "rotate" in command:
-            record["rotate"] = _three(command["rotate"], "Rotation")
-        if "scale" in command:
-            record["scale"] = _three(command["scale"], "Scale")
-        _prune(base.get(ident), actors, ident, record)
-        focus = ident
+        focus = _apply_transform(base, actors, command)
+    elif name == "transform_set":
+        members = command.get("actors")
+        if not isinstance(members, list) or not members:
+            raise BancError("A grouped move needs at least one actor.", "edit")
+        focus = format_hash(parse_hash(command.get("id"))) if command.get("id") else None
+        for member in members:
+            if not isinstance(member, dict):
+                raise BancError("Each grouped actor needs a hash and a transform.", "edit")
+            ident = _apply_transform(base, actors, member)
+            if focus is None:
+                focus = ident
+    elif name == "decoration_group":
+        focus = write_decoration_group(diff, command, set(base))
     elif name == "set":
         ident = format_hash(parse_hash(command.get("id")))
         path = str(command.get("path") or "")
@@ -541,8 +609,12 @@ def _pop_nested(root: dict, path: str) -> bool:
     return True
 
 
-def replace_diff(document: dict, banc: str, actors: dict) -> dict:
-    """Replace the whole actor diff. Used by undo and by the YAML importer."""
+def replace_diff(document: dict, banc: str, actors: dict, groups=None) -> dict:
+    """Replace the whole actor diff. Used by undo and by the YAML importer.
+
+    ``groups`` is the editor's decoration override. ``None`` leaves it off
+    the returned diff. An empty mapping clears it.
+    """
     require_banc(document, banc)
     if not isinstance(actors, dict):
         raise BancError("A scene diff is a mapping of actor hash to edit.", "project")
@@ -553,10 +625,15 @@ def replace_diff(document: dict, banc: str, actors: dict) -> dict:
         if record["state"] not in ("edited", "added", "hidden", "removed"):
             raise BancError(f"Edit for {key} has an unknown state {record['state']!r}.", "project")
         cleaned[format_hash(parse_hash(key))] = record
-    return {"format": 1, "banc": banc, "actors": cleaned}
+    result = {"format": 1, "banc": banc, "actors": cleaned}
+    if groups is not None:
+        stored = groups_or_none(groups)
+        if stored:
+            result["decorationGroups"] = stored
+    return result
 
 
-def keep_unloaded_diff(document: dict, banc: str, incoming: dict, stored: dict, loaded_layers) -> dict:
+def keep_unloaded_diff(document: dict, banc: str, incoming: dict, stored: dict, loaded_layers, groups=None) -> dict:
     """Apply ``incoming`` and put back stored edits whose layer was not loaded.
 
     The stored record object is the one that is kept, so a round trip does not
@@ -566,4 +643,9 @@ def keep_unloaded_diff(document: dict, banc: str, incoming: dict, stored: dict, 
 
     cleaned = replace_diff(document, banc, incoming)
     actors = keep_unloaded_edits(cleaned["actors"], (stored or {}).get("actors") or {}, loaded_layers)
-    return {"format": 1, "banc": banc, "actors": actors}
+    result = {"format": 1, "banc": banc, "actors": actors}
+    if groups is not None:
+        kept = groups_or_none(groups)
+        if kept:
+            result["decorationGroups"] = kept
+    return result

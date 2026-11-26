@@ -14,6 +14,7 @@ layer. ``material-debug`` prints the shader assign and the uniforms.
 ``height-diff <results.json>`` compares a height-check scan to Forge terrain and water.
 ``lighting-import <results.json>`` splits a lighting-capture storage JSON into per-scene files in the user data directory.
 ``lighting-survey <banc>`` lists effect actors and GameBancParam key names. It does not invent light values.
+``decoration-report <banc>`` counts decoration links, group-list ties, and how the proximity group treats that file. It does not convert models, so parent boxes are the 3 m stand-in. The editor uses loaded mesh bounds instead.
 ``lighting-mod`` prints how to run the capture mod. ``--install`` copies it into the game's mods/local folder.
 ``collision-follow-test`` writes the Kokiri variant B scene from a dump and exports it. ``--collision-follow off`` is the control. ``--romfs`` also writes a whole-banc mod. Do not enable both at once.
 With no subcommand, the server starts, which is what the builder runs.
@@ -62,6 +63,7 @@ def main(argv: list[str] | None = None) -> None:
             "lighting-import",
             "lighting-survey",
             "lighting-mod",
+            "decoration-report",
         ],
         help="Commands for auditing, editing, and preparing scenes. The default is the editor server.",
     )
@@ -167,6 +169,10 @@ def main(argv: list[str] | None = None) -> None:
         if not args.banc:
             parser.error("lighting-survey needs a banc path")
         raise SystemExit(print_lighting_survey(args.banc, dump=args.dump, as_json=args.json, out=args.out))
+    if args.command == "decoration-report":
+        if not args.banc:
+            parser.error("decoration-report needs a banc path")
+        raise SystemExit(print_decoration_report(args.banc, dump=args.dump, as_json=args.json))
     if args.command == "lighting-mod":
         # The flag is also read from argv. A probe install must not depend on
         # the store_true attribute alone: the 6409840 run left the dynamic entry.
@@ -538,6 +544,38 @@ def print_lighting_survey(banc: str, *, dump: str | None = None, as_json: bool =
         print(json.dumps(report, indent=2))
     else:
         print(render_report(report), end="")
+    return 0
+
+
+def print_decoration_report(banc: str, *, dump: str | None = None, as_json: bool = False) -> int:
+    """Print how proximity grouping treats one banc. 2 when the dump is missing."""
+    from ocarina_forge.config import load_config
+    from ocarina_forge.decoration_groups import measure, render_measure
+    from ocarina_forge.dump import Dump
+    from ocarina_forge.errors import BancError
+
+    config = load_config()
+    dump_path = dump or config.get("dump") or ""
+    if not dump_path:
+        print("No dump is configured. Pass --dump, or set one in the editor.", file=sys.stderr)
+        return 2
+    try:
+        opened = Dump(dump_path)
+        document, _dict_id, _raw = opened.read_byml(banc)
+        report = measure(document)
+    except (BancError, OSError, ValueError) as exc:
+        print(getattr(exc, "message", None) or str(exc), file=sys.stderr)
+        return 2
+    report["bounds"] = "fallback"
+    report["note"] = (
+        "This report does not convert meshes. Parent boxes are the 3 m stand-in. "
+        "The editor uses the loaded mesh bounds, expanded by 1.5 m, and keeps the smallest box."
+    )
+    if as_json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_measure(report), end="")
+        print(report["note"])
     return 0
 
 
