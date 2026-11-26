@@ -171,7 +171,15 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   background: #24302a;
 }
 .actor-row[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--gold); }
-.actor-row.is-grouped:not([aria-selected="true"]) { box-shadow: inset 3px 0 0 color-mix(in srgb, var(--gold) 55%, transparent); }
+.actor-row.is-grouped:not([aria-selected="true"]) { box-shadow: inset 3px 0 0 #7ec8c3; }
+.actor-row.is-multi:not([aria-selected="true"]) { box-shadow: inset 3px 0 0 var(--gold); }
+.marquee {
+  position: absolute;
+  border: 1px solid var(--gold);
+  background: color-mix(in srgb, var(--gold) 16%, transparent);
+  pointer-events: none;
+  z-index: 5;
+}
 .decoration-group { display: grid; gap: 6px; margin: 8px 0 14px; }
 .decoration-group .actions { margin: 0; }
 .change-row {

@@ -323,6 +323,54 @@ def _merged_by_id(document: dict, diff: dict) -> dict[str, dict]:
     return {actor_id(actor): actor for actor, status in zip(actors, statuses) if actor_id(actor) and status != "locked"}
 
 
+def write_decoration_group(diff: dict, command: dict, placed: set[str]) -> str:
+    """Record a membership override. ``placed`` is the hashes already in the banc.
+
+    The caller has already copied ``diff``. This does not read or rebuild actors.
+    """
+    actors = diff.setdefault("actors", {})
+    raw_ids = command.get("ids") if isinstance(command.get("ids"), list) else [command.get("id")]
+    if not raw_ids or raw_ids == [None]:
+        raise BancError("Which decoration should change group?", "edit")
+    parent = command.get("parent")
+    parent_id = format_hash(parse_hash(parent)) if parent else None
+    groups = normalize_groups(diff.get("decorationGroups"))
+    focus = None
+    for raw in raw_ids:
+        child = format_hash(parse_hash(raw))
+        if child not in placed and not _is_added(actors.get(child)):
+            raise BancError(f"No actor {child} is placed in this scene.", "edit")
+        if parent_id:
+            if child == parent_id:
+                raise BancError("A decoration cannot be grouped with itself.", "edit")
+            groups["include"][child] = parent_id
+            groups["exclude"] = [item for item in groups["exclude"] if item != child]
+        else:
+            groups["include"].pop(child, None)
+            if child not in groups["exclude"]:
+                groups["exclude"].append(child)
+        if focus is None:
+            focus = child
+    stored = groups_or_none(groups)
+    if stored:
+        diff["decorationGroups"] = stored
+    else:
+        diff.pop("decorationGroups", None)
+    return focus
+
+
+def decoration_group_result(banc: str, diff: dict, focus: str | None) -> dict:
+    """The edit reply for a membership change. It is not a scene view."""
+    groups = normalize_groups(diff.get("decorationGroups"))
+    return {
+        "banc": banc,
+        "incremental": "decorationGroups",
+        "focus": focus,
+        "decorationGroups": groups,
+        "diff": {"actors": diff.get("actors") or {}, "decorationGroups": groups},
+    }
+
+
 def _apply_transform(base: dict, actors: dict, command: dict) -> str:
     ident = format_hash(parse_hash(command.get("id")))
     record = _ensure(base, actors, ident)
@@ -361,33 +409,7 @@ def apply_command(document: dict, diff: dict, command: dict) -> tuple[dict, str 
             if focus is None:
                 focus = ident
     elif name == "decoration_group":
-        raw_ids = command.get("ids") if isinstance(command.get("ids"), list) else [command.get("id")]
-        if not raw_ids or raw_ids == [None]:
-            raise BancError("Which decoration should change group?", "edit")
-        parent = command.get("parent")
-        parent_id = format_hash(parse_hash(parent)) if parent else None
-        groups = normalize_groups(diff.get("decorationGroups"))
-        focus = None
-        for raw in raw_ids:
-            child = format_hash(parse_hash(raw))
-            if child not in base and not _is_added(actors.get(child)):
-                raise BancError(f"No actor {child} is placed in this scene.", "edit")
-            if parent_id:
-                if child == parent_id:
-                    raise BancError("A decoration cannot be grouped with itself.", "edit")
-                groups["include"][child] = parent_id
-                groups["exclude"] = [item for item in groups["exclude"] if item != child]
-            else:
-                groups["include"].pop(child, None)
-                if child not in groups["exclude"]:
-                    groups["exclude"].append(child)
-            if focus is None:
-                focus = child
-        stored = groups_or_none(groups)
-        if stored:
-            diff["decorationGroups"] = stored
-        else:
-            diff.pop("decorationGroups", None)
+        focus = write_decoration_group(diff, command, set(base))
     elif name == "set":
         ident = format_hash(parse_hash(command.get("id")))
         path = str(command.get("path") or "")

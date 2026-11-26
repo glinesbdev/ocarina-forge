@@ -1,11 +1,14 @@
 """Decoration groups are inferred. The banc has no parent field."""
 
 from ocarina_forge.actors import format_hash, make_actor, read_vec
+import json
+import time
+
 from ocarina_forge.decoration_groups import measure, resolve_groups, transform_point
 from ocarina_forge.errors import BancError
 from ocarina_forge.formats.byml import U64
 from ocarina_forge.project import Project
-from ocarina_forge.scene import apply_command, export_document, scene_view
+from ocarina_forge.scene import apply_command, decoration_group_result, export_document, scene_view, write_decoration_group
 
 BANC = "Banc/Test/Test_Static.bcett.byml.zs"
 HOUSE = 0x10
@@ -161,6 +164,42 @@ def test_grouped_move_exports_transforms_and_not_the_group(tmp_path):
     assert project.scene_path(BANC).is_file()
     project.save_scene_diff({"format": 1, "banc": BANC, "actors": {}})
     assert not project.scene_path(BANC).is_file()
+
+
+def test_membership_edit_does_not_rebuild_the_scene_view():
+    """The old path parsed the banc, built every actor row, and encoded JSON for all of them.
+
+    On 4,000 actors that view was the multi-hundred-millisecond part of the click.
+    Hot reload then re-encoded the banc even though a group override does not
+    change it. The reply below is the override only.
+    """
+    actors = [make_actor("Land_House_A_01", HOUSE, [10, 0, 10]), make_actor("Land_IvyClimbable_A_01", IVY, [12, 3, 10])]
+    for index in range(4000):
+        actors.append(make_actor("Obj_Grass_A" if index % 4 == 0 else "Obj_Tree", 0x1000000000000000 + index, [index % 80, 0, index // 80]))
+    document = {"Actors": actors}
+    diff = {"format": 1, "banc": BANC, "actors": {}}
+    placed = {format_hash(HOUSE), format_hash(IVY)}
+    started = time.perf_counter()
+    updated = dict(diff)
+    focus = write_decoration_group(updated, {"command": "decoration_group", "id": format_hash(IVY), "parent": format_hash(HOUSE)}, placed)
+    payload = decoration_group_result(BANC, updated, focus)
+    encoded = json.dumps(payload)
+    fast = time.perf_counter() - started
+    started = time.perf_counter()
+    view = scene_view(document, updated)
+    json.dumps({"actors": view["actors"][:1]})
+    slow_setup = time.perf_counter() - started
+    started = time.perf_counter()
+    full = json.dumps(scene_view(document, updated))
+    slow = time.perf_counter() - started
+    assert payload["incremental"] == "decorationGroups"
+    assert "actors" not in payload
+    assert payload["decorationGroups"]["include"][format_hash(IVY)] == format_hash(HOUSE)
+    assert len(encoded) < 500
+    assert len(full) > 100_000
+    assert fast < 0.05
+    assert slow > fast * 10
+    assert slow_setup >= 0
 
 
 def test_group_command_rejects_a_missing_actor_and_a_self_group():

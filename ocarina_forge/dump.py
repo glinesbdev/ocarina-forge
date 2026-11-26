@@ -22,6 +22,7 @@ _READ_LOCK = threading.Lock()
 _READ_CACHE: dict[tuple, tuple[bytes, int | None]] = {}
 _READ_ORDER: deque[tuple] = deque()
 _READ_BYTES = 0
+_HASH_CACHE: dict[tuple, frozenset[str]] = {}
 
 
 def _recall_read(key: tuple) -> tuple[bytes, int | None] | None:
@@ -153,6 +154,37 @@ class Dump:
             return loads(payload), dict_id, payload
         except ValueError as exc:
             raise BancError(f"{relative} is not a BYML file Ocarina Forge can read: {exc}", "bad_byml") from exc
+
+    def actor_hashes(self, relative: str) -> frozenset[str]:
+        """Hashes placed in one banc. The parsed file is not kept, and the set is.
+
+        A membership edit only needs to know the actor is there. Rebuilding the
+        scene view, or parsing the banc again on the next click, is what made
+        grouping stall.
+        """
+        path = self.romfs / relative
+        if not path.is_file():
+            raise BancError(f"{relative} is not in this dump ({self.romfs}).", "not_found")
+        try:
+            st = path.stat()
+        except OSError as exc:
+            raise BancError(f"Cannot read {relative}: {exc}", "not_found") from exc
+        key = (str(path), st.st_size, st.st_mtime_ns)
+        cached = _HASH_CACHE.get(key)
+        if cached is not None:
+            return cached
+        from ocarina_forge.actors import actor_id
+
+        document, _dict_id, _raw = self.read_byml(relative)
+        found = []
+        for actor in document.get("Actors") or []:
+            if isinstance(actor, dict):
+                ident = actor_id(actor)
+                if ident:
+                    found.append(ident)
+        hashes = frozenset(found)
+        _HASH_CACHE[key] = hashes
+        return hashes
 
     def rstb_relative(self) -> str | None:
         preferred = self.romfs / RSTB_REL

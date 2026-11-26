@@ -38,6 +38,7 @@ import {
   groupPanel,
   resolveDecorationGroups,
 } from "./decoration-groups.js";
+import { groupToggle, toggleId } from "./selection.js";
 import {
   LAYERS,
   LAYER_LABELS,
@@ -126,6 +127,7 @@ const state = {
   banc: null,
   view: null,
   selected: null,
+  selection: [],
   history: blankHistory(null),
   showHidden: false,
   showLabels: true,
@@ -246,13 +248,33 @@ viewport = await createViewport($("viewport"), {
     sceneTerrainReady = true;
     if (sceneActorsReady) finishSceneViewerLoad();
   },
-  onSelect: (id) => {
+  onSelect: (id, event) => {
+    if (event && (event.ctrlKey || event.metaKey) && id && toggleGroupedDecoration(id)) return;
+    if (event && event.shiftKey && id) {
+      const ids = toggleId(state.selection || [], id);
+      state.selection = ids;
+      state.selected = ids.includes(id) ? id : (ids[ids.length - 1] || null);
+      viewport.setSelection(state.selected, state.selection);
+      renderOutliner({ reveal: "viewport" });
+      renderProps();
+      noteCompanion();
+      return;
+    }
+    state.selection = id ? [id] : [];
     state.selected = id;
     viewport.select(id);
     renderOutliner({ reveal: "viewport" });
     renderProps();
     noteCompanion();
     if (id && window.matchMedia("(max-width: 980px)").matches) showTab("props");
+  },
+  onMarquee: (ids) => {
+    state.selection = ids || [];
+    state.selected = state.selection[0] || null;
+    viewport.setSelection(state.selected, state.selection);
+    renderOutliner({ reveal: "viewport" });
+    renderProps();
+    noteCompanion();
   },
   onPreview: (id, translate, rotate, scale) => {
     if (id !== state.selected) return;
@@ -1623,9 +1645,25 @@ function currentDecorationGroups() {
 let decorationSelection = new Set();
 
 function syncDecorationSelection() {
-  const ids = state.view ? followersFor(state.selected, currentDecorationGroups()) : [];
+  const resolved = state.view ? currentDecorationGroups() : null;
+  const chosen = new Set(state.selection || []);
+  const ids = [];
+  if (resolved) {
+    for (const id of chosen) {
+      for (const child of followersFor(id, resolved)) {
+        if (!chosen.has(child)) ids.push(child);
+      }
+    }
+  }
   decorationSelection = new Set(ids);
   if (viewport && viewport.setGroupHighlight) viewport.setGroupHighlight(ids);
+}
+
+function toggleGroupedDecoration(id) {
+  const change = groupToggle(actorRecord(state.selected), actorRecord(id), currentDecorationGroups());
+  if (change === undefined) return false;
+  setDecorationParent([change.childId], change.parentId);
+  return true;
 }
 
 function moveWithDecorations(id, pose, followers) {
@@ -1639,14 +1677,23 @@ function moveWithDecorations(id, pose, followers) {
     rotate: pose.rotate,
     scale: pose.scale,
   }];
+  let selectedCount = 1;
+  let decorationCount = 0;
   for (const child of followers) {
     const actor = actorRecord(child.id) || actorRecord(child.key);
-    rows.push({
+    const hash = actor ? placementHash(actor) : child.id;
+    if (hash === parentHash) continue;
+    const row = {
       banc: (actor && actor.banc) || parentBanc,
-      id: actor ? placementHash(actor) : child.id,
+      id: hash,
       translate: (child.translate || []).map(round4),
       rotate: (child.rotate || []).map(round4),
-    });
+    };
+    if (child.role === "selected") {
+      row.scale = (child.scale || [1, 1, 1]).map(round4);
+      selectedCount += 1;
+    } else decorationCount += 1;
+    rows.push(row);
   }
   const byBanc = new Map();
   for (const row of rows) {
@@ -1654,9 +1701,10 @@ function moveWithDecorations(id, pose, followers) {
     list.push(row);
     byBanc.set(row.banc, list);
   }
-  const count = followers.length;
   const name = (parent && (parent.name || parent.gyaml)) || "piece";
-  const label = `Move ${name} · ${count} decoration${count === 1 ? "" : "s"}`;
+  const label = selectedCount > 1
+    ? `Move ${selectedCount} actors`
+    : `Move ${name} · ${decorationCount} decoration${decorationCount === 1 ? "" : "s"}`;
   const commands = [...byBanc.entries()].map(([banc, actors]) => ({
     banc,
     command: {
@@ -1746,7 +1794,11 @@ function applyView(view, { frame = false, select, forceSceneLoad = false } = {})
   state.view = composed;
   if (select !== undefined) state.selected = select;
   else if (filtered.focus) state.selected = filtered.focus;
-  if (state.selected && !composed.actors.some((actor) => actor.id === state.selected)) state.selected = null;
+  const alive = new Set((composed.actors || []).map((actor) => actor.id));
+  state.selection = (state.selection || []).filter((id) => alive.has(id));
+  if (state.selected && !alive.has(state.selected)) state.selected = null;
+  if (state.selected && !state.selection.includes(state.selected)) state.selection = [state.selected, ...state.selection];
+  if (!state.selected) state.selected = state.selection[0] || null;
   const plan = frame ? { mode: "rebuild" } : planActorRefresh(previousActors, composed.actors);
   const patched = plan.mode === "keep" || (plan.mode === "patch" && viewport.patchActors(plan.actors));
   const previewUrl = fullVisual(state.load) ? filtered.previewUrl : null;
@@ -1757,7 +1809,7 @@ function applyView(view, { frame = false, select, forceSceneLoad = false } = {})
     state.terrainNotes = [];
     viewport.setActors(composed.actors, { frame, banc: filtered.banc, previewUrl, terrain });
   }
-  viewport.select(state.selected);
+  viewport.setSelection(state.selected, state.selection);
   viewport.setFlags({ hidden: state.showHidden, labels: state.showLabels, visibleLayers: state.load && state.load.visible });
   refreshLinkGizmos();
   loadLighting(view.banc || state.banc);
@@ -1924,7 +1976,8 @@ function applyLocal(shot) {
     viewport.setActors(nextActors, { frame: false, banc: state.banc });
   }
   state.selected = shot.select && nextActors.some((actor) => actor.id === shot.select) ? shot.select : null;
-  viewport.select(state.selected);
+  state.selection = state.selected ? [state.selected] : [];
+  viewport.setSelection(state.selected, state.selection);
   if (state.banc) {
     if (diffTouched(state.raw.diff)) state.modified.add(state.banc);
     else state.modified.delete(state.banc);
@@ -1949,6 +2002,14 @@ async function edit(command, labelOverride) {
   await persistChain;
   try {
     const view = await api.edit(target.banc, target.command, { load: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
+    if (view && view.incremental === "decorationGroups") {
+      applyGroupEdit(view, target.banc);
+      state.history = pushEdit(state.history, { label, shot: captureShot() });
+      renderScenes();
+      renderChanges();
+      updateHistoryButtons();
+      return;
+    }
     if (target.banc !== state.banc && state.raw) {
       const companions = (state.raw.companions || []).map((item) =>
         item.banc === target.banc
@@ -1989,10 +2050,23 @@ async function editBundle(commands, label, selectId) {
   try {
     let hostView = null;
     const patched = new Map();
+    let sawFull = false;
     for (const item of commands) {
       const view = await api.edit(item.banc, item.command, { load: loadQuery(state.load), textures: state.load.textures ? "1" : "0" });
+      if (view && view.incremental === "decorationGroups") {
+        applyGroupEdit(view, item.banc);
+        continue;
+      }
+      sawFull = true;
       if (item.banc === state.banc) hostView = view;
       else patched.set(item.banc, view);
+    }
+    if (!sawFull) {
+      state.history = pushEdit(state.history, { label, shot: captureShot() });
+      renderScenes();
+      renderChanges();
+      updateHistoryButtons();
+      return;
     }
     const base = hostView || state.raw;
     if (base) {
@@ -2397,6 +2471,7 @@ function actorRow(actor) {
   button.setAttribute("aria-selected", actor.id && actor.id === state.selected ? "true" : "false");
   if (actor.id) button.setAttribute("data-actor-id", String(actor.id));
   if (decorationSelection.has(actor.id)) button.classList.add("is-grouped");
+  if ((state.selection || []).includes(actor.id) && actor.id !== state.selected) button.classList.add("is-multi");
   const swatch = document.createElement("i");
   swatch.className = `swatch ${actor.category}`;
   const text = document.createElement("span");
@@ -2415,7 +2490,19 @@ function actorRow(actor) {
     badge.textContent = actor.status === "recipe" ? "build" : actor.status;
     button.append(badge);
   }
-  button.addEventListener("click", () => {
+  button.addEventListener("click", (event) => {
+    if ((event.ctrlKey || event.metaKey) && toggleGroupedDecoration(actor.id)) return;
+    if (event.shiftKey) {
+      const ids = toggleId(state.selection || [], actor.id);
+      state.selection = ids;
+      state.selected = ids.includes(actor.id) ? actor.id : (ids[ids.length - 1] || null);
+      viewport.setSelection(state.selected, state.selection);
+      renderOutliner({ reveal: "panel" });
+      renderProps();
+      noteCompanion();
+      return;
+    }
+    state.selection = actor.id ? [actor.id] : [];
     state.selected = actor.id;
     viewport.select(actor.id);
     renderOutliner({ reveal: "panel" });
@@ -2490,67 +2577,69 @@ function renderFilters() {
   }
 }
 
+function applyGroupEdit(view, banc) {
+  if (!state.raw || !view) return;
+  const groups = view.decorationGroups || { include: {}, exclude: [] };
+  if (banc === state.banc) {
+    state.raw = {
+      ...state.raw,
+      decorationGroups: groups,
+      diff: {
+        ...(state.raw.diff || {}),
+        actors: (view.diff && view.diff.actors) || (state.raw.diff && state.raw.diff.actors) || {},
+        decorationGroups: groups,
+      },
+    };
+  } else {
+    state.raw = {
+      ...state.raw,
+      companions: (state.raw.companions || []).map((item) => (
+        item.banc === banc
+          ? {
+            ...item,
+            diff: {
+              ...(item.diff || {}),
+              actors: (view.diff && view.diff.actors) || (item.diff && item.diff.actors) || {},
+              decorationGroups: groups,
+            },
+          }
+          : item
+      )),
+    };
+  }
+  const touched = banc === state.banc
+    ? state.raw.diff
+    : ((state.raw.companions || []).find((item) => item.banc === banc) || {}).diff;
+  if (diffTouched(touched)) state.modified.add(banc);
+  else state.modified.delete(banc);
+  syncDecorationSelection();
+  renderOutliner();
+  renderProps();
+  noteCompanion();
+}
+
 function renderDecorationGroup(panel, actor) {
   const info = groupPanel(actor, (state.view && state.view.actors) || [], currentDecorationGroups());
   if (!info) return;
   const box = document.createElement("section");
   box.className = "decoration-group";
   const title = document.createElement("h3");
-  title.textContent = "Decorations";
   const note = document.createElement("p");
   note.className = "muted";
-  box.append(title, note);
   if (info.role === "decoration") {
     title.textContent = "Moves with";
-    if (info.parentId) {
-      note.textContent = `${info.parentName}. Dragging that piece moves this one. Dragging this one leaves the piece where it is.`;
-      const row = document.createElement("div");
-      row.className = "actions";
-      row.append(action("Remove from group", () => setDecorationParent([actor.id], null)));
-      box.append(row);
-    } else {
-      note.textContent = "This decoration moves on its own. Group it with a nearby piece to drag them together.";
-    }
-    for (const parent of info.alternatives.slice(0, 8)) {
-      const row = document.createElement("div");
-      row.className = "actions";
-      row.append(action(`Group with ${parent.name || parent.gyaml}`, () => setDecorationParent([actor.id], parent.id)));
-      box.append(row);
-    }
-    panel.append(box);
-    return;
+    note.textContent = info.parentId
+      ? `${info.parentName}. It is highlighted with this piece. Ctrl-click it, or Command-click it, to detach it without leaving the piece. Dragging the decoration alone leaves the piece where it is.`
+      : "This decoration moves on its own. Select a piece, then Ctrl-click this decoration (Command-click on a Mac) to group them. The piece stays selected.";
+  } else {
+    const count = info.members.length;
+    const many = (state.selection || []).length;
+    title.textContent = many > 1 ? `${many} selected` : "Decorations";
+    note.textContent = count
+      ? `${count} decoration${count === 1 ? "" : "s"} move and turn with this piece. They stay outlined while this piece is selected. Ctrl-click one to detach it. Scale does not move them. The Decorations layer has to be loaded.`
+      : "No decoration is grouped with this piece. Ctrl-click a decoration (Command-click on a Mac) to attach it. This piece stays selected. The Decorations layer has to be loaded.";
   }
-  const count = info.members.length;
-  note.textContent = count
-    ? `${count} decoration${count === 1 ? "" : "s"} move and turn with this piece. Scale does not. The Decorations layer has to be loaded.`
-    : "No decoration is grouped with this piece. Nearby ones can be added. The Decorations layer has to be loaded.";
-  const shown = info.members.slice(0, 24);
-  for (const member of shown) {
-    const row = document.createElement("div");
-    row.className = "actions";
-    const label = document.createElement("span");
-    label.textContent = member.name || member.gyaml;
-    row.append(label, action("Remove", () => setDecorationParent([member.id], null)));
-    box.append(row);
-  }
-  if (count > shown.length) {
-    const more = document.createElement("p");
-    more.className = "muted";
-    more.textContent = `${count - shown.length} more. Remove all clears every one.`;
-    box.append(more);
-  }
-  if (count) {
-    const row = document.createElement("div");
-    row.className = "actions";
-    row.append(action("Remove all", () => setDecorationParent(info.members.map((member) => member.id), null)));
-    box.append(row);
-  }
-  for (const candidate of info.candidates.slice(0, 8)) {
-    const row = document.createElement("div");
-    row.className = "actions";
-    row.append(action(`Add ${candidate.name || candidate.gyaml}`, () => setDecorationParent([candidate.id], actor.id)));
-    box.append(row);
-  }
+  box.append(title, note);
   panel.append(box);
 }
 
@@ -2562,7 +2651,7 @@ function renderProps() {
   panel.replaceChildren();
   const actor = selectedActor();
   if (!actor) {
-    panel.append(empty("Select an actor in the view or the list. Move, Rotate, and Scale use the gizmo. G moves, R rotates, F frames."));
+    panel.append(empty("Select an actor in the view or the list. Shift-click adds to the selection. Drag a box on empty space to select several. Move and Rotate use the gizmo. G moves, R rotates, F frames."));
     return;
   }
   const head = document.createElement("div");

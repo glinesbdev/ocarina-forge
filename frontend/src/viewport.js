@@ -38,6 +38,7 @@ import { buildCapture, countTextures, createProfileWindow, formatProfileHud, rec
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { followDecoration } from "./decoration-groups.js";
+import { marqueeIds, normalizeRect } from "./selection.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
@@ -293,9 +294,13 @@ export async function createViewport(host, hooks) {
   renderer.domElement.addEventListener("pointermove", () => {
     if (!transform.dragging || dragPlaneY == null || transform.axis === "Y") return;
     const entry = selected ? entries.get(selected) : null;
-    if (!entry) return;
-    entry.pivot.position.y = dragPlaneY;
-    entry.pivot.updateMatrixWorld(true);
+    const pivot = selection.size > 1 && transform.object === selectionPivot
+      ? selectionPivot
+      : entry && entry.pivot;
+    if (!pivot) return;
+    if (entry && pivot === entry.pivot) entry.pivot.position.y = dragPlaneY;
+    else pivot.position.y = dragPlaneY;
+    pivot.updateMatrixWorld(true);
     transform._root.updateMatrixWorld(true);
   }, true);
   scene.add(transform.getHelper());
@@ -507,9 +512,19 @@ let convertSlots = 8;
   let lastClick = null;
   let grid = null;
   let selected = null;
+  let selection = new Set();
   let hovered = null;
   let groupHighlight = new Set();
   let followHome = null;
+  const selectionPivot = new THREE.Object3D();
+  selectionPivot.rotation.order = "ZYX";
+  selectionPivot.name = "selection-pivot";
+  scene.add(selectionPivot);
+  const marqueeEl = document.createElement("div");
+  marqueeEl.className = "marquee";
+  marqueeEl.hidden = true;
+  host.append(marqueeEl);
+  let marqueeDrag = null;
   let showLabels = false;
   let showHidden = false;
   let looking = false;
@@ -1235,29 +1250,97 @@ let convertSlots = 8;
     };
   }
 
+  function poseOfPivot(pivot) {
+    return {
+      translate: pivot.position.toArray(),
+      rotate: fileRotate(pivot),
+      scale: pivotScale(pivot),
+    };
+  }
+
+  function decorationIdsFor(ids) {
+    if (!hooks.decorationFollowers) return [];
+    const found = [];
+    const seen = new Set(ids);
+    for (const id of ids) {
+      for (const childId of hooks.decorationFollowers(id) || []) {
+        if (seen.has(childId)) continue;
+        seen.add(childId);
+        found.push(childId);
+      }
+    }
+    return found;
+  }
+
   function captureFollow(entry) {
     followHome = null;
-    if (!entry || !entry.id || transform.mode === "scale") return;
-    const ids = hooks.decorationFollowers ? hooks.decorationFollowers(entry.key) : [];
-    const children = (ids || [])
-      .map((id) => entries.get(id))
-      .filter((child) => child && child.pivot && child.key !== entry.key)
-      .map((child) => ({ key: child.key, id: child.id, before: poseOf(child) }));
+    const multi = selection.size > 1;
+    if (transform.mode === "scale" && !multi) return;
+    if (!multi && (!entry || !entry.id)) return;
+    const selectedIds = multi ? [...selection] : [entry.key];
+    const children = [];
+    if (multi) {
+      for (const id of selectedIds) {
+        const child = entries.get(id);
+        if (!child || !child.pivot) continue;
+        children.push({ key: child.key, id: child.id, before: poseOf(child), role: "selected" });
+      }
+    }
+    if (transform.mode !== "scale") {
+      const parents = multi ? selectedIds : [entry.key];
+      for (const childId of decorationIdsFor(parents)) {
+        const child = entries.get(childId);
+        if (!child || !child.pivot) continue;
+        children.push({ key: child.key, id: child.id, before: poseOf(child), role: "decoration" });
+      }
+    }
     if (!children.length) return;
-    followHome = { key: entry.key, before: poseOf(entry), children };
+    followHome = {
+      key: multi ? "__selection__" : entry.key,
+      multi,
+      before: multi ? poseOfPivot(selectionPivot) : poseOf(entry),
+      children,
+    };
+  }
+
+  function applyFollowedPose(target, next, role) {
+    target.pivot.position.fromArray(next.translate);
+    target.pivot.rotation.set(next.rotate[0], next.rotate[1], next.rotate[2]);
+    if (role === "selected") target.pivot.scale.fromArray(next.scale);
+    syncPreviewPlacement(target);
+    syncInstanceMatrix(target);
   }
 
   function syncFollow(entry) {
-    if (!followHome || !entry || entry.key !== followHome.key || transform.mode === "scale") return;
+    if (!followHome) return;
+    const multi = followHome.multi;
+    if (multi) {
+      if (transform.object !== selectionPivot) return;
+      const after = poseOfPivot(selectionPivot);
+      if (transform.mode === "scale") {
+        for (const child of followHome.children) {
+          const target = entries.get(child.key);
+          if (!target) continue;
+          const base = child.before.scale;
+          target.pivot.scale.set(base[0] * after.scale[0], base[1] * after.scale[1], base[2] * after.scale[2]);
+          syncPreviewPlacement(target);
+          syncInstanceMatrix(target);
+        }
+        return;
+      }
+      for (const child of followHome.children) {
+        const target = entries.get(child.key);
+        if (!target) continue;
+        applyFollowedPose(target, followDecoration(followHome.before, after, child.before), child.role);
+      }
+      return;
+    }
+    if (!entry || entry.key !== followHome.key || transform.mode === "scale") return;
     const after = poseOf(entry);
     for (const child of followHome.children) {
       const target = entries.get(child.key);
       if (!target) continue;
-      const next = followDecoration(followHome.before, after, child.before);
-      target.pivot.position.fromArray(next.translate);
-      target.pivot.rotation.set(next.rotate[0], next.rotate[1], next.rotate[2]);
-      syncPreviewPlacement(target);
-      syncInstanceMatrix(target);
+      applyFollowedPose(target, followDecoration(followHome.before, after, child.before), child.role);
     }
   }
 
@@ -1266,7 +1349,9 @@ let convertSlots = 8;
     return followHome.children.map((child) => {
       const target = entries.get(child.key);
       const pose = target ? poseOf(target) : child.before;
-      return { id: child.id, key: child.key, translate: pose.translate, rotate: pose.rotate };
+      const row = { id: child.id, key: child.key, translate: pose.translate, rotate: pose.rotate, role: child.role || "decoration" };
+      if (row.role === "selected") row.scale = pose.scale;
+      return row;
     });
   }
 
@@ -1291,14 +1376,16 @@ let convertSlots = 8;
 
   function paint(entry) {
     const on = entry.key === selected;
-    const grouped = groupHighlight.has(entry.key);
+    const multi = selection.has(entry.key) && !on;
+    const grouped = groupHighlight.has(entry.key) && !selection.has(entry.key);
     const marked = entry.status === "edited" || entry.status === "added" || entry.status === "recipe";
     const ghost = !entry.parts || !entry.parts.length;
     entry.material.depthWrite = false;
     if (!(ghost && entry.volume)) {
-      entry.material.opacity = on ? 0.1 : grouped ? 0.08 : entry.status === "hidden" ? 0.02 : 0.04;
-      entry.edgeMaterial.color.set(on || grouped || marked ? 0xf2d7a2 : entry.color);
-      entry.edgeMaterial.opacity = on ? 1 : grouped ? 0.95 : 0.82;
+      entry.material.opacity = on ? 0.1 : multi || grouped ? 0.08 : entry.status === "hidden" ? 0.02 : 0.04;
+      const edge = on || multi ? 0xf2d7a2 : grouped ? 0x7ec8c3 : marked ? 0xf2d7a2 : entry.color;
+      entry.edgeMaterial.color.set(edge);
+      entry.edgeMaterial.opacity = on ? 1 : multi ? 0.95 : grouped ? 0.9 : 0.82;
     }
     syncGhost(entry);
     tintInstance(entry);
@@ -1340,8 +1427,8 @@ let convertSlots = 8;
       }
       ensureLabel(entry);
       entry.label.visible = true;
-      entry.label.element.classList.toggle("is-selected", entry.key === selected);
-      entry.label.element.classList.toggle("is-grouped", groupHighlight.has(entry.key));
+      entry.label.element.classList.toggle("is-selected", entry.key === selected || selection.has(entry.key));
+      entry.label.element.classList.toggle("is-grouped", groupHighlight.has(entry.key) && !selection.has(entry.key));
     }
   }
 
@@ -2656,7 +2743,8 @@ let convertSlots = 8;
     else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
     else target.setRGB(1, 1, 1);
     if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
-    else if (groupHighlight.has(entry.key)) target.lerp(new THREE.Color(0xf2d7a2), 0.45);
+    else if (selection.has(entry.key)) target.lerp(new THREE.Color(0xf2d7a2), 0.55);
+    else if (groupHighlight.has(entry.key)) target.lerp(new THREE.Color(0x7ec8c3), 0.4);
     return target;
   }
 
@@ -3933,17 +4021,59 @@ uniform float terrainLayerMissing;`
     }
   }
 
+  function gizmoEntry(entry) {
+    return Boolean(entry && canGizmo({ id: entry.id, shown: entry.pivot.visible, locked: entry.locked }));
+  }
+
+  function placeSelectionPivot() {
+    const members = [...selection].map((id) => entries.get(id)).filter(gizmoEntry);
+    if (!members.length) return false;
+    const center = new THREE.Vector3();
+    for (const entry of members) center.add(entry.pivot.position);
+    center.multiplyScalar(1 / members.length);
+    selectionPivot.position.copy(center);
+    selectionPivot.scale.set(1, 1, 1);
+    const primary = entries.get(selected);
+    if (primary) selectionPivot.rotation.copy(primary.pivot.rotation);
+    else selectionPivot.rotation.set(0, 0, 0);
+    selectionPivot.updateMatrix();
+    return true;
+  }
+
   function attach() {
-    const entry = selected ? entries.get(selected) : null;
-    if (!entry || !canGizmo({ id: entry.id, shown: entry.pivot.visible, locked: entry.locked })) {
+    const members = [...selection].map((id) => entries.get(id)).filter(gizmoEntry);
+    if (!members.length) {
       transform.detach();
       return;
     }
-    transform.attach(entry.pivot);
+    if (members.length === 1) {
+      transform.attach(members[0].pivot);
+      return;
+    }
+    if (!placeSelectionPivot()) {
+      transform.detach();
+      return;
+    }
+    transform.attach(selectionPivot);
   }
 
   function select(id) {
-    selected = id;
+    selected = id || null;
+    selection = new Set(selected ? [selected] : []);
+    releaseUnselectedPartGeometry();
+    nextDetailScan = 0;
+    prioritizeLoad();
+    for (const entry of entries.values()) paint(entry);
+    syncBatchVisibility();
+    attach();
+    syncLabels();
+    requestRender();
+  }
+
+  function setSelection(primary, ids) {
+    selection = new Set((ids || []).filter(Boolean));
+    selected = primary && selection.has(primary) ? primary : ([...selection][0] || null);
+    if (selected) selection.add(selected);
     releaseUnselectedPartGeometry();
     nextDetailScan = 0;
     prioritizeLoad();
@@ -4354,6 +4484,12 @@ uniform float terrainLayerMissing;`
     const dragged = entries.get(ignoreId);
     const ids = [ignoreId];
     if (dragged) ids.push(dragged.id, dragged.key);
+    if (selection.size > 1) {
+      for (const id of selection) {
+        const member = entries.get(id);
+        if (member) ids.push(member.id, member.key);
+      }
+    }
     const owned = (value) => ids.some((candidate) => isSameActor(value, candidate));
     const id = idOfHit(hit);
     if (owned(id)) return true;
@@ -4366,6 +4502,12 @@ uniform float terrainLayerMissing;`
       const mark = object.userData && (object.userData.actorId || object.userData.snapOwner);
       if (owned(mark)) return true;
       if (dragged && object === dragged.pivot) return true;
+      if (selection.size > 1) {
+        for (const id of selection) {
+          const member = entries.get(id);
+          if (member && object === member.pivot) return true;
+        }
+      }
       object = object.parent;
     }
     return false;
@@ -4408,6 +4550,7 @@ uniform float terrainLayerMissing;`
     for (const candidate of entries.values()) {
       if (!isCollisionEntry(candidate) || !candidate.pivot.visible) continue;
       if (isSnapSelfHit(candidate.id, ignoreId) || isSnapSelfHit(candidate.key, ignoreId)) continue;
+      if (ignoreId && selection.size > 1 && (selection.has(candidate.key) || selection.has(candidate.id))) continue;
       const top = volumeSurfaceY(candidate, snapRay);
       if (top != null && Number.isFinite(top)) collision.push({ y: top });
     }
@@ -4662,8 +4805,75 @@ uniform float terrainLayerMissing;`
     });
   }
 
+  const screenCorner = new THREE.Vector3();
+
+  function entryScreenBox(entry) {
+    if (!entry || !entry.pivot || !entry.pivot.visible || entry.locked) return null;
+    const bounds = entry.modelMeta && entry.modelMeta.bounds;
+    const min = bounds && bounds.min ? bounds.min : [-0.5, -0.5, -0.5];
+    const max = bounds && bounds.max ? bounds.max : [0.5, 0.5, 0.5];
+    entry.pivot.updateWorldMatrix(true, false);
+    const rect = renderer.domElement.getBoundingClientRect();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let any = false;
+    for (const x of [min[0], max[0]]) {
+      for (const y of [min[1], max[1]]) {
+        for (const z of [min[2], max[2]]) {
+          screenCorner.set(x, y, z).applyMatrix4(entry.pivot.matrixWorld);
+          const clip = screenCorner.clone().project(camera);
+          if (clip.z < -1 || clip.z > 1) continue;
+          const sx = rect.left + (clip.x * 0.5 + 0.5) * rect.width;
+          const sy = rect.top + (-clip.y * 0.5 + 0.5) * rect.height;
+          any = true;
+          minX = Math.min(minX, sx);
+          minY = Math.min(minY, sy);
+          maxX = Math.max(maxX, sx);
+          maxY = Math.max(maxY, sy);
+        }
+      }
+    }
+    return any ? { minX, minY, maxX, maxY } : null;
+  }
+
+  function showMarquee(x0, y0, x1, y1) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    const box = normalizeRect(x0, y0, x1, y1);
+    marqueeEl.hidden = false;
+    marqueeEl.style.left = `${box.minX - rect.left}px`;
+    marqueeEl.style.top = `${box.minY - rect.top}px`;
+    marqueeEl.style.width = `${Math.max(0, box.maxX - box.minX)}px`;
+    marqueeEl.style.height = `${Math.max(0, box.maxY - box.minY)}px`;
+  }
+
+  function finishMarquee(x1, y1) {
+    if (!marqueeDrag) return;
+    const rect = normalizeRect(marqueeDrag.x, marqueeDrag.y, x1, y1);
+    const items = [];
+    for (const entry of entries.values()) {
+      if (!canPick({ shown: entry.pivot.visible, locked: entry.locked })) continue;
+      items.push({ id: entry.key, box: entryScreenBox(entry) });
+    }
+    const ids = marqueeIds(items, rect, {
+      additive: marqueeDrag.shift,
+      existing: marqueeDrag.shift ? [...selection] : [],
+    });
+    marqueeEl.hidden = true;
+    marqueeDrag = null;
+    if (hooks.onMarquee) hooks.onMarquee(ids, { additive: false });
+  }
+
   function pick(event) {
-    const snapshot = { clientX: event.clientX, clientY: event.clientY, altKey: event.altKey };
+    const snapshot = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      altKey: event.altKey,
+      shiftKey: event.shiftKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+    };
     hoverToken += 1;
     enqueuePick(() => pickAt(snapshot));
   }
@@ -4682,7 +4892,7 @@ uniform float terrainLayerMissing;`
         : frontKeys;
       const groups = groupsFromPick(keys, volumeRayHits(raycaster));
       lastClick = { x: event.clientX, y: event.clientY, front, signature: signature(groups) };
-      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }));
+      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }), event);
     } catch (error) {
       warnPickFallback(error);
       const groups = aimed(event, true);
@@ -4690,7 +4900,7 @@ uniform float terrainLayerMissing;`
         lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
       );
       lastClick = { x: event.clientX, y: event.clientY, front: groups.solids[0] || null, signature: signature(groups) };
-      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }));
+      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }), event);
     }
   }
 
@@ -4723,6 +4933,13 @@ uniform float terrainLayerMissing;`
     gizmoUsed = Boolean(transform.axis);
     if (transform.axis) dragAxis = transform.axis;
     if (gizmoUsed) orbit.enabled = false;
+    marqueeDrag = null;
+    if (!gizmoUsed && !event.altKey && !transform.dragging) {
+      const groups = aimed(event, false);
+      if (!groups.solids.length && !groups.volumes.length) {
+        marqueeDrag = { x: event.clientX, y: event.clientY, shift: event.shiftKey, active: false };
+      }
+    }
   });
 
   renderer.domElement.addEventListener("pointermove", (event) => {
@@ -4737,6 +4954,14 @@ uniform float terrainLayerMissing;`
       if (event.altKey && (dx !== 0 || dy !== 0)) orbitMoved = true;
       if (Math.hypot(dx, dy) > 4) lastPointer.moved = true;
     }
+    if (marqueeDrag && event.buttons === 1 && !transform.dragging && !event.altKey) {
+      if (Math.hypot(event.clientX - marqueeDrag.x, event.clientY - marqueeDrag.y) > 4) {
+        marqueeDrag.active = true;
+        if (lastPointer) lastPointer.moved = true;
+        showMarquee(marqueeDrag.x, marqueeDrag.y, event.clientX, event.clientY);
+        return;
+      }
+    }
     if (transform.dragging) return;
     scheduleHover(event);
   });
@@ -4746,7 +4971,10 @@ uniform float terrainLayerMissing;`
       releaseLook();
       event.preventDefault();
     }
-    if (event.button === 0 && lastPointer && !lastPointer.moved && !orbitMoved && !gizmoUsed && !transform.dragging) pick(event);
+    if (event.button === 0 && marqueeDrag && marqueeDrag.active) finishMarquee(event.clientX, event.clientY);
+    else if (event.button === 0 && lastPointer && !lastPointer.moved && !orbitMoved && !gizmoUsed && !transform.dragging) pick(event);
+    else marqueeEl.hidden = true;
+    marqueeDrag = null;
     const didOrbit = orbitMoved;
     if (event.button === 0 && orbitArmed && !didOrbit) orbit.target.copy(savedOrbitTarget);
     orbitArmed = false;
@@ -4789,6 +5017,19 @@ uniform float terrainLayerMissing;`
       }, 0);
     }
     const entry = selected ? entries.get(selected) : null;
+    if (selection.size > 1 && transform.object === selectionPivot) {
+      dragAxis = transform.axis || dragAxis;
+      const axis = transform.axis || dragAxis;
+      if (axis !== "Y") dragPlaneY = selectionPivot.position.y;
+      if (snapOn && transform.mode === "translate" && (axis === "X" || axis === "Z" || axis === "XZ")) {
+        const point = selectionPivot.position;
+        const y = surfaceAt(point.x, point.y, point.z, selected);
+        if (y != null) point.y = y;
+      }
+      syncFollow(selectionPivot);
+      requestRender();
+      return;
+    }
     if (!entry) return;
     dragAxis = transform.axis || dragAxis;
     // Record the controls' Y before Snap replaces it. The next pointer sample
@@ -4813,6 +5054,33 @@ uniform float terrainLayerMissing;`
     const entry = selected ? entries.get(selected) : null;
     const serial = dragSerial;
     const axis = transform.axis || dragAxis;
+    if (followHome && followHome.multi) {
+      dragAxis = null;
+      dragPlaneY = null;
+      const finishGroup = () => {
+        if (serial !== dragSerial || transform.dragging) return;
+        if (snapOn && transform.mode === "translate" && !isExplicitLift(axis)) {
+          const point = selectionPivot.position;
+          const y = surfaceAt(point.x, point.y, point.z, selected);
+          if (y != null) point.y = y;
+        }
+        syncFollow(selectionPivot);
+        const extras = followerPoses();
+        followHome = null;
+        const primary = entries.get(selected);
+        if (primary) {
+          const pose = poseOf(primary);
+          hooks.onTransform(primary.id, pose.translate, pose.rotate, pose.scale, extras);
+        }
+        placeSelectionPivot();
+      };
+      const ground = snapOn && transform.mode === "translate" && !isExplicitLift(axis)
+        ? requestGround(selectionPivot.position.x, selectionPivot.position.z, null)
+        : null;
+      if (ground) void ground.then(finishGroup, finishGroup);
+      else finishGroup();
+      return;
+    }
     if (!entry || !entry.id) {
       dragAxis = null;
       return;
@@ -5527,6 +5795,7 @@ uniform float terrainLayerMissing;`
       };
     },
     select,
+    setSelection,
     setGroupHighlight,
     setGizmo,
     setFlags,
