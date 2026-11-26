@@ -59,7 +59,12 @@ export const SHORTCUT_GROUPS = [
   {
     id: "snap",
     label: "Snap",
-    items: [{ keys: "V", action: "Toggle snap to ground and collision" }],
+    items: [
+      { keys: "V", action: "Toggle snap to ground and collision" },
+      { keys: "X, Z, or XZ drag", action: "With Snap on, change only the height. X and Z stay on the drag. The surface is the ground, a collision mesh, or the room model when the map has no ground. A hit more than a couple of metres above the actor is ignored. A miss keeps the current height. Releasing any translate handle except Y does the same" },
+      { keys: "Y drag", action: "With Snap on, keep the height you leave the actor at, including after release. The gizmo stays on the model, so a second Y move is not needed to catch the mesh up" },
+      { keys: "Dragged mesh", action: "Left out of the snap query: every submesh, batched instance, proxy, and companion copy of that actor, including a Land_ piece" },
+    ],
   },
   {
     id: "search",

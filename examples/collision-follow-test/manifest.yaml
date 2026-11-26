@@ -1,0 +1,12 @@
+format: 1
+name: collision-follow-test
+title: Collision follow test
+version: 0.1.0
+author: Ocarina Forge
+target:
+  game: oot-switch2
+  version: "1.1.1"
+  host: longshot
+domains:
+  - scenes
+collisionFollow: srt

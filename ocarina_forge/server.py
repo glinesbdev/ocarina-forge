@@ -1481,6 +1481,7 @@ def export_longshot_mod(body: dict | None = None):
         _open_dump(),
         install=bool(body.get("install")),
         game=Path(str(game)).expanduser() if game else None,
+        collision_follow=body.get("collisionFollow") or body.get("collision_follow") or None,
     )
 
 
@@ -1489,7 +1490,13 @@ def export_mod(body: dict | None = None):
     body = body or {}
     dump = _open_dump()
     project = _open_project()
-    return build(project, dump, install=bool(body.get("install")), make_zip=bool(body.get("zip")))
+    return build(
+        project,
+        dump,
+        install=bool(body.get("install")),
+        make_zip=bool(body.get("zip")),
+        collision_follow=body.get("collisionFollow") or body.get("collision_follow") or None,
+    )
 
 
 @app.get("/api/export/download")

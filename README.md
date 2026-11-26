@@ -60,7 +60,7 @@ The viewport status label names the renderer. `WebGPU` is a real WebGPU device. 
 - Browse scenes by area and variant. Each matching Static and Dynamic pair appears once, with both banks visible when **Companion banc** is on. Each actor's edits go to its own bank. The viewport's bank selector switches the target for new actors and the bank shown when viewing a single bank.
 - See each actor as a labeled box at its translate, rotate, and scale. Color is the actor category (NPC, enemy, object, land, effect, animal, system).
 - Fly the camera: hover the view to focus it (a click is not required, and a text field or an open dialog keeps focus). Right-drag looks, WASD moves, Q and E go down and up, Shift is faster. Alt+left-drag orbits the point under the cursor (or the selection). Middle-drag pans. Scroll zooms. **Shortcuts**, or `?`, lists every binding. The same list is [docs/controls.md](docs/controls.md).
-- Select an actor by clicking it or its row. Move and rotate with the gizmo, or type metres and degrees. Y is up. Yaw is the Y rotation. The file stores radians.
+- Select an actor by clicking it or its row. Move and rotate with the gizmo, or type metres and degrees. Y is up. Yaw is the Y rotation. The file stores radians. Snap (V) sits a sideways move on the ground. A Y lift stays where you leave it, and the gizmo stays on the model.
 - Edit the other BYML parameters as typed fields. Add an actor from the names in `Pack/Actor`. Duplicate, hide, delete, or revert.
 - Undo and redo cover the edits you make in this session. The project files are the lasting copy.
 - **Build mod** re-encodes changed placement files with the dump’s zstd dictionary and raises the resource size table. It can install the result under `mods/<name>` and write a zip. The build log is shown in the window. The dump’s own files are not modified.
@@ -116,6 +116,7 @@ Tests build synthetic BYML and zstd fixtures in a temporary directory. They do n
 | `frontend/` | Vite + Three.js editor. Real meshes replace boxes when a model converts; the gizmo stays on the same pivot. New renderer work follows [docs/design/mod-editor.md](docs/design/mod-editor.md). |
 | `docs/design/mod-editor.md` | How an edit becomes a Longshot mod, and the milestone plan. |
 | `examples/sample-project/` | A small project in the format. |
+| `examples/collision-follow-test/` | Variant B for issue #10. The scene yaml is generated from a dump and is not committed. |
 | `examples/ato-scenes/` | An After the Ocarina style scene YAML, used to prove the simple scene importer. |
 | `examples/after-the-ocarina/` | The imported After the Ocarina project (Bradyn's YAML only). |
 | `vendor/after_ocarina/` | Bradyn's build library, plus the MIT community tools the pipeline shells out to. |
@@ -132,7 +133,7 @@ python scripts/compare_romfs.py --ato ~/Work/after-the-ocarina
 
 ## Not in this version
 
-This build writes a Longshot mod folder (`mod.json`, `patches/`, and an empty `romfs/` when a patch was written) and can install it under the test game. It does not run `longshot mod check`, `dev`, `teleport`, or `shot`. Skeletal animation, a dialog editor, desktop packaging, blueprint phase B (connecting and adding nodes), baked lighting, and an asset browser are later milestones, not this slice. See [docs/design/mod-editor.md](docs/design/mod-editor.md) and [ROADMAP.md](ROADMAP.md). Panels dock, and a field on an existing behavior node can be edited. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
+This build writes a Longshot mod folder (`mod.json`, `patches/`, and an empty `romfs/` when a patch was written) and can install it under the test game. `collisionFollow: bake` is the exception: that mode puts the patched static-compound tiles and the size table in `romfs/`. The shape bytes are not rewritten. It does not run `longshot mod check`, `dev`, `teleport`, or `shot`. Skeletal animation, a dialog editor, desktop packaging, blueprint phase B (connecting and adding nodes), baked lighting, and an asset browser are later milestones, not this slice. See [docs/design/mod-editor.md](docs/design/mod-editor.md) and [ROADMAP.md](ROADMAP.md). Panels dock, and a field on an existing behavior node can be edited. Models that cannot be resolved stay labeled boxes; see [docs/models.md](docs/models.md).
 
 ## License
 
