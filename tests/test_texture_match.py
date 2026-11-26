@@ -1,0 +1,545 @@
+"""Albedo sampler selection and Tex file matching.
+
+The corpus is synthetic. It does not contain a game dump. Counts below are
+the same materials the audit script reports when pointed at this fixture
+with the fragment ``Model/AuditActor.``.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from ocarina_forge.dump import Dump
+from ocarina_forge.fixtures import build_fixture
+from ocarina_forge.formats.bfres import Material, Model, Part, rank_albedo, sample_v10_bfres
+from ocarina_forge.formats.bntx import Texture
+from ocarina_forge.formats.bntx import write_rgba
+from ocarina_forge.formats.sarc import pack
+from ocarina_forge.formats.zsio import compress
+from ocarina_forge.models import (
+    _ACTOR_PACK_LIST,
+    _COMPANION_IMAGES,
+    _COMPANION_LIST,
+    _PACK_TEX,
+    _TEX_INDEX,
+    _flat_colour_note,
+    _resolve_materials,
+    _resolve_tex,
+    _stem,
+    describe_actor,
+    describe_actor_textures,
+)
+from ocarina_forge.textureaudit import audit_models
+
+
+def test_rank_albedo_keeps_runtime_slots_flat_and_accepts_an_alb_name():
+    assert rank_albedo([("tc", "MaterialAlb"), ("ta", "MaterialCmb")]) == []
+    assert rank_albedo([("_a0", "Field_Water_Nrm"), ("_n0", "Field_Water_N0")]) == []
+    assert rank_albedo([("s0", "Tree_Alb")]) == []
+    assert rank_albedo([("tex0", "Slot_Alb"), ("_n0", "Slot_Nrm")]) == [("tex0", "Slot_Alb")]
+    assert rank_albedo([("_t0", "Mt_Skin")]) == [("_t0", "Mt_Skin")]
+    assert rank_albedo([("_n0", "Mt_Skin")]) == []
+    assert rank_albedo([("_a0", "Field_Water_Nrm"), ("tex0", "Field_Water_Alb")]) == [("tex0", "Field_Water_Alb")]
+    assert rank_albedo([("_a0", "Rock_Alb"), ("_n0", "Rock_Nrm")])[0] == ("_a0", "Rock_Alb")
+
+
+def test_an_unused_a0_does_not_hide_another_albedo():
+    from ocarina_forge.models import _albedo_sources
+
+    material = SimpleNamespace(
+        binds=[("_a0", "Gone_Nrm"), ("tex0", "Slot_Alb")],
+        albedo=[("_a0", "Gone_Nrm")],
+        shader_blocks=[
+            {
+                "samplerNames": ["_a0", "tex0"],
+                "attributeNames": [],
+                "samplerIndices": [255, 0],
+            }
+        ],
+    )
+    assert _albedo_sources(material) == [("tex0", "Slot_Alb")]
+
+
+def test_stem_strips_a_case_different_suffix():
+    assert _stem("Tex/Case_Alb.BNTX.ZS") == "Case_Alb"
+    assert _stem("Work/Foo.BNTX") == "Foo"
+
+
+def test_flat_note_names_samplers_and_vertex_colours():
+    missing = SimpleNamespace(texture="Gone_Alb", texture_error="samplers _a0=Gone_Alb. tried Tex/Gone_Alb.bntx.zs", colors=None)
+    note = _flat_colour_note(missing, "")
+    assert "Gone_Alb" in note
+    assert "_a0" in note
+    assert "Tex/Gone_Alb.bntx.zs" in note
+    assert note.endswith("This mesh uses a flat colour.")
+    bare = SimpleNamespace(texture="", texture_error="", colors=[(1, 1, 1, 1)], material="", binds=[])
+    vertex = _flat_colour_note(bare, "")
+    assert "vertex colours" in vertex
+    assert "names no albedo texture" in vertex
+    assert "No albedo sampler was usable and no Tex file matched." in vertex
+    named = SimpleNamespace(
+        texture="",
+        texture_error="Mt_Body: samplers _a0=Npc_Body_Alb. tried Tex/Npc_Body_Alb.bntx.zs, Model/Npc_Goron_GOU.Tex.bfres.zs",
+        colors=[(0.45, 0.28, 0.16, 1)],
+        material="Mt_Body",
+        binds=[("_a0", "Npc_Body_Alb")],
+    )
+    seen = _flat_colour_note(named, "")
+    assert "Mt_Body" in seen
+    assert "_a0" in seen
+    assert "Npc_Body_Alb" in seen
+    assert "Model/Npc_Goron_GOU.Tex.bfres.zs" in seen
+    assert "vertex colours" in seen
+    assert "names no albedo texture" not in seen
+
+
+def test_audit_corpus_resolves_sampler_fallback_and_explains_flats(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    colour = bytes([20, 140, 40, 255]) * 4
+
+    def tex(name: str) -> bytes:
+        return compress(write_rgba(name, 2, 2, colour), 1, dicts, level=3)
+
+    (dump.romfs / "Tex" / "Rock_Alb.bntx.zs").write_bytes(tex("Rock_Alb"))
+    nested = dump.romfs / "Tex" / "Common"
+    nested.mkdir(parents=True)
+    (nested / "Nested_Alb.bntx.zs").write_bytes(tex("Nested_Alb"))
+    (dump.romfs / "Tex" / "Case_Alb.BNTX.ZS").write_bytes(tex("Case_Alb"))
+    (dump.romfs / "Tex" / "Slot_Alb.bntx.zs").write_bytes(tex("Slot_Alb"))
+    (dump.romfs / "Tex" / "Bare_Alb.bntx.zs").write_bytes(tex("Bare_Alb"))
+    (dump.romfs / "Banc" / "AuditField").mkdir(parents=True)
+    (dump.romfs / "Banc" / "AuditField" / "Banc_Alb.bntx.zs").write_bytes(tex("Banc_Alb"))
+
+    packed = pack({"Packed_Alb.bntx": write_rgba("Packed_Alb", 2, 2, colour)})
+    (dump.romfs / "Pack" / "Actor" / "AuditActor.pack.zs").write_bytes(compress(packed, 4, dicts, level=3))
+    shared = pack({"Shared_Alb.bntx": write_rgba("Shared_Alb", 2, 2, colour)})
+    (dump.romfs / "Pack" / "ResidentCommon.pack.zs").write_bytes(compress(shared, 4, dicts, level=3))
+
+    materials = [
+        {"name": "Standard", "samplers": [("_a0", "Rock_Alb")]},
+        {"name": "Nested", "samplers": [("_a0", "Nested_Alb")]},
+        {"name": "Cased", "samplers": [("_a0", "Case_Alb")]},
+        {"name": "Packed", "samplers": [("_a0", "Packed_Alb")]},
+        {"name": "Shared", "samplers": [("_a0", "Shared_Alb")]},
+        {"name": "BancFile", "samplers": [("_a0", "Banc_Alb")]},
+        {"name": "OddSlot", "samplers": [("tex0", "Slot_Alb"), ("_n0", "Slot_Nrm")]},
+        {"name": "Suffix", "samplers": [("_a0", "Bare")]},
+        {"name": "Runtime", "samplers": [("tc", "MaterialAlb"), ("ta", "MaterialCmb")]},
+        {"name": "Missing", "samplers": [("_a0", "Gone_Alb")]},
+        {"name": "Normals", "samplers": [("_n0", "Only_Nrm"), ("_rgh0", "Only_Rgh")]},
+    ]
+    mesh = sample_v10_bfres("AuditActor", materials)
+    model_path = dump.romfs / "Model" / "AuditActor.AuditActor.bfres.zs"
+    model_path.write_bytes(compress(mesh, 1, dicts, level=3))
+    empty = sample_v10_bfres("AuditEmpty", [{"name": "Empty", "samplers": []}])
+    (dump.romfs / "Model" / "AuditEmpty.AuditEmpty.bfres.zs").write_bytes(compress(empty, 1, dicts, level=3))
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+
+    from ocarina_forge.models import describe_actor
+
+    info = describe_actor(dump, "AuditActor")
+    assert info["status"] == "mesh"
+    rows = {row["material"]: row for row in info["textureLog"]}
+    assert rows["Standard"]["via"] == "sampler"
+    assert rows["Nested"]["decoded"] is True
+    assert rows["Nested"]["found"] == "Tex/Common/Nested_Alb.bntx.zs"
+    assert rows["Cased"]["found"] == "Tex/Case_Alb.BNTX.ZS"
+    assert rows["Packed"]["found"].startswith("pack://Pack/Actor/AuditActor.pack.zs//")
+    assert rows["Shared"]["found"].startswith("pack://Pack/ResidentCommon.pack.zs//")
+    assert rows["BancFile"]["found"] == "Banc/AuditField/Banc_Alb.bntx.zs"
+    assert rows["OddSlot"]["via"] == "sampler" and rows["OddSlot"]["wanted"] == "Slot_Alb"
+    assert rows["Suffix"]["via"] == "tex-fallback"
+    assert rows["Runtime"]["flatCause"] == "runtime-array"
+    assert rows["Missing"]["flatCause"] == "missing-file"
+    assert "_a0=Gone_Alb" in rows["Missing"]["error"]
+    assert "Tex/Gone_Alb.bntx.zs" in rows["Missing"]["error"]
+    assert rows["Normals"]["flatCause"] == "non-color-samplers"
+    assert "flat colour" in info["reason"]
+    assert "Gone_Alb" in info["reason"]
+    assert "_a0" in info["reason"]
+
+    bare = describe_actor(dump, "AuditEmpty")
+    assert bare["textureLog"][0]["flatCause"] == "untextured"
+    assert "no texture names" in bare["textureLog"][0]["error"]
+
+    report = audit_models(dump, prefix="Model/Audit")
+    assert report["models"] == 2
+    assert report["resolvedViaSampler"] == 7
+    assert report["resolvedViaTexFallback"] == 1
+    assert report["flat"] == 4
+    assert report["flatByCause"]["runtime-array"]["count"] == 1
+    assert report["flatByCause"]["untextured"]["count"] == 1
+    assert report["flatByCause"]["missing-file"]["count"] == 1
+    assert report["flatByCause"]["non-color-samplers"]["count"] == 1
+    example = report["flatByCause"]["missing-file"]["examples"][0]
+    assert example["binds"] == ["_a0=Gone_Alb"]
+    assert "rgba" not in json_blob(report)
+    assert "\\" + "x" not in json_blob(report)
+
+    _TEX_INDEX.clear()
+    path, tried = _resolve_tex(dump, "Nested_Alb", ["AuditActor"])
+    assert path == "Tex/Common/Nested_Alb.bntx.zs"
+    assert any("Nested_Alb" in item for item in tried)
+
+
+def test_unlinked_character_shape_uses_companion_textures_and_names_them(tmp_path, monkeypatch):
+    """A hero mesh whose shape index misses, with the albedo in a shared Tex bfres.
+
+    Vertex colours are set on the shape. They must not produce the sentence
+    that the material names no albedo, and they must not stop the lookup.
+    """
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    from ocarina_forge.formats.bfres import parse, sample_bfres
+    from ocarina_forge.models import (
+        _COMPANION_IMAGES,
+        _COMPANION_LIST,
+        _PACK_TEX,
+        _TEX_INDEX,
+        _convert_cached,
+        _resolve_materials,
+    )
+
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    _COMPANION_LIST.clear()
+    _COMPANION_IMAGES.clear()
+    colour = bytes([120, 72, 36, 255]) * 4
+    mesh = sample_v10_bfres(
+        "Npc_Goron_GOU_Biggoron",
+        [{"name": "Mt_Body", "samplers": [("_a0", "Npc_Body_Alb"), ("_n0", "Npc_Body_Nrm")]}],
+        shapes=[{"name": "Body", "material": 9}],
+    )
+    model_rel = "Model/Npc_Goron_GOU_Biggoron.Npc_Goron_GOU_Biggoron.bfres.zs"
+    (dump.romfs / model_rel).write_bytes(compress(mesh, 1, dicts, level=3))
+    child = sample_v10_bfres(
+        "Npc_Goron_GOU_Child",
+        [{"name": "Mt_Child", "samplers": [("_a0", "Npc_Child_Alb")]}],
+    )
+    child_rel = "Model/Npc_Goron_GOU_Child.Npc_Goron_GOU_Child.bfres.zs"
+    (dump.romfs / child_rel).write_bytes(compress(child, 1, dicts, level=3))
+    packed = pack({"Npc_Child_Alb.bntx": write_rgba("Npc_Child_Alb", 2, 2, colour)})
+    actor = dump.romfs / "Pack" / "Actor"
+    actor.mkdir(parents=True, exist_ok=True)
+    (actor / "Npc_Goron_GOU.pack.zs").write_bytes(compress(packed, 4, dicts, level=3))
+
+    hint = f"Npc_Goron_Biggoron_Adult {model_rel}"
+    parsed = parse(mesh)
+    for part in parsed[0].parts:
+        part.colors = [(0.45, 0.28, 0.16, 1.0)] * len(part.positions)
+    _external, log, _raws = _resolve_materials(dump, parsed, hint, False)
+    assert log[0]["decoded"] is False
+    note = _flat_colour_note(parsed[0].parts[0], "")
+    assert "Mt_Body" in note
+    assert "_a0" in note and "Npc_Body_Alb" in note
+    assert "Tex/Npc_Body_Alb.bntx.zs" in note
+    assert "Model/Npc_Goron_GOU.Tex.bfres.zs" in note
+    assert "vertex colours" in note
+    assert "names no albedo texture" not in note
+    assert note.endswith("This mesh uses a flat colour.")
+
+    companion = sample_bfres(
+        "Npc_Goron_GOU",
+        [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+        [0, 1, 2],
+        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+        colour,
+        2,
+        2,
+        texture_name="Npc_Body_Alb",
+    )
+    (dump.romfs / "Model" / "Npc_Goron_GOU.Tex.bfres.zs").write_bytes(compress(companion, 1, dicts, level=3))
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    _COMPANION_LIST.clear()
+    _COMPANION_IMAGES.clear()
+    colored = parse(mesh)
+    for part in colored[0].parts:
+        part.colors = [(0.45, 0.28, 0.16, 1.0)] * len(part.positions)
+    external, log, _raws = _resolve_materials(dump, colored, hint, False)
+    assert log[0]["via"] == "sampler"
+    assert log[0]["decoded"] is True
+    assert log[0]["wanted"] == "Npc_Body_Alb"
+    assert external["Npc_Body_Alb"].rgba
+    assert any("Npc_Goron_GOU.Tex.bfres" in path for path in log[0]["tried"])
+    assert "names no albedo texture" not in (log[0].get("error") or "")
+
+    _digest, info = _convert_cached(mesh, dump, hint=hint)
+    assert info["textures"] >= 1
+    assert "names no albedo texture" not in " ".join(info.get("notes") or [])
+    assert info["textureLog"][0]["material"] == "Mt_Body"
+
+    child_hint = f"Npc_Goron_GOU_Child {child_rel}"
+    child_models = parse(child)
+    _external, child_log, _raws = _resolve_materials(dump, child_models, child_hint, False)
+    assert child_log[0]["via"] == "sampler"
+    assert child_log[0]["wanted"] == "Npc_Child_Alb"
+    assert "Npc_Goron_GOU.pack.zs" in child_log[0]["found"]
+
+    report = audit_models(dump, prefix="Model/Npc_Goron")
+    assert report["models"] == 2
+    assert report["resolvedViaSampler"] == 2
+    assert report["flat"] == 0
+    assert "rgba" not in json_blob(report)
+
+
+def test_an_unlinked_shape_does_not_take_the_first_textured_material():
+    """A missed index used to paint every shape with the first albedo that loaded."""
+    face = Texture("Face_Alb", 1, 1, bytes([240, 200, 90, 255]), 0)
+    rock = Texture("Rock_Alb", 1, 1, bytes([90, 80, 70, 255]), 0)
+    triangle = ([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)])
+    model = Model(
+        "Npc",
+        parts=[
+            Part("Face", *triangle, "", "", 9),
+            Part("Back", *triangle, "", "", 9),
+            Part("Prop", *triangle, "", "", 9),
+        ],
+        materials=[
+            Material("Mt_Face", binds=[("_a0", "Face_Alb")], albedo=[("_a0", "Face_Alb")]),
+            Material("Mt_Back", binds=[("_a0", "Rock_Alb")], albedo=[("_a0", "Rock_Alb")]),
+        ],
+        images={"Face_Alb": face, "Rock_Alb": rock},
+    )
+    _resolve_materials(None, [model], "Npc_Goron", False)
+    assert model.parts[0].texture == "Face_Alb"
+    assert model.parts[1].texture == "Rock_Alb"
+    assert model.parts[2].texture == ""
+    assert "did not match a material by name" in model.parts[2].texture_error
+    assert "Mt_Back" in model.parts[2].texture_error
+    assert "Rock_Alb" in model.parts[2].texture_error
+
+
+def test_biggoron_materials_each_take_their_own_tex_file(tmp_path, monkeypatch):
+    """Six Biggoron materials, each bound to its own Tex/<name> file.
+
+    Longshot reads the texture-name count from FMAT +0xA2. One material uses
+    that layout with +0xA3 left at 0 and a sampler name that is not _a0. One
+    material stores a short count at +0xA3 so the normal is the only name a
+    reader of that byte keeps. The other four use the usual _a0 bind. A second
+    goron reuses the skin file. An empty bind list must not paint every
+    material with the first Goron albedo in the pool.
+    """
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    from ocarina_forge.formats.bfres import parse
+    from ocarina_forge.models import _COMPANION_IMAGES, _COMPANION_LIST, _PACK_TEX, _TEX_INDEX, _convert_cached
+
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    _COMPANION_LIST.clear()
+    _COMPANION_IMAGES.clear()
+
+    names = {
+        "Mt_Hair": "Mt_Hair",
+        "Mt_Skin": "Mt_Skin_Npc_Goron_GOU_Alb",
+        "Mt_Eye_Inner": "Mt_Eye_Inner_Alb",
+        "Mt_Face": "Mt_Face_Npc_Goron_GOU_Alb",
+        "Mt_Rock": "Mt_Rock_Npc_Goron_GOU_Alb",
+        "Mt_Teeth": "Mt_Teeth_Npc_Goron_GOU_Alb",
+    }
+    materials = [
+        {"name": "Mt_Hair", "counts": "longshot", "samplers": [("_t0", names["Mt_Hair"])]},
+        {"name": "Mt_Skin", "samplers": [("_a0", names["Mt_Skin"])]},
+        {
+            "name": "Mt_Eye_Inner",
+            "counts": "decoy",
+            "samplers": [("_n0", "Mt_Eye_Inner_Nrm"), ("_a0", names["Mt_Eye_Inner"])],
+        },
+        {"name": "Mt_Face", "samplers": [("_a0", names["Mt_Face"])]},
+        {"name": "Mt_Rock", "samplers": [("_a0", names["Mt_Rock"])]},
+        {"name": "Mt_Teeth", "samplers": [("_a0", names["Mt_Teeth"])]},
+    ]
+    shapes = [{"name": name, "material": index} for index, name in enumerate(names)]
+    mesh = sample_v10_bfres("Npc_Goron_GOU_Biggoron", materials, shapes=shapes)
+    parsed = parse(mesh)
+    by_name = {material.name: material for material in parsed[0].materials}
+    assert [slot_tex[1] for slot_tex in by_name["Mt_Hair"].albedo] == [names["Mt_Hair"]]
+    assert by_name["Mt_Hair"].albedo[0][0] == "_t0"
+    assert by_name["Mt_Eye_Inner"].albedo[0] == ("_a0", names["Mt_Eye_Inner"])
+    for material_name, texture_name in names.items():
+        assert by_name[material_name].albedo[0][1] == texture_name
+
+    tex = dump.romfs / "Tex"
+    tex.mkdir(parents=True, exist_ok=True)
+    for index, texture_name in enumerate(names.values()):
+        pixel = bytes([40 + index * 30, 80, 90, 255]) * 4
+        (tex / f"{texture_name}.bntx.zs").write_bytes(compress(write_rgba(texture_name, 2, 2, pixel), 1, dicts, level=3))
+
+    hint = "Npc_Goron_Biggoron_Adult Model/Npc_Goron_GOU_Biggoron.Npc_Goron_GOU_Biggoron.bfres.zs"
+    _external, log, _raws = _resolve_materials(dump, parse(mesh), hint, False)
+    rows = {row["material"]: row for row in log}
+    assert set(rows) == set(names)
+    for material_name, texture_name in names.items():
+        row = rows[material_name]
+        assert row["via"] == "sampler"
+        assert row["wanted"] == texture_name
+        assert row["decoded"] is True
+        assert f"Tex/{texture_name}.bntx.zs" in " ".join(row.get("tried") or [])
+        assert "No albedo sampler was usable" not in (row.get("error") or "")
+
+    decoded = []
+    import ocarina_forge.models as models
+
+    original = models._decode_bntx_cached
+
+    def counting(*args, **kwargs):
+        decoded.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_decode_bntx_cached", counting)
+    _digest, info = _convert_cached(mesh, dump, hint=hint, flat=True)
+    assert decoded == []
+    assert info["textures"] == 0
+    note = " ".join(info.get("notes") or [])
+    assert "No albedo sampler was usable" not in note
+    for texture_name in names.values():
+        assert texture_name in note
+        assert f"Tex/{texture_name}.bntx.zs" in note
+
+    child = sample_v10_bfres(
+        "Npc_Goron_GOU_Child",
+        [{"name": "Mt_Skin", "samplers": [("_a0", names["Mt_Skin"])]}],
+    )
+    _external, child_log, _raws = _resolve_materials(
+        dump,
+        parse(child),
+        "Npc_Goron_GOU_Child Model/Npc_Goron_GOU_Child.Npc_Goron_GOU_Child.bfres.zs",
+        False,
+    )
+    assert child_log[0]["via"] == "sampler"
+    assert child_log[0]["wanted"] == names["Mt_Skin"]
+    assert child_log[0]["decoded"] is True
+
+
+def test_separate_goron_materials_do_not_share_the_rock_albedo():
+    """A shared 'goron' token must not paint the skin with the rock file."""
+    skin = Texture("Mt_Skin_Npc_Goron_GOU_Alb", 1, 1, bytes([240, 200, 80, 255]), 0)
+    rock = Texture("Mt_Rock_Npc_Goron_GOU_Alb", 1, 1, bytes([90, 80, 70, 255]), 0)
+    triangle = ([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2], [(0, 0), (1, 0), (0, 1)])
+    model = Model(
+        "Npc_Goron_GOU_Biggoron",
+        parts=[
+            Part("Body", *triangle, "", "", 0),
+            Part("Back", *triangle, "", "", 1),
+        ],
+        materials=[Material("Mt_Skin"), Material("Mt_Rock")],
+        images={skin.name: skin, rock.name: rock},
+        extra_textures=[rock.name, skin.name],
+    )
+    _resolve_materials(None, [model], "Npc_Goron_Biggoron", False)
+    assert model.parts[0].texture == skin.name
+    assert model.parts[1].texture == rock.name
+
+
+def test_texture_request_uses_the_model_path_and_names_why_it_failed(tmp_path, monkeypatch):
+    """A gyaml that does not contain the project still loads that project's pack.
+
+    ``CmnTex_...`` is the texture name. It is a loose ``Tex/`` file when that
+    file exists, and a member of a pack whose name is inside the texture name
+    when it does not. The geometry note stats the file and does not decode it.
+    The texture response says file not found or decode error.
+    """
+    from ocarina_forge.formats.byml import dumps
+
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    _TEX_INDEX.clear()
+    _PACK_TEX.clear()
+    _COMPANION_LIST.clear()
+    _COMPANION_IMAGES.clear()
+    _ACTOR_PACK_LIST.clear()
+
+    gyaml = "Npc_Goron_Biggoron_Adult"
+    project = "Npc_Goron_GOU_Biggoron"
+    hair = "Mt_Hair_Npc_Goron_GOU_Biggoron_Alb"
+    skin = "CmnTex_Chara_Mt_Skin_Npc_Goron_GON_001_Alb"
+    face = "CmnTex_Chara_Mt_Face_Npc_Goron_GON_001_Alb"
+    teeth = "CmnTex_Chara_Mt_Teeth_Npc_Goron_GON_001_Alb"
+    gone = "CmnTex_Chara_Mt_Gone_Npc_Goron_GON_001_Alb"
+    names = {
+        "Mt_Hair": hair,
+        "Mt_Skin": skin,
+        "Mt_Face": face,
+        "Mt_Teeth": teeth,
+        "Mt_Gone": gone,
+    }
+    materials = [{"name": name, "samplers": [("_a0", texture)]} for name, texture in names.items()]
+    shapes = [{"name": name, "material": index} for index, name in enumerate(names)]
+    mesh = sample_v10_bfres(project, materials, shapes=shapes)
+    model_rel = f"Model/{project}.{project}.bfres.zs"
+    (dump.romfs / model_rel).parent.mkdir(parents=True, exist_ok=True)
+    (dump.romfs / model_rel).write_bytes(compress(mesh, 1, dicts, level=3))
+    info = dumps({"FmdbName": project, "ModelProjectName": project})
+    actor = dump.romfs / "Pack" / "Actor"
+    actor.mkdir(parents=True, exist_ok=True)
+    (actor / f"{gyaml}.pack.zs").write_bytes(
+        compress(pack({f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info}), 4, dicts, level=3)
+    )
+    tex = dump.romfs / "Tex"
+    tex.mkdir(parents=True, exist_ok=True)
+    (tex / f"{hair}.bntx.zs").write_bytes(compress(write_rgba(hair, 2, 2, bytes([180, 90, 40, 255]) * 4), 1, dicts, level=3))
+    (tex / f"{teeth}.bntx.zs").write_bytes(compress(b"NOPE-not-a-bntx", 1, dicts, level=3))
+    (actor / "Npc_Goron_GOU.pack.zs").write_bytes(
+        compress(pack({f"{skin}.bntx": write_rgba(skin, 2, 2, bytes([210, 160, 120, 255]) * 4)}), 4, dicts, level=3)
+    )
+    (actor / "CmnTex_Chara.pack.zs").write_bytes(
+        compress(pack({f"{face}.bntx": write_rgba(face, 2, 2, bytes([160, 100, 80, 255]) * 4)}), 4, dicts, level=3)
+    )
+
+    import ocarina_forge.models as models
+
+    decoded = []
+    original = models._decode_bntx_cached
+
+    def counting(*args, **kwargs):
+        decoded.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(models, "_decode_bntx_cached", counting)
+    flat = describe_actor(dump, gyaml, flat=True)
+    assert decoded == []
+    note = flat["reason"]
+    assert f"found Tex/{hair}.bntx.zs" in note
+    assert "Npc_Goron_GOU.pack.zs" in note
+    assert "CmnTex_Chara.pack.zs" in note
+    assert "file not found" in note
+    assert gone in note
+    assert "Longshot serves that name" not in note
+
+    manifest = describe_actor_textures(dump, gyaml)
+    rows = manifest["materials"]
+
+    def slot(name: str) -> dict:
+        return next(row for key, row in rows.items() if key.startswith(f"{name}:"))
+
+    assert slot("Mt_Hair")["status"] == "ready"
+    assert slot("Mt_Hair")["map"]
+    assert slot("Mt_Hair")["found"] == f"Tex/{hair}.bntx.zs"
+    assert "Npc_Goron_GOU.pack.zs" in slot("Mt_Skin")["found"]
+    assert slot("Mt_Skin")["status"] == "ready"
+    assert slot("Mt_Skin")["map"]
+    assert "CmnTex_Chara.pack.zs" in slot("Mt_Face")["found"]
+    assert slot("Mt_Face")["status"] == "ready"
+    teeth_row = slot("Mt_Teeth")
+    assert teeth_row["status"] == "decode"
+    assert "decode error" in teeth_row["error"].lower()
+    assert teeth_row["map"] is None
+    gone_row = slot("Mt_Gone")
+    assert gone_row["status"] == "missing"
+    assert "file not found" in gone_row["error"].lower()
+    assert gone_row["map"] is None
+
+
+def json_blob(report: dict) -> str:
+    import json
+
+    return json.dumps(report)

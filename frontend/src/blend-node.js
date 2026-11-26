@@ -56,7 +56,12 @@ export function attachBlend(material) {
     const base = texture(map, baseUv);
     const moss = texture(mossMap, mossAt);
     const weight = maskWeight();
-    const mixed = mix(base.rgb, moss.rgb, weight);
+    const tint = blend.skinColor || [1, 1, 1];
+    const skinColor = vec3(Number(tint[0] ?? 1), Number(tint[1] ?? 1), Number(tint[2] ?? 1));
+    const low = blend.skin
+      ? (blend.skinVertex ? attribute("blendMask", "vec4").rgb.mul(skinColor) : skinColor)
+      : base.rgb;
+    const mixed = mix(low, moss.rgb, weight);
     const shown = mix(mixed, vec3(weight), step(float(0.5), debug));
     return vec4(shown, base.a);
   })();
