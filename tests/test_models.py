@@ -157,10 +157,60 @@ def test_moat_and_stream_count_as_water_and_a_bounds_box_is_omitted():
     assert not _water_names("Npc_River_A")
     assert _omit_reason("Occluder_A", "Mt_White") == "occluder is not drawn"
     assert _omit_reason("MiniMap_Castle", "") == "minimap model is not drawn"
+    assert _omit_reason("VFX_BlackFade_01", "Mt_VFX_BlackFade44") == ""
     box = Part("Bounds", [(0, 0, 0), (8, 0, 0), (8, 4, 6)], [0, 1, 2], None, "", "")
     tiny = Part("Courtyard", [(i * 0.01, 0, 0) for i in range(30)], [0, 1, 2], [(0, 0)] * 30, "alb", "")
     assert _untextured_bounds_box(box, [(box, ""), (tiny, "alb")])
     assert not _untextured_bounds_box(tiny, [(box, ""), (tiny, "alb")])
+
+
+def test_fade_and_dark_planes_stay_in_the_mesh_and_are_tagged():
+    from ocarina_forge.formats.bfres import parse, sample_v10_bfres
+    from ocarina_forge.models import _assemble, _helper_kind, _image_format_label
+
+    assert _helper_kind("BlackBoard", "Mt_BlackBorad_Room000") == "board"
+    assert _helper_kind("pPlane1", "Mt_DarkPlane_A0") == "dark"
+    assert _helper_kind("ShadowBoard1", "Mt_ShadowBoard_A43") == "shadow"
+    assert _helper_kind("VFX_BlackFade_01", "Mt_VFX_BlackFade44") == "fade"
+    assert _helper_kind("BlackFadeA", "Mt_Etc_LakeHrl_VFXBlackFade_A1") == "fade"
+    assert _helper_kind("Land_LakeHrl_Tree_A_01", "Mt_Bark") == ""
+
+    class _Image:
+        def __init__(self, fmt):
+            self.codec = "bc7"
+            self.fmt = fmt
+            self.width = 32
+            self.height = 16
+
+    assert _image_format_label(_Image(0x2006)) == "bc7 srgb 0x2006 32x16"
+    assert _image_format_label(_Image(0x2001)) == "bc7 linear 0x2001 32x16"
+
+    blob = sample_v10_bfres(
+        "Tree",
+        [
+            {"name": "Mt_Bark", "samplers": [("_a0", "Tree_Alb")], "mode": "opaque"},
+            {"name": "Mt_VFX_BlackFade44", "samplers": [], "mode": "opaque"},
+            {"name": "Mt_DarkPlane_A0", "samplers": [], "mode": "opaque"},
+            {"name": "Mt_ShadowBoard_A43", "samplers": [], "mode": "opaque"},
+            {"name": "Mt_BlackBorad_Room000", "samplers": [], "mode": "opaque"},
+        ],
+        shapes=[
+            {"name": "Land_LakeHrl_Tree_A_01", "material": 0},
+            {"name": "VFX_BlackFade_01", "material": 1},
+            {"name": "pPlane1", "material": 2},
+            {"name": "ShadowBoard1", "material": 3},
+            {"name": "BlackBoard", "material": 4},
+        ],
+    )
+    glb, _info = _assemble(parse(blob), {})
+    doc = _document(glb)
+    kinds = [material.get("extras", {}).get("helper", "") for material in doc["materials"]]
+    assert kinds.count("fade") == 1
+    assert "dark" in kinds and "shadow" in kinds and "board" in kinds
+    assert "" in kinds
+    names = [mesh["name"] for mesh in doc["meshes"]]
+    assert any("Land_LakeHrl_Tree_A_01" in name for name in names)
+    assert any("VFX_BlackFade_01" in name for name in names)
 
 
 def test_base_color_prefers_albedo():
@@ -623,7 +673,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-64", "79f25da863720dab5206ce767f2851f952609b060772ec2d4c173e7b9a3fba78")
+    pinned = ("models-65", "5a35633214ac0ef26fd537280126b4dc85032c04312585f7130649481b2e6df6")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."

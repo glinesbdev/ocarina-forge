@@ -83,7 +83,7 @@ Wasm decode on this VM is the same order as the 11.17 ms `decodeSwizzle` in [was
 
 [rendering-performance.md](rendering-performance.md) is the later cap: 1.2 GB of geometry plus BC7, or 2.2 GB of JS heap, stops further loads. 4096 unique meshes is the last resort. An earlier build stopped near 240. A headless run with a 10 GB working-set cap stopped at 388 of 852 models with a 4.67 GB JS heap, already over the 4.19 GB limit. An earlier pass that baked island and hill meshes into the visible terrain glb ran the tab out of memory. The heightmap stays on screen, and the walkable meshes stay in the one wasm object that `WasmGroundSurface.free()` drops on a scene change.
 
-The current glb cache prefix on main is `models-64`. Decoded images stay `bntx-6`. Texture manifests are `texman-2` under the cache, and shared images are `shared-v1`.
+The current glb cache prefix on this branch is `models-65`. Decoded images stay `bntx-6`. Texture manifests are `texman-2` under the cache, and shared images are `shared-v1`.
 
 ## Memory, workers, and the wasm32 ceiling
 
@@ -146,7 +146,7 @@ Projects live under `~/.local/share/ocarina-forge/projects` (or `OCARINA_FORGE_P
 
 ### Models, textures, and the warm queue
 
-`describe_actor` / `describe_terrain` in `models.py` (about 3,600 lines) plus `formats/bfres.py` (about 3,800), `formats/bntx.py`, `formats/terrain.py`, and `formats/gltf.py` are the convert. Cache keys hash the source bytes, the prefix (`models-64` for glbs, `bntx-6` for decoded images), and a stamp of the converter sources. Files land under `~/.cache/ocarina-forge`. A daemon thread drops old versions and evicts the least recently used files down to 90% of the cap. The default cap is 20 GiB. `0` means unlimited.
+`describe_actor` / `describe_terrain` in `models.py` (about 3,600 lines) plus `formats/bfres.py` (about 3,800), `formats/bntx.py`, `formats/terrain.py`, and `formats/gltf.py` are the convert. Cache keys hash the source bytes, the prefix (`models-65` for glbs, `bntx-6` for decoded images), and a stamp of the converter sources. Files land under `~/.cache/ocarina-forge`. A daemon thread drops old versions and evicts the least recently used files down to 90% of the cap. The default cap is 20 GiB. `0` means unlimited.
 
 `formats/meshopt.py` keeps a Node process up (`frontend/tools/meshopt-worker.mjs`) and ships `EXT_meshopt_compression` in the glb. The helper exits with the Python worker that started it, including when that worker is hard-killed. If Node is missing, the converter falls back to a grid quantize and skips a generated LOD. The game's own coarser level is left as it is.
 

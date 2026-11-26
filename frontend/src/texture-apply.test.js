@@ -95,6 +95,17 @@ test("a water stand-in records the ripple and does not keep the cyan multiply", 
   assert.deepEqual(mesh.color.rgb, [1, 1, 1]);
 });
 
+test("a UNORM BC7 albedo keeps the linear colour space", async () => {
+  const mesh = material();
+  await applyTextureManifest(
+    [{ materialKey: "Body:0", material: mesh }],
+    { materials: { "Body:0": { map: "/api/model-textures/albedo.ktx2", color: [1, 1, 1, 1] } } },
+    async (url) => ({ ...texture(url), colorSpace: "srgb-linear", userData: { forgeTransfer: "linear" } }),
+  );
+  assert.equal(mesh.map.colorSpace, "srgb-linear");
+  assert.equal(mesh.map.userData.forgeTransfer, "linear");
+});
+
 test("a manifest keys the glTF node without its lod prefix", () => {
   assert.equal(materialKey("lod0:Body:0"), "Body:0");
   assert.equal(materialKey("lod1:Body:0"), "Body:0");

@@ -69,7 +69,8 @@ export function formatTextureDebug(report) {
         `foreign=${sample.foreign ? 1 : 0}`,
         `uploaded=${sample.uploaded ? 1 : 0}`,
         `same=${sample.sameMaterial ? 1 : 0}`,
-      ].join(" "),
+        sample.helper ? `helper=${sample.helper}` : "",
+      ].filter(Boolean).join(" "),
     );
   }
   return [text, ...samples].join("\n");
@@ -107,6 +108,8 @@ export function formatActorTextureDebug(actor) {
         `blend=${part.blend ? 1 : 0}`,
         `alphaTest=${Number(part.alphaTest) || 0}`,
         `transparent=${part.transparent ? 1 : 0}`,
+        part.helper ? `helper=${part.helper}` : "",
+        part.space ? `space=${part.space}` : "",
         color ? `color=${color}` : "",
         `attrs=${(part.attributes || []).join("|") || "none"}`,
       ].filter(Boolean).join(" "),

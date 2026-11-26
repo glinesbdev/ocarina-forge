@@ -16,9 +16,18 @@ const KTX_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0
 
 export const VK_FORMAT = {
   bc1: 133,
+  bc1srgb: 134,
   bc3: 137,
   bc7: 145,
+  bc7srgb: 146,
 };
+
+/** sRGB block formats are sampled as sRGB. UNORM block formats stay linear. */
+export function colorSpaceFor(vkFormat) {
+  if (vkFormat === VK_FORMAT.bc1srgb || vkFormat === VK_FORMAT.bc7srgb) return "srgb";
+  if (vkFormat === VK_FORMAT.bc1 || vkFormat === VK_FORMAT.bc3 || vkFormat === VK_FORMAT.bc7) return "linear";
+  return "";
+}
 
 export function splitPacked(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -229,14 +238,16 @@ export function chooseTexture(buffer, options) {
   const packed = splitPacked(buffer);
   const info = readKtx2(packed.ktx);
   const format = enabled && info ? formatFor(info.vkFormat, caps) : 0;
+  const colorSpace = colorSpaceFor(info && info.vkFormat);
   if (format) {
     if (canUploadCompressed(gl, format, info.levels)) {
-      return { kind: "compressed", format, width: info.width, height: info.height, levels: info.levels, reason: "" };
+      return { kind: "compressed", format, colorSpace, width: info.width, height: info.height, levels: info.levels, reason: "" };
     }
     if (info.levels.length > 1 && canUploadCompressed(gl, format, [info.levels[0]])) {
       return {
         kind: "compressed",
         format,
+        colorSpace,
         width: info.width,
         height: info.height,
         levels: [info.levels[0]],
@@ -346,9 +357,13 @@ export function createGpuTextureLoader(options) {
           choice.format,
         );
         texture.needsUpdate = true;
-        texture.colorSpace = THREE.SRGBColorSpace;
+        const transfer = choice.colorSpace === "linear" ? "linear" : "srgb";
+        texture.colorSpace = transfer === "linear" && THREE.LinearSRGBColorSpace
+          ? THREE.LinearSRGBColorSpace
+          : THREE.SRGBColorSpace;
         texture.flipY = false;
         texture.generateMipmaps = false;
+        texture.userData = { ...(texture.userData || {}), forgeTransfer: transfer };
         onLoad(texture);
         return;
       }
@@ -456,9 +471,9 @@ const ASTC = {
 
 export function formatFor(vkFormat, support) {
   const caps = support || {};
-  if (vkFormat === VK_FORMAT.bc1 && caps.s3tc) return 33777;
+  if ((vkFormat === VK_FORMAT.bc1 || vkFormat === VK_FORMAT.bc1srgb) && caps.s3tc) return 33777;
   if (vkFormat === VK_FORMAT.bc3 && caps.s3tc) return 33779;
-  if (vkFormat === VK_FORMAT.bc7 && caps.bptc) return 36492;
+  if ((vkFormat === VK_FORMAT.bc7 || vkFormat === VK_FORMAT.bc7srgb) && caps.bptc) return 36492;
   if (ASTC[vkFormat] && caps.astc) return ASTC[vkFormat];
   return 0;
 }

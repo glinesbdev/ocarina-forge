@@ -78,7 +78,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-64\0"
+_CACHE_VERSION = b"models-65\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -384,9 +384,7 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
             slot["texture"] = part.texture or ""
             slot["sampler"] = part.albedo_sampler or ""
             if image is not None:
-                codec = getattr(image, "codec", "") or ""
-                fmt = getattr(image, "fmt", 0) or 0
-                slot["format"] = f"{codec or format(int(fmt), '#x')} {getattr(image, 'width', 0)}x{getattr(image, 'height', 0)}".strip()
+                slot["format"] = _image_format_label(image)
             if part.stand_in == "water" and (part.texture == _WATER_TEX or image is None):
                 slot["standIn"] = "water"
                 slot["texture"] = part.texture or _WATER_TEX
@@ -1356,14 +1354,53 @@ def _borrow_sibling(dump, model, sources, hints, material, external, raws):
     return None
 
 
+_HELPER_TOKENS = (
+    ("blackfade", "fade"),
+    ("fadeblack", "fade"),
+    ("blackborad", "board"),
+    ("blackboard", "board"),
+    ("darkplane", "dark"),
+    ("shadowboard", "shadow"),
+)
+
+
+def _helper_kind(*names: str) -> str:
+    """Fade, black-board, dark-plane, and shadow-board shapes.
+
+    The retail names are ``BlackFade`` and ``BlackBorad`` (the file spells
+    the board that way). ``fadeblack`` is not a substring of ``blackfade``,
+    so the old omit left these planes in the mesh. They are tagged and the
+    view hides them. Longshot does not name a blend equation for them.
+    """
+    compact = "".join(names).lower().replace("_", "").replace(" ", "")
+    for token, kind in _HELPER_TOKENS:
+        if token in compact:
+            return kind
+    return ""
+
+
+def _image_format_label(image) -> str:
+    """``bc7 srgb 0x2006 1024x1024`` or ``bc7 linear 0x2001 1024x1024``.
+
+    NVN low byte ``0x06`` is sRGB and ``0x01`` is UNORM. The KTX vkFormat
+    follows that nibble (146 versus 145). The label is what texdebug prints.
+    """
+    codec = getattr(image, "codec", "") or ""
+    fmt = int(getattr(image, "fmt", 0) or 0)
+    nibble = fmt & 0xFF
+    transfer = "srgb" if nibble == 0x06 else "linear" if nibble == 0x01 else ""
+    head = codec or (format(fmt, "#x") if fmt else "")
+    parts = [part for part in (head, transfer, format(fmt, "#x") if fmt and codec else "") if part]
+    size = f"{getattr(image, 'width', 0)}x{getattr(image, 'height', 0)}"
+    return f"{' '.join(parts)} {size}".strip()
+
+
 def _omit_reason(shape: str, material: str) -> str:
     compact = f"{shape} {material}".lower().replace("_", "").replace(" ", "")
     if "watervolume" in compact:
         return "water volume is not drawn"
     if "bakeshadowproxy" in compact:
         return "bake shadow proxy is not drawn"
-    if "fadeblack" in compact:
-        return "fade black is not drawn"
     if "innermesh" in compact:
         return "inner mesh is not drawn"
     if "eyeouter" in compact or "eyeshadow" in compact:
@@ -1400,6 +1437,7 @@ def _mark_omitted(models) -> None:
             for part, name in labeled
         )
         for part, name in labeled:
+            part.helper = _helper_kind(part.name, name)
             reason = _omit_reason(part.name, name)
             low = f"{part.name} {name}".lower()
             if not reason and front and "back" in low and ("water" in low or "flow" in low):
@@ -1573,6 +1611,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                         f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
                     )
             drawn_colors = part.colors if blend_extra else None
+            part_extras = dict(blend_extra or {})
+            if part.helper:
+                part_extras["helper"] = part.helper
             primitives.append(
                 Primitive(
                     part.positions,
@@ -1593,7 +1634,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     normal_png=normal_png,
                     emissive_png=emissive_png,
                     moss_png=moss_png,
-                    extras=blend_extra,
+                    extras=part_extras or None,
                     orm_png=orm_png,
                     orm1_png=orm1_png,
                     normal1_png=normal1_png,
@@ -1623,7 +1664,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             normal_png=normal_png,
                             emissive_png=emissive_png,
                             moss_png=moss_png,
-                            extras=blend_extra,
+                            extras=part_extras or None,
                             orm_png=orm_png,
                             orm1_png=orm1_png,
                             normal1_png=normal1_png,

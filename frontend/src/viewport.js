@@ -51,6 +51,7 @@ import { buildCapture, countTextures, createProfileWindow, formatProfileHud, rec
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
+import { helperKind } from "./scene-helper.js";
 import { formatActorTextureDebug, formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
@@ -485,6 +486,7 @@ let convertSlots = 8;
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
+  let showHelpers = false;
   const layerVisibility = {
     models: true,
     terrain: true,
@@ -1194,6 +1196,13 @@ let convertSlots = 8;
     for (const mesh of scenePreview?.waterMeshes ?? []) mesh.visible = showWater;
   }
 
+  function applyHelpers() {
+    for (const batch of batches) {
+      if (batch.helper) batch.mesh.visible = showHelpers;
+    }
+    for (const mesh of scenePreview?.helperMeshes ?? []) mesh.visible = showHelpers;
+  }
+
   function clearActors(options = {}) {
     loadQueue = null;
     modelLoads?.dispose();
@@ -1642,7 +1651,9 @@ let convertSlots = 8;
         const original = part.material;
         originals.add(original);
         const water = name !== "@terrain" && isPreviewWater(original, part.userData.name || part.name, name);
+        const helper = helperKind(part.userData.name || "", part.name || "", original && original.name, name);
         part.userData.previewWater = water;
+        part.userData.previewHelper = helper;
         const label = `${part.name} ${name}`;
         let color = original.color.getHex();
         if (color === 0xffffff) {
@@ -1702,7 +1713,7 @@ let convertSlots = 8;
     const controller = new AbortController();
     const preview = {
       controller, terrainPending, terrain: null, asset: null, root: new THREE.Group(), hidden: [],
-      models: new Map(), placements: new Map(), bounds: new Map(), waterMeshes: new Set(),
+      models: new Map(), placements: new Map(), bounds: new Map(), waterMeshes: new Set(), helperMeshes: new Set(),
     };
     scenePreview = preview;
     try {
@@ -1781,6 +1792,10 @@ let convertSlots = 8;
               mesh.renderOrder = 2;
               mesh.visible = showWater;
               preview.waterMeshes.add(mesh);
+            }
+            if (part.userData.previewHelper) {
+              mesh.visible = showHelpers;
+              preview.helperMeshes.add(mesh);
             }
             placements.forEach((entry, index) => {
               displayedActorMatrix(entry, matrix).multiply(local);
@@ -3231,10 +3246,13 @@ let convertSlots = 8;
       mesh.renderOrder = 1;
       const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
       const water = tag === "water";
+      const helper = (group.material.userData && group.material.userData.helper)
+        || helperKind(label, group.material.name, group.material.userData && group.material.userData.name);
       if (water) {
         mesh.renderOrder = 2;
         mesh.visible = showWater;
       }
+      if (helper) mesh.visible = showHelpers;
       const geomIds = new Map();
       let built = true;
       for (const [uuid, geometry] of group.geometries) {
@@ -3296,7 +3314,7 @@ let convertSlots = 8;
       mesh.userData.pick = { ids, geometries, spheres, count };
       mesh.userData.forgeIndirect = mesh._indirectTexture;
       mesh.computeBoundingSphere();
-      pendingMeshes.push({ mesh, ids, water });
+      pendingMeshes.push({ mesh, ids, water, helper: Boolean(helper) });
     }
     const compileStarted = performance.now();
     // compileObjectPipeline logs a compile failure once and still resolves.
@@ -4531,12 +4549,13 @@ uniform float terrainLayerMissing;`
     lastLightingNote = resolved.note;
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers, shadows, ao, effectGizmos, editorDefaults }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, helpers, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers, shadows, ao, effectGizmos, editorDefaults }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
     if (ground !== undefined) showGround = Boolean(ground);
     if (water !== undefined) showWater = Boolean(water);
+    if (helpers !== undefined) showHelpers = Boolean(helpers);
     if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
     if (subTerrain !== undefined) showSub = Boolean(subTerrain);
     if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
@@ -4580,6 +4599,7 @@ uniform float terrainLayerMissing;`
     syncPickIds();
     applyGround();
     applyWater();
+    applyHelpers();
     applyTerrainUniforms();
     applyBlendUniforms();
     drawLinks();
@@ -5546,6 +5566,8 @@ uniform float terrainLayerMissing;`
         blend: Boolean(userData.blend || userData.blendNode),
         alphaTest: material && material.alphaTest ? material.alphaTest : 0,
         transparent: Boolean(material && material.transparent),
+        helper: (userData.helper) || helperKind(part.name, part.materialKey, material && material.name),
+        space: (map && map.colorSpace) || (map && map.userData && map.userData.forgeTransfer) || "",
         color: color ? [color.r, color.g, color.b] : [],
         attributes,
       });
@@ -5660,6 +5682,8 @@ uniform float terrainLayerMissing;`
           foreign: typeof Texture === "function" && !(partMap instanceof Texture),
           uploaded: textureGpuReady(renderer.backend, partMap),
           sameMaterial: material === partMaterial,
+          helper: (partMaterial && partMaterial.userData && partMaterial.userData.helper)
+            || helperKind(mesh.name, partMaterial && partMaterial.name),
         });
       }
     }

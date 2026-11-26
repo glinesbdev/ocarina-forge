@@ -206,9 +206,12 @@ class Part:
     stand_in: str = ""
     # 0 is the near mesh. A higher value is a farther BFRES LOD of the same shape.
     lod: int = 0
-    # Helper shapes (water volume, bake, fade, inner mesh, eye cards) are not drawn.
+    # Helper shapes (water volume, bake, inner mesh, eye cards) are not drawn.
     omit: bool = False
     omit_reason: str = ""
+    # fade, board, dark, or shadow. The mesh stays in the file. The view hides it
+    # until Helpers is on. BlackFade does not match the old "fadeblack" omit.
+    helper: str = ""
     # "repeat" writes a glTF sampler with wrap REPEAT. Terra UVs tile past 1.
     wrap: str = ""
     normal_texture: str = ""

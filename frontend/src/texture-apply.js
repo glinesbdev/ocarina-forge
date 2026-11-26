@@ -229,7 +229,9 @@ async function assignSlot(material, slot, loadTexture) {
     take(slot.moss),
   ]);
   const plain = userData.forgePlain;
-  replaceMap(material, "map", map, plain, SRGB);
+  const albedo = asTexture(map);
+  const albedoTransfer = albedo && albedo.userData && albedo.userData.forgeTransfer;
+  replaceMap(material, "map", map, plain, albedoTransfer === "linear" ? LINEAR : SRGB);
   replaceMap(material, "normalMap", normalMap, plain, LINEAR);
   replaceMap(material, "roughnessMap", orm, plain, LINEAR);
   replaceMap(material, "metalnessMap", orm, plain, LINEAR);
@@ -255,7 +257,6 @@ async function assignSlot(material, slot, loadTexture) {
   if (slot.texture) userData.forgeAlbedoName = String(slot.texture);
   if (slot.sampler) userData.forgeAlbedoSampler = String(slot.sampler);
   if (slot.format) userData.forgeAlbedoFormat = String(slot.format);
-  const albedo = asTexture(material.map);
   if (albedo && slot.tile) {
     albedo.wrapS = REPEAT;
     albedo.wrapT = REPEAT;

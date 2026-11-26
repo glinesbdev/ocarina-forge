@@ -488,6 +488,7 @@ for (const [id, flag, fallback] of [
   ["show-shadows", "shadows", false],
   ["show-ao", "ao", true],
   ["show-effect-gizmos", "effectGizmos", true],
+  ["show-helpers", "helpers", false],
   ["show-editor-lighting", "editorDefaults", false],
 ]) {
   const box = $(id);

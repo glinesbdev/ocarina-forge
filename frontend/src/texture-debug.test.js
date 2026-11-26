@@ -82,6 +82,8 @@ test("the texture pipeline warns once and keeps the first error", () => {
         alphaTest: 0,
         transparent: false,
         color: [1, 1, 1],
+        helper: "",
+        space: "srgb",
         attributes: ["position", "uv 0.000..1.000,0.000..1.000"],
       }],
       roles: [{ material: "Mt_Bark", sampler: "_a0", texture: "Tree_Alb", uv: "_u0", alpha: "opaque" }],
@@ -89,6 +91,7 @@ test("the texture pipeline warns once and keeps the first error", () => {
     assert.match(actor, /forge texdebug actor/);
     assert.match(actor, /gyaml=Land_LakeHrl_Tree_A_01/);
     assert.match(actor, /sampler=_a0 texture=Tree_Alb format=bc7 1024x1024/);
+    assert.match(actor, /space=srgb/);
     assert.match(actor, /attrs=position\|uv 0.000..1.000,0.000..1.000/);
     assert.match(actor, /role Mt_Bark sampler=_a0 texture=Tree_Alb uv=_u0/);
   } finally {

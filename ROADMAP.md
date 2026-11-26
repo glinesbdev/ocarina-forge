@@ -34,6 +34,10 @@ The first step is the profiling HUD, so the rest of this list is driven by a spl
 - [#11 Move decorations with their parent piece](https://github.com/glinesbdev/ocarina-forge/issues/11) — when a piece moves, the decorations that sit on it move with it.
 - [#12 Snap bug: gizmo drops to the ground while the model stays in the air](https://github.com/glinesbdev/ocarina-forge/issues/12) — with Snap on, the gizmo falls to the ground while the model stays up. Fix this together with [#10](https://github.com/glinesbdev/ocarina-forge/issues/10) and [#11](https://github.com/glinesbdev/ocarina-forge/issues/11).
 
+## Follow-up
+
+- Water stand-in. The retest of `a20b4fd` draws the lake as a harsh tiled teal pattern. Leave that until after the performance work. The helper planes and the BC7 colour space are separate.
+
 ## Exploration
 
 - [#13 Explore running the editor fully in the browser (WebAssembly)](https://github.com/glinesbdev/ocarina-forge/issues/13) — a long-term look at running the whole editor in the browser, including parsing and conversion.

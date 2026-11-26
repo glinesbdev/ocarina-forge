@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chooseTexture, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
+import { chooseTexture, colorSpaceFor, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
   adoptRendererTexture,
   releaseTextureCpu,
   repairCompressedTexture, textureGpuReady, VK_FORMAT } from "./gpu-texture.js";
@@ -39,6 +39,9 @@ test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   assert.equal(info.levels.length, 1);
   assert.equal(info.levels[0].data.length, 16);
   assert.equal(formatFor(info.vkFormat, { bptc: true }), 36492);
+  assert.equal(formatFor(VK_FORMAT.bc7srgb, { bptc: true }), 36492);
+  assert.equal(colorSpaceFor(VK_FORMAT.bc7), "linear");
+  assert.equal(colorSpaceFor(VK_FORMAT.bc7srgb), "srgb");
   assert.equal(formatFor(info.vkFormat, {}), 0);
   assert.equal(formatFor(0, { bptc: true }), 0);
   assert.equal(formatFor(167, { astc: true }), 37813);
