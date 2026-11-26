@@ -37,7 +37,7 @@ import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { planAssetFetches, wantsMesh } from "./layers.js";
-import { applyTextureManifest, formatTextureReport, presentTextures } from "./texture-apply.js";
+import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -2498,6 +2498,13 @@ let convertSlots = 8;
       });
       index += 1;
     });
+    // A stale flat glb can still share one material across shape keys. Split
+    // that object before the batch key is recorded, and keep the key on the
+    // shape so those batches do not fold back onto the first material.
+    separateSharedMaterials(parts);
+    for (const part of parts) {
+      part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey}`;
+    }
     return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
   }
 

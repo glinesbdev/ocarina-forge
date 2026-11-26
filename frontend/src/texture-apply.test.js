@@ -156,6 +156,39 @@ test("applying textures does not rebuild geometry and clearing drops them", asyn
   assert.equal(parts[0].geometry, geometry);
 });
 
+test("a shared material is cloned once per shape key", async () => {
+  const shared = material();
+  const beard = material();
+  const parts = [
+    { name: "lod0Body_low0", materialKey: "Body_low:5", material: shared },
+    { name: "lod1Body_low0", materialKey: "Body_low:5", material: shared },
+    { name: "lod0Face0", materialKey: "Eyelid_Lower_low:2", material: shared },
+    { name: "lod0Rock0", materialKey: "RockSmall_Body:4", material: shared },
+    { name: "lod0Beard0", materialKey: "BeardA_01_low:3", material: beard },
+  ];
+  const report = await applyTextureManifest(parts, {
+    materials: {
+      "Body_low:5": { map: "/api/model-textures/skin.ktx2", color: [1, 1, 1, 1], status: "ready", found: "CmnTex_Chara_Mt_Skin" },
+      "Eyelid_Lower_low:2": { map: "/api/model-textures/face.ktx2", color: [1, 1, 1, 1], status: "ready", found: "CmnTex_Chara_Mt_Face" },
+      "RockSmall_Body:4": { map: "/api/model-textures/rock.ktx2", color: [1, 1, 1, 1], status: "ready", found: "CmnTex_Chara_Mt_Rock" },
+      "BeardA_01_low:3": { map: "/api/model-textures/hair.ktx2", color: [1, 1, 1, 1], status: "ready", found: "Mt_Hair" },
+    },
+  }, async (url) => texture(url));
+  assert.equal(parts[0].material, parts[1].material);
+  assert.notEqual(parts[0].material, parts[2].material);
+  assert.notEqual(parts[0].material, parts[3].material);
+  assert.equal(parts[0].material.map.url, "/api/model-textures/skin.ktx2");
+  assert.equal(parts[1].material.map.url, "/api/model-textures/skin.ktx2");
+  assert.equal(parts[2].material.map.url, "/api/model-textures/face.ktx2");
+  assert.equal(parts[3].material.map.url, "/api/model-textures/rock.ktx2");
+  assert.equal(parts[4].material, beard);
+  assert.equal(beard.map.url, "/api/model-textures/hair.ktx2");
+  const note = formatTextureReport(report);
+  assert.match(note, /Body_low:5: applied CmnTex_Chara_Mt_Skin/);
+  assert.match(note, /RockSmall_Body:4: applied CmnTex_Chara_Mt_Rock/);
+  assert.doesNotMatch(note, /Body_low:5: applied CmnTex_Chara_Mt_Rock/);
+});
+
 test("a skin tint is named and a tiling albedo repeats", async () => {
   const mesh = material();
   const parts = [{ name: "lod0Body_low0", materialKey: "Body_low:5", material: mesh }];

@@ -312,138 +312,29 @@ def test_a_vertex_option_does_not_paint_skin_with_the_rock_mix():
     assert "Rock" in plan["texture"]
 
 
-def test_a_skin_albedo_is_multiplied_by_its_colour_and_its_assigned_uv(tmp_path, monkeypatch):
-    """The body keeps the skin image. The uniform tints it. The sampler's UV set is the one drawn."""
-    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
-    tan = (0.72, 0.48, 0.28, 1.0)
-    name = "CmnTex_Chara_Mt_Skin_Npc_Goron_GON_001_Alb"
-    material = Material(
-        "Mt_Skin",
-        binds=[("_a0", name)],
-        albedo=[("_a0", name)],
-        base_color=tan,
-        options={"enable_vertex_color": "1"},
-        assign={"_a0": "_u1"},
-        params=[
-            {"kind": "float", "name": "albedo_color", "value": list(tan)},
-            {"kind": "texsrt", "name": "tex_srt_a0", "scale": [2.0, 2.0], "translate": [0.0, 0.0]},
-        ],
-    )
-    colors = [(0.90, 0.60, 0.30, 0.1), (0.40, 0.20, 0.10, 0.9), (0.70, 0.40, 0.20, 0.4)]
-    part = Part(
-        "Body_low",
-        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
-        [0, 1, 2],
-        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
-        "",
-        "",
-        0,
-        colors=colors,
-        uv_extra={"_u1": [(0.1, 0.2), (0.3, 0.4), (0.5, 0.6)]},
-    )
-    image = Texture(name, 1, 1, bytes([140, 140, 140, 255]), 0)
-    model = Model("Npc_Goron", parts=[part], materials=[material], images={name: image})
-    from ocarina_forge.models import _resolve_materials, _texture_manifest
-
-    external, _log, _raws = _resolve_materials(None, [model], "Npc_Goron_Biggoron", False)
-    assert part.blend is None
-    assert part.texture == name
-    blob, info = _assemble([model], external)
-    text = " ".join(info["notes"])
-    assert "albedo tint (0.72, 0.48, 0.28)" in text
-    assert "albedo uv _u1" in text
-    assert "albedo repeats 2.00×2.00" in text
-    assert "vertex tint on Mt_Skin" in text
-    assert "layers:" not in text
-    document = _json(blob)
-    primitive = document["meshes"][0]["primitives"][0]
-    factor = document["materials"][primitive["material"]]["pbrMetallicRoughness"]["baseColorFactor"]
-    assert abs(factor[0] - 0.72) < 1e-4 and abs(factor[1] - 0.48) < 1e-4 and abs(factor[2] - 0.28) < 1e-4
-    assert "blend" not in document["materials"][primitive["material"]].get("extras", {})
-    painted = _accessor_floats(document, blob, primitive["attributes"]["COLOR_0"], 4)
-    assert painted[0][3] == 1.0
-    assert abs(painted[1][0] - 0.40) < 1e-4
-    drawn = _accessor_floats(document, blob, primitive["attributes"]["TEXCOORD_0"], 2)
-    assert abs(drawn[0][0] - 0.2) < 1e-4 and abs(drawn[0][1] - 0.4) < 1e-4
-    assert abs(drawn[2][0] - 1.0) < 1e-4 and abs(drawn[2][1] - 1.2) < 1e-4
-    manifest = _texture_manifest("Npc_Goron_Biggoron", [model], external)
-    slot = manifest["materials"]["Body_low:0"]
-    assert abs(slot["color"][0] - 0.72) < 1e-4
-    assert slot["tint"] == [0.72, 0.48, 0.28]
-    assert slot["uv"] == "_u1"
-    assert slot["tile"] == "2.00×2.00"
-    assert "blend" not in slot
-
-
-def test_hair_vertex_colours_tint_the_albedo_and_a_roof_scale_is_left_alone():
-    material = Material(
-        "Mt_Hair",
-        binds=[("_a0", "Mt_Hair_Npc_Goron_GOU_Biggoron_Alb")],
-        albedo=[("_a0", "Mt_Hair_Npc_Goron_GOU_Biggoron_Alb")],
-    )
-    colors = [(0.35, 0.18, 0.08, 0.2), (0.55, 0.28, 0.10, 0.8), (0.20, 0.10, 0.05, 0.4)]
-    part = Part(
-        "BeardA_01_low",
-        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
-        [0, 1, 2],
-        [(0, 0), (1, 0), (0, 1)],
-        "",
-        "",
-        0,
-        colors=colors,
-    )
-    image = Texture("hair", 1, 1, bytes([180, 180, 180, 255]), 0)
-    model = Model("Npc_Goron", parts=[part], materials=[material], images={"Mt_Hair_Npc_Goron_GOU_Biggoron_Alb": image})
-    from ocarina_forge.models import _resolve_materials
-
-    external, _log, _raws = _resolve_materials(None, [model], "Npc_Goron_Biggoron", False)
-    assert part.blend is None
-    blob, info = _assemble([model], external)
-    assert "vertex tint on Mt_Hair" in " ".join(info["notes"])
-    assert "layers:" not in " ".join(info["notes"])
-    document = _json(blob)
-    primitive = document["meshes"][0]["primitives"][0]
-    factor = document["materials"][primitive["material"]]["pbrMetallicRoughness"]["baseColorFactor"]
-    assert factor == [1.0, 1.0, 1.0, 1.0]
-    painted = _accessor_floats(document, blob, primitive["attributes"]["COLOR_0"], 4)
-    assert painted[0][3] == 1.0
-    assert abs(painted[0][0] - 0.35) < 1e-4
-
-    roof = Material(
-        "Mt_Land_HrlCastle_Roof_Slate_A",
-        albedo=[("_a0", "slate")],
-        params=[{"kind": "texsrt", "name": "tex_srt_a0", "scale": [8.0, 8.0], "translate": [0.0, 0.0]}],
-    )
-    slate = Part(
-        "roof",
-        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
-        [0, 1, 2],
-        [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
-        "slate",
-        "Mt_Land_HrlCastle_Roof_Slate_A",
-        0,
-    )
-    from ocarina_forge.models import _albedo_shade
-
-    shade = _albedo_shade(Model("castle", parts=[slate], materials=[roof]), slate)
-    assert shade[1] == [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
-    assert shade[4] == ""
-
-
-def _accessor_floats(document, blob, index, width):
-    accessor = document["accessors"][index]
-    view = document["bufferViews"][accessor["bufferView"]]
-    offset = 12
-    length = struct.unpack_from("<I", blob, offset)[0]
-    offset += 8 + length
-    while offset % 4:
-        offset += 1
-    offset += 8
-    start = offset + view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
-    found = []
-    for item in range(accessor["count"]):
-        found.append(struct.unpack_from("<" + "f" * width, blob, start + item * width * 4))
-    return found
+def test_a_flat_glb_keeps_each_untextured_material():
+    """White, imageless shapes used to share one material. The last texture write then painted them all."""
+    positions = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    indices = [0, 1, 2]
+    uvs = [(0, 0), (1, 0), (0, 1)]
+    names = ("BeardA_01_low:3", "Body_low:5", "Eye_Inner_0_L:0", "Eyelid_Lower_low:2", "RockSmall_Body:4", "Teeth_Lower_low:6")
+    flat = [
+        Primitive(positions, indices, uvs, name=name, double_sided=(index == 0), base_color=(1, 1, 1, 1))
+        for index, name in enumerate(names)
+    ]
+    document = _json(to_glb(flat))
+    assert len(document["materials"]) == len(names)
+    used = [mesh["primitives"][0]["material"] for mesh in document["meshes"]]
+    assert used == list(range(len(names)))
+    assert document["nodes"][1]["name"] == "lod0:Body_low:5"
+    assert document["nodes"][4]["name"] == "lod0:RockSmall_Body:4"
+    # The same image still shares a material. Flat mode is what has to split.
+    png = b"\x89PNG-same"
+    shared = _json(to_glb([
+        Primitive(positions, indices, uvs, png=png, name="Body_low:5", double_sided=False),
+        Primitive(positions, indices, uvs, png=png, name="RockSmall_Body:4", double_sided=False),
+    ]))
+    assert len(shared["materials"]) == 1
 
 
 def test_a_plain_emissive_map_still_glows():

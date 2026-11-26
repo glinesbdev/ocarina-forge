@@ -84,7 +84,50 @@ function hasSlotImage(slot) {
  * that opened and did not yield an image, `not-applied` is a response the
  * mesh did not take, and `applied` is a map now on the material.
  */
+/**
+ * One glTF material object shared by two shape keys would take every texture
+ * write. Clone it once per key. Parts that already share a key keep one object,
+ * so a single assign still covers both LODs.
+ */
+export function separateSharedMaterials(parts) {
+  const owner = new Map();
+  const replacement = new Map();
+  for (const part of parts || []) {
+    const material = part && part.material;
+    if (!material) continue;
+    const key = materialKey(part);
+    const previous = owner.get(material);
+    if (!previous) {
+      owner.set(material, key);
+      continue;
+    }
+    if (previous === key) continue;
+    const saved = replacement.get(key);
+    if (saved) {
+      part.material = saved;
+      continue;
+    }
+    const copy = cloneMaterial(material);
+    owner.set(copy, key);
+    replacement.set(key, copy);
+    part.material = copy;
+  }
+  return parts;
+}
+
+function cloneMaterial(material) {
+  if (typeof material.clone === "function") {
+    const copy = material.clone();
+    copy.userData = { ...(material.userData || {}) };
+    return copy;
+  }
+  const copy = { ...material, map: material.map || null, userData: { ...(material.userData || {}) } };
+  if (material.color && typeof material.color.clone === "function") copy.color = material.color.clone();
+  return copy;
+}
+
 export async function applyTextureManifest(parts, manifest, loadTexture) {
+  separateSharedMaterials(parts);
   const materials = (manifest && manifest.materials) || {};
   if (manifest && manifest.skipped) {
     return [{ key: "", status: "not-applied", error: manifest.reason || "Textures are not loaded.", found: "" }];

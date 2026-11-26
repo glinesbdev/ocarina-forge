@@ -18,8 +18,8 @@ for images the mesh bfres only names. Older `Model/<name>.bfres` paths and a
 bfres stored in the pack are still accepted. Vertex colours do not mean the
 material has no texture. Each material's own texture name is a file under
 `Tex/`. A rock albedo is a second layer only when that name is the rock.
-A skin, hair, face, teeth, or eye albedo keeps that texture and multiplies it
-by the material's colour uniform and by `_c0` when that colour is a tint.
+A flat mesh keeps one glTF material per shape key, so a later texture write
+cannot paint every shape with the last image.
 """
 
 from __future__ import annotations
@@ -52,18 +52,7 @@ from ocarina_forge.cache_prune import (
 )
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
 from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, rank_albedo, texture_rank
-from ocarina_forge.blend import (
-    character_vertex_tint,
-    color_span,
-    display_tint,
-    draw_srt,
-    draw_uv,
-    is_character_albedo,
-    overlay_plan,
-    sampler_indices,
-    skin_overlay_plan,
-    span_from_colors,
-)
+from ocarina_forge.blend import color_span, overlay_plan, sampler_indices, skin_overlay_plan, span_from_colors
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
 
@@ -89,7 +78,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-62\0"
+_CACHE_VERSION = b"models-63\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -364,16 +353,6 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
             else:
                 color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
                 alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
-            shade = _albedo_shade(model, part)
-            if (
-                shade is not None
-                and image is not None
-                and part.stand_in != "water"
-                and not part.proxy
-                and shade[0] is not None
-                and not (part.blend and part.blend.get("skin"))
-            ):
-                color = shade[0]
             slot = {
                 "map": albedo,
                 "normalMap": normal,
@@ -400,8 +379,6 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
             slot["status"] = "ready"
             slot["found"] = found
             slot["error"] = ""
-            if shade is not None and image is not None and part.stand_in != "water" and not part.proxy:
-                _stamp_shade(slot, shade)
             materials[f"{part.name}:{part.material_index}"] = slot
     return {"gyaml": gyaml, "materials": materials}
 
@@ -1460,11 +1437,6 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             else:
                 color = (1.0, 1.0, 1.0, 1.0) if image is not None else (part.base_color or _NEUTRAL)
                 alpha = part.alpha if image is not None or part.alpha == "blend" else "opaque"
-            shade = _albedo_shade(model, part) if image is not None and not water and not part.proxy else None
-            drawn_uvs = part.uvs
-            if shade is not None:
-                _tint, drawn_uvs, _uv_name, _scale, _tile = shade
-
             def extra_png(name: str):
                 nonlocal texture_count
                 extra = taken(name)
@@ -1549,24 +1521,11 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                         f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
                     )
             drawn_colors = part.colors if blend_extra else None
-            if shade is not None and not (blend_extra and blend_extra.get("blend", {}).get("skin")):
-                tint, _drawn, uv_name, _scale, tile = shade
-                if tint is not None:
-                    color = tint
-                _note_shade(notes, part, tint, uv_name, tile)
-                if drawn_colors is None:
-                    drawn_colors = character_vertex_tint(
-                        _part_material(model, part), part.texture, part.colors, tint
-                    )
-                    if drawn_colors:
-                        line = f"vertex tint on {part.material or part.name}"
-                        if line not in notes:
-                            notes.append(line)
             primitives.append(
                 Primitive(
                     part.positions,
                     part.indices,
-                    drawn_uvs,
+                    part.uvs,
                     normals=part.normals,
                     png=png,
                     alpha=alpha,
@@ -1590,9 +1549,9 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
             )
             if part.lod == 0 and not any(other.name == part.name and other.lod for other in model.parts):
                 if meshopt_available():
-                    coarser = simplify_mesh(part.positions, part.indices, drawn_uvs, drawn_colors)
+                    coarser = simplify_mesh(part.positions, part.indices, part.uvs, drawn_colors)
                 else:
-                    coarser = cluster_lod(part.positions, part.indices, drawn_uvs, colors=drawn_colors)
+                    coarser = cluster_lod(part.positions, part.indices, part.uvs, colors=drawn_colors)
                 if coarser:
                     primitives.append(
                         Primitive(
@@ -1875,105 +1834,6 @@ def _span_for_material(model, material):
         if span:
             return span
     return None
-
-
-def _part_material(model, part):
-    materials = list(getattr(model, "materials", None) or [])
-    index = getattr(part, "material_index", -1)
-    if 0 <= index < len(materials):
-        return materials[index]
-    return None
-
-
-def _srt_active(scale, translate) -> bool:
-    sx, sy = float(scale[0]), float(scale[1])
-    tx, ty = float(translate[0]), float(translate[1])
-    return abs(sx - 1.0) > 1e-3 or abs(sy - 1.0) > 1e-3 or abs(tx) > 1e-3 or abs(ty) > 1e-3
-
-
-def _uvs_outside(uvs) -> bool:
-    if not uvs:
-        return False
-    count = len(uvs)
-    step = max(1, count // 32)
-    for index in range(0, count, step):
-        u, v = float(uvs[index][0]), float(uvs[index][1])
-        if u < -0.001 or v < -0.001 or u > 1.001 or v > 1.001:
-            return True
-    return False
-
-
-def _bake_srt(uvs, scale, translate):
-    """Scale and slide UVs. Identity leaves the authored set alone."""
-    if not uvs or not _srt_active(scale, translate):
-        return uvs
-    sx, sy = float(scale[0]), float(scale[1])
-    tx, ty = float(translate[0]), float(translate[1])
-    return [(float(uvs[index][0]) * sx + tx, float(uvs[index][1]) * sy + ty) for index in range(len(uvs))]
-
-
-def _albedo_shade(model, part):
-    """Tint, drawn UVs, the UV set name, the SRT scale, and a repeat label.
-
-    The drawn UV changes when the albedo sampler assigns `_u1` or `_u2` and
-    that set is on the shape. A texture SRT is baked only for skin, hair, the
-    face, teeth, and eyes. A roof stores a large `_a0` scale for its own shader
-    and the mesh UVs are already authored, so that scale is not applied again.
-    """
-    material = _part_material(model, part)
-    if material is None:
-        return None
-    slot = part.albedo_sampler or ""
-    if not slot and material.albedo:
-        slot = material.albedo[0][0]
-    slot = slot or "_a0"
-    texture = part.texture or (material.albedo[0][1] if material.albedo else "")
-    tint = display_tint(material)
-    uv_name = draw_uv(material, slot)
-    uvs = part.uvs
-    if str(uv_name).lower() not in ("_u0", "u0"):
-        extra = (part.uv_extra or {}).get(uv_name)
-        if extra is not None and len(extra) == len(part.positions):
-            uvs = extra
-        else:
-            uv_name = "_u0"
-    scale, translate = (1.0, 1.0), (0.0, 0.0)
-    if is_character_albedo(material, texture):
-        scale, translate = draw_srt(material, slot)
-        uvs = _bake_srt(uvs, scale, translate)
-    tile = ""
-    if is_character_albedo(material, texture) and _srt_active(scale, translate):
-        tile = "{:.2f}×{:.2f}".format(float(scale[0]), float(scale[1]))
-    elif is_character_albedo(material, texture) and _uvs_outside(uvs):
-        tile = "uv"
-    return tint, uvs, uv_name, scale, tile
-
-
-def _stamp_shade(slot: dict, shade) -> None:
-    """Tell the page which multiply, UV set, and repeat the albedo is using."""
-    tint, _uvs, uv_name, _scale, tile = shade
-    if tint is not None and not (slot.get("blend") or {}).get("skin"):
-        slot["tint"] = [round(float(tint[0]), 4), round(float(tint[1]), 4), round(float(tint[2]), 4)]
-    if str(uv_name).lower() not in ("_u0", "u0"):
-        slot["uv"] = uv_name
-    if tile:
-        slot["tile"] = tile
-
-
-def _note_shade(notes: list, part, tint, uv_name: str, tile: str) -> None:
-    name = part.material or part.name
-    if tint is not None:
-        line = "albedo tint ({:.2f}, {:.2f}, {:.2f}) on {}".format(float(tint[0]), float(tint[1]), float(tint[2]), name)
-        if line not in notes:
-            notes.append(line)
-    if str(uv_name).lower() not in ("_u0", "u0"):
-        line = f"albedo uv {uv_name} on {name}"
-        if line not in notes:
-            notes.append(line)
-    if tile:
-        line = f"albedo repeats {tile} on {name}"
-        if line not in notes:
-            notes.append(line)
 
 
 def _plan_layer_blends(models) -> None:

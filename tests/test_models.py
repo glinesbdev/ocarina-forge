@@ -623,7 +623,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-62", "26f7dde097fc6d4cd12a878f2e969dc4b168975130ecb55fec96546aeca22ae4")
+    pinned = ("models-63", "4c41cc12e5cbb8822e50f86f3a708d2e2352f0d99aaaeaa90b159cbbb8502c87")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
