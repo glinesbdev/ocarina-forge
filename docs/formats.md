@@ -180,7 +180,7 @@ Inside that compound, `+0x38` is a u32 offset from that field to the instance ar
 
 The compound broadphase is an `hkcdSimdTreeNamespace::Node` array. On `KokiriForest_Child_X1_Z2` it is 222 nodes of 128 bytes, immediately after the 555-instance array. The ITEM view with that type name is the one that starts at the end of the instance array (a gap of at most 16 bytes still binds). Per-mesh `hknpAabb8TreeNode` arrays are a different type and are not this tree.
 
-One node is four children, structure of arrays, then eight u32s:
+One node is four children, structure of arrays, then 32 bytes that a hex dump shows as eight u32s:
 
 | Offset | Field |
 | --- | --- |
@@ -190,10 +190,14 @@ One node is four children, structure of arrays, then eight u32s:
 | `+0x30` | `hy`, four floats |
 | `+0x40` | `lz`, four floats |
 | `+0x50` | `hz`, four floats |
-| `+0x60` | u32 `data[4]`. A leaf holds the instance index. An internal slot holds the child node index |
-| `+0x70` | u32 `isLeaf[4]`. Non-zero means that slot is a leaf |
+| `+0x60` | u32 `data[4]`. On a leaf node this is the instance index. On an internal node it is the child index, or that index plus one when `m_parent` says so |
+| `+0x70` | four filter-mask bytes, then a flags byte, depth, axis, and a rebalance count. `NODE_IS_LEAF` is bit 0 of the flags byte. `NODE_IS_FREE` is bit 1 |
+| `+0x78` | u32 `m_parent` |
+| `+0x7C` | u32 `m_numLeaves` |
 
-An empty slot is the inverted box `+FLT_MAX` / `-FLT_MAX` (`min > max`). It is not a child. The patcher does not write the eight u32s, so the payload, the leaf flag, and the child index stay.
+The same tagfile holds other `hkcdSimdTreeNamespace::Node` arrays of two to four nodes, one per shape. Their child indices start over at 0. The refit uses only the array that begins at the compound's instance array, and a count that would run into the next array stops at that boundary.
+
+An empty slot is the inverted box `+FLT_MAX` / `-FLT_MAX` (`min > max`). An internal lane whose `data` word is `0` or `0xFFFFFFFF` is also empty, even when the box is finite. Those sentinels are not pointers at node 0. A leaf lane uses `0xFFFFFFFF` for empty and any other word as the instance index, including 0. When every word at `+0x70` is 0 or 1, that word is a per-lane leaf mask instead of the node tail, and a non-zero word marks the lane as a leaf. The patcher does not write these 32 bytes, so the payload, the flags, and the child index stay. Two internal lanes that name the same real child still fail the export.
 
 Moving the instance without this tree leaves the leaf on the old world box. A query only reaches the moved shape where that stale box still overlaps it. On the house facade that overlap was about 0.49 m, so only a strip collided. After the instance write, the patcher refits. The leaf is the slot whose payload is the instance index, or, when no payload matches, the unique tightest leaf whose box contains the old instance position. The new box is the min and max of the old leaf's eight corners through `new_instance * inverse(old_instance)`. On the cooked house leaf that matched to about 0.2 mm. Every parent slot that names that node is then set to the union of its child node's four slots, skipping empty ones, and that walk continues to the root. Several moved instances in one tile are applied to their leaves first, then the parents, so a parent sees every sibling that this call already moved. A second call, from another banc that shares the tile, sees those updated boxes and refits only its own instances.
 
@@ -218,7 +222,7 @@ The manifest key is `collisionFollow` (`collision_follow` is accepted). The CLI 
 
 `off` moves the mesh and the ControllerSet. The vanilla bake row stays where it was, and that is an invisible box at the old spot. `bake` moves that row. The old spot is clear. Bake mode is required for this sign. The sign still felt solid at the new pose because the ControllerSet follows `Translate`. That did not show that the broadphase had moved.
 
-`Land_Kokiri_House_Outside_B_02` (`0xd471946eaeb8e44f`) is only the front facade, and its collision is bake-only. In `KokiriForest_Child_X1_Z2` the actor is one compound row, `first = last = 322`, instance 290. Writing the new instance transform cleared the old spot, and the leaf stayed put: node 45, slot 1, world box `[-12.327, 111.089, 10.580]`–`[-7.840, 115.976, 13.766]`. That box overlaps the moved facade by about 0.49 m, which is the strip that still collided. The refit above is what moves that leaf and the parents above it. The shape bytes were not rewritten.
+`Land_Kokiri_House_Outside_B_02` (`0xd471946eaeb8e44f`) is only the front facade, and its collision is bake-only. In `KokiriForest_Child_X1_Z2` the actor is one compound row, `first = last = 322`, instance 290. The compound's node array is 222 nodes at file offset `0x243f0`, immediately after the 555 instances. Instance 290's leaf is node 45, slot 1. Its world box was `[-12.327, 111.089, 10.580]`–`[-7.840, 115.976, 13.766]`, which overlaps the moved facade by about 0.49 m. That was the strip that collided. A refit that treated every `0` in `m_data` as a child index stopped the export with "SIMD tree node has two parents", because empty lanes and the other shapes' trees repeat that sentinel. With those lanes ignored, the same +4 X move writes the leaf `[-8.3268, 111.0895, 10.5798]`–`[-3.8402, 115.9762, 13.7664]`. The shape bytes were not rewritten.
 
 `examples/collision-follow-test` generates `scenes/` from the dump on each run and deletes the previous scene yaml first, so an earlier `--id` is not exported again. That folder is gitignored. Do not commit it. The steps, including the house-facade command, are in that example's README.
 

@@ -222,16 +222,36 @@ def _instances(raw, compound_at):
     return instances, array + count * _INSTANCE_STRIDE
 
 
+def _exclusive_tree(tree, trees):
+    """Keep this array from running into the next shape's node array."""
+    start, count = tree
+    end = start + count * _NODE_STRIDE
+    for other_start, _other_count in trees:
+        if other_start <= start or other_start >= end:
+            continue
+        count = (other_start - start) // _NODE_STRIDE
+        end = start + count * _NODE_STRIDE
+    if count <= 0:
+        raise CompoundLayoutError("SIMD tree is empty")
+    return (start, count)
+
+
 def _bind_tree(array_end, trees):
-    """The node array that starts at this compound's instance array, if the tagfile has one."""
+    """The node array that starts at this compound's instance array, if the tagfile has one.
+
+    Other ``hkcdSimdTreeNamespace::Node`` arrays in the same tagfile belong to
+    other shapes. Their child indices are local to those arrays, so they are
+    not part of this walk. A count that would run into the next array is cut
+    at that boundary.
+    """
     exact = [tree for tree in trees if tree[0] == array_end]
     if len(exact) > 1:
         raise CompoundLayoutError("more than one SIMD tree starts at the instance array")
     if len(exact) == 1:
-        return exact[0]
+        return _exclusive_tree(exact[0], trees)
     padded = [tree for tree in trees if 0 < tree[0] - array_end <= 16]
     if len(padded) == 1:
-        return padded[0]
+        return _exclusive_tree(padded[0], trees)
     return None
 
 
@@ -503,10 +523,90 @@ def _slot_aabb(buf, node_at, slot):
     return (axis(0x00), axis(0x20), axis(0x40)), (axis(0x10), axis(0x30), axis(0x50))
 
 
-def _slot_words(buf, node_at, slot):
-    data = struct.unpack_from("<I", buf, node_at + 0x60 + 4 * slot)[0]
-    is_leaf = struct.unpack_from("<I", buf, node_at + 0x70 + 4 * slot)[0]
-    return data, is_leaf
+_NODE_IS_LEAF = 0x1
+_NODE_IS_FREE = 0x2
+_NO_INDEX = 0xFFFFFFFF
+
+
+def _u32(buf, at):
+    return struct.unpack_from("<I", buf, at)[0]
+
+
+def _node_flag_mode(buf, tree):
+    """True when the tail is a node flag, not four 0/1 per-lane leaf words.
+
+    A per-lane leaf mask stores 0 or 1 in each word at ``+0x70``. The compound
+    tree stores filter bytes, a flags byte, ``m_parent``, and ``m_numLeaves``
+    there, so at least one of those words is neither 0 nor 1.
+    """
+    start, count = tree
+    for node in range(count):
+        words = struct.unpack_from("<4I", buf, start + node * _NODE_STRIDE + 0x70)
+        if any(word not in (0, 1) for word in words):
+            return True
+    return False
+
+
+def _child_base(buf, tree, node_flag):
+    """0 when ``m_data`` stores a node index, 1 when it stores that index plus one.
+
+    ``m_parent`` at ``+0x78`` is what decides. Empty lanes store 0, so a stored
+    0 is not a vote for node 0. A per-lane mask has no parent word and stays
+    0-based.
+    """
+    if not node_flag:
+        return 0
+    start, count = tree
+    zero_based = one_based = 0
+    for node in range(count):
+        if node == 0:
+            continue
+        node_at = start + node * _NODE_STRIDE
+        parent = _u32(buf, node_at + 0x78)
+        if parent >= count:
+            continue
+        pdata = struct.unpack_from("<4I", buf, start + parent * _NODE_STRIDE + 0x60)
+        if node in pdata:
+            zero_based += 1
+        if (node + 1) in pdata:
+            one_based += 1
+    return 1 if one_based > zero_based else 0
+
+
+def _classify_lane(buf, node_at, slot, node_flag, base, count):
+    """``empty``, ``leaf`` (instance index), or ``child`` (node index).
+
+    An inverted box is empty. On an internal node, ``0`` and ``0xFFFFFFFF``
+    are empty sentinels, not a pointer at node 0. On a leaf node,
+    ``0xFFFFFFFF`` is an empty lane and any other ``m_data`` word is the
+    instance index. The leaf bit is per lane when the tail is a 0/1 mask,
+    and ``NODE_IS_LEAF`` in the flags byte otherwise.
+    """
+    mins, maxs = _slot_aabb(buf, node_at, slot)
+    data = _u32(buf, node_at + 0x60 + 4 * slot)
+    if _slot_empty(mins, maxs):
+        return "empty", None
+    if node_flag:
+        flags = buf[node_at + 0x74]
+        if flags & _NODE_IS_FREE:
+            return "empty", None
+        if flags & _NODE_IS_LEAF:
+            if data == _NO_INDEX:
+                return "empty", None
+            return "leaf", data
+        if data in (0, _NO_INDEX):
+            return "empty", None
+        child = data - base
+        if child < 0 or child >= count:
+            return "empty", None
+        return "child", child
+    if _u32(buf, node_at + 0x70 + 4 * slot):
+        if data == _NO_INDEX:
+            return "empty", None
+        return "leaf", data
+    if data in (0, _NO_INDEX) or data >= count:
+        return "empty", None
+    return "child", data
 
 
 def _slot_empty(mins, maxs):
@@ -565,20 +665,25 @@ def _contains_point(mins, maxs, point, tol=1e-3):
     return all(mins[axis] - tol <= point[axis] <= maxs[axis] + tol for axis in range(3))
 
 
-def _find_leaf_slots(buf, tree, instance_index, old_position):
-    """Leaf lanes for one instance: payload index first, then the tightest old box."""
+def _lane_context(buf, tree):
     _check_tree(buf, tree)
+    node_flag = _node_flag_mode(buf, tree)
+    return node_flag, _child_base(buf, tree, node_flag)
+
+
+def _find_leaf_slots(buf, tree, instance_index, old_position, node_flag, base):
+    """Leaf lanes for one instance: payload index first, then the tightest old box."""
     start, count = tree
     by_payload = []
     by_box = []
     for node in range(count):
         node_at = start + node * _NODE_STRIDE
         for slot in range(4):
-            mins, maxs = _slot_aabb(buf, node_at, slot)
-            data, is_leaf = _slot_words(buf, node_at, slot)
-            if _slot_empty(mins, maxs) or not is_leaf:
+            kind, value = _classify_lane(buf, node_at, slot, node_flag, base, count)
+            if kind != "leaf":
                 continue
-            if data == instance_index:
+            mins, maxs = _slot_aabb(buf, node_at, slot)
+            if value == instance_index:
                 by_payload.append((node, slot, mins, maxs))
             elif _contains_point(mins, maxs, old_position):
                 span = tuple(maxs[axis] - mins[axis] for axis in range(3))
@@ -595,30 +700,34 @@ def _find_leaf_slots(buf, tree, instance_index, old_position):
     return [(node, slot, mins, maxs)]
 
 
-def _parent_links(buf, tree):
-    """Child node index to the internal slot that names it. Empty lanes are not children."""
+def _parent_links(buf, tree, node_flag, base):
+    """Child node index to the one internal slot that names it.
+
+    Empty lanes, leaf lanes, and the sentinels ``0`` and ``0xFFFFFFFF`` are
+    not children. Two internal lanes that name the same real child still fail.
+    """
     start, count = tree
     parents = {}
     for node in range(count):
         node_at = start + node * _NODE_STRIDE
         for slot in range(4):
-            mins, maxs = _slot_aabb(buf, node_at, slot)
-            data, is_leaf = _slot_words(buf, node_at, slot)
-            if _slot_empty(mins, maxs) or is_leaf or data >= count:
+            kind, child = _classify_lane(buf, node_at, slot, node_flag, base, count)
+            if kind != "child":
                 continue
-            if data in parents:
+            if child in parents:
                 raise CompoundLayoutError("SIMD tree node has two parents")
-            parents[data] = (node, slot)
+            parents[child] = (node, slot)
     return parents
 
 
-def _union_slots(buf, node_at):
+def _union_slots(buf, node_at, node_flag, base, count):
     mins = None
     maxs = None
     for slot in range(4):
-        slot_min, slot_max = _slot_aabb(buf, node_at, slot)
-        if _slot_empty(slot_min, slot_max):
+        kind, _value = _classify_lane(buf, node_at, slot, node_flag, base, count)
+        if kind == "empty":
             continue
+        slot_min, slot_max = _slot_aabb(buf, node_at, slot)
         if mins is None:
             mins, maxs = slot_min, slot_max
             continue
@@ -635,16 +744,20 @@ def _refit_simd_tree(out, tree, updates, allowed):
     whose box contains the old instance position. The new box is the min/max of
     the old leaf's eight corners through ``new * inverse(old)``. Only those six
     SoA floats are written. The eight u32s, and every other lane, stay.
+    Empty internal lanes store ``0`` or ``0xFFFFFFFF`` and are not children.
+    The walk is this compound's node array only.
     """
-    _check_tree(out, tree)
-    parents = _parent_links(out, tree)
+    node_flag, base = _lane_context(out, tree)
+    parents = _parent_links(out, tree, node_flag, base)
     dirty = set()
     for instance_index, old_matrix, new_matrix, old_position in updates:
-        leaves = _find_leaf_slots(out, tree, instance_index, old_position)
+        leaves = _find_leaf_slots(out, tree, instance_index, old_position, node_flag, base)
         if not leaves:
             raise CompoundLayoutError(f"instance {instance_index} has no broadphase leaf")
         delta = _mul(new_matrix, _invert_trs(old_matrix))
         for node, slot, mins, maxs in leaves:
+            if parents and node not in parents:
+                raise CompoundLayoutError("SIMD tree leaf has no parent")
             mapped_min, mapped_max = _map_aabb(mins, maxs, delta)
             _write_slot_aabb(out, _node_at(tree, node), slot, mapped_min, mapped_max, allowed)
             dirty.add(node)
@@ -659,7 +772,7 @@ def _refit_simd_tree(out, tree, updates, allowed):
             if parent is None:
                 continue
             parent_node, parent_slot = parent
-            union_min, union_max = _union_slots(out, _node_at(tree, node))
+            union_min, union_max = _union_slots(out, _node_at(tree, node), node_flag, base, tree[1])
             if union_min is None:
                 raise CompoundLayoutError("SIMD tree child has no bounds")
             _write_slot_aabb(out, _node_at(tree, parent_node), parent_slot, union_min, union_max, allowed)
