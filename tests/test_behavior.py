@@ -479,13 +479,13 @@ def test_set_field_saves_an_op_and_export_round_trips(tmp_path):
     assert cleared["ops"] == []
 
 def test_behavior_resolves_companion_placement_keys(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
+    from ocarina_forge.local_api import editor_client
     from ocarina_forge import server
     from ocarina_forge.fixtures import FIELD_STATIC, KOKIRI_DYNAMIC, KOKIRI_STATIC
 
     dump = Dump(build_fixture(tmp_path / "dump"))
     monkeypatch.setattr(server, "_open_dump", lambda: dump)
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     actor = format_hash(FADO)
     canonical = client.get("/api/behavior", params={"banc": KOKIRI_STATIC, "id": actor})
     companion = client.get("/api/behavior", params={"banc": KOKIRI_DYNAMIC, "id": f"{KOKIRI_STATIC}::{actor}"})

@@ -130,7 +130,7 @@ def test_warm_loop_waits_for_interactive_converts(monkeypatch):
 
 
 def test_api_warm_status_reports_a_fixed_scene_job(monkeypatch):
-    from fastapi.testclient import TestClient
+    from ocarina_forge.local_api import editor_client
     import ocarina_forge.server as server
 
     dump = _SceneList()
@@ -139,7 +139,7 @@ def test_api_warm_status_reports_a_fixed_scene_job(monkeypatch):
     monkeypatch.setattr(server, "_kick_warm", lambda: None)
     monkeypatch.setattr(server, "_WARM_JOB", None)
     monkeypatch.setattr(server, "_WARM_EVENT", None)
-    with TestClient(server.app) as client:
+    with editor_client(server.app) as client:
         started = client.post("/api/warm", json={"banc": DYNAMIC, "names": ["Npc_Kokiri_F_01"]})
         assert started.status_code == 200
         status = client.get("/api/warm")

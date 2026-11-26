@@ -134,6 +134,7 @@ test("dragging a Kokiri tree through the viewport keeps the batched mesh on the 
   const debugPort = await freePort();
   const api = spawn(python, ["-m", "ocarina_forge", "--host", "127.0.0.1", "--port", String(apiPort)], {
     cwd: repo,
+    env: { ...process.env, OCARINA_FORGE_DEV_PORT: String(vitePort) },
     stdio: "ignore",
   });
   const vite = spawn("npm", ["run", "dev", "--", "--host", "127.0.0.1", "--port", String(vitePort), "--strictPort"], {
@@ -154,7 +155,14 @@ test("dragging a Kokiri tree through the viewport keeps the batched mesh on the 
   ], { stdio: "ignore" });
   try {
     await waitForOk(`http://127.0.0.1:${apiPort}/api/status`, 30000);
-    const sample = await fetch(`http://127.0.0.1:${apiPort}/api/setup/sample`, { method: "POST" });
+    const health = await (await fetch(`http://127.0.0.1:${apiPort}/api/health`)).json();
+    const sample = await fetch(`http://127.0.0.1:${apiPort}/api/setup/sample`, {
+      method: "POST",
+      headers: {
+        Origin: `http://127.0.0.1:${vitePort}`,
+        "X-Ocarina-Forge-Token": health.token,
+      },
+    });
     assert.equal(sample.ok, true, await sample.text());
     await waitForOk(`http://127.0.0.1:${vitePort}/`, 30000);
     const version = await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json();

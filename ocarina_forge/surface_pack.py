@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ocarina_forge.actors import parse_hash
 from ocarina_forge.dump import Dump
+from ocarina_forge.errors import BancError
 from ocarina_forge.formats.terrain import SIZE
 from ocarina_forge.grounddebug import _load
 from ocarina_forge.cache_prune import note_access, note_written
@@ -213,11 +214,11 @@ def pack_surface(meshes: list[dict], heightmap: dict, *, step: float = STEP) -> 
 def _source_stamp(dump: Dump, banc: str) -> bytes:
     parts = [f"ofgs-{PACK_VERSION}".encode(), str(dump.root).encode(), banc.encode()]
     for relative in scene_files(dump, banc):
-        path = dump.romfs / relative
         try:
+            path = dump.resolve_relative(relative)
             stat = path.stat()
             parts.append(f"{relative}:{stat.st_mtime_ns}:{stat.st_size}".encode())
-        except OSError:
+        except (BancError, OSError):
             parts.append(f"{relative}:0:0".encode())
     digest = hashlib.sha256()
     for part in parts:

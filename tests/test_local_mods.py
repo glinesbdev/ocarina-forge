@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from ocarina_forge.local_api import editor_client
 
 from ocarina_forge.dump import Dump
 from ocarina_forge.fixtures import FADO, KOKIRI_STATIC, build_fixture
@@ -50,7 +50,7 @@ def test_local_mod_api_imports_patches_and_preserves_runtime(tmp_path, monkeypat
     monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("OCARINA_FORGE_GAME", str(game))
     monkeypatch.setenv("OCARINA_FORGE_PROJECTS", str(projects))
-    client = TestClient(app)
+    client = editor_client(app)
 
     listed = client.get("/api/local-mods")
     assert listed.status_code == 200
@@ -96,7 +96,7 @@ def test_unsupported_local_patch_is_marked_not_editable(tmp_path, monkeypatch):
     monkeypatch.setenv("OCARINA_FORGE_PROJECTS", str(projects))
     monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
 
-    client = TestClient(app)
+    client = editor_client(app)
     item = client.get("/api/local-mods").json()["mods"][0]
     assert item["editable"] is False
     assert "set operations only" in item["reason"]

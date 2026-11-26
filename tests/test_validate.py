@@ -3,7 +3,7 @@
 import json
 import struct
 
-from fastapi.testclient import TestClient
+from ocarina_forge.local_api import editor_client
 
 from ocarina_forge.actors import format_hash
 from ocarina_forge.dump import Dump
@@ -148,7 +148,7 @@ def test_problems_endpoint(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from ocarina_forge.server import app
 
-    client = TestClient(app)
+    client = editor_client(app)
     dump = _dump(tmp_path)
     project = _project(tmp_path)
     saved = client.put("/api/config", json={"dump": str(dump.root), "project": str(project.root)})

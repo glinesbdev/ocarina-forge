@@ -40,7 +40,13 @@ def load_bytes(dump, target: str) -> tuple[str, bytes]:
         relative = relative[2:]
     relative = relative.lstrip("/")
     if _model_path(relative):
-        if dump is None or not (dump.romfs / relative).is_file():
+        located = None
+        if dump is not None:
+            try:
+                located = dump.resolve_relative(relative)
+            except BancError:
+                located = None
+        if located is None or not located.is_file():
             raise BancError(f"No model file {relative} in this dump.", "not_found")
         raw, _dict_id = dump.read_file(relative)
         return relative, _fres_bytes(raw, None, relative)

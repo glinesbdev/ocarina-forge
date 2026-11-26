@@ -4,7 +4,7 @@ import json
 import time
 
 import pytest
-from fastapi.testclient import TestClient
+from ocarina_forge.local_api import editor_client
 
 from ocarina_forge.actors import format_hash
 from ocarina_forge.dump import Dump
@@ -94,7 +94,7 @@ def test_hot_reload_setting_round_trips_and_is_kept_when_the_dump_changes(tmp_pa
     monkeypatch.chdir(tmp_path)
     from ocarina_forge.server import app
 
-    client = TestClient(app)
+    client = editor_client(app)
     dump = Dump(build_fixture(tmp_path / "dump"))
     project = Project.create(tmp_path / "mod", name="kokiri-notes", title="Kokiri notes", author="Ada", version="0.1.0")
     client.put("/api/config", json={"dump": str(dump.root), "project": str(project.root)})

@@ -38,6 +38,7 @@ import zlib
 from dataclasses import replace
 from pathlib import Path
 
+from ocarina_forge.dump import lexical_dump_relative
 from ocarina_forge.errors import BancError
 from ocarina_forge.locate import setting, user_cache_root
 from ocarina_forge.cache_prune import (
@@ -78,7 +79,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-64\0"
+_CACHE_VERSION = b"models-65\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -410,8 +411,10 @@ def _manifest_failure(part) -> tuple[str, str]:
 
 
 def describe_terrain(dump, banc: str, *, convert: bool = True) -> dict:
-    if not banc or ".." in banc or banc.startswith("/"):
-        return {"status": "none", "reason": "That scene path is not in the dump.", "source": "", "url": None}
+    try:
+        lexical_dump_relative(banc)
+    except BancError as exc:
+        return {"status": "none", "reason": exc.message, "source": "", "url": None}
     located = _locate_heightmap(dump, banc)
     if located.get("tscb"):
         return _describe_heightmap(dump, banc, located, convert=convert)
@@ -3662,7 +3665,10 @@ def _model_listing(dump) -> list[str]:
 
 
 def _exists(dump, relative: str) -> bool:
-    return bool(relative) and (dump.romfs / relative).is_file()
+    try:
+        return dump.resolve_relative(relative).is_file()
+    except BancError:
+        return False
 
 
 def _param_candidates(stem: str) -> list[str]:

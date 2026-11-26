@@ -315,11 +315,10 @@ def test_status_reports_the_measured_cache(tmp_path, monkeypatch):
     assert public["source"] == "env"
     assert public["path"] == str(cache)
 
-    from fastapi.testclient import TestClient
-
+    from ocarina_forge.local_api import editor_client
     from ocarina_forge.server import app
 
-    with TestClient(app) as client:
+    with editor_client(app) as client:
         body = client.get("/api/status").json()
     assert body["cache"]["bytes"] == 3
     assert body["cache"]["path"] == str(cache)
@@ -330,11 +329,10 @@ def test_config_endpoint_saves_the_cap(tmp_path, monkeypatch):
     monkeypatch.delenv("BANCWRIGHT_CACHE_LIMIT", raising=False)
     monkeypatch.setenv("OCARINA_FORGE_CONFIG", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
-    from fastapi.testclient import TestClient
-
+    from ocarina_forge.local_api import editor_client
     from ocarina_forge.server import app
 
-    with TestClient(app) as client:
+    with editor_client(app) as client:
         saved = client.put("/api/config", json={"cacheLimit": "20G"}).json()
         rejected = client.put("/api/config", json={"cacheLimit": "lots"})
     assert saved["config"]["cacheLimit"] == 20 * 1024**3

@@ -2,10 +2,10 @@
 
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
+from ocarina_forge.local_api import editor_client
 
 from ocarina_forge import scene_preview, server
-from ocarina_forge.dump import Dump
+from ocarina_forge.dump import Dump, lexical_dump_relative
 from ocarina_forge.fixtures import FIELD_STATIC, KOKIRI_DYNAMIC, KOKIRI_STATIC, build_fixture
 
 
@@ -18,7 +18,10 @@ def test_terrain_uses_age_specific_material_then_falls_back(tmp_path, monkeypatc
     for suffix in (".hght", ".mate", ".adult.mate", ".child.mate.zs"):
         (folder / f"001{suffix}").write_bytes(suffix.encode())
     dump = SimpleNamespace(
-        romfs=tmp_path, read_file=lambda path: ((tmp_path / path).read_bytes(), 0), dicts=lambda: {},
+        romfs=tmp_path,
+        read_file=lambda path: ((tmp_path / path).read_bytes(), 0),
+        dicts=lambda: {},
+        resolve_relative=lambda relative: tmp_path / lexical_dump_relative(relative),
     )
     monkeypatch.setattr(terrain, "read_height_file", lambda _data: ([0.1], None, "height"))
 
@@ -55,7 +58,7 @@ def test_scene_pair_shares_preview_url_and_retains_bank_ownership(tmp_path, monk
     assert scene_preview.preview_path(dump, FIELD_STATIC) != path
     scene_preview._write_prepared(path, b"paired preview")
 
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     dynamic = client.get("/api/scene", params={"banc": KOKIRI_DYNAMIC}).json()
     static = client.get("/api/scene", params={"banc": KOKIRI_STATIC}).json()
     assert dynamic["banc"] == static["companions"][0]["banc"] == KOKIRI_DYNAMIC
@@ -119,7 +122,7 @@ def test_terrain_api_serves_base_then_fit_with_separate_cache_keys(tmp_path, mon
 
     monkeypatch.setattr(server, "_describe_terrain_model", describe)
     monkeypatch.setattr(server, "prepare_scene_terrain", prepare)
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     original = client.get("/api/terrain", params={"banc": banc}).json()
     assert original["fitPending"] and not prepared
     assert client.get(original["url"]).content == b"base terrain"
@@ -271,7 +274,7 @@ def test_ground_api_returns_the_composed_surface(tmp_path, monkeypatch):
         }]
 
     monkeypatch.setattr(server, "query_ground_cached", fake_query)
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     data = client.get("/api/ground", params={
         "banc": "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs",
         "x": -192.39,
@@ -298,7 +301,7 @@ def test_ground_api_excludes_the_moved_land_actor(tmp_path, monkeypatch):
         }]
 
     monkeypatch.setattr(server, "query_ground_cached", fake_query)
-    client = TestClient(server.app)
+    client = editor_client(server.app)
     data = client.get("/api/ground", params={
         "banc": "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs",
         "x": -195.2242,

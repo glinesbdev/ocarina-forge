@@ -2,9 +2,8 @@
 
 from types import SimpleNamespace
 
-from fastapi.testclient import TestClient
-
 from ocarina_forge import meshaudit, server
+from ocarina_forge.local_api import editor_client
 from ocarina_forge.formats.gltf import Primitive, join_glb, split_glb, to_glb
 
 
@@ -66,6 +65,6 @@ def test_mesh_audit_endpoint_routes_scene_to_validator(monkeypatch):
         return {"banc": banc, "counts": {}, "models": []}
 
     monkeypatch.setattr(meshaudit, "audit_scene_meshes", audit)
-    reply = TestClient(server.app).get("/api/scene/mesh-audit", params={"banc": "sample"})
+    reply = editor_client(server.app).get("/api/scene/mesh-audit", params={"banc": "sample"})
     assert reply.status_code == 200
     assert reply.json()["banc"] == "sample"

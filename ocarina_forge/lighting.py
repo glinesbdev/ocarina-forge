@@ -550,11 +550,11 @@ def _open_param(dump, banc: str) -> tuple[str, dict | None]:
 
 def lighting_report(dump, banc: str, *, survey: bool = False) -> dict:
     """Emitters, GameBancParam key names, probes, and a capture if one was imported."""
+    from ocarina_forge.dump import lexical_dump_relative
     from ocarina_forge.errors import BancError
     from ocarina_forge.scene import sibling_bancs
 
-    if not banc or ".." in banc.split("/"):
-        raise BancError("That scene path is not in the dump.", "not_found")
+    banc = lexical_dump_relative(banc)
     document, _dict_id, _raw = dump.read_byml(banc)
     if not isinstance(document, dict):
         document = {}
