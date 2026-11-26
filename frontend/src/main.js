@@ -19,6 +19,8 @@ import { createDock, panelIdForTab, tabForPanel } from "./dock.js";
 import { blankHistory, editLabel, historyRows, popRedo, popUndo, pushEdit } from "./history.js";
 import { modelLine } from "./inspector.js";
 import { paletteRows } from "./palette.js";
+import { normalizeSpace, readStoredSpace, toggleSpace, writeStoredSpace } from "./gizmo-space.js";
+import { normalizeGridSettings, nudge, readGridSettings, savedRadians, writeGridSettings } from "./grid-snap.js";
 import {
   addPermission,
   catalogRows,
@@ -89,6 +91,14 @@ const dock = createDock(document.getElementById("dock"), {
   },
 });
 
+function browserStorage() {
+  try {
+    return localStorage;
+  } catch {
+    return null;
+  }
+}
+
 const state = {
   status: null,
   scenes: [],
@@ -136,6 +146,8 @@ const state = {
   helperBoxes: null,
   terrain: null,
   gizmo: "translate",
+  gizmoSpace: readStoredSpace(browserStorage()),
+  grid: readGridSettings(browserStorage()),
   tab: "outliner",
   addMode: "add",
   load: fullLoad(),
@@ -269,7 +281,7 @@ viewport = await createViewport($("viewport"), {
       command: "transform",
       id,
       translate: translate.map(round4),
-      rotate: rotate.map(round4),
+      rotate: rotate.map(savedRadians),
       scale: (scale || [1, 1, 1]).map(round4),
     });
   },
@@ -514,6 +526,20 @@ if (shortcutsDialog) {
 document.querySelectorAll("[data-gizmo]").forEach((button) => {
   button.addEventListener("click", () => setGizmo(button.dataset.gizmo));
 });
+document.querySelectorAll("[data-gizmo-space]").forEach((button) => {
+  button.addEventListener("click", () => setGizmoSpace(button.dataset.gizmoSpace, { announce: true }));
+});
+bindGridControls();
+viewport.setGizmoSpace(state.gizmoSpace);
+viewport.setGridSnap(state.grid);
+syncGizmoToolControls();
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Control") viewport.setSnapModifier(true);
+});
+window.addEventListener("keyup", (event) => {
+  if (event.key === "Control") viewport.setSnapModifier(false);
+});
+window.addEventListener("blur", () => viewport.setSnapModifier(false));
 document.querySelectorAll("[data-close]").forEach((button) => {
   button.addEventListener("click", () => button.closest("dialog").close());
 });
@@ -583,6 +609,9 @@ onShortcut = (event) => {
     } else viewport.frame(state.selected);
   } else if (event.key === "g") {
     setGizmo("translate");
+  } else if (event.key === "l" && !meta && !event.altKey) {
+    event.preventDefault();
+    toggleGizmoSpace();
   } else if (event.key === "r") {
     setGizmo("rotate");
   } else if (event.key === "b" && state.selected) {
@@ -597,6 +626,9 @@ onShortcut = (event) => {
     if (!actor) return;
     if (actor.status === "recipe") removeRecipe(actor);
     else edit({ command: "remove", id: state.selected });
+  } else if (event.key.toLowerCase() === "v" && event.shiftKey && !meta) {
+    event.preventDefault();
+    toggleGridSnap();
   } else if (event.key.toLowerCase() === "v" && !meta) {
     toggleSnap();
   } else if (!meta && !event.repeat && event.key.toLowerCase() === "p") {
@@ -2566,9 +2598,19 @@ function vectorFields(label, prefix, values) {
     const input = document.createElement("input");
     input.id = prefix + axis.toLowerCase();
     input.type = "number";
-    input.step = "any";
+    const step = transformStep(prefix);
+    input.step = step == null ? "any" : String(step);
     input.value = formatNum(values[index]);
     input.setAttribute("aria-label", `${label} ${axis}`);
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      const increment = transformStep(prefix);
+      if (increment == null) return;
+      event.preventDefault();
+      const next = nudge(Number(input.value), increment, event.key === "ArrowUp" ? 1 : -1);
+      input.value = formatNum(next);
+      commitTransform();
+    });
     input.addEventListener("change", () => commitTransform());
     grid.append(input);
   });
@@ -3821,11 +3863,124 @@ function toggleSnap() {
   toast(box.checked ? "Snap to ground and collision is on." : "Snap is off.");
 }
 
+function syncGizmoToolControls() {
+  document.querySelectorAll("[data-gizmo-space]").forEach((button) => {
+    const on = button.dataset.gizmoSpace === state.gizmoSpace;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  const grid = state.grid || {};
+  const snap = $("snap-grid");
+  if (snap) snap.checked = Boolean(grid.enabled);
+  const move = $("grid-move");
+  if (move) move.value = String(grid.move);
+  const rotate = $("grid-rotate");
+  if (rotate) rotate.value = String(grid.rotate);
+  const scale = $("snap-scale");
+  if (scale) scale.checked = Boolean(grid.scaleEnabled);
+  const scaleStep = $("grid-scale");
+  if (scaleStep) scaleStep.value = String(grid.scale);
+  const lines = $("show-snap-grid");
+  if (lines) lines.checked = Boolean(grid.visible);
+  syncTransformSteps();
+}
+
+function publishGrid(announce) {
+  state.grid = normalizeGridSettings(state.grid);
+  writeGridSettings(browserStorage(), state.grid);
+  if (viewport) viewport.setGridSnap(state.grid);
+  syncGizmoToolControls();
+  if (!announce) return;
+  toast(state.grid.enabled
+    ? "Grid snap is on. Hold Ctrl while dragging to turn it off for that drag."
+    : "Grid snap is off. Hold Ctrl while dragging to snap that drag.");
+}
+
+function setGizmoSpace(space, options = {}) {
+  state.gizmoSpace = normalizeSpace(space);
+  writeStoredSpace(browserStorage(), state.gizmoSpace);
+  if (viewport) viewport.setGizmoSpace(state.gizmoSpace);
+  syncGizmoToolControls();
+  if (!options.announce) return;
+  toast(state.gizmoSpace === "local"
+    ? "Local space. Move and rotate follow the actor. Scale stays local."
+    : "World space. Move and rotate use world axes. Scale stays local.");
+}
+
+function toggleGizmoSpace() {
+  setGizmoSpace(toggleSpace(state.gizmoSpace), { announce: true });
+}
+
+function toggleGridSnap() {
+  state.grid = { ...state.grid, enabled: !state.grid.enabled };
+  publishGrid(true);
+}
+
+function toggleSnapGrid() {
+  state.grid = { ...state.grid, visible: !state.grid.visible };
+  publishGrid(false);
+}
+
+function bindGridControls() {
+  const snap = $("snap-grid");
+  if (snap) snap.addEventListener("change", () => {
+    state.grid = { ...state.grid, enabled: snap.checked };
+    publishGrid(false);
+  });
+  const move = $("grid-move");
+  if (move) move.addEventListener("change", () => {
+    state.grid = { ...state.grid, move: Number(move.value) };
+    publishGrid(false);
+  });
+  const rotate = $("grid-rotate");
+  if (rotate) rotate.addEventListener("change", () => {
+    state.grid = { ...state.grid, rotate: Number(rotate.value) };
+    publishGrid(false);
+  });
+  const scale = $("snap-scale");
+  if (scale) scale.addEventListener("change", () => {
+    state.grid = { ...state.grid, scaleEnabled: scale.checked };
+    publishGrid(false);
+  });
+  const scaleStep = $("grid-scale");
+  if (scaleStep) scaleStep.addEventListener("change", () => {
+    state.grid = { ...state.grid, scale: Number(scaleStep.value) };
+    publishGrid(false);
+  });
+  const lines = $("show-snap-grid");
+  if (lines) lines.addEventListener("change", () => {
+    state.grid = { ...state.grid, visible: lines.checked };
+    publishGrid(false);
+  });
+}
+
+function transformStep(prefix) {
+  const grid = state.grid;
+  if (!grid || !grid.enabled) return null;
+  if (prefix === "t") return grid.move;
+  if (prefix === "r") return grid.rotate;
+  if (prefix === "s" && grid.scaleEnabled) return grid.scale;
+  return null;
+}
+
+function syncTransformSteps() {
+  for (const prefix of ["t", "r", "s"]) {
+    const step = transformStep(prefix);
+    for (const axis of ["x", "y", "z"]) {
+      const input = $(prefix + axis);
+      if (input) input.step = step == null ? "any" : String(step);
+    }
+  }
+}
+
 function runCommand(id) {
   if (id === "undo") undo();
   else if (id === "redo") redo();
   else if (id === "frame") viewport.frame(state.selected);
   else if (id === "snap") toggleSnap();
+  else if (id === "gizmo-space") toggleGizmoSpace();
+  else if (id === "grid-snap") toggleGridSnap();
+  else if (id === "snap-grid") toggleSnapGrid();
   else if (id === "add") openAdd("add");
   else if (id === "hide") {
     const actor = selectedActor();

@@ -98,7 +98,37 @@
               <button type="button" data-gizmo="rotate">Rotate</button>
               <button type="button" data-gizmo="scale">Scale</button>
             </div>
-            <label class="check" title="Drop and move onto the walkable surface: the ground, a collision mesh, or the room model. V toggles this."><input id="snap-surface" type="checkbox" /> Snap</label>
+            <div class="seg" role="group" aria-label="Gizmo space">
+              <button type="button" data-gizmo-space="world" class="is-on" aria-pressed="true" title="World space for move and rotate. L toggles. Scale stays local.">World</button>
+              <button type="button" data-gizmo-space="local" aria-pressed="false" title="The selected actor's local space for move and rotate. L toggles. Scale stays local.">Local</button>
+            </div>
+            <label class="check" title="Drop and move onto the walkable surface: the ground, a collision mesh, or the room model. V toggles this. With Grid on, this still sets the height and Grid sets X and Z."><input id="snap-surface" type="checkbox" /> Snap</label>
+            <label class="check" title="Snap the drag to the increments. Shift+V toggles this. Hold Ctrl while dragging to flip it. With Snap on, Grid sets X and Z and Snap sets the height."><input id="snap-grid" type="checkbox" /> Grid</label>
+            <label class="check" title="Move increment in metres, along the active axes.">Move
+              <select id="grid-move" aria-label="Move increment">
+                <option value="0.25">0.25</option>
+                <option value="0.5">0.5</option>
+                <option value="1" selected>1</option>
+                <option value="5">5</option>
+                <option value="10">10</option>
+              </select>
+            </label>
+            <label class="check" title="Rotation increment in degrees.">Rotate
+              <select id="grid-rotate" aria-label="Rotate increment">
+                <option value="5">5°</option>
+                <option value="15" selected>15°</option>
+                <option value="45">45°</option>
+                <option value="90">90°</option>
+              </select>
+            </label>
+            <label class="check" title="Snap scale to this increment. Off leaves scale free."><input id="snap-scale" type="checkbox" /> Scale snap
+              <select id="grid-scale" aria-label="Scale increment">
+                <option value="0.25" selected>0.25</option>
+                <option value="0.5">0.5</option>
+                <option value="1">1</option>
+              </select>
+            </label>
+            <label class="check" title="Draw a grid at the move increment, in world or local space."><input id="show-snap-grid" type="checkbox" /> Grid lines</label>
             <label class="check"><input id="show-hidden" type="checkbox" /> Show hidden</label>
             <label class="check"><input id="show-labels" type="checkbox" checked /> All labels</label>
             <label class="check"><input id="show-companions" type="checkbox" checked /> Companion banc</label>
