@@ -276,6 +276,34 @@ async function assignSlot(material, slot, loadTexture) {
  * Synchronous. Does not fetch, decode, or dispose. Batches share `part.material`,
  * so writing the maps here updates those draws.
  */
+/**
+ * Put `forgeLit` back on the material when the stage bar is showing textures.
+ * A later clear can leave the snapshot full and the live slots empty. Hiding
+ * textures does not call this.
+ */
+export function restoreShownMaps(parts, shown) {
+  if (!shown) return 0;
+  const seen = new Set();
+  let restored = 0;
+  for (const part of parts || []) {
+    const material = part && part.material;
+    if (!material || seen.has(material)) continue;
+    seen.add(material);
+    const lit = material.userData && material.userData.forgeLit;
+    if (!lit) continue;
+    let changed = false;
+    for (const key of MAP_KEYS) {
+      const held = lit[key];
+      if (!held || held.isTexture !== true || material[key] === held) continue;
+      material[key] = held;
+      changed = true;
+      restored += 1;
+    }
+    if (changed) material.needsUpdate = true;
+  }
+  return restored;
+}
+
 export function presentTextures(parts, shown) {
   const seen = new Set();
   let swapped = 0;

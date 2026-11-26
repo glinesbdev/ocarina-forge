@@ -3,7 +3,7 @@ import test from "node:test";
 
 import * as THREE from "three";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -305,6 +305,23 @@ test("cloneMaterialPreservingTextures keeps userData maps and does not serialize
   assert.equal(copy.userData.mossMap, moss);
   assert.equal(copy.userData.orm1Uniform.value, moss);
   assert.equal(copy.userData.note, "keep");
+});
+
+test("materialToDraw returns the part material when the mesh is still flat", () => {
+  const map = { isTexture: true, channel: 0 };
+  const mapped = { map };
+  const mesh = { material: { map: null }, geometry: { hasAttribute: (name) => name === "uv" } };
+  const decision = materialToDraw(mesh, [{ material: mapped }]);
+  assert.equal(decision.material, mapped);
+  assert.equal(decision.map, map);
+  assert.equal(decision.missingUv, false);
+  assert.equal(materialToDraw({ material: mapped, geometry: mesh.geometry }, [{ material: mapped }]), null);
+  const missing = materialToDraw(
+    { material: { map: null }, geometry: { hasAttribute: () => false } },
+    [{ material: mapped }],
+  );
+  assert.equal(missing.missingUv, true);
+  assert.equal(missing.material, null);
 });
 
 test("dropMapWithoutUv logs once per material at debug level", () => {

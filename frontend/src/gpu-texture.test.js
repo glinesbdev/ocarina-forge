@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { chooseTexture, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
+  adoptRendererTexture,
   releaseTextureCpu,
   repairCompressedTexture, textureGpuReady, VK_FORMAT } from "./gpu-texture.js";
 
@@ -305,4 +306,65 @@ test("textureGpuReady waits for a real WebGPU image and ignores the default text
   assert.equal(textureGpuReady(backend, texture), true);
   assert.equal(textureGpuReady(null, texture), false);
   assert.equal(textureGpuReady({ get() { throw new Error("missing"); } }, texture), false);
+});
+
+test("the renderer and the addon three entry share compressed texture constructors", async () => {
+  const webgpu = await import("three/webgpu");
+  const classic = await import("three");
+  assert.equal(webgpu.Texture, classic.Texture);
+  assert.equal(webgpu.CompressedTexture, classic.CompressedTexture);
+  assert.equal(webgpu.CompressedArrayTexture, classic.CompressedArrayTexture);
+});
+
+test("adoptRendererTexture rebuilds a texture from a second three copy", () => {
+  const warns = [];
+  const original = console.warn;
+  console.warn = (message) => warns.push(String(message));
+  try {
+    class Texture {
+      constructor(image) {
+        this.isTexture = true;
+        this.image = image;
+        this.needsUpdate = false;
+      }
+    }
+    class CompressedTexture extends Texture {
+      constructor(mipmaps, width, height, format, type) {
+        super(null);
+        this.isCompressedTexture = true;
+        this.mipmaps = mipmaps;
+        this.image = { width, height };
+        this.format = format;
+        this.type = type;
+      }
+    }
+    const THREE = { Texture, CompressedTexture };
+    const foreign = {
+      isTexture: true,
+      isCompressedTexture: true,
+      mipmaps: [new Uint8Array(16)],
+      image: { width: 4, height: 4 },
+      format: 36492,
+      type: 1015,
+      colorSpace: "srgb",
+      wrapS: 1000,
+      wrapT: 1000,
+      magFilter: 1006,
+      minFilter: 1008,
+      anisotropy: 4,
+      userData: { forge: true },
+    };
+    const copy = adoptRendererTexture(THREE, foreign);
+    assert.equal(copy instanceof THREE.CompressedTexture, true);
+    assert.equal(copy.image.width, 4);
+    assert.equal(copy.format, 36492);
+    assert.equal(copy.colorSpace, "srgb");
+    assert.equal(copy.userData.forgeAdopted, true);
+    assert.equal(warns.length, 1);
+    const same = adoptRendererTexture(THREE, copy);
+    assert.equal(same, copy);
+    assert.equal(adoptRendererTexture(THREE, { isTexture: false }), null);
+  } finally {
+    console.warn = original;
+  }
 });

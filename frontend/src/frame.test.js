@@ -39,6 +39,10 @@ test("the status label keeps the backend, the revision, and the draw count", () 
     }),
     "WebGL · 30 draws · gpu 10 geom / 9 tex · heap 29MB",
   );
+  assert.equal(
+    formatStatusLabel({ draws: 10, texturesDone: 616, texturesTotal: 617, texturesHidden: true }),
+    "10 draws · textures 616/617 · textures hidden",
+  );
   assert.equal(formatMemoryNote({}), "gpu ? geom / ? tex · heap n/a");
 });
 

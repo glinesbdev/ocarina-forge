@@ -120,6 +120,15 @@ test("a Windows resolve that returns three.webgpu.js is not used for three/tsl",
   assert.equal(await reentered.resolveId.call(loop, "three/tsl", importer), expected);
 });
 
+test("a marked KTX2 loader resolves three to the renderer build", async () => {
+  const webgpuFile = fileURLToPath(new URL("../node_modules/three/build/three.webgpu.js", import.meta.url));
+  const plugin = oneThreePlugin(webgpuFile);
+  const importer = "C:\\forge\\node_modules\\three\\examples\\jsm\\loaders\\KTX2Loader.js?three=webgpu";
+  const resolved = await plugin.resolveId("three", importer, {});
+  assert.equal(resolved, webgpuFile);
+  assert.equal(await plugin.resolveId("./three.core.js", webgpuFile, {}), null);
+});
+
 test("src imports are names the three entry exports", () => {
   const webgpuFile = fileURLToPath(new URL("../node_modules/three/build/three.webgpu.js", import.meta.url));
   const srcDir = fileURLToPath(new URL("./", import.meta.url));

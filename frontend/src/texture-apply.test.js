@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { pickMask } from "./gpu-pick.js";
-import { applyTextureManifest, clearTextureMaps, formatTextureReport, materialKey, presentTextures } from "./texture-apply.js";
+import { applyTextureManifest, clearTextureMaps, formatTextureReport, materialKey, presentTextures, restoreShownMaps } from "./texture-apply.js";
 import { createTextureQueue, orderTextureJobs, simulateTextureWave, textureSlotLimit } from "./texture-stream.js";
 
 function color(rgb) {
@@ -275,6 +275,17 @@ test("show, hide, and show again swaps resident maps and does not fetch", async 
   assert.equal(mesh.map.url, "/api/model-textures/albedo.ktx2");
   assert.equal(pickMask(mesh).map, mesh.map);
   assert.equal(batchMate.map, mesh.map);
+});
+
+test("restoreShownMaps puts a saved map back on a material the stage bar is showing", () => {
+  const held = { isTexture: true };
+  const material = { map: null, needsUpdate: false, userData: { forgeLit: { map: held } } };
+  assert.equal(restoreShownMaps([{ material }], false), 0);
+  assert.equal(material.map, null);
+  assert.equal(restoreShownMaps([{ material }, { material }], true), 1);
+  assert.equal(material.map, held);
+  assert.equal(material.needsUpdate, true);
+  assert.equal(restoreShownMaps([{ material }], true), 0);
 });
 
 test("a show toggle during the stream reveals what is resident and leaves the rest counted", async () => {

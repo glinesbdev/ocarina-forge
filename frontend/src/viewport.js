@@ -8,6 +8,7 @@ import {
   createGpuTextureLoader,
   gpuTexturesEnabled,
   releaseTextureCpu,
+  adoptRendererTexture,
   repairCompressedTexture,
   textureGpuReady,
   textureSupport,
@@ -49,9 +50,10 @@ import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
-import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
+import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
+import { formatTextureDebug, textureDebugEnabled } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -841,11 +843,21 @@ let convertSlots = 8;
     paintFrame(lastRendering, false);
   }
 
+  function adoptMap(texture) {
+    const adopted = adoptRendererTexture(THREE, texture);
+    return adopted && adopted.isTexture === true ? adopted : null;
+  }
+
   function refreshTextureMaterial(material) {
     if (!material) return;
-    const map = material.map && material.map.isTexture === true ? material.map : null;
+    let map = material.map && material.map.isTexture === true ? material.map : null;
     if (material.map && !map) material.map = null;
     if (map) {
+      const adopted = adoptMap(map);
+      if (adopted && adopted !== map) {
+        material.map = adopted;
+        map = adopted;
+      }
       map.colorSpace = THREE.SRGBColorSpace;
       map.wrapS = THREE.RepeatWrapping;
       map.wrapT = THREE.RepeatWrapping;
@@ -859,22 +871,69 @@ let convertSlots = 8;
     }
     for (const key of ["normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap"]) {
       const tex = material[key];
-      if (tex && tex.isTexture === true) asDataMap(tex);
-      else if (tex) material[key] = null;
+      if (tex && tex.isTexture === true) {
+        const adopted = adoptMap(tex);
+        if (adopted && adopted !== tex) material[key] = adopted;
+        asDataMap(material[key]);
+      } else if (tex) material[key] = null;
     }
-    // The cutout node captures the map it saw. A later assign has to build it
+    // The colour node captures the map it saw. A later assign has to build it
     // again, and only from a real three.js texture. That recompiles the
-    // material. The mesh stays.
+    // material. The mesh stays. Blend and terrain nodes already sample their
+    // own images and must not be replaced by the flat albedo node.
     if (mapNodes) {
-      material.colorNode = null;
-      material.alphaTestNode = null;
-      if (material.userData) material.userData.cutoutNode = false;
-      if (material.alphaTest > 0 && map) mapNodes.attachCutout(material);
+      const userData = material.userData;
+      const keep = userData && (userData.terrainNode || userData.blendNode || userData.terrainShader);
+      if (!keep) {
+        material.colorNode = null;
+        material.alphaTestNode = null;
+        if (userData) {
+          userData.cutoutNode = false;
+          userData.albedoNode = false;
+        }
+        if (material.alphaTest > 0 && map) mapNodes.attachCutout(material);
+        else if (map && mapNodes.attachAlbedo) mapNodes.attachAlbedo(material);
+      }
     }
     material.needsUpdate = true;
   }
 
+  function rebindDrawnMaps() {
+    if (!texturesShown) return 0;
+    const partsByMesh = new Map();
+    for (const entry of entries.values()) {
+      const parts = entry.parts || [];
+      for (const slot of entry.slots || []) {
+        if (!slot.mesh) continue;
+        const part = parts.find((item) => item.family === slot.family && item.lod === slot.lod && item.material);
+        if (!part) continue;
+        const list = partsByMesh.get(slot.mesh);
+        if (list) list.push(part);
+        else partsByMesh.set(slot.mesh, [part]);
+      }
+    }
+    let changed = 0;
+    for (const [mesh, parts] of partsByMesh) {
+      const decision = materialToDraw(mesh, parts);
+      if (!decision || decision.missingUv || !decision.material) continue;
+      if (mesh.material !== decision.material) {
+        mesh.material = decision.material;
+        changed += 1;
+      }
+      if (mesh.userData.forgeAlbedo !== decision.map) {
+        decision.material.needsUpdate = true;
+        mesh.userData.forgeAlbedo = decision.map;
+        changed += 1;
+      }
+      if (mapNodes && mapNodes.attachAlbedo && !decision.material.colorNode) {
+        mapNodes.attachAlbedo(decision.material);
+      }
+    }
+    return changed;
+  }
+
   function finishTextureEdit(parts) {
+    if (texturesShown) restoreShownMaps(parts, true);
     const seen = new Set();
     for (const part of parts || []) {
       if (!part.material || seen.has(part.material)) continue;
@@ -884,14 +943,18 @@ let convertSlots = 8;
     // Geometry glbs have no images, so the mesh was compiled against a flat
     // material. The manifest writes the BC7 onto that material afterwards.
     // A new key, or a mesh that still has the pre-upload stamp, has to be
-    // built again so compileAsync sees the map.
-    if (refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
+    // built again so compileAsync sees the map. Rebind first so the mesh
+    // already on screen samples the map without waiting out that rebuild.
+    const rebound = rebindDrawnMaps();
+    if (rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
+    noteTextureDebug();
   }
 
   function loadOwnedTexture(url) {
     return sharedImage(url, () => new Promise((resolve, reject) => {
       gpuTextureLoader.load(url, (texture) => {
-        if (texture && texture.isTexture === true) resolve(texture);
+        const adopted = adoptRendererTexture(THREE, texture);
+        if (adopted && adopted.isTexture === true) resolve(adopted);
         else reject(new Error("decoded image is not a three.js texture"));
       }, undefined, reject);
     })).then((texture) => {
@@ -1035,6 +1098,7 @@ let convertSlots = 8;
     texturesShownArmed = true;
     texturesShown = next;
     presentResidentTextures();
+    noteTextureDebug();
   }
 
   function setTextureLoad(on) {
@@ -3214,6 +3278,7 @@ let convertSlots = 8;
     syncPickIds();
     releaseUnselectedPartGeometry();
     guardMissingUv();
+    noteTextureDebug();
     return true;
   }
 
@@ -5332,6 +5397,9 @@ uniform float terrainLayerMissing;`
     if (!renderer.isWebGPURenderer || !uvDirty) return;
     uvDirty = false;
     dropMapWithoutUv(scene);
+    // A colour node keeps its map. A clone that dropped the map while the
+    // part still holds it is pointed back at that part when the batch has uv.
+    rebindDrawnMaps();
   }
 
   function requestRender() {
@@ -5354,6 +5422,102 @@ uniform float terrainLayerMissing;`
       draws: drawTotal(info, webgpu, subDraws),
       triangles: Number(info.triangles) || 0,
     };
+  }
+
+  let textureDebugSignature = "";
+
+  function noteTextureDebug() {
+    let search = "";
+    let stored = null;
+    try {
+      search = window.location.search;
+      stored = window.localStorage.getItem("ocarinaforge.texdebug");
+    } catch {
+      return;
+    }
+    if (!textureDebugEnabled(search, stored)) return;
+    const Texture = THREE.Texture;
+    const seenParts = new Set();
+    let partMaps = 0;
+    let litOnly = 0;
+    for (const parsed of parsedTemplates.values()) {
+      for (const part of parsed.parts || []) {
+        const material = part && part.material;
+        if (!material || seenParts.has(material)) continue;
+        seenParts.add(material);
+        const map = material.map && material.map.isTexture === true ? material.map : null;
+        const lit = material.userData && material.userData.forgeLit && material.userData.forgeLit.map;
+        if (map) partMaps += 1;
+        else if (lit && lit.isTexture === true) litOnly += 1;
+      }
+    }
+    const samples = [];
+    let meshMaps = 0;
+    let missingUv = 0;
+    let foreign = 0;
+    let uploaded = 0;
+    const seenMesh = new Set();
+    for (const batch of batches) {
+      const mesh = batch && batch.mesh;
+      if (!mesh || seenMesh.has(mesh)) continue;
+      seenMesh.add(mesh);
+      const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      const map = material && material.map && material.map.isTexture === true ? material.map : null;
+      if (map) {
+        meshMaps += 1;
+        if (typeof Texture === "function" && !(map instanceof Texture)) foreign += 1;
+        if (textureGpuReady(renderer.backend, map)) uploaded += 1;
+      }
+      let partMap = null;
+      let partMaterial = null;
+      for (const entry of entries.values()) {
+        const slot = (entry.slots || []).find((item) => item.mesh === mesh);
+        if (!slot) continue;
+        const part = (entry.parts || []).find((item) => item.family === slot.family && item.lod === slot.lod);
+        const candidate = part && part.material && part.material.map;
+        if (candidate && candidate.isTexture === true) {
+          partMap = candidate;
+          partMaterial = part.material;
+          break;
+        }
+      }
+      const channel = Number.isInteger((map || partMap) && (map || partMap).channel) ? (map || partMap).channel : 0;
+      const uvName = channel > 0 ? `uv${channel}` : "uv";
+      const geometry = mesh.geometry;
+      const hasUv = Boolean(geometry && (typeof geometry.hasAttribute === "function"
+        ? geometry.hasAttribute(uvName)
+        : geometry.attributes && geometry.attributes[uvName]));
+      if (partMap && !hasUv) missingUv += 1;
+      if (samples.length < 6 && partMap && (!map || !hasUv || (typeof Texture === "function" && !(partMap instanceof Texture)))) {
+        samples.push({
+          name: mesh.name || "batch",
+          meshMap: Boolean(map),
+          partMap: true,
+          uv: hasUv,
+          channel,
+          compressed: Boolean(partMap.isCompressedTexture),
+          foreign: typeof Texture === "function" && !(partMap instanceof Texture),
+          uploaded: textureGpuReady(renderer.backend, partMap),
+          sameMaterial: material === partMaterial,
+        });
+      }
+    }
+    const report = {
+      shown: texturesShown,
+      batches: batches.length,
+      meshMaps,
+      partMaps,
+      litOnly,
+      missingUv,
+      foreign,
+      uploaded,
+      profileTex: profileTextureCount(),
+      samples,
+    };
+    const text = formatTextureDebug(report);
+    if (text === textureDebugSignature) return;
+    textureDebugSignature = text;
+    console.info(text);
   }
 
   function profileTextureCount() {
@@ -5527,6 +5691,7 @@ uniform float terrainLayerMissing;`
       capped: statCapped,
       texturesDone: statTexturesDone,
       texturesTotal: statTexturesTotal,
+      texturesHidden: !texturesShown && statTexturesDone > 0,
       layersOff: statLayersOff,
       memory: {
         geometries: renderer.info && renderer.info.memory ? renderer.info.memory.geometries : null,

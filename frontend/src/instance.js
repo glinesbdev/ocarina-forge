@@ -80,6 +80,34 @@ export function refreshBatchKeys(parts, keyFor) {
   return changed;
 }
 
+/**
+ * The drawn mesh has to use the part material that holds the map. A batch
+ * compiled before the upload, or a clone made because the uv was missing,
+ * keeps a flat material while the part still has the image.
+ * `null` means the mesh is already drawing that map. `missingUv` means the
+ * batch geometry cannot sample the map's channel, so the caller leaves it.
+ */
+export function materialToDraw(mesh, parts) {
+  const records = [];
+  for (const part of parts || []) records.push({ part });
+  const next = materialForBatch(records, mesh && mesh.material);
+  const map = next && next.map && next.map.isTexture === true ? next.map : null;
+  if (!map || !mesh) return null;
+  const channel = Number.isInteger(map.channel) ? map.channel : 0;
+  const name = channel > 0 ? `uv${channel}` : "uv";
+  const geometry = mesh.geometry;
+  const hasUv = Boolean(
+    geometry && (typeof geometry.hasAttribute === "function"
+      ? geometry.hasAttribute(name)
+      : geometry.attributes && geometry.attributes[name]),
+  );
+  if (!hasUv) return { material: null, map, missingUv: true };
+  const current = mesh.material;
+  const currentMap = current && current.map && current.map.isTexture === true ? current.map : null;
+  if (current === next && currentMap === map) return null;
+  return { material: next, map, missingUv: false };
+}
+
 /** The mesh has to draw a material that actually holds the uploaded map. */
 export function materialForBatch(records, fallback) {
   for (const record of records || []) {

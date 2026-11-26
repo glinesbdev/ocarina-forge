@@ -38,3 +38,35 @@ export function attachCutout(material) {
   material.userData.cutoutNode = true;
   return material;
 }
+
+/**
+ * Opaque maps on the node renderer. `MaterialNode.COLOR` decides whether to
+ * sample `material.map` when the program is first built. A geometry glb is
+ * compiled with `map` null, and that program's cache key does not follow a
+ * map assigned later, so the fragment stays the flat material colour.
+ * This colour node samples the map that is on the material now. The map stays
+ * on the material so the profile count and the bind group see the same image.
+ * WebGL never imports this file.
+ */
+export function attachAlbedo(material) {
+  if (!material || material.colorNode || !material.map || material.map.isTexture !== true) return material;
+  const userData = material.userData;
+  if (userData && (userData.terrainNode || userData.cutoutNode || userData.blendNode || userData.terrainShader || userData.banc === "terrain")) {
+    return material;
+  }
+  const map = material.map;
+  material.colorNode = Fn((builder) => {
+    const geometry = builder && builder.geometry;
+    const channel = Number.isInteger(map.channel) ? map.channel : 0;
+    const name = channel > 0 ? `uv${channel}` : "uv";
+    const hasUv = Boolean(geometry && typeof geometry.hasAttribute === "function" && geometry.hasAttribute(name));
+    const tint = materialReference("color", "color", material);
+    if (!hasUv) return vec4(tint, 1);
+    const sampled = texture(map, uv(channel));
+    return vec4(sampled.rgb.mul(tint), sampled.a);
+  })();
+  material.userData = userData || {};
+  material.userData.albedoNode = true;
+  material.needsUpdate = true;
+  return material;
+}

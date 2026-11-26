@@ -86,6 +86,50 @@ export function repairCompressedTexture(texture) {
   texture.needsUpdate = true;
 }
 
+let reportedForeignTexture = false;
+
+/**
+ * A loader that imported `three` from a second build returns a texture whose
+ * constructor is not the renderer's. `isTexture` is still true, so the map is
+ * assigned, and an `instanceof Texture` check in the other build then skips
+ * the upload. Rebuild the image with the renderer's constructors.
+ */
+export function adoptRendererTexture(THREE, texture) {
+  if (!texture || texture.isTexture !== true) return null;
+  const Texture = THREE && THREE.Texture;
+  if (typeof Texture !== "function" || texture instanceof Texture) return texture;
+  const image = texture.image || {};
+  let copy = null;
+  if (texture.isCompressedTexture === true && THREE.CompressedTexture) {
+    copy = new THREE.CompressedTexture(
+      Array.isArray(texture.mipmaps) ? texture.mipmaps : [],
+      image.width || 0,
+      image.height || 0,
+      texture.format,
+      texture.type,
+    );
+    copy.generateMipmaps = false;
+    copy.flipY = false;
+  } else if (image) {
+    copy = new THREE.Texture(image);
+    copy.flipY = texture.flipY === true;
+  }
+  if (!copy || copy.isTexture !== true) return texture;
+  if (texture.colorSpace) copy.colorSpace = texture.colorSpace;
+  copy.wrapS = texture.wrapS;
+  copy.wrapT = texture.wrapT;
+  copy.magFilter = texture.magFilter;
+  copy.minFilter = texture.minFilter;
+  copy.anisotropy = texture.anisotropy;
+  copy.needsUpdate = true;
+  copy.userData = { ...(texture.userData || {}), forgeAdopted: true };
+  if (!reportedForeignTexture) {
+    reportedForeignTexture = true;
+    console.warn("Texture loader returned a texture from a different three copy. Rebuilt it with the renderer constructors.");
+  }
+  return copy;
+}
+
 
 function emptyTexelData(data) {
   if (!data) return data;
