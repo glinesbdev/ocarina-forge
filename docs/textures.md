@@ -94,12 +94,6 @@ From the repo, with the venv active and the dump that contains `romfs`:
 
 On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r170's missing BC7 `getFormat` case is patched at init and by a Vite plugin. See `docs/rendering-performance.md`.
 
-## Texture arrays
+## Batch materials
 
-Resident BC7/BC1/BC3 maps of one size, mip count, format, and colour space are layers of a `CompressedArrayTexture` (`frontend/src/texture-array.js`). Albedo stays sRGB. Normals and ORM stay linear, so they never share an array with an albedo. The instance's layer is an RGBA8 texel. The material samples that layer; a second slice starts when a group is already published or holds 256 layers.
-
-Arrays are off by default. Each material keeps its compressed map, repeated meshes stay instanced, and tint stays on the instance. Opt in with `?arrays=1` or `localStorage['ocarinaforge.textureArrays']='1'`.
-
-On WebGPU an enabled array is not filled by three's concatenated `writeTexture`, and not by `copyTextureToTexture`. The concatenated upload leaves the 1×1 white default. The copy reported success on Windows while the array stayed white, and `unresolved` stayed 0 because the layer index existed. Each layer is now `queue.writeTexture` of that layer's own bytes, mip by mip, the same call the 2D path uses. A layer with no bytes, a missing GPU texture, or a validation error drops the array and the batch keeps the original maps. `unresolved` counts those instances, including an array that was never filled. The colour node samples the original map, or the material colour, when a UV is missing.
-
-WebGL2 still uploads the concatenated mips. Headless Chrome 157 (SwiftShader) sampled BC7 arrays, including sRGB and a mip chain. See `docs/rendering-performance.md`.
+Repeated meshes share a `BatchedMesh` across tints. The coalesced material is a clone with colour white and the original compressed `map` still set. `setColorAt` carries the tint. Texture arrays are not used: on WebGPU they left the Field untextured, and the node shader then warned `Bindings._update: binding should be available` because the texture it sampled had no GPU image. See `docs/rendering-performance.md`.

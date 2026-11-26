@@ -107,6 +107,22 @@ export function textureImageSize(texture) {
   return { width, height };
 }
 
+/**
+ * True when this texture object already has a GPU image that is not three's
+ * 1×1 white default. CPU bytes stay until then: releasing them first makes
+ * WebGPU skip the upload (`source.dataReady` is false) and the material's
+ * texture binding has nothing to sample.
+ */
+export function textureGpuReady(backend, texture) {
+  if (!backend || typeof backend.get !== "function" || !texture) return false;
+  try {
+    const data = backend.get(texture);
+    return Boolean(data && (data.texture || data.externalTexture) && data.isDefaultTexture !== true);
+  } catch {
+    return false;
+  }
+}
+
 export function releaseTextureCpu(texture) {
   if (!texture) return false;
   const source = texture.source;

@@ -13,8 +13,6 @@
  * keeps the cursor pixel.
  */
 
-import { patchPickArrayShader } from "./texture-array.js";
-
 export const PICK_LAYER = 1;
 export const PREVIEW_PICK_LAYER = 2;
 export const TERRAIN_PICK_LAYER = 3;
@@ -331,7 +329,6 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     forgePeel: { value: 0 },
     forgeCameraPos: { value: new THREE.Vector3() },
     forgeFar: { value: 1000 },
-    forgeLayers: { value: zero },
   };
   let activeObject = null;
   const material = new THREE.MeshBasicMaterial({
@@ -350,18 +347,10 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     // WebGL shares one instanced program and updates the id texture uniform.
     // WebGPU's instance node captures the mesh, so each preview mesh stays unique.
     if (object?.isInstancedMesh) return nodeRenderer ? `forge-pick-inst-${object.uuid}` : "forge-pick-inst";
-    if (object?.isBatchedMesh) {
-      const map = object.material?.map;
-      const array = map && (map.isCompressedArrayTexture || map.isDataArrayTexture);
-      return array ? "forge-pick-batch-array" : "forge-pick-batch";
-    }
+    if (object?.isBatchedMesh) return "forge-pick-batch";
     return "forge-pick-mesh";
   };
-  material.onBeforeCompile = (shader) => {
-    installPickShader(shader, uniforms);
-    const map = activeObject?.material?.map;
-    if (map && (map.isCompressedArrayTexture || map.isDataArrayTexture)) patchPickArrayShader(shader);
-  };
+  material.onBeforeCompile = (shader) => installPickShader(shader, uniforms);
   let nodeMaterial = null;
   // Native WebGPU's copy aligns rows to 256 bytes. The WebGL2 backend of
   // WebGPURenderer does not, but both backends compile node materials.
@@ -475,13 +464,9 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     const mask = pickMask(src);
     const nextMap = mask.channel === "a" ? mask.map : null;
     const nextAlpha = mask.channel === "g" ? mask.map : null;
-    const arrayMap = (tex) => Boolean(tex && (tex.isCompressedArrayTexture || tex.isDataArrayTexture));
     const defineChange = (material.alphaTest > 0) !== (mask.alphaTest > 0)
       || Boolean(material.map) !== Boolean(nextMap)
-      || Boolean(material.alphaMap) !== Boolean(nextAlpha)
-      || arrayMap(material.map) !== arrayMap(nextMap)
-      || arrayMap(material.alphaMap) !== arrayMap(nextAlpha);
-    uniforms.forgeLayers.value = object?.userData?.forgeLayers || zero;
+      || Boolean(material.alphaMap) !== Boolean(nextAlpha);
     material.alphaTest = mask.alphaTest;
     material.map = nextMap;
     material.alphaMap = nextAlpha;

@@ -24,11 +24,9 @@ import {
   reference,
   texture,
   textureSize,
-  uv,
   vec4,
 } from "three/tsl";
 import { pickMask, resolvePickTexture } from "./gpu-pick.js";
-import { layerIndex } from "./texture-array-node.js";
 
 function texelNode(tex) {
   const node = texture(tex).setSampler(false).setUpdateMatrix(false);
@@ -57,19 +55,10 @@ function watchedTexel(getTexture) {
   return node;
 }
 
-function maskNode(material, hasUv, builder) {
+function maskNode(material, hasUv) {
   const mask = pickMask(material);
   if (!mask.map || !hasUv) return;
   material.userData.forgePickMask = mask.map;
-  const array = mask.map.isCompressedArrayTexture === true || mask.map.isDataArrayTexture === true;
-  const object = builder && builder.object;
-  const layers = material.userData && material.userData.forgeLayerWatch;
-  if (array && object && layers) {
-    const sampled = texture(mask.map, uv()).depth(layerIndex(builder, object, 0, layers));
-    const texel = mask.channel === "g" ? sampled.g : sampled.a;
-    texel.lessThanEqual(materialReference("alphaTest", "float", material)).discard();
-    return;
-  }
   const sampled = materialReference("userData.forgePickMask", "texture", material);
   const texel = mask.channel === "g" ? sampled.g : sampled.a;
   texel.lessThanEqual(materialReference("alphaTest", "float", material)).discard();
@@ -77,16 +66,12 @@ function maskNode(material, hasUv, builder) {
 
 export function createNodePickMaterial({ uniforms, getActiveObject }) {
   const excludeNode = watchedTexel(() => resolvePickTexture(uniforms.forgeExclude.value));
-  const layersWatch = watchedTexel(() => {
-    const object = getActiveObject ? getActiveObject() : null;
-    return object?.userData?.forgeLayers || resolvePickTexture(uniforms.forgeLayers?.value) || resolvePickTexture(uniforms.forgeExclude.value);
-  });
   const material = new NodeMaterial();
   material.fragmentNode = Fn((builder) => {
     const object = builder.object;
     const geometry = builder.geometry;
     const hasUv = Boolean(geometry && typeof geometry.hasAttribute === "function" && geometry.hasAttribute("uv"));
-    maskNode(material, hasUv, builder);
+    maskNode(material, hasUv);
     let id;
     const pickTex = resolvePickTexture(object?.userData?.forgePickTexture);
     const indirect = resolvePickTexture(object?.userData?.forgeIndirect) || resolvePickTexture(object?._indirectTexture);
@@ -115,9 +100,8 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
     const mask = pickMask(material);
     const cut = mask.map ? `cut-${mask.channel}` : "solid";
     const tex = object?.userData?.forgePickTexture?.uuid || "none";
-    const array = mask.map && (mask.map.isCompressedArrayTexture || mask.map.isDataArrayTexture) ? `array-${mask.map.uuid}` : "2d";
     if (object?.isInstancedMesh) return `forge-pick-inst-${object.uuid}-${cut}-${tex}`;
-    if (object?.isBatchedMesh) return `forge-pick-batch-${cut}-${tex}-${array}`;
+    if (object?.isBatchedMesh) return `forge-pick-batch-${cut}-${tex}`;
     return `forge-pick-mesh-${cut}`;
   };
   material.fog = false;
@@ -127,7 +111,6 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
   material.depthWrite = true;
   material.forceSinglePass = true;
   material.userData.forgePick = true;
-  material.userData.forgeLayerWatch = layersWatch;
   return material;
 }
 

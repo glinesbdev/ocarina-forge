@@ -49,12 +49,7 @@ export function formatStatusLabel({
   return parts.join(" · ");
 }
 
-/**
- * renderer.info.memory plus the JS heap, for the status line and the unload log.
- * `heapBytes` is `performance.memory.usedJSHeapSize`: the page isolate's V8
- * heap, including ArrayBuffers it still references. It is not GPU memory and
- * it does not include a worker isolate.
- */
+/** renderer.info.memory plus the JS heap, for the status line and the unload log. */
 export function formatMemoryNote({ geometries = null, textures = null, heapBytes = null } = {}) {
   const geom = geometries == null ? "?" : String(Number(geometries) || 0);
   const tex = textures == null ? "?" : String(Number(textures) || 0);
@@ -86,7 +81,6 @@ export function formatProfileDetail({
   warmTotal = null,
   sceneStream = null,
   server = "",
-  unresolved = null,
 } = {}) {
   const lines = [];
   lines.push(rendering ? (fps ? `${fps} fps` : "…") : "idle");
@@ -94,7 +88,6 @@ export function formatProfileDetail({
   if (instances != null) counts.push(`${instances} inst`);
   if (culled != null) counts.push(`${culled} culled`);
   if (separate != null) counts.push(`${separate} separate`);
-  if (unresolved != null) counts.push(`${unresolved} unresolved`);
   if (counts.length) lines.push(counts.join(" · "));
   const stream = [];
   if (queued != null && !(Number(queued) === 0 && Number(capped) > 0)) stream.push(`${queued} queued`);

@@ -43,7 +43,7 @@ export function canGizmo({ id, shown, locked }) {
 /**
  * Copies that share a key are one BatchedMesh.
  * Tint is per instance (`setColorAt`), so it is not part of the key.
- * `sizeClass` is the texture-array group (or a 2D source id) and replaces `image`.
+ * `sizeClass` overrides `image` when a caller already grouped by texture.
  */
 export function batchKey({ image, alpha, side, indexed, attributes, sizeClass }) {
   const imageKey = sizeClass || image || "flat";
@@ -51,12 +51,55 @@ export function batchKey({ image, alpha, side, indexed, attributes, sizeClass })
 }
 
 /**
- * Streaming still batches one model at a time, before arrays are sealed.
- * That key keeps tint and the image signature so a texture written onto the
- * shared material shows up immediately, and two shapes do not fold together.
+ * Streaming still batches one model at a time. That key keeps tint and the
+ * image signature so a texture written onto the shared material shows up
+ * immediately, and two shapes do not fold together.
  */
 export function stageBatchKey({ image, alpha, side, tint, indexed, attributes }) {
   return `${image}|${alpha}|s${side}|c${tint}|${indexed}|${attributes}`;
+}
+
+/**
+ * Blend and terrain shaders sample more than `material.map`. They keep their
+ * own material and their tinted streaming key. Everything else can share a
+ * batch across tints.
+ */
+export function materialSharesTint(material) {
+  const data = material?.userData || {};
+  if (data.blend || data.terrainShader || data.terrainNode || data.banc === "terrain") return false;
+  return true;
+}
+
+/**
+ * One material for every tint of a texture. The clone stays on the source
+ * map (and any other sampled slot). Colour is white so `setColorAt` is the
+ * only tint. Colour nodes are cleared and, for a cutout, rebuilt on this
+ * clone: the source node closed over the source material, and a node left
+ * pointing at a texture the GPU does not have is the WebGPU
+ * "binding should be available" warning.
+ */
+export function prepareBatchMaterial(material, { attachCutout } = {}) {
+  const clone = cloneMaterialPreservingTextures(material);
+  if (!clone || clone === material) return material;
+  if (typeof material.onBeforeCompile === "function") clone.onBeforeCompile = material.onBeforeCompile;
+  if (typeof material.customProgramCacheKey === "function") clone.customProgramCacheKey = material.customProgramCacheKey;
+  clone.colorNode = null;
+  clone.alphaTestNode = null;
+  clone.roughnessNode = null;
+  clone.metalnessNode = null;
+  clone.aoNode = null;
+  clone.normalNode = null;
+  clone.emissiveNode = null;
+  clone.userData = clone.userData || {};
+  clone.userData.cutoutNode = false;
+  clone.userData.arrayNode = false;
+  clone.userData.forgeBatchClone = true;
+  if (clone.color && clone.color.setHex) clone.color.setHex(0xffffff);
+  if (typeof attachCutout === "function" && clone.alphaTest > 0 && clone.map && clone.map.isTexture === true) {
+    attachCutout(clone);
+  }
+  clone.needsUpdate = true;
+  return clone;
 }
 
 /**

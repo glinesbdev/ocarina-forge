@@ -53,10 +53,10 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Compressed GPU textures (BC7/BC1) | **4–8×** texture memory vs RGBA; often the difference between a Field tab surviving and OOM | Implemented this pass |
 | Dispose leftover CPU geometry after extract | One of three vertex copies gone; tens to a few hundred MB on Field | Implemented. Template sources are disposed, and part clones are released after the batch copy exists (GPU picking, below) |
 | Frustum culling | Already removing off-screen instance draws | Already present |
-| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of CPU copies still on the heap. GPU BC7 is reported and is not part of that total. The JS heap (2.2 GB) and a 4096-mesh count are the other caps. See [Residency budget](#residency-budget) |
+| Distance streaming / unload far unique models | Stops the Field tab from pulling all 852 unique meshes into JS; nearby models stay loaded and the rest stream as you move | Implemented. Soft budget is **1.2 GB** of geometry plus BC7 (`__forgeMemory()`). The JS heap and a 4096-mesh count are last-resort caps. See [Residency budget](#residency-budget) |
 | Occlusion culling (Hi-Z / GPU queries) | **10–30%** fewer shaded pixels and some draws in dense Field views | Not implemented |
 | HLOD / impostors for far actors | Large GPU save at distance; visible change if the billboard is wrong | Not implemented |
-| Texture arrays | Fewer binds. One `BatchedMesh` per alpha mode, side, vertex layout, and texture size class | Implemented. See [Texture arrays](#texture-arrays). Field and Kokiri frame times were not remeasured in this checkout |
+| Texture arrays / atlases | Fewer binds, more meshes in one batch | Not in this build. `ac3254f` put models on array layers and the Field drew white (`tex 6`). `8ab4f0f` and `2046b64` still drew white, and parking batch attributes took the Field heap from 727 MB to 4.6–6.3 GB. See [Instance tint](#instance-tint) |
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
@@ -66,7 +66,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 
 The viewer used to stop background loads at **240** unique meshes (hard evict at 280) or at **2.2 GB** of JS heap (hard **2.8 GB**), nearest first, at most 8 evictions a pass. One Field model can be about ten times another, so a count fills the tab with whatever happened to be nearby.
 
-The soft limit is the CPU copies still on the JS heap. `__forgeMemory()` sums live geometry arrays and texture bytes that have not been released (`geometries.cpuBytes` + `textures.cpuBytes`). BC7 GPU size stays on the report as `bc7Bytes` and is not added into that total: it is not JS heap. A model whose geometry and textures have been uploaded therefore stops counting against the byte brake, and the 2.2 GB heap cap is what still refuses a tab that is about to hit V8. The residency budget:
+The soft limit is bytes. `__forgeMemory()` sums geometry CPU bytes and BC7 texture GPU bytes (`geometries.cpuBytes` + `textures.byFormat.BC7.gpu`). That total is the residency budget:
 
 | Limit | Value | What it does |
 | --- | --- | --- |
@@ -108,39 +108,15 @@ Forge pins `three@0.170.0`. The current npm release checked for this note is **0
 
 r170's draw path still calls synchronous `createRenderPipeline` on a cache miss. Later releases have not removed that. Open reports on the 0.18x line: `compileComputeAsync` can resolve with `pipeline` unset and a later `setPipeline` throws ([#35556](https://github.com/mrdoob/three.js/issues/35556), r187), and `compileAsync` can miss the pipeline a later draw actually uses when the color format differs ([#35659](https://github.com/mrdoob/three.js/issues/35659), checked on r186 and current dev). A background-compilation pull request ([#33766](https://github.com/mrdoob/three.js/pull/33766)) was closed without merging. The BC7 `getFormat` patch, the batched-draw fold, and the rest of the r170 WebGPU shims would all have to be re-checked across 17 minor versions. That is not a small upgrade. The compile-before-attach path and the draw guard cover the race on r170.
 
-## Texture arrays
+## Instance tint
 
-BC7 (and BC1/BC3) maps that share width, height, mip count, format, colour space, wrap, and UV channel become layers of one `CompressedArrayTexture`. Each instance stores its layer in an RGBA8 table, indexed the same way as `BatchedMesh`'s colour texture: channel 0 is the albedo, 1 the normal, 2 the ORM, and 3 a spare (a distinct AO, otherwise emissive, otherwise a distinct metalness). A roughness map that is also the metalness and AO map uses channel 2 for all three. Alpha-test and blend stay in different batches, and so do double-sided materials. Blend materials and terrain keep the streaming key, because their shaders are not the standard PBR graph.
+Repeated meshes that differ only by tint share one `BatchedMesh`. The streaming key still includes tint, so a texture written onto a shared material shows up before the quiet coalesce. The coalesced key drops tint. `prepareBatchMaterial` clones the material, sets its colour to white, and leaves `material.map` (and the other sampled slots) on that clone. `setColorAt` multiplies the original colour per instance. Blend and terrain materials keep their own key and their own shader.
 
-The node material samples `texture(array, uv).depth(layer)`. Classic WebGL's `MeshStandardMaterial` declares `sampler2D`, so `onBeforeCompile` switches those slots to `sampler2DArray`. The id-buffer pick samples the same layer, so a foliage hole is still a miss. If the batched geometry has no UV, the colour node samples the original 2D map, or the material colour. It does not return constant white.
+Texture arrays are not in this build. `ac3254f` replaced batch maps with `CompressedArrayTexture` layers. On Hyrule Field (WebGPU, Windows) that was 574 draws, gpu 30 geom / 48 tex, heap 727 MB, tex 6, and every model except terrain was flat white. `8ab4f0f` still drew white (`tex 3`, `unresolved 0`) because `copyTextureToTexture` into a BC7 array did not fail validation and did not fill the array. `2046b64` turned arrays off (`localStorage['ocarinaforge.textureArrays']` unset) and the Field was still untextured: 227 draws, gpu 28 geom / 35 tex, tex 1, heap 4629 MB. The console warning was three's `Bindings._update: binding should be available`, which fires when a node shader's texture has no GPU image. The batch material had dropped or replaced the map the shader still sampled, or `releaseTextureCpu` had cleared the bytes before that image existed.
 
-A published array is not rewritten. `releaseTextureCpu` drops the mip bytes, and a later texture of that size opens another slice. Coalesce runs once streaming and texture assigns have gone quiet, and it does not clear the scene preview.
+Parking batch attributes is not in this build either. `ac3254f` (no park) was 727 MB at 252 models. `8ab4f0f` parked normals and UVs out of shared glTF buffers and the same load was 6304 MB at 160 meshes. `2046b64` still held 4629 MB. The page heap is `performance.memory.usedJSHeapSize` (this isolate's ArrayBuffers, not the GPU). Those copies were the extra gigabytes. Part clones are still released after `addGeometry`, which is the same path as `main`. Decoded texture bytes are released only after `textureGpuReady` says the GPU image exists, and then only after three frames.
 
-### Why WebGPU models went white
-
-Bradyn loaded Hyrule Field on WebGPU at `ac3254f` (Windows). The HUD was 574 draws, 542 background, gpu 30 geom / 48 tex, heap 727 MB, 252 loaded, tex 6. Terrain kept its textures. Cliffs, ranch buildings, fences, and rocks were flat white or cream.
-
-`tex 6` is the number of texture objects on the batch and terrain materials, not six images uploaded. The arrays had replaced the per-model maps. Flat cream is an untextured white albedo under the scene lights. Terrain is excluded from arrays, which is why it stayed textured.
-
-At `8ab4f0f` the same scene was still white, with `tex 3` and `unresolved 0`. `copyTextureToTexture` from the 2D BC7 image into the array did not fail validation, so the group was marked ready, but the array stayed the uninitialized white image. `unresolved` only counted a missing layer, so a white array looked resolved.
-
-Texture arrays are off unless the page opts in (`?arrays=1`, or `localStorage['ocarinaforge.textureArrays'] = '1'`). The batch keeps each compressed map. Repeated meshes stay instanced, and tint is still the per-instance colour. With the flag on, each layer is `queue.writeTexture` of that layer's own bytes, the same call the 2D path uses. A layer with no bytes, a missing GPU texture, or a validation error drops the array. `unresolved` counts those instances. An empty array is not ready.
-
-### Spike
-
-Headless Chrome 157.0.8103.50 (SwiftShader, WebGL2) exposed `EXT_texture_compression_bptc`. `texStorage3D` + `compressedTexSubImage3D` and a `sampler2DArray` sample succeeded for BC7 unorm and sRGB: 64×64×2 (1 mip), 256×256×2 (3 mips), 32×32×2 (1 mip), and 512×256×4 (1 mip). The readback was `0,0,0,0` because the blocks were zeros. `copyImageSubData` was not a function on that context. `navigator.gpu` was missing, so the WebGPU device upload was not executed. The Windows result above is that missing run.
-
-three r170 already treats `CompressedArrayTexture` like `CompressedTexture` in `getFormat`, creates `depthOrArrayLayers`, and writes one `writeTexture` per layer of a concatenated mip. The BC7 plugin supplies the missing `RGBA_BPTC_Format` case and the `bc7-rgba-unorm-srgb` enum `_getBlockData` compares. That concatenated upload is what came back white. The opt-in WebGPU path writes each layer from its own byte range instead.
-
-### What a unit scene collapses to
-
-32 compressed albedos, four sizes, two tints, one vertex layout: the streaming key (unique texture and tint) is **64** batches. The coalesced key is **4**, one array per size, 16 layers each. Alpha-test and double-sided stay split. This checkout has no game dump and no WebGPU device, so the Field and Kokiri Forest were not remeasured here.
-
-The status-line heap is `performance.memory.usedJSHeapSize`. That is the page isolate's V8 heap, including ArrayBuffers it still references. It is not GPU memory, and it does not include a worker isolate. A number in the gigabytes means the page thread is still holding those bytes.
-
-Bradyn's WebGPU Field at `ac3254f` was **252 of 852** models and **727 MB**. At `8ab4f0f` the same load was **245** models, **160** meshes, and **6304 MB**. Parking sliced every normal and UV out of a shared glTF buffer while position still held that buffer, and a failed `postMessage` sliced them again into a map on the page. An interleaved attribute was "cleared" by assigning `.array`, which only shadows the getter; `data.array` kept the whole buffer. Those copies are what the heap reported.
-
-Parking now keeps one packed range per attribute. Position and the index are copied off a shared buffer first, so the original buffer can be dropped. The page-side map does not slice a second time. `frontend/src/geometry-retain.test.js` fails if a shared buffer's live bytes grow. Position and the index stay on the batch for snap. The target is still the whole Field under the 2.2 GB heap cap. Read it on that machine: the status-line heap, and `__forgeMemory()` for `geometries.cpuMB`, `textures.cpuMB`, and `resident.assetBytes`.
+A unit test builds a BC7 `CompressedTexture`, runs `prepareBatchMaterial`, and asserts the batch material's `map` is that texture and its mip bytes are still the upload source.
 
 ## GPU picking
 
@@ -150,13 +126,13 @@ Instanced preview meshes sample a per-instance id texture (`gl_InstanceID` / `in
 
 Alpha-tested materials discard in the id shader before the id is written, so a foliage hole is not a solid hit. Alt-click, and a second click on the same front actor, peel up to eight ids front to back. `chooseHit` still walks that stack together with volume edges.
 
-After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. Once that batch has been uploaded, normals, UVs, tangents, and vertex colours are moved out of the batch (`cpu-park.js`). An owned buffer is transferred. A glTF view is packed once, and position is copied off that buffer first so the shared allocation can be dropped. The page heap is `performance.memory.usedJSHeapSize` (this isolate's ArrayBuffers, not the worker and not the GPU). Position and the index stay on the batch: snap raycasts `BatchedMesh`. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes, and a parked attribute does too.
+After `addGeometry` the part clone's typed arrays are released (`geometry-retain.js`). A later rebuild copies them back out of the batch that owns them. An interleaved buffer is released once, by clearing `data.array`, because assigning `.array` on the attribute only shadows the getter. `__forgeMemory()` counts `array.byteLength`, so a released part reports about 0 bytes. The batch geometry itself stays: snap raycasts it.
 
-The glTF JSON, the dependency cache, and the binary chunk are dropped once the scene has been built (`gltf-release.js`). Decoded texture bytes are released after the GPU image exists. With arrays off, that is the three-frame flush. With arrays on, it is the per-layer write, and the 2D source is held until that write finishes so it cannot be swapped for the 1×1 white default. WebGL still waits out the three-frame flush.
+The glTF JSON, the dependency cache, and the binary chunk are dropped once the scene has been built (`gltf-release.js`). Decoded texture bytes are released after the GPU image exists (`textureGpuReady`) and three further frames have drawn it. Releasing earlier leaves WebGPU with no texture for the binding the material samples.
 
 These stay on the CPU on purpose:
 
-- The `BatchedMesh` position and index. Snap raycasts them, and a rebuild copies the other attributes back from the park.
+- The `BatchedMesh` geometry. Snap raycasts it, and a rebuild copies part attributes back out of it.
 - The selected actor's model, so selecting it does not depend on a round-trip and the mesh audit still sees its vertices.
 - Water parts. Pond fish placement raycasts the water surface.
 - Terrain meshes and their BVH. Snap uses the wasm ground sampler (`sampleGroundSurface`). It falls back to a heightmap raycast only when that sampler is absent, and it does not use the id buffer.
@@ -177,7 +153,7 @@ The HUD shows the latest frame and the rolling average and p95 over the last 180
 - **CPU** — JavaScript in the frame. Update is fly, streaming, and labels. Cull is `syncBatchVisibility`. Submit is `renderer.render` on the CPU.
 - **GPU** — On WebGPU, a `timestamp-query` query set is written at the render-pass boundaries, resolved into a buffer, and mapped with `mapAsync`. On WebGL, and on the WebGPU renderer's WebGL2 fallback, the timer is `EXT_disjoint_timer_query_webgl2`. The line reads `n/a` when the adapter has neither, and when a WebGL disjoint sync throws the result away. It reads `…` until the first result arrives.
 - **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `sub` is the sum of `_multiDrawCount` (the folded WebGPU draws). `draws` is the same total the status label prints.
-- **fps, inst, culled, separate, unresolved** — frame rate (`idle` when the view has settled), live instances, hidden instances, the draw count those actors would cost without batching, and instances whose texture-array layer was not uploaded (they are drawing with their own maps).
+- **fps, inst, culled, separate** — frame rate (`idle` when the view has settled), live instances, hidden instances, and the draw count those actors would cost without batching.
 - **queued, loading, loaded, background** — the model queue. `conv`, `tex`, `dl`, and `up` are this scene's convert, texture, download, and upload times. `warm` is the server warm-up. `detail` is the wait for the first nearby detailed batch. The server convert summary is the last of those lines, and **Dump JSON** keeps the recent convert log with it.
 - **tris, meshes, tex, heap** — triangles, resident unique meshes, resident textures on batches and terrain, and `performance.memory` when the browser exposes it. Otherwise the heap reads `n/a`.
 - **avg / p95** — mean and 95th percentile. GPU samples that have not come back are left out of the GPU average.

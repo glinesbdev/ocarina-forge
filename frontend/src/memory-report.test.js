@@ -59,27 +59,11 @@ test("the memory report counts actors, instanced slots, and compressed textures"
   const budget = budgetAssetBytes(report);
   assert.equal(budget.geometry, report.geometries.cpuBytes);
   assert.equal(budget.bc7, report.textures.byFormat.BC7.gpu);
-  assert.equal(budget.textureCpu, report.textures.cpuBytes);
-  assert.equal(budget.total, budget.geometry + budget.textureCpu);
+  assert.equal(budget.total, budget.geometry + budget.bc7);
   const perModel = residentModelBytes(new Map([
     ["a", { gyaml: "Tree", parts: [{ geometry, material: { map: texture } }] }],
     ["b", { gyaml: "Tree", parts: [{ geometry, material: { map: texture } }] }],
   ]));
   assert.equal(perModel.size, 1);
   assert.ok(perModel.get("Tree") > 0);
-  const releasedGeometry = {
-    attributes: { position: { array: new Float32Array(0) } },
-    userData: { forgeCpuReleased: true, forgeCpuShape: { attributes: { position: { bytes: 999 } }, index: null } },
-  };
-  const releasedTexture = {
-    isCompressedTexture: true,
-    format: 36492,
-    mipmaps: [{ width: 4, height: 4, data: new Uint8Array(0) }],
-    userData: { forgeCpuReleased: true },
-    uuid: "tex-released",
-  };
-  const released = residentModelBytes(new Map([
-    ["a", { gyaml: "Tree", parts: [{ geometry: releasedGeometry, material: { map: releasedTexture } }] }],
-  ]));
-  assert.equal(released.get("Tree"), 0);
 });

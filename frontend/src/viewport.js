@@ -9,6 +9,7 @@ import {
   gpuTexturesEnabled,
   releaseTextureCpu,
   repairCompressedTexture,
+  textureGpuReady,
   textureSupport,
 } from "./gpu-texture.js";
 import { loadForgeImageSource } from "./gltf-image-source.js";
@@ -50,10 +51,8 @@ import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault, stageBatchKey } from "./instance.js";
-import { applyArrayMaps, arraysReady, createTextureArrayPool, installWebGLArrayMaterial, textureArraysEnabled, writeLayerTexture } from "./texture-array.js";
+import { actorLocked, actorShown, applyActorMatrix, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, materialSharesTint, patchBatchedDraw, prepareBatchMaterial, presentByDefault, stageBatchKey, batchKey } from "./instance.js";
 import { releaseGltfDocument } from "./gltf-release.js";
-import { createCpuPark } from "./cpu-park.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -65,7 +64,7 @@ import {
   groupsFromPick,
   ndcFromClient,
 } from "./gpu-pick.js";
-import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, parkGeometryAttributes, releaseGeometryCpu, unparkGeometryAttributes } from "./geometry-retain.js";
+import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
 import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSameActor, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, shouldSnapTranslate, snapExcludeId } from "./snap.js";
 import { basisFromQuaternion, defaultGridSettings, effectiveRotationSpace, gridSnapEngaged, normalizeGridSettings, snapGridLayout, snapRotation, snapScale, snapTranslation } from "./grid-snap.js";
 import { normalizeSpace, spaceForMode } from "./gizmo-space.js";
@@ -125,13 +124,11 @@ export async function createViewport(host, hooks) {
   let mapNodes = null;
   let blendNodes = null;
   let pickNodes = null;
-  let arrayNodes = null;
   if (created.nodes) {
     terrainNodes = await import("./terrain-node.js");
     mapNodes = await import("./cutout-node.js");
     blendNodes = await import("./blend-node.js");
     pickNodes = await import("./gpu-pick-node.js");
-    arrayNodes = await import("./texture-array-node.js");
   }
   if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
   const shaderDiagnostics = observeWgsl(renderer.backend);
@@ -337,20 +334,6 @@ export async function createViewport(host, hooks) {
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
   const batches = [];
-  const cpuPark = createCpuPark();
-  let statUnresolved = 0;
-
-  function freshTextureArrays() {
-    const pool = createTextureArrayPool(THREE);
-    const search = typeof window !== "undefined" ? window.location.search : "";
-    const stored = typeof window !== "undefined" ? window.localStorage.getItem("ocarinaforge.textureArrays") : null;
-    pool.setEnabled(textureArraysEnabled(search, stored));
-    const webgpu = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
-    pool.setRetainMips(!webgpu);
-    return pool;
-  }
-
-  let textureArrays = freshTextureArrays();
   const parsedTemplates = new Map();
   const templateOrder = [];
   const recentSceneTemplates = new Map();
@@ -618,11 +601,16 @@ let convertSlots = 8;
     if (!textureCpuReleaseDirty || textureCpuReleaseInFlight) return;
     const live = [...collectLiveTextures()];
     const groups = new Map();
+    let waitingForGpu = false;
     for (const texture of live) {
       if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
-      // publish() clears the hold after the layer bytes are on the GPU.
-      // Releasing earlier uploads the 1x1 white default into the array.
-      if (texture.userData?.forgeArrayHold) continue;
+      // three's Bindings._update warns, and the mesh draws white, when the
+      // shader samples a texture whose GPU image was never created. That is
+      // what happens if these bytes are dropped first.
+      if (!textureGpuReady(renderer.backend, texture)) {
+        waitingForGpu = true;
+        continue;
+      }
       const key = sourceKey(texture);
       const group = groups.get(key) || [];
       group.push(texture);
@@ -642,8 +630,11 @@ let convertSlots = 8;
       if (!groups.has(key)) textureCpuReleaseFrames.delete(key);
     }
     if (!ready.length) {
-      textureCpuReleaseDirty = groups.size > 0;
+      textureCpuReleaseDirty = groups.size > 0 || waitingForGpu;
       // Keep drawing a couple of extra frames so new uploads can retire.
+      // A texture that is not on the GPU yet is checked on the next render
+      // the scene already scheduled. Forcing frames here would spin on a map
+      // that is never drawn.
       if ([...textureCpuReleaseFrames.values()].some((frames) => frames > 0 && frames < 3)) requestRender();
       return;
     }
@@ -660,8 +651,10 @@ let convertSlots = 8;
       }
     }).finally(() => {
       textureCpuReleaseInFlight = false;
-      textureCpuReleaseDirty = collectLiveTextures().size > 0
-        && [...collectLiveTextures()].some((texture) => !texture.userData?.forgeCpuReleased && !texture.source?.userData?.forgeCpuReleased);
+      textureCpuReleaseDirty = [...collectLiveTextures()].some((texture) => {
+        if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) return false;
+        return textureGpuReady(renderer.backend, texture);
+      });
       if (textureCpuReleaseDirty) requestRender();
     });
   }
@@ -2754,13 +2747,8 @@ let convertSlots = 8;
 
   function releaseBatchMesh(mesh) {
     if (!mesh) return;
-    const parkedId = mesh.geometry && mesh.geometry.userData && mesh.geometry.userData.forgeParkId;
-    if (parkedId && mesh.geometry.userData.forgeParked) cpuPark.drop(parkedId);
     mesh.removeFromParent();
     disposePickTexture(mesh);
-    const layers = mesh.userData && mesh.userData.forgeLayers;
-    if (layers && typeof layers.dispose === "function") layers.dispose();
-    if (mesh.userData) mesh.userData.forgeLayers = null;
     const material = mesh.material;
     if (material && material.userData && material.userData.forgeBatchClone && typeof material.dispose === "function") {
       material.dispose();
@@ -2772,8 +2760,6 @@ let convertSlots = 8;
     for (const batch of batches) releaseBatchMesh(batch.mesh);
     batches.length = 0;
     for (const entry of entries.values()) entry.slots = [];
-    textureArrays.dispose();
-    textureArrays = freshTextureArrays();
   }
 
   const tint = new THREE.Color();
@@ -2887,7 +2873,7 @@ let convertSlots = 8;
     return key;
   }
 
-  function batchKeyFor(material, geometry) {
+  function batchKeyFor(material, geometry, { tint = true } = {}) {
     const image = material.map && material.map.image
       ? imageSignature(material.map.image)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
@@ -2902,45 +2888,39 @@ let convertSlots = 8;
     const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
       ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
       : "";
+    const indexed = geometry.getIndex() ? "idx" : "no";
+    const attributes = Object.keys(geometry.attributes).sort().join(",");
+    const imageKey = image + blendKey + surfaceKey;
+    if (!tint) {
+      return batchKey({
+        image: imageKey,
+        alpha,
+        side: material.side,
+        indexed,
+        attributes,
+      });
+    }
     return stageBatchKey({
-      image: image + blendKey + surfaceKey,
+      image: imageKey,
       alpha,
       side: material.side,
       tint: material.color ? material.color.getHexString() : "fff",
-      indexed: geometry.getIndex() ? "idx" : "no",
-      attributes: Object.keys(geometry.attributes).sort().join(","),
+      indexed,
+      attributes,
     });
   }
 
   function assignPartKey(part) {
     if (!part || !part.material || !part.geometry) return;
-    const staged = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey || ""}`;
+    const family = part.materialKey || "";
+    const staged = `${batchKeyFor(part.material, part.geometry)}|${family}`;
     part.stageKey = staged;
-    const described = textureArrays.describe(part.material, part.geometry);
-    part.arrayBatch = described;
-    part.batchKey = described.custom ? staged : described.key;
-  }
-
-  function collapsedMaterial(source, spec, options = {}) {
-    const clone = cloneMaterialPreservingTextures(source);
-    if (!clone || clone === source) return source;
-    if (typeof source.onBeforeCompile === "function") clone.onBeforeCompile = source.onBeforeCompile;
-    if (typeof source.customProgramCacheKey === "function") clone.customProgramCacheKey = source.customProgramCacheKey;
-    clone.colorNode = null;
-    clone.alphaTestNode = null;
-    clone.roughnessNode = null;
-    clone.metalnessNode = null;
-    clone.aoNode = null;
-    clone.normalNode = null;
-    clone.emissiveNode = null;
-    clone.userData = clone.userData || {};
-    clone.userData.cutoutNode = false;
-    clone.userData.arrayNode = false;
-    clone.userData.forgeBatchClone = true;
-    if (clone.color && clone.color.setHex) clone.color.setHex(0xffffff);
-    if (spec.whiten && options.useArrays) applyArrayMaps(clone, spec);
-    clone.needsUpdate = true;
-    return clone;
+    const share = materialSharesTint(part.material);
+    part.shareTint = share;
+    part.tintColor = share && part.material.color && part.material.color.clone
+      ? part.material.color.clone()
+      : null;
+    part.batchKey = share ? `${batchKeyFor(part.material, part.geometry, { tint: false })}|${family}` : staged;
   }
 
   function actorScale(entry) {
@@ -3070,38 +3050,6 @@ let convertSlots = 8;
     return job;
   }
 
-  function attributeOnGpu(attribute) {
-    const backend = renderer && renderer.backend;
-    if (!backend || typeof backend.get !== "function" || !attribute) return false;
-    try {
-      const data = backend.get(attribute);
-      return Boolean(data && data.buffer);
-    } catch {
-      return false;
-    }
-  }
-
-  async function restoreParkedFor(actors) {
-    const seen = new Set();
-    for (const entry of actors) {
-      for (const part of entry.parts || []) {
-        const link = part.geometry && part.geometry.userData && part.geometry.userData.forgeBatch;
-        const geometry = link && link.mesh && link.mesh.geometry;
-        if (!geometry || seen.has(geometry) || !geometry.userData || !geometry.userData.forgeParked) continue;
-        seen.add(geometry);
-        await unparkGeometryAttributes(geometry, cpuPark);
-      }
-    }
-  }
-
-  async function parkLiveBatches(list) {
-    for (const batch of list) {
-      const geometry = batch.mesh && batch.mesh.geometry;
-      if (!geometry) continue;
-      await parkGeometryAttributes(geometry, cpuPark, { ready: attributeOnGpu });
-    }
-  }
-
   async function rebuildBatchesNow(stagedEntries = null) {
     const sceneToken = generation;
     uvDirty = true;
@@ -3110,16 +3058,11 @@ let convertSlots = 8;
     const nextBatches = [];
     const pendingMeshes = [];
     const actors = stagedEntries || [...entries.values()];
-    await restoreParkedFor(actors);
     for (const entry of actors) entry.slots = [];
     if (collapse) {
       for (const entry of actors) {
         for (const part of entry.parts || []) assignPartKey(part);
       }
-      const webgpu = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
-      textureArrays.finalize({ concatenate: !webgpu });
-      await textureArrays.publish(renderer);
-      invalidateAssetBudget();
     }
     const groups = new Map();
     for (const entry of actors) {
@@ -3155,11 +3098,10 @@ let convertSlots = 8;
         indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
       }
       if (!verts || !group.records.length) continue;
-      if (collapse) {
-        const spec = group.records[0].part.arrayBatch;
-        if (spec && spec.whiten) {
-          group.material = collapsedMaterial(group.material, spec, { useArrays: arraysReady(spec) });
-        }
+      if (collapse && group.records[0].part.shareTint) {
+        group.material = prepareBatchMaterial(group.material, {
+          attachCutout: mapNodes && mapNodes.attachCutout,
+        });
       }
       let mesh;
       try {
@@ -3245,10 +3187,8 @@ let convertSlots = 8;
         if (geometryId === undefined) continue;
         const instanceId = mesh.addInstance(geometryId);
         const placed = displayedActorMatrix(record.entry, new THREE.Matrix4());
-        const bake = Boolean(collapse && record.part.arrayBatch && record.part.arrayBatch.whiten);
-        const tintColor = bake && record.part.arrayBatch.color && record.part.arrayBatch.color.clone
-          ? record.part.arrayBatch.color.clone()
-          : null;
+        const bake = Boolean(collapse && record.part.shareTint);
+        const tintColor = bake ? record.part.tintColor : null;
         mesh.setMatrixAt(instanceId, placed);
         mesh.setColorAt(instanceId, instanceTint(record.entry, tint, tintColor));
         ids[instanceId] = record.entry.key;
@@ -3268,25 +3208,7 @@ let convertSlots = 8;
           shown: true,
           bakeTint: bake,
           tintColor,
-          arrayWanted: Boolean(record.part.arrayBatch && record.part.arrayBatch.usesArray),
-          arrayReady: Boolean(record.part.arrayBatch && arraysReady(record.part.arrayBatch)),
         });
-      }
-      const batchSpec = group.records[0].part.arrayBatch;
-      if (collapse && batchSpec && arraysReady(batchSpec)) {
-        writeLayerTexture(THREE, mesh, group.records);
-        if (arrayNodes) arrayNodes.attachArrayMaterial(group.material, mesh, batchSpec);
-        else installWebGLArrayMaterial(group.material, mesh, batchSpec);
-      } else if (
-        collapse
-        && batchSpec
-        && batchSpec.whiten
-        && arrayNodes
-        && mapNodes
-        && group.material.alphaTest > 0
-        && group.material.map
-      ) {
-        mapNodes.attachCutout(group.material);
       }
       mesh.userData.pick = { ids, geometries, spheres, count };
       mesh.userData.forgeIndirect = mesh._indirectTexture;
@@ -3305,7 +3227,6 @@ let convertSlots = 8;
       if (rounded > (sceneStreamStats.maxCompileMs || 0)) sceneStreamStats.maxCompileMs = rounded;
     }
     if (sceneToken !== generation) {
-      await parkLiveBatches(batches);
       for (const item of pendingMeshes) {
         item.mesh.removeFromParent();
         disposePickTexture(item.mesh);
@@ -3321,7 +3242,6 @@ let convertSlots = 8;
     }
     if (stagedEntries) {
       for (const batch of nextBatches) batches.push(batch);
-      await parkLiveBatches(batches);
       invalidateAssetBudget();
       syncPickIds();
       releaseUnselectedPartGeometry();
@@ -3329,23 +3249,12 @@ let convertSlots = 8;
     }
     const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
     if (!nextBatches.length && expectMeshes && previous.length) {
-      await parkLiveBatches(previous);
       for (const entry of entries.values()) entry.slots = [];
       console.error("Actor batches failed to build; the meshes already on screen stay up.");
       return false;
     }
     batches.length = 0;
     for (const batch of nextBatches) batches.push(batch);
-    if (collapse) {
-      let unresolved = 0;
-      for (const entry of actors) {
-        for (const slot of entry.slots || []) {
-          if (slot.arrayWanted && !slot.arrayReady) unresolved += 1;
-        }
-      }
-      statUnresolved = unresolved;
-    }
-    await parkLiveBatches(batches);
     invalidateAssetBudget();
     naiveDraws = looseParts();
     disposeBatches(previous);
@@ -5584,7 +5493,6 @@ uniform float terrainLayerMissing;`
       warmTotal: statWarmTotal,
       sceneStream: sceneStreamStats,
       server: serverHead,
-      unresolved: statUnresolved,
     };
   }
 
