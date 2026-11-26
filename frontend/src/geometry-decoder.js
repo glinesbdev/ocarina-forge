@@ -40,6 +40,17 @@ function decodeInWorker(count, stride, source, mode, filter) {
   });
 }
 
+/** Drop in-flight meshopt jobs for a map that is going away. The next decode starts a new worker. */
+export function cancelGeometryDecodes() {
+  const error = new Error("The geometry decode was cancelled.");
+  error.name = "AbortError";
+  worker?.terminate();
+  worker = undefined;
+  workerUnavailable = false;
+  for (const request of pending.values()) request.reject(error);
+  pending.clear();
+}
+
 export const geometryDecoder = {
   supported: MeshoptDecoder.supported,
   async decodeGltfBufferAsync(count, stride, source, mode, filter) {

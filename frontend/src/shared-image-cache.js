@@ -48,5 +48,15 @@ export function createSharedImageCache({ limit = 128, released = textureCpuRelea
     });
   }
 
-  return { get, entries };
+  function evict(match) {
+    const removed = [];
+    for (const [uri, pending] of entries) {
+      if (!match(uri)) continue;
+      entries.delete(uri);
+      removed.push(pending);
+    }
+    return removed;
+  }
+
+  return { get, entries, evict };
 }

@@ -53,8 +53,8 @@ same-origin through the Vite proxy, so model and texture fetches do not
 need a second origin.
 
 The editor and the bench both send those headers. The bench listens on
-**47241**. `scripts/dev-wasm.bat` starts the editor on 47241 and the API on
-47242 so a server already bound to 47231/47232 can stay up. The bench page
+**47241**. That measurement started the editor on 47241 and the API on
+47242 so a server already bound to 47231/47232 could stay up. The bench page
 confirmed `crossOriginIsolated === true` and SharedArrayBuffer was available.
 
 ## Results
@@ -147,21 +147,23 @@ copied into the module). Both are far ahead of CPython.
 
 From the repo root, with any editor already on 47231/47232 left alone:
 
-```bat
-scripts\wasm-bench.bat
+```bash
+./build.sh --bench
 ```
 
-If `tools/wasm-bench/data/hyrule-field-child.bin` is missing, that script
-exports fixtures from the dump path written in the script
-(`E:\sw2\oot\stable\ray-test`). Point it at a dump you already have, or
-export first:
-
 ```bat
-.venv\Scripts\python.exe tools\export_wasm_fixture.py --dump path\to\dump
+build.bat --bench
 ```
 
-The script then builds the wasm module and runs `npm run bench` in
-`tools/wasm-bench`, which opens headless Chrome against
+If `tools/wasm-bench/data/hyrule-field-child.bin` is missing, that uses the
+saved dump (or `OCARINA_FORGE_DUMP`) and exports fixtures first:
+
+```bash
+.venv/bin/python tools/export_wasm_fixture.py --dump path/to/dump
+```
+
+It then copies the wasm module into `tools/wasm-bench/pkg` and runs
+`npm run bench`, which opens headless Chrome against
 `http://127.0.0.1:47241`. To watch the page in a window instead:
 
 ```bat
@@ -212,20 +214,12 @@ Measured Wednesday, 25 November 2026, America/New_York, on Hyrule Field
 
 ### How to try local Snap
 
-`scripts\dev-wasm.bat` does not run pip or maturin, and it does not use
-47231/47232. From the repo root:
-
-```bat
-scripts\dev-wasm.bat
-```
-
-That starts Vite on **47241** and the API on **47242**. Open
-`http://127.0.0.1:47241`. `OCARINA_FORGE_HOST` and `OCARINA_FORGE_PORT`
-override the API address. `BANCWRIGHT_HOST` and `BANCWRIGHT_PORT` are
-still read when the new names are unset. The wasm module is committed
-under `frontend/wasm/`, so you do not need `scripts\build-wasm.bat`
-first. The normal editor on 47231 is `scripts\dev.sh` or
-`scripts\dev.bat`.
+From the repo root, `./build.sh` or `build.bat` starts the editor on
+**47231** and the API on **47232**. Open http://127.0.0.1:47231.
+`OCARINA_FORGE_HOST` and `OCARINA_FORGE_PORT` override the API address.
+`BANCWRIGHT_HOST` and `BANCWRIGHT_PORT` are still read when the new names
+are unset. The wasm module is committed under `frontend/wasm/`, so Rust
+is not required just to open the editor.
 
 Then:
 
@@ -240,10 +234,14 @@ Then:
    it, not on its own surface. A Y-axis lift stays at the height you leave
    it, and the gizmo stays on the mesh.
 
-To rebuild the wasm module only:
+To rebuild the wasm module:
+
+```bash
+./build.sh --rebuild-wasm
+```
 
 ```bat
-scripts\build-wasm.bat
+build.bat --rebuild-wasm
 ```
 
 The wasm module is committed under `frontend/wasm/` so a Rust rebuild is

@@ -71,6 +71,8 @@ domains:
 
 `name` is the folder Longshot loads: `mods/<name>/romfs`. It must match `^[A-Za-z0-9][A-Za-z0-9._-]*$` and must not start with `_` or `-`. Those prefixes are how Longshot disables a mod.
 
+`permissions`, `optionalPermissions`, and `net` are optional. The Mod permissions panel writes them. Export copies a non-empty list into `mod.json`. An empty list that was saved clears the same field on an imported manifest. A project that never set the key leaves an imported value as it was. `multiplayer` is written only when it is `all` or `host`. The rules for those fields are in [formats.md](formats.md).
+
 `target.version` is the game the diffs were written against. Export warns when it is not `1.1.1`, because the size-table rule was checked against that version.
 
 `domains` lists the kinds of patch the project may contain. A format 1 project exports `scenes` and stores `text`, `events`, and `tables` for a later editor. See `ocarina_forge/domains.py`. `behaviors/` is the behavior editor's op list. It is not one of those reserved domains.

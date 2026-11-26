@@ -234,10 +234,12 @@ export function collectMemoryReport(state = {}) {
     : null;
 
   const info = state.renderer && state.renderer.info && state.renderer.info.render;
+  const gpuMemory = state.renderer && state.renderer.info && state.renderer.info.memory;
   const stats = state.stats || {};
 
   return {
     heap,
+    gpu: gpuMemory ? { geometries: gpuMemory.geometries || 0, textures: gpuMemory.textures || 0 } : null,
     textures: {
       count: textures.size,
       unique: uniqueSources,

@@ -97,6 +97,11 @@ export function createTextureQueue() {
       done.add(gyaml);
       jobs = jobs.filter((job) => job.gyaml !== gyaml);
     },
+    clear() {
+      jobs = [];
+      done.clear();
+      inflight.clear();
+    },
     forget(gyaml) {
       done.delete(gyaml);
       inflight.delete(gyaml);

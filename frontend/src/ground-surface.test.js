@@ -21,3 +21,11 @@ test("sampleGroundSurface is null when no pack is loaded", () => {
   assert.equal(groundSurfaceReady(), false);
   assert.equal(sampleGroundSurface(0, 0, ""), null);
 });
+
+test("an aborted ground load does not replace the current pack", async () => {
+  const { loadGroundSurface } = await import("./ground-surface.js");
+  disposeGroundSurface();
+  const loaded = await loadGroundSurface("/api/ground/surface?banc=old", { signal: AbortSignal.abort() });
+  assert.equal(loaded, null);
+  assert.equal(groundSurfaceReady(), false);
+});

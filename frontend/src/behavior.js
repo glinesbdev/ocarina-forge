@@ -6,7 +6,7 @@ curated layer uses the friendly name. The picture is a blueprint: it fills
 the panel, and the camera pans and zooms.
 */
 
-import { COL, NODE_W, ROW_GAP, mountGraph, nodeHeight, pinColor } from "./graph-view.js";
+import { COL, NODE_W, ROW_GAP, mountGraph, nodeHeight, pinColor, releaseDisconnectedGraphs } from "./graph-view.js";
 
 export function displayName(node, layer) {
   if (!node) return "";
@@ -210,6 +210,9 @@ function neighborhood(start, members, edges) {
 export function renderBehavior(host, model) {
   host.replaceChildren();
   host.__fitGraph = null;
+  host.__clearGraph = null;
+  host.__spotlight = null;
+  releaseDisconnectedGraphs();
   if (!model || !model.actor) {
     host.append(note("Select an actor. The Behavior tab draws its AI graph, schedule, and event-flow hooks."));
     return;
