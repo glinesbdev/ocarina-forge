@@ -60,6 +60,7 @@ Already implemented in `frontend/src/cull.js`. Off-screen instances are hidden; 
 | Meshlets / cluster culling | Large for huge unique meshes; mesh shaders are not how three r170 draws `BatchedMesh` | Research only |
 | GPU-driven indirect draws | Pays off after GPU culling writes the indirect buffer | Not implemented |
 | True static merge with breakout on edit | Modest draw reduction on top of instancing | Not implemented |
+| WebGPU render bundles per 64 m cell | Submit CPU, if a cell is recorded once and then only shown or hidden | Spike, default off. See [Render bundles per cell](#render-bundles-per-cell). Not measured on the Field |
 | Async pipeline compile before a batch is attached | Removes 50–300 ms stream-in hitches. No steady-state frame change | Implemented. WebGPU awaits one `compileAsync` at a time, then attaches. See [Shader pipelines](#shader-pipelines) |
 
 ## Residency budget
@@ -168,7 +169,9 @@ The HUD shows the latest frame and the rolling average and p95 over the last 180
 
 - **CPU** — JavaScript in the frame. Update is fly, streaming, and labels. Cull is `syncBatchVisibility`. Submit is `renderer.render` on the CPU.
 - **GPU** — On WebGPU, a `timestamp-query` query set is written at the render-pass boundaries, resolved into a buffer, and mapped with `mapAsync`. On WebGL, and on the WebGPU renderer's WebGL2 fallback, the timer is `EXT_disjoint_timer_query_webgl2`. The line reads `n/a` when the adapter has neither, and when a WebGL disjoint sync throws the result away. It reads `…` until the first result arrives.
-- **obj / batches / sub / draws** — `obj` is render objects other than batches (`drawCalls` minus the batch count on WebGPU; the draw count on WebGL). `batches` is the `BatchedMesh` count. `keys` is the distinct batch keys, and `pick` is id-texture uploads since the previous sample. `sub` is the sum of `_mergedDrawCount` once `scheduleMergedDraws` has filled it, otherwise `_multiDrawCount`. `draws` is the same total the status label prints.
+- **obj / batches / sub / draws** — `obj` is render objects other than batches. On WebGPU that is real GPU draws minus the batch count. With bundles off, real GPU draws are `drawCalls`. With bundles on, a replay does not call `info.update`, so the HUD adds the merged ranges of cells that were not re-recorded. `batches` is the `BatchedMesh` count (one mesh per cell when bundles are on, so this rises above `keys`). `keys` is the distinct material batch keys, with the cell and loose suffixes stripped. `pick` is id-texture uploads since the previous sample. `sub` is the sum of `_mergedDrawCount` once `scheduleMergedDraws` has filled it, otherwise `_multiDrawCount`. `draws` is `drawCalls` plus `sub`. It still double-counts merged ranges, and it falls by the replayed ranges because those ranges left `drawCalls`. Compare GPU work on the `gpu draws` line.
+- **gpu draws / writeTex / pipelines / versions / binds / bundles** — `gpu draws` is the real GPU draw count for that frame (`drawCalls`, plus replayed bundle ranges). `writeTex` is `queue.writeTexture` calls. `pipelines` is render pipelines created. `versions` is materials whose `version` changed. `binds` is `createBindGroup` calls. `bundles` is how many cells were re-recorded. A camera move that only hides a whole cell stays at 0. The line is omitted until a sample has one of those fields.
+- **geom / bc7** — geometry CPU bytes and BC7 GPU bytes from the residency budget cache (`budgetAssetBytes`). The line is omitted until that cache has run.
 - **fps, inst, culled, separate** — frame rate (`idle` when the view has settled), live instances, hidden instances, and the draw count those actors would cost without batching.
 - **queued, loading, loaded, background** — the model queue. `conv`, `tex`, `dl`, and `up` are this scene's convert, texture, download, and upload times. `warm` is the server warm-up. `detail` is the wait for the first nearby detailed batch. `compile` is the longest wall-clock wait while one fill's meshes were compiled, when that wait has run. It is outside the submit timer. The server convert summary is the last of those lines, and **Dump JSON** keeps the recent convert log with it.
 - **tris, meshes, tex, heap** — triangles, resident unique meshes, resident textures on batches and terrain, and `performance.memory` when the browser exposes it. Otherwise the heap reads `n/a`.
@@ -192,6 +195,47 @@ The next-step line uses the rolling averages once 12 frames are in the window:
 | Otherwise | CPU and GPU are close. Compare cull with the object count |
 
 This checkout has no game dump, so there is no new Field split recorded here. The last total on a capped Hyrule Field Child load is still **50.3 ms** and about **5,600 draws** (see the table below). Open that scene with Profile on, orbit, and dump. The HUD's last line is the recommended next step.
+
+## Render bundles per cell
+
+Static scenery can be recorded into a WebGPU render bundle, one bundle per 64 m cell. The toggle is **Bundles** on the viewport toolbar (`?bundles=1`, remembered in `ocarinaforge.renderBundles`). It is off until a Field run beats main. WebGL ignores it: `BundleGroup` is only used when the backend reports `beginBundle`. three stays at 0.187.0. `BundleGroup` is already in that build (`three.webgpu.js`). No upgrade.
+
+This is not a geometry merge. Issue #5's chunk merge is still separate. The batch key gains `|cell:ix,iz` while the toggle is on, so each existing `BatchedMesh` is split by the actor pivot's world XZ. Water, terrain, ground, and helpers stay on the normal key. `keys` on the HUD is the material key, so it stays comparable to the 391-key Field. `batches` counts the split meshes.
+
+three r187 records the group's draws into a `GPURenderBundle` when `BundleGroup.version` changes. Setting `needsUpdate` is what bumps that version. A later frame replays the bundle: it refreshes node bindings per render object and does not encode those draws again. `group.visible` shows or hides the whole cell. That does not re-record. A cell is re-recorded when its loaded content changes (a model is added or removed, an array layer rebinds, or instance visibility changes the merged ranges) or an edit is committed (move, add, delete, undo). Distance LOD still calls `setVisibleAt`, and those ranges are draw arguments, so a flythrough that changes LOD re-records the cell. `bundles` on the HUD is that count. Replay does not help if it stays high.
+
+The editor path stays outside the bundle. Selecting an actor rebuilds that actor onto a `|loose:` key, parented to the scene, so the GPU id pass, the gizmo, the selection tint, and a drag all hit a normal batched instance. The cell the actor left is re-recorded. Committing the drag, or undo, re-records again. Drag frames do not. Deselect puts the actor back in its cell.
+
+### Field benchmark
+
+**Field benchmark** on the Profile panel waits until queued, loading, background, and pending are all zero (or 90 seconds), then flies a fixed loop. The eye is at y=190 and looks at y=150. The XZ points are (0, 0), (160, 0), (160, 160), (0, 160), (−160, 160), (−160, 0), (−160, −160), (0, −160), (160, −160), (0, 0), at 90 m/s and a fixed 1/60 s step. It restores the camera at the end. The JSON (avg and p95) is copied and printed. `__forgeBenchmark()` returns the last result. Run it with **Bundles** off, then on, in the same session.
+
+### Headless measurement (not the Field)
+
+This machine has no game dump. `node tools/measure-render-bundles.mjs` serves `tools/render-bundle-bench.html` and opens it in headless Chrome with SwiftShader (`--use-webgpu-adapter=swiftshader`). The page is 36 cells × 30 `BatchedMesh` × 4 instances of one box, one shared `MeshBasicMaterial`. There is no LOD, so each cell is recorded once. 27 Nov 2026, three r187, adapter architecture `swiftshader`. Eight warmup frames, then 40. The camera orbits.
+
+| | submit avg | submit p95 | drawCalls during the 40 | first frame drawCalls | first frame triangles | JS heap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bundles off | 5.0 ms | 8.3 ms | 1081 | 1081 | 51841 | 55.8 MB |
+| Bundles on | 2.4 ms | 3.6 ms | 1 | 1081 | 51841 | 57.8 MB |
+
+The first bundle frame recorded the same 1081 draws and 51841 triangles (16.4 ms). The next frames replayed: `BundleGroup.version` did not change, and `drawCalls` fell to 1 because `executeBundles` does not call `info.update`. That 1 is the pass that is not inside a bundle. Submit on the replay frames was 2.4 ms against 5.0 ms for the direct draws. An earlier run of the same page, before the first-frame probe, was 7.8 ms off and 2.3 ms on. SwiftShader moves. Both replays were faster than the direct path, and the heap grew by about 2 MB, not a second copy of the scene.
+
+This does not say the Field's 29.7 ms submit is beaten. The grid has no streaming, no texture arrays, no LOD, and one material. A Field flythrough that re-records cells can lose the difference. The bar is still Bradyn's Windows/AMD/Chrome run below.
+
+### Windows retest
+
+1. `npm run build --prefix frontend`
+2. Restart the editor server so it serves that build.
+3. Hard-reload.
+4. Open Hyrule Field Child, Static + Dynamic, with **Profile** on.
+5. Leave **Bundles** off. Wait until streaming settles. Click **Field benchmark**.
+6. Turn **Bundles** on. Wait until the view settles again. Click **Field benchmark**.
+7. Paste both JSON summaries. Read `summary.submitMs` (avg and p95), `summary.gpuMs`, `summary.gpuDraws`, `summary.bundleRecords`, `summary.writeTex`, `heapBytes`, `geomBytes`, `bc7Bytes`, and `capped`.
+
+The success bar, against main `e65af37` on that machine (cpu 41.3, update 11.6, cull 0, submit 29.7 ms, gpu 5.5 ms, obj 4282, batches=keys=391, sub 699, draws 5372, about 4673 real GPU calls, heap 902 MB, nothing capped): submit well below 29.7 ms, heap at or under about 1 GB, nothing capped, and the picture the same as main. `gpu draws` is the real GPU call count. `bundles` near 0 during the fly is the replay. If submit does not fall, this spike does not beat main.
+
+No game or file format changed. Longshot's modding API does not describe render bundles or scenery cells. `docs/formats.md` is unchanged.
 
 ## How to measure
 

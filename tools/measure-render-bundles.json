@@ -1,0 +1,83 @@
+{
+  "measuredAt": "2026-11-27T05:38:46.191Z",
+  "chrome": "/opt/google/chrome/chrome",
+  "attempts": [
+    {
+      "ok": true,
+      "reason": null,
+      "flags": [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--enable-unsafe-webgpu",
+        "--use-angle=swiftshader",
+        "--use-vulkan=swiftshader",
+        "--disable-gpu-sandbox",
+        "--enable-precise-memory-info",
+        "--use-webgpu-adapter=swiftshader"
+      ],
+      "logs": [
+        "info: {\"ok\":true,\"three\":\"187\",\"synthetic\":true,\"note\":\"Synthetic BatchedMesh grid. Not a Hyrule Field load. submitMs is renderer.render on the CPU. drawCalls on the bundle pass omits replayed ranges because executeBundles does not call info.update.\",\"cells\":36,\"meshesPerCell\":30,\"meshes\":1080,\"instances\":4320,\"adapter\":{\"vendor\":\"google\",\"architecture\":\"swiftshader\",\"description\":\"\",\"device\":\"\"},\"off\":{\"frames\":40,\"submitMs\":{\"avg\":4.959999999997672,\"p95\":8.29999999993015},\"drawCalls\":{\"avg\":1081,\"p95\":1081,\"min\":1081,\"max\":1081},\"triangles\":51841,\"first\":{\"submitMs\":1156.7000000000698,\"drawCalls\":1081,\"calls\":2,\"triangles\":51841},\"versionChanges\":0,\"heapBytes\":55811251},\"on\":{\"frames\":40,\"submitMs\":{\"avg\":2.402499999993597,\"p95\":3.599999999976717},\"drawCalls\":{\"avg\":1,\"p95\":1,\"min\":1,\"max\":1},\"triangles\":1,\"first\":{\"submitMs\":16.400000000023283,\"drawCalls\":1081,\"calls\":98,\"triangles\":51841},\"versionChanges\":0,\"heapBytes\":57818511}}"
+      ]
+    }
+  ],
+  "result": {
+    "ok": true,
+    "three": "187",
+    "synthetic": true,
+    "note": "Synthetic BatchedMesh grid. Not a Hyrule Field load. submitMs is renderer.render on the CPU. drawCalls on the bundle pass omits replayed ranges because executeBundles does not call info.update.",
+    "cells": 36,
+    "meshesPerCell": 30,
+    "meshes": 1080,
+    "instances": 4320,
+    "adapter": {
+      "vendor": "google",
+      "architecture": "swiftshader",
+      "description": "",
+      "device": ""
+    },
+    "off": {
+      "frames": 40,
+      "submitMs": {
+        "avg": 4.959999999997672,
+        "p95": 8.29999999993015
+      },
+      "drawCalls": {
+        "avg": 1081,
+        "p95": 1081,
+        "min": 1081,
+        "max": 1081
+      },
+      "triangles": 51841,
+      "first": {
+        "submitMs": 1156.7000000000698,
+        "drawCalls": 1081,
+        "calls": 2,
+        "triangles": 51841
+      },
+      "versionChanges": 0,
+      "heapBytes": 55811251
+    },
+    "on": {
+      "frames": 40,
+      "submitMs": {
+        "avg": 2.402499999993597,
+        "p95": 3.599999999976717
+      },
+      "drawCalls": {
+        "avg": 1,
+        "p95": 1,
+        "min": 1,
+        "max": 1
+      },
+      "triangles": 1,
+      "first": {
+        "submitMs": 16.400000000023283,
+        "drawCalls": 1081,
+        "calls": 98,
+        "triangles": 51841
+      },
+      "versionChanges": 0,
+      "heapBytes": 57818511
+    }
+  }
+}

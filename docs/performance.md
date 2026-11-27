@@ -531,3 +531,16 @@ Use the viewport status label to confirm the backend. A WebGPU run starts with `
 ## Field-scale memory and further GPU techniques
 
 Compressed WebGPU textures, draw/frame measurements, static-batching notes, and the remaining technique list live in `docs/rendering-performance.md`.
+
+## Render bundles (spike, default off)
+
+WebGPU can record each 64 m cell of static `BatchedMesh` draws into a `BundleGroup` and replay it until the cell's content or a committed edit changes. The **Bundles** checkbox starts off. WebGL does not take the path. three stays at 0.187.0. The design, the Profile HUD lines (`gpu draws`, `writeTex`, `pipelines`, `versions`, `binds`, `bundles`, `geom`, `bc7`), and the Field benchmark are in [rendering-performance.md](rendering-performance.md#render-bundles-per-cell).
+
+No Field was loaded here. Headless Chrome, SwiftShader, 27 Nov 2026, synthetic grid of 36 cells × 30 meshes × 4 instances (1080 draws, one material, no LOD):
+
+| | submit avg | submit p95 | replay drawCalls | record frame | JS heap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Bundles off | 5.0 ms | 8.3 ms | 1081 | 1081 draws, 51841 triangles | 55.8 MB |
+| Bundles on | 2.4 ms | 3.6 ms | 1 (bundled ranges are not counted) | 1081 draws, 51841 triangles, 16.4 ms | 57.8 MB |
+
+The replay was faster on this grid and the heap did not double. That is not the Field bar (submit well below 29.7 ms, heap at or under about 1 GB, on Bradyn's machine). LOD that changes a cell's visible ranges re-records it, and this page never did that. Retest steps are in the rendering note.

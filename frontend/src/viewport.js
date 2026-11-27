@@ -48,6 +48,20 @@ import { compileObjectPipeline, createBackendRenderer, drawTotal, warmWebGLProgr
 import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext, summarizeBatchKeys } from "./frame-profile.js";
+import {
+  aabbIntersectsFrustum,
+  boxReady,
+  cellFromBatchKey,
+  cellOfPosition,
+  createFlight,
+  emptyBox,
+  expandBox,
+  groupedBatchKey,
+  materialBatchKey,
+  nominalCellBox,
+  streamSettled,
+  summarizeBenchmark,
+} from "./render-bundles.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
@@ -386,14 +400,29 @@ export async function createViewport(host, hooks) {
   profileDump.className = "ghost";
   profileDump.textContent = "Dump JSON";
   profileDump.title = "Copy a JSON capture of the recent frames and print it in the console";
-  profileEl.append(profileText, profileDump);
+  const profileBench = document.createElement("button");
+  profileBench.type = "button";
+  profileBench.className = "ghost";
+  profileBench.textContent = "Field benchmark";
+  profileBench.title = "Fly a fixed path over Hyrule Field Child after streaming settles, then copy avg/p95 JSON";
+  profileEl.append(profileText, profileDump, profileBench);
   host.appendChild(profileEl);
   profileDump.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     publishProfile();
   });
+  profileBench.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    startFieldBenchmark();
+  });
   let showProfile = false;
+  let renderBundlesRequested = false;
+  const bundleGroups = new Map();
+  const bundleDirty = new Set();
+  let benchmarkRun = null;
+  let benchmarkResult = null;
   let lastRendering = false;
   let serverHead = "";
   let serverLines = [];
@@ -1396,6 +1425,7 @@ let convertSlots = 8;
     detailParses.length = 0;
 
     for (const batch of batches) if (batch.mesh) meshes.push(batch.mesh);
+    releaseBundleGroups();
     const geometries = [];
     const materials = [];
     const textures = [];
@@ -2059,6 +2089,7 @@ let convertSlots = 8;
     paintLabel(entry);
     paint(entry);
     syncInstanceMatrix(entry);
+    noteBundleEdit(entry, { commit: true });
     if (entry.key === selected) updateSnapGrid(entry);
   }
 
@@ -2097,11 +2128,15 @@ let convertSlots = 8;
   }
 
   function hideSlots(entry) {
+    const cells = new Set();
     for (const slot of entry.slots || []) {
       slot.shown = false;
       if (slot.mesh && slot.mesh.setVisibleAt) slot.mesh.setVisibleAt(slot.index, false);
       if (slot.mesh) slot.mesh._visibilityChanged = true;
+      const cell = slotCell(slot);
+      if (cell) cells.add(cell);
     }
+    for (const cell of cells) touchBundle(cell);
   }
 
   function adoptModel(entry) {
@@ -3232,10 +3267,132 @@ let convertSlots = 8;
   function batchKeyCount() {
     const keys = new Set();
     for (const batch of batches) {
-      const raw = batch && batch.key ? String(batch.key).split("\u0000")[0] : "";
+      const raw = materialBatchKey(batch && batch.key);
       if (raw) keys.add(raw);
     }
     return keys.size;
+  }
+
+  function materialKeys() {
+    return batches.map((batch) => materialBatchKey(batch && batch.key));
+  }
+
+  function bundlesSupported() {
+    return Boolean(
+      renderer.backend
+      && renderer.backend.isWebGPUBackend === true
+      && typeof THREE.BundleGroup === "function"
+      && typeof renderer.backend.beginBundle === "function",
+    );
+  }
+
+  function bundlesActive() {
+    return renderBundlesRequested && bundlesSupported();
+  }
+
+  function touchBundle(cell) {
+    if (!cell || !bundlesActive()) return;
+    const group = bundleGroups.get(cell);
+    if (!group || bundleDirty.has(cell)) return;
+    bundleDirty.add(cell);
+    group.needsUpdate = true;
+  }
+
+  function ensureBundleGroup(cell) {
+    let group = bundleGroups.get(cell);
+    if (group) return group;
+    group = new THREE.BundleGroup();
+    group.name = `forge-cell-${cell}`;
+    group.static = true;
+    group.frustumCulled = false;
+    group.matrixAutoUpdate = false;
+    group.userData.forgeCell = cell;
+    group.userData.forgeBox = emptyBox();
+    scene.add(group);
+    bundleGroups.set(cell, group);
+    return group;
+  }
+
+  function placeBatchMesh(mesh, key) {
+    const cell = bundlesActive() ? cellFromBatchKey(key) : null;
+    if (!cell) {
+      if (mesh.parent !== scene) scene.add(mesh);
+      return;
+    }
+    const group = ensureBundleGroup(cell);
+    if (mesh.parent !== group) group.add(mesh);
+    touchBundle(cell);
+  }
+
+  function pruneBundleGroups() {
+    for (const [cell, group] of [...bundleGroups]) {
+      if (group.children.length) continue;
+      group.removeFromParent();
+      bundleGroups.delete(cell);
+      bundleDirty.delete(cell);
+    }
+  }
+
+  function releaseBundleGroups() {
+    for (const group of bundleGroups.values()) {
+      while (group.children.length) scene.attach(group.children[0]);
+      group.removeFromParent();
+    }
+    bundleGroups.clear();
+    bundleDirty.clear();
+  }
+
+  function slotCell(slot) {
+    return slot && !slot.loose ? cellFromBatchKey(slot.batchKey) : null;
+  }
+
+  function entryInCell(entry) {
+    return Boolean(entry && (entry.slots || []).some((slot) => slotCell(slot)));
+  }
+
+  function entryIsLoose(entry) {
+    return Boolean(entry && (entry.slots || []).some((slot) => String(slot.batchKey || "").includes("|loose:")));
+  }
+
+  // The selected actor is rebuilt onto a key outside every bundle. Deselect
+  // or a committed move that crosses a cell puts it back and re-records.
+  function syncBundleMembership() {
+    if (!bundlesActive()) {
+      for (const entry of entries.values()) {
+        if (entryIsLoose(entry)) {
+          rebuildBatches([entry]);
+          return;
+        }
+      }
+      return;
+    }
+    const chosen = selected ? entries.get(selected) : null;
+    if (chosen && chosen.parts && chosen.parts.length && entryInCell(chosen)) {
+      rebuildBatches([chosen]);
+      return;
+    }
+    for (const entry of entries.values()) {
+      if (entry.key === selected || !entryIsLoose(entry)) continue;
+      rebuildBatches([entry]);
+      return;
+    }
+  }
+
+  function noteBundleEdit(entry, { commit = false } = {}) {
+    if (!bundlesActive() || !entry || !commit) return;
+    const now = cellOfPosition(entry.pivot.position.x, entry.pivot.position.z);
+    const cells = new Set();
+    let crossed = false;
+    for (const slot of entry.slots || []) {
+      const cell = slotCell(slot);
+      if (!cell) continue;
+      cells.add(cell);
+      if (now && cell !== now) crossed = true;
+    }
+    if (entry.bundleCell) cells.add(entry.bundleCell);
+    if (now) cells.add(now);
+    for (const cell of cells) touchBundle(cell);
+    if (crossed) rebuildBatches([entry]);
   }
 
   function slotProbe(entry, slot, elements, probe) {
@@ -3244,6 +3401,9 @@ let convertSlots = 8;
       probe.inFrustum = true;
       probe.distance = camera.position.distanceTo(entry.pivot.position);
       probe.radius = (slot.radius || 1) * scale;
+      probe.x = entry.pivot.position.x;
+      probe.y = entry.pivot.position.y;
+      probe.z = entry.pivot.position.z;
       return probe;
     }
     transformSphere(
@@ -3257,6 +3417,9 @@ let convertSlots = 8;
     probe.inFrustum = cullFrustum.intersectsSphere(cullSphere);
     probe.distance = boundsGap(camera.position.distanceTo(cullSphere.center), cullSphere.radius);
     probe.radius = cullSphere.radius;
+    probe.x = cullSphere.center.x;
+    probe.y = cullSphere.center.y;
+    probe.z = cullSphere.center.z;
     return probe;
   }
 
@@ -3268,7 +3431,7 @@ let convertSlots = 8;
       camera.far = farNeed;
       camera.updateProjectionMatrix();
     }
-    if (cullReady && !shouldRecull({
+    if (cullReady && !benchmarkRun && !shouldRecull({
       world: cullWorld,
       projection: cullProjection,
       worldNow: camera.matrixWorld,
@@ -3282,6 +3445,9 @@ let convertSlots = 8;
     cullFrustum.setFromProjectionMatrix(cullMatrix, camera.coordinateSystem);
     let instances = 0;
     let visible = 0;
+    let cellHidden = 0;
+    const cellBoxes = new Map();
+    const cellCounts = new Map();
     let probeUsed = 0;
     let levelUsed = 0;
     for (const entry of entries.values()) {
@@ -3328,8 +3494,13 @@ let convertSlots = 8;
       for (let i = 0; i < entry.slots.length; i += 1) {
         const slot = entry.slots[i];
         const probe = cullProbes[i];
+        const cell = bundlesActive() && !slot.loose ? cellFromBatchKey(slot.batchKey) : null;
         const lod = resolveLod(cullWanted.get(slot.family), cullLevels.get(slot.family));
-        const show = probe.inFrustum && lod === slot.lod;
+        // A bundled cell is shown or hidden as one group. The instance test
+        // inside the bundle would change the recorded draws every frame.
+        const inCell = Boolean(cell);
+        const broken = inCell && entry.key === selected;
+        const show = broken ? false : (inCell ? entry.pivot.visible && lod === slot.lod : probe.inFrustum && lod === slot.lod);
         if (slot.shown !== show) {
           const wasHidden = slot.shown === false;
           slot.shown = show;
@@ -3337,12 +3508,38 @@ let convertSlots = 8;
           slot.mesh.setVisibleAt(slot.index, show);
           const batch = slot.batchKey ? batchFiller.get(slot.batchKey) : null;
           if (batch) batch.pickIdsDirty = true;
+          if (inCell) touchBundle(cell);
         }
         if (show) visible += 1;
+        if (inCell && show && probe) {
+          let box = cellBoxes.get(cell);
+          if (!box) {
+            box = emptyBox();
+            cellBoxes.set(cell, box);
+          }
+          expandBox(box, probe.x, probe.y, probe.z, probe.radius);
+          cellCounts.set(cell, (cellCounts.get(cell) || 0) + 1);
+        }
+      }
+    }
+    if (bundlesActive()) {
+      const planes = cullFrustum.planes.map((plane) => ({
+        nx: plane.normal.x,
+        ny: plane.normal.y,
+        nz: plane.normal.z,
+        constant: plane.constant,
+      }));
+      for (const [cell, group] of bundleGroups) {
+        const measured = cellBoxes.get(cell);
+        const box = boxReady(measured) ? measured : nominalCellBox(cell);
+        group.userData.forgeBox = box;
+        const on = aabbIntersectsFrustum(box, planes);
+        if (group.visible !== on) group.visible = on;
+        if (!on) cellHidden += cellCounts.get(cell) || 0;
       }
     }
     statInstances = instances;
-    statCulled = instances - visible;
+    statCulled = instances - visible + cellHidden;
     cullWorld.copy(camera.matrixWorld);
     cullProjection.copy(camera.projectionMatrix);
     cullSelection = selected;
@@ -3393,7 +3590,13 @@ let convertSlots = 8;
       const batch = batchFiller.get(slot.batchKey);
       if (!batch || batch.mesh !== slot.mesh) continue;
       try {
+        const cell = cellFromBatchKey(slot.batchKey);
         batchFiller.removeInstance(slot.batchKey, slot.index);
+        if (cell) {
+          touchBundle(cell);
+          const owner = entries.get(slot.actor);
+          if (owner) owner.bundleCell = cell;
+        }
       } catch (error) {
         console.error(error);
         continue;
@@ -3669,6 +3872,7 @@ let convertSlots = 8;
       }
       if (releaseArraySlots(material)) changed = true;
       if (!changed) continue;
+      touchBundle(cellFromBatchKey(batch.key));
       material.colorNode = null;
       material.alphaTestNode = null;
       userData.albedoNode = false;
@@ -3997,10 +4201,18 @@ let convertSlots = 8;
         }
         const position = part.geometry.getAttribute && part.geometry.getAttribute("position");
         if (!position || !position.count) continue;
-        let group = groups.get(part.batchKey);
+        const loose = bundlesActive() && entry.key === selected;
+        const groupKey = groupedBatchKey(part.batchKey, {
+          enabled: bundlesActive(),
+          x: entry.pivot.position.x,
+          z: entry.pivot.position.z,
+          loose,
+          actor: entry.key,
+        });
+        let group = groups.get(groupKey);
         if (!group) {
           group = { material: part.material, records: [] };
-          groups.set(part.batchKey, group);
+          groups.set(groupKey, group);
         }
         group.records.push({ entry, part, geometry: part.geometry });
       }
@@ -4062,6 +4274,7 @@ let convertSlots = 8;
         });
       }
       if (result.added.length) installArrayBatch(result.batch, result.added);
+      if (result.added.length) touchBundle(cellFromBatchKey(result.batch.key));
       retargetArrayTextures();
       mesh.userData.forgeIndirect = mesh._indirectTexture;
       if (result.added.length && typeof mesh.computeBoundingSphere === "function") mesh.computeBoundingSphere();
@@ -4094,8 +4307,9 @@ let convertSlots = 8;
     for (const batch of fresh) {
       const mesh = batch.mesh;
       if (mesh.parent) continue;
-      scene.add(mesh);
+      placeBatchMesh(mesh, batch.key);
     }
+    pruneBundleGroups();
     if (!replacing) {
       flushPickIds(touched);
       releaseUnselectedPartGeometry();
@@ -5013,6 +5227,7 @@ uniform float terrainLayerMissing;`
     prioritizeLoad();
     for (const entry of entries.values()) paint(entry);
     syncBatchVisibility();
+    syncBundleMembership();
     attach();
     syncLabels();
     updateSnapGrid(selected ? entries.get(selected) : null);
@@ -5627,6 +5842,7 @@ uniform float terrainLayerMissing;`
     // gizmo or the batch on their own.
     syncPreviewPlacement(entry);
     syncInstanceMatrix(entry);
+    if (commit) noteBundleEdit(entry, { commit: true });
     const translate = [entry.pivot.position.x, entry.pivot.position.y, entry.pivot.position.z];
     const rotate = fileRotate(entry.pivot);
     const scale = pivotScale(entry.pivot);
@@ -6310,12 +6526,26 @@ uniform float terrainLayerMissing;`
       : 0;
     const drawCalls = webgpu ? Number(info.drawCalls) || 0 : Number(info.calls) || 0;
     const batchCount = batches.length;
+    // A replayed bundle does not call backend.draw, so drawCalls omits those
+    // ranges. Add the merged counts of cells that were not re-recorded.
+    // info.update increments drawCalls once per merged range, which is
+    // batchSubDrawCount. A record frame already counted those ranges.
+    let replayed = 0;
+    if (bundlesActive()) {
+      for (const [cell, group] of bundleGroups) {
+        if (!group.visible || bundleDirty.has(cell)) continue;
+        for (const child of group.children) replayed += batchSubDrawCount(child);
+      }
+    }
+    const gpuDraws = drawCalls + replayed;
     return {
-      objects: webgpu ? Math.max(0, drawCalls - batchCount) : drawCalls,
+      objects: webgpu ? Math.max(0, gpuDraws - batchCount) : drawCalls,
       batches: batchCount,
       subDraws,
       draws: drawTotal(info, webgpu, subDraws),
       triangles: Number(info.triangles) || 0,
+      gpuDraws,
+      bundleRecords: bundleDirty.size,
     };
   }
 
@@ -6615,7 +6845,7 @@ uniform float terrainLayerMissing;`
       sceneStream: sceneStreamStats,
       server: serverHead,
       batchKeys: batchKeyCount(),
-      keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
+      keyReasons: summarizeBatchKeys(materialKeys()),
       imagePack: imagePackDump(),
       pickUploads: statPickUploads,
     };
@@ -6634,7 +6864,7 @@ uniform float terrainLayerMissing;`
       gpuState: profileGpuState(),
       samples: profileWindow.samples(),
       server: serverHead ? { head: serverHead, lines: serverLines.slice() } : null,
-      keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
+      keyReasons: summarizeBatchKeys(materialKeys()),
       imagePack: imagePackDump(),
     });
   }
@@ -6656,6 +6886,14 @@ uniform float terrainLayerMissing;`
       if (list[index].gpuMs == null) {
         list[index].gpuMs = ms;
         break;
+      }
+    }
+    if (benchmarkRun && benchmarkRun.recording && benchmarkRun.samples) {
+      for (let index = benchmarkRun.samples.length - 1; index >= 0; index -= 1) {
+        if (benchmarkRun.samples[index].gpuMs == null) {
+          benchmarkRun.samples[index].gpuMs = ms;
+          break;
+        }
       }
     }
     if (showProfile) paintFrame(false, false);
@@ -6682,7 +6920,18 @@ uniform float terrainLayerMissing;`
       heapBytes,
       batchKeys: batchKeyCount(),
       pickUploads: statPickUploads,
+      gpuDraws: counters.gpuDraws,
+      writeTex: gpuProfile && gpuProfile.last ? gpuProfile.last.writeTex : 0,
+      pipelines: gpuProfile && gpuProfile.last ? gpuProfile.last.pipelines : 0,
+      versions: gpuProfile && gpuProfile.last ? gpuProfile.last.versions : 0,
+      binds: gpuProfile && gpuProfile.last ? gpuProfile.last.binds : 0,
+      bundleRecords: counters.bundleRecords,
+      geomBytes: assetBudgetCache ? assetBudgetCache.geometry : null,
+      bc7Bytes: assetBudgetCache ? assetBudgetCache.bc7 : null,
     });
+    if (benchmarkRun && benchmarkRun.recording && profileWindow.latest()) {
+      benchmarkRun.samples.push({ ...profileWindow.latest() });
+    }
   }
 
   let paintedStatus = "";
@@ -6734,6 +6983,103 @@ uniform float terrainLayerMissing;`
     if (hooks.onFrame) hooks.onFrame();
   }
 
+  function startFieldBenchmark() {
+    if (benchmarkRun) return benchmarkResult;
+    if (!showProfile) {
+      showProfile = true;
+      frameTimer.setEnabled(true);
+      profileEl.hidden = false;
+      profileWindow.clear();
+    }
+    benchmarkRun = { waited: 0, samples: [], recording: false, flight: null, complete: false };
+    requestRender();
+    return null;
+  }
+
+  function finishBenchmark() {
+    const run = benchmarkRun;
+    benchmarkRun = null;
+    if (!run) return null;
+    if (run.saved) {
+      camera.position.copy(run.saved.position);
+      orbit.target.copy(run.saved.target);
+      orbit.enabled = run.saved.orbit !== false;
+      camera.up.set(0, 1, 0);
+      camera.lookAt(orbit.target);
+      camera.updateMatrixWorld(true);
+    }
+    const samples = (run.samples || []).filter(Boolean);
+    let budget = assetBudgetCache;
+    try {
+      budget = currentAssetBudget();
+    } catch (error) {
+      console.error(error);
+    }
+    benchmarkResult = {
+      version: 1,
+      scene: "hyrule-field-child",
+      path: "field-loop-160m",
+      bundles: run.bundles,
+      bundlesRequested: renderBundlesRequested,
+      webgpu: bundlesSupported(),
+      settled: Boolean(run.settled),
+      waitFrames: run.waitFrames || 0,
+      frames: samples.length,
+      summary: summarizeBenchmark(samples),
+      heapBytes: samples.length ? samples[samples.length - 1].heapBytes : null,
+      geomBytes: budget ? budget.geometry : null,
+      bc7Bytes: budget ? budget.bc7 : null,
+      capped: statCapped,
+      note: "avg and p95 are the flythrough after the stream wait. gpu draws adds replayed bundle ranges that WebGPU does not count in drawCalls. bundleRecords is how many cells were re-recorded that frame.",
+    };
+    const json = JSON.stringify(benchmarkResult, null, 2);
+    console.info(json);
+    const clipboard = globalThis.navigator && navigator.clipboard;
+    if (clipboard && typeof clipboard.writeText === "function") {
+      clipboard.writeText(json).catch(() => {});
+    }
+    requestRender();
+    return benchmarkResult;
+  }
+
+  function stepBenchmark(dt) {
+    if (!benchmarkRun || benchmarkRun.complete) return Boolean(benchmarkRun);
+    const run = benchmarkRun;
+    if (!run.flight) {
+      const pending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
+        || (modelStage && modelStage.pending && modelStage.pending.size > 0);
+      const settled = streamSettled({
+        queued: statQueued,
+        loading: statLoading,
+        background: (statDeferred || 0) + (statBackgroundLoading || 0),
+        pending: pending ? 1 : 0,
+      });
+      run.waited += 1;
+      if (!settled && run.waited < 60 * 90) return true;
+      run.settled = settled;
+      run.waitFrames = run.waited;
+      run.bundles = bundlesActive();
+      run.flight = createFlight();
+      run.recording = true;
+      run.samples = [];
+      run.saved = {
+        position: camera.position.clone(),
+        target: orbit.target.clone(),
+        orbit: orbit.enabled,
+      };
+      orbit.enabled = false;
+      profileWindow.clear();
+    }
+    const pose = run.flight.sample(1 / 60);
+    camera.position.set(pose.x, pose.y, pose.z);
+    orbit.target.set(pose.lookX, pose.lookY, pose.lookZ);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(orbit.target);
+    camera.updateMatrixWorld(true);
+    if (pose.done) run.complete = true;
+    return true;
+  }
+
   function tick() {
     frameHandle = 0;
     if (!running) return;
@@ -6742,8 +7088,9 @@ uniform float terrainLayerMissing;`
     lastTickAt = tickAt;
     timer.update(tickAt);
     const dt = Math.min(timer.getDelta(), 0.05);
-    const flying = updateFly(dt);
-    const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
+    const benchmarkFlying = stepBenchmark(dt);
+    const flying = benchmarkFlying ? false : updateFly(dt);
+    const damped = benchmarkFlying || looking ? false : ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
     if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
     const now = performance.now();
     const wasInteractive = streamInteractive;
@@ -6831,7 +7178,7 @@ uniform float terrainLayerMissing;`
       submitMs: roundMs(submitMs),
       cpuMs: roundMs(updateMs + updateTail + cullMs + submitMs + extra),
     };
-    const again = keepRendering({
+    const again = benchmarkRun != null || keepRendering({
       flying,
       damped,
       looking,
@@ -6839,6 +7186,8 @@ uniform float terrainLayerMissing;`
     });
     if (again && gap > 0 && gap < 250) frameMs = Math.round(gap * 10) / 10;
     paintFrame(again);
+    bundleDirty.clear();
+    if (benchmarkRun && benchmarkRun.complete) finishBenchmark();
     if (again) requestRender();
     else if (showProfile && frameTimer.mode === "webgl" && frameTimer.latest() == null) scheduleGpuPoll();
   }
@@ -6910,7 +7259,7 @@ uniform float terrainLayerMissing;`
         objects: profileWindow.latest() ? profileWindow.latest().objects : null,
         batchCount: profileWindow.latest() ? profileWindow.latest().batches : batches.length,
         batchKeys: batchKeyCount(),
-        keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
+        keyReasons: summarizeBatchKeys(materialKeys()),
         imagePack: imagePackDump(),
         pickUploads: profileWindow.latest() && profileWindow.latest().pickUploads != null
           ? profileWindow.latest().pickUploads
@@ -6963,6 +7312,7 @@ uniform float terrainLayerMissing;`
   }
 
   globalThis.__forgeProfile = dumpProfile;
+  globalThis.__forgeBenchmark = () => benchmarkResult;
   if (import.meta.env && import.meta.env.DEV) {
     globalThis.__forgeSnapDrag = (axis, y, x) => {
       const entry = selected ? entries.get(selected) : null;
@@ -7120,6 +7470,17 @@ uniform float terrainLayerMissing;`
       serverLines = status && Array.isArray(status.lines) ? status.lines.slice() : [];
       if (showProfile) paintProfile();
     },
+    setRenderBundles(on) {
+      renderBundlesRequested = Boolean(on);
+      if (!renderBundlesRequested) releaseBundleGroups();
+      if (entries.size) rebuildBatches();
+      requestRender();
+      return bundlesActive();
+    },
+    renderBundlesOn() {
+      return bundlesActive();
+    },
+    startFieldBenchmark,
     setShowProfile(on) {
       const next = Boolean(on);
       if (next && !showProfile) profileWindow.clear();

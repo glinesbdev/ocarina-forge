@@ -138,6 +138,7 @@
             <label class="check"><input id="show-companions" type="checkbox" checked /> Companion banc</label>
             <label class="check"><input id="companion-pick" type="checkbox" checked /> Pick companions</label>
             <label class="check" title="CPU and GPU frame split, plus the old stats counters. Off until you need it, so timestamp queries stay out of the frame. P toggles this."><input id="show-profile" type="checkbox" /> Profile</label>
+            <label class="check" title="WebGPU only. Group static scenery into 64 m cells and record each cell into a render bundle. Off until a Field benchmark beats main. WebGL ignores it."><input id="render-bundles" type="checkbox" /> Bundles</label>
             <span id="hot-status" class="hot-status" hidden></span>
             <label class="check" title="Auto uses the size rules. A metre cap also hides anything farther than that, except the selection.">Draw
               <select id="draw-distance">

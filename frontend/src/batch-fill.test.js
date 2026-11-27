@@ -229,7 +229,8 @@ test("texture arrival restages the affected actors instead of every batch", () =
   const rebuildEnd = source.indexOf("function queueRebuild");
   const rebuild = source.slice(rebuildStart, rebuildEnd);
   assert.equal(rebuild.includes("clearBatches("), false);
-  assert.ok(rebuild.indexOf("scene.add(mesh)") < rebuild.lastIndexOf("removeFromParent"));
+  const attached = rebuild.indexOf("placeBatchMesh(mesh, batch.key)");
+  assert.ok(attached >= 0 && attached < rebuild.lastIndexOf("removeFromParent"));
   assert.equal(source.includes("function syncPickIds"), false);
   assert.match(source, /prepareGpuPick\(\)/);
 });

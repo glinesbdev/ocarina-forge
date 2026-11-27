@@ -19,6 +19,8 @@ const FIELDS = [
   "objects", "batches", "subDraws", "draws", "triangles",
   "meshes", "textures", "heapBytes",
   "batchKeys", "pickUploads",
+  "gpuDraws", "writeTex", "pipelines", "versions", "binds", "bundleRecords",
+  "geomBytes", "bc7Bytes",
 ];
 
 export function average(values) {
@@ -173,10 +175,30 @@ export function formatProfileHud({
     lineMs("frame", latest.frameMs, stats.frameMs),
     drawLine(latest),
     `tris ${formatTris(latest.triangles)} · meshes ${fmtInt(latest.meshes)} · tex ${fmtInt(latest.textures)} · heap ${fmtHeap(latest.heapBytes)}`,
+    gpuCounterLine(latest),
+    memorySplitLine(latest),
   );
   if (detail) lines.push(...formatProfileDetail(detail));
   if (recommendation) lines.push(recommendation);
-  return lines.join("\n");
+  return lines.filter((line) => line).join("\n");
+}
+
+function gpuCounterLine(latest) {
+  if (latest.gpuDraws == null && latest.writeTex == null && latest.bundleRecords == null) return "";
+  const parts = [
+    `gpu draws ${fmtInt(latest.gpuDraws)}`,
+    `writeTex ${fmtInt(latest.writeTex)}`,
+    `pipelines ${fmtInt(latest.pipelines)}`,
+    `versions ${fmtInt(latest.versions)}`,
+    `binds ${fmtInt(latest.binds)}`,
+    `bundles ${fmtInt(latest.bundleRecords)}`,
+  ];
+  return parts.join(" · ");
+}
+
+function memorySplitLine(latest) {
+  if (latest.geomBytes == null && latest.bc7Bytes == null) return "";
+  return `geom ${fmtHeap(latest.geomBytes)} · bc7 ${fmtHeap(latest.bc7Bytes)}`;
 }
 
 function drawLine(latest) {

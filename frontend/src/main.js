@@ -437,6 +437,21 @@ $("companion-pick").addEventListener("change", (event) => {
 });
 showRendererNotice();
 watchBuildSkew();
+const bundleBox = $("render-bundles");
+if (bundleBox && viewport.setRenderBundles) {
+  const fromQuery = new URLSearchParams(window.location.search).get("bundles") === "1";
+  bundleBox.checked = fromQuery || storedFlag("ocarinaforge.renderBundles", false);
+  viewport.setRenderBundles(bundleBox.checked);
+  bundleBox.addEventListener("change", () => {
+    const active = viewport.setRenderBundles(bundleBox.checked);
+    try {
+      localStorage.setItem("ocarinaforge.renderBundles", bundleBox.checked ? "1" : "0");
+    } catch {
+      /* private mode */
+    }
+    if (bundleBox.checked && !active) console.info("Render bundles stay off: this session is not WebGPU.");
+  });
+}
 const profileBox = $("show-profile");
 if (profileBox) {
   const fromQuery = new URLSearchParams(window.location.search).get("profile") === "1";

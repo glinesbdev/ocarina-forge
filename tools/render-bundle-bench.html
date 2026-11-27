@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Render bundle bench</title>
+</head>
+<body>
+  <p id="status">starting</p>
+  <script type="module">
+    import * as THREE from "/three/three.webgpu.js";
+
+    const params = new URLSearchParams(location.search);
+    const cells = Number(params.get("cells") || 36);
+    const meshesPerCell = Number(params.get("meshes") || 30);
+    const warmup = Number(params.get("warmup") || 8);
+    const frames = Number(params.get("frames") || 40);
+    const status = document.getElementById("status");
+
+    function average(values) {
+      if (!values.length) return null;
+      let sum = 0;
+      for (const value of values) sum += value;
+      return sum / values.length;
+    }
+
+    function p95(values) {
+      if (!values.length) return null;
+      const sorted = values.slice().sort((a, b) => a - b);
+      const rank = Math.ceil(0.95 * sorted.length) - 1;
+      return sorted[Math.max(0, Math.min(sorted.length - 1, rank))];
+    }
+
+    function summarize(samples) {
+      const submit = samples.map((sample) => sample.submitMs);
+      const draws = samples.map((sample) => sample.drawCalls);
+      return {
+        frames: samples.length,
+        submitMs: { avg: average(submit), p95: p95(submit) },
+        drawCalls: { avg: average(draws), p95: p95(draws), min: Math.min(...draws), max: Math.max(...draws) },
+        triangles: samples.length ? samples[samples.length - 1].triangles : null,
+      };
+    }
+
+    function fail(reason, extra = {}) {
+      const result = { ok: false, reason, ...extra };
+      window.__bundleBench = result;
+      status.textContent = reason;
+      console.error(reason);
+    }
+
+    try {
+      if (!navigator.gpu) {
+        fail("navigator.gpu is missing");
+      } else {
+        const adapter = await navigator.gpu.requestAdapter();
+        if (!adapter) {
+          fail("requestAdapter returned null");
+        } else {
+          const adapterInfo = adapter.info ? {
+            vendor: adapter.info.vendor || "",
+            architecture: adapter.info.architecture || "",
+            description: adapter.info.description || "",
+            device: adapter.info.device || "",
+          } : null;
+          const renderer = new THREE.WebGPURenderer({ antialias: false, alpha: false });
+          renderer.setSize(640, 360, false);
+          document.body.appendChild(renderer.domElement);
+          await renderer.init();
+          const webgpu = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+          if (!webgpu || typeof THREE.BundleGroup !== "function" || typeof renderer.backend.beginBundle !== "function") {
+            fail("WebGPU backend did not start", {
+              webgpu,
+              bundleGroup: typeof THREE.BundleGroup,
+              beginBundle: typeof (renderer.backend && renderer.backend.beginBundle),
+              adapter: adapterInfo,
+            });
+          } else {
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(55, 640 / 360, 0.1, 8000);
+            const material = new THREE.MeshBasicMaterial({ color: 0x8a9a62 });
+            const source = new THREE.BoxGeometry(1, 2, 1);
+            const grid = Math.ceil(Math.sqrt(cells));
+            const meshes = [];
+            const groups = [];
+            for (let cell = 0; cell < cells; cell += 1) {
+              const ix = cell % grid;
+              const iz = Math.floor(cell / grid);
+              const group = new THREE.BundleGroup();
+              group.name = `cell-${ix},${iz}`;
+              group.frustumCulled = false;
+              group.matrixAutoUpdate = false;
+              groups.push(group);
+              for (let index = 0; index < meshesPerCell; index += 1) {
+                const mesh = new THREE.BatchedMesh(4, source.attributes.position.count, source.index.count, material);
+                mesh.frustumCulled = false;
+                mesh.perObjectFrustumCulled = false;
+                mesh.sortObjects = false;
+                mesh.matrixAutoUpdate = false;
+                const geometryId = mesh.addGeometry(source);
+                for (let instance = 0; instance < 4; instance += 1) {
+                  const id = mesh.addInstance(geometryId);
+                  const matrix = new THREE.Matrix4().makeTranslation(
+                    ix * 64 + (index % 8) * 3,
+                    instance * 2,
+                    iz * 64 + Math.floor(index / 8) * 3,
+                  );
+                  mesh.setMatrixAt(id, matrix);
+                }
+                mesh.computeBoundingSphere();
+                mesh.onBeforeRender = function onBefore() {
+                  if (typeof mesh._updateDrawParameters === "function") {
+                    mesh._updateDrawParameters(camera, mesh.geometry, mesh.material, "merged");
+                  }
+                };
+                meshes.push({ mesh, cell });
+              }
+            }
+
+            function place(bundled) {
+              for (const group of groups) {
+                while (group.children.length) scene.attach(group.children[0]);
+                group.removeFromParent();
+              }
+              if (!bundled) {
+                for (const item of meshes) {
+                  if (item.mesh.parent !== scene) scene.add(item.mesh);
+                }
+                return;
+              }
+              for (const group of groups) scene.add(group);
+              for (const item of meshes) groups[item.cell].add(item.mesh);
+              for (const group of groups) group.needsUpdate = true;
+            }
+
+            function look(frame) {
+              const angle = frame * 0.04;
+              camera.position.set(Math.cos(angle) * 180, 90, Math.sin(angle) * 180);
+              camera.lookAt(grid * 32, 0, grid * 32);
+              camera.updateMatrixWorld(true);
+            }
+
+            async function time(bundled) {
+              place(bundled);
+              const versionsBefore = groups.map((group) => group.version);
+              const samples = [];
+              let first = null;
+              for (let frame = 0; frame < warmup + frames; frame += 1) {
+                look(frame);
+                renderer.info.reset();
+                const started = performance.now();
+                renderer.render(scene, camera);
+                const submitMs = performance.now() - started;
+                const sample = {
+                  submitMs,
+                  drawCalls: renderer.info.render.drawCalls,
+                  calls: renderer.info.render.calls,
+                  triangles: renderer.info.render.triangles,
+                };
+                if (frame === 0) first = sample;
+                if (frame >= warmup) samples.push(sample);
+                await new Promise((resolve) => requestAnimationFrame(resolve));
+              }
+              const versionsAfter = groups.map((group) => group.version);
+              let versionChanges = 0;
+              for (let index = 0; index < versionsBefore.length; index += 1) {
+                if (versionsAfter[index] !== versionsBefore[index]) versionChanges += 1;
+              }
+              return {
+                ...summarize(samples),
+                first,
+                versionChanges,
+                heapBytes: performance.memory ? performance.memory.usedJSHeapSize : null,
+              };
+            }
+
+            status.textContent = "measuring direct draws";
+            const off = await time(false);
+            status.textContent = "measuring bundles";
+            const on = await time(true);
+            const result = {
+              ok: true,
+              three: THREE.REVISION,
+              synthetic: true,
+              note: "Synthetic BatchedMesh grid. Not a Hyrule Field load. submitMs is renderer.render on the CPU. drawCalls on the bundle pass omits replayed ranges because executeBundles does not call info.update.",
+              cells,
+              meshesPerCell,
+              meshes: meshes.length,
+              instances: meshes.length * 4,
+              adapter: adapterInfo,
+              off,
+              on,
+            };
+            window.__bundleBench = result;
+            status.textContent = "done";
+            console.info(JSON.stringify(result));
+          }
+        }
+      }
+    } catch (error) {
+      fail(error && error.stack ? error.stack : String(error));
+    }
+  </script>
+</body>
+</html>

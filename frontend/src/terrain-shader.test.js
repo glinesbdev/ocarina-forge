@@ -71,8 +71,10 @@ test("committing an edit does not rebuild the field", () => {
   assert.match(source, /compileObjectPipeline\(renderer, root, camera, scene\)/);
   const rebuild = source.slice(source.indexOf("async function rebuildBatchesNow"), source.indexOf("function queueRebuild"));
   const compileAt = rebuild.indexOf("compileObjectPipeline(renderer, batch.mesh, camera, scene)");
-  const addAt = rebuild.indexOf("scene.add(mesh)");
+  const addAt = rebuild.indexOf("placeBatchMesh(mesh, batch.key)");
   assert.ok(compileAt >= 0 && addAt > compileAt, "compile the batch before attaching it");
+  const place = source.slice(source.indexOf("function placeBatchMesh"), source.indexOf("function pruneBundleGroups"));
+  assert.match(place, /scene\.add\(mesh\)/);
   assert.match(source, /renderer\.initTexture\(map\)/);
   assert.match(source, /function showTerrain\(nextRoot\)/);
 });

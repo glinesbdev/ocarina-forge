@@ -4,9 +4,28 @@
  * load is the number to trust. Later pipeline or version changes are logged
  * a few times, not on every frame.
  */
+function wrapCount(object, name, state, field) {
+  if (!object || typeof object[name] !== "function" || object[`__forge${name}`]) return;
+  const original = object[name].bind(object);
+  object[name] = (...args) => {
+    state[field] += 1;
+    return original(...args);
+  };
+  object[`__forge${name}`] = true;
+}
+
 export function createGpuProfile(renderer) {
   const device = renderer && renderer.backend && renderer.backend.device;
-  const state = { made: 0, frames: 0, quiet: 0, logged: 0, versions: new WeakMap() };
+  const state = {
+    made: 0,
+    frames: 0,
+    quiet: 0,
+    logged: 0,
+    versions: new WeakMap(),
+    writeTex: 0,
+    binds: 0,
+    last: { pipelines: 0, versions: 0, writeTex: 0, binds: 0 },
+  };
   if (!device) return state;
   if (typeof device.createRenderPipeline === "function") {
     const original = device.createRenderPipeline.bind(device);
@@ -22,6 +41,8 @@ export function createGpuProfile(renderer) {
       return original(descriptor);
     };
   }
+  wrapCount(device, "createBindGroup", state, "binds");
+  wrapCount(device.queue, "writeTexture", state, "writeTex");
   return state;
 }
 
@@ -41,6 +62,14 @@ export function sampleGpuFrame(state, { calls = 0, materials = [], loading = fal
       state.versions.set(material, version);
     }
   }
+  state.last = {
+    pipelines: made,
+    versions: churn,
+    writeTex: state.writeTex,
+    binds: state.binds,
+  };
+  state.writeTex = 0;
+  state.binds = 0;
   if (loading) {
     state.quiet = 0;
     return "";

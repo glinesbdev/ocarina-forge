@@ -322,6 +322,7 @@ input[type="search"], input:not([type="checkbox"]), .dialog-card input {
   padding: 4px 10px;
   font: inherit;
 }
+.view-profile button + button { margin-left: 6px; }
 .actor-label {
   font-family: var(--sans);
   font-size: 12px;
