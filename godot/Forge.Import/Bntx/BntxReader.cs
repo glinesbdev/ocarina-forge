@@ -28,6 +28,8 @@ public sealed class CompressedTexture
     /// <summary>Linear compressed blocks, mip 0 first. Not decoded to RGBA.</summary>
     public byte[] Blocks { get; init; } = Array.Empty<byte>();
     public int MipCount { get; init; } = 1;
+    /// <summary>Array layer, or -1 when the image is not one slice of an array.</summary>
+    public int Layer { get; init; } = -1;
     public string Note { get; init; } = "";
 }
 
@@ -118,16 +120,19 @@ public static class BntxReader
         var mips = new List<byte>();
         int mipW = width;
         int mipH = height;
-        int count = Math.Max(1, offsets.Count);
-        for (int mip = 0; mip < count; mip++)
+        // Keep going to 1×1. Stopping on the first level that fits in one block drops the
+        // 2×2 and 1×1 levels Godot still counts (8 or 16 bytes on the retail errors).
+        for (int mip = 0; mip < offsets.Count; mip++)
         {
-            int start = offsets[Math.Min(mip, offsets.Count - 1)];
-            int size = mip + 1 < offsets.Count ? offsets[mip + 1] - start : (mip == 0 ? mip0 : 0);
-            if (mip > 0 && size <= 0) break;
+            int start = offsets[mip];
+            int size = mip + 1 < offsets.Count ? offsets[mip + 1] - start : mip == 0 ? mip0 : LastMipBytes(mipW, mipH, info.W, info.H, info.Bytes, tile, log2, data.Length - start);
+            if (size <= 0) break;
             if (start < 0 || size <= 0 || start + size > data.Length) break;
             var linear = BlockLinear.Deswizzle(mipW, mipH, info.W, info.H, info.Bytes, tile, log2, data.AsSpan(start, size));
+            int tight = BlockLinear.DivUp(mipW, info.W) * BlockLinear.DivUp(mipH, info.H) * info.Bytes;
+            if (linear.Length > tight) linear = linear.AsSpan(0, tight).ToArray();
             mips.AddRange(linear);
-            if (mipW <= info.W && mipH <= info.H) break;
+            if (mipW == 1 && mipH == 1) break;
             mipW = Math.Max(1, mipW / 2);
             mipH = Math.Max(1, mipH / 2);
             log2 = 0;
@@ -144,7 +149,7 @@ public static class BntxReader
             BlockH = info.H,
             BytesPerBlock = info.Bytes,
             Blocks = mips.ToArray(),
-            MipCount = count,
+            MipCount = Math.Max(1, offsets.Count),
             Note = $"{info.Name} {(srgb ? "srgb" : "linear")} 0x{format:X4}, {mips.Count} compressed bytes",
         };
     }
@@ -192,6 +197,145 @@ public static class BntxReader
         WriteAt(blob, 0x24, U32(1));
         WriteAt(blob, 0x28, U64((ulong)table));
         return blob.ToArray();
+    }
+
+    /// <summary>Like <see cref="WriteLinear"/>, with one stored level per entry. The test uses this to keep a tail mip.</summary>
+    public static byte[] WriteLinearMips(string name, int width, int height, int format, IReadOnlyList<byte[]> levels)
+    {
+        if (levels.Count == 0) throw new ImportException("a mip chain needs one level");
+        if (!TryFormat(format, out var info))
+            throw new ImportException($"cannot write format 0x{format:X4}");
+        var blob = new List<byte>(0x200);
+        void Pad(int n) { while (blob.Count % n != 0) blob.Add(0); }
+        blob.AddRange(new byte[0x40]);
+        blob[0] = (byte)'B'; blob[1] = (byte)'N'; blob[2] = (byte)'T'; blob[3] = (byte)'X';
+        blob[0x0C] = 0xFF; blob[0x0D] = 0xFE;
+        int nameAt = blob.Count;
+        var raw = System.Text.Encoding.ASCII.GetBytes(name);
+        blob.Add((byte)raw.Length); blob.Add((byte)(raw.Length >> 8));
+        blob.AddRange(raw); blob.Add(0);
+        Pad(8);
+        var levelAt = new List<int>();
+        foreach (var level in levels)
+        {
+            Pad(8);
+            levelAt.Add(blob.Count);
+            blob.AddRange(level);
+        }
+        Pad(8);
+        int mipAt = blob.Count;
+        foreach (int at in levelAt) blob.AddRange(U64((ulong)at));
+        Pad(8);
+        int brti = blob.Count;
+        var header = new byte[0x80];
+        header[0] = (byte)'B'; header[1] = (byte)'R'; header[2] = (byte)'T'; header[3] = (byte)'I';
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(0x12), 1);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x1C), (uint)format);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(0x24), width);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(0x28), height);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x30), 1);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(0x60), (ulong)nameAt);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(header.AsSpan(0x70), (ulong)mipAt);
+        blob.AddRange(header);
+        Pad(8);
+        int table = blob.Count;
+        blob.AddRange(U64((ulong)brti));
+        WriteAt(blob, 0x24, U32(1));
+        WriteAt(blob, 0x28, U64((ulong)table));
+        _ = info;
+        return blob.ToArray();
+    }
+
+    /// <summary>
+    /// One compressed image per array layer, mip 0 only. Layer N starts at
+    /// <c>image_offset + N * (image_size / count)</c> (BRTI +0x50 and +0x30).
+    /// A non-array file returns the ordinary read.
+    /// </summary>
+    public static List<CompressedTexture?> ReadLayers(byte[] data)
+    {
+        if (data.Length < 0x40 || !LooksLike(data))
+            throw new ImportException("not a BNTX texture container");
+        int count = Bin.I32(data, 0x24);
+        int table = (int)Bin.U64(data, 0x28);
+        if (count <= 0 || table <= 0) return new List<CompressedTexture?>();
+        int brti = (int)Bin.U64(data, table);
+        int arrayCount = (int)Bin.U32(data, brti + 0x30);
+        if (arrayCount <= 1)
+        {
+            var single = new List<CompressedTexture?>();
+            foreach (var image in Read(data)) single.Add(image);
+            return single;
+        }
+        if (!TryFormat((int)Bin.U32(data, brti + 0x1C), out var info))
+            throw new ImportException($"texture format 0x{Bin.U32(data, brti + 0x1C):X4} is not kept compressed");
+        int width = Bin.I32(data, brti + 0x24);
+        int height = Bin.I32(data, brti + 0x28);
+        string name = Bin.LengthString(data, (int)Bin.U64(data, brti + 0x60));
+        int imageSize = (int)Bin.U32(data, brti + 0x50);
+        if (imageSize <= 0 || imageSize % arrayCount != 0)
+            throw new ImportException($"{name}: array of {arrayCount} has no per-layer size");
+        int stride = imageSize / arrayCount;
+        var offsets = MipOffsets(data, brti);
+        if (offsets.Count == 0) throw new ImportException($"{name}: image data is missing");
+        int span = offsets.Count >= 2 ? offsets[1] - offsets[0] : stride;
+        if (span <= 0 || span > stride) span = stride;
+        int tile = Bin.U16(data, brti + 0x12);
+        var layout = data.AsSpan(brti + 0x34, Math.Min(8, data.Length - (brti + 0x34)));
+        int log2 = BlockLinear.StoredLog2(layout);
+        if (log2 < 0) log2 = 0;
+        int swizzled = BlockLinear.SurfaceBytes(width, height, info.W, info.H, info.Bytes, log2);
+        if (swizzled != span)
+        {
+            for (int alt = 0; alt <= 5; alt++)
+            {
+                int candidate = BlockLinear.SurfaceBytes(width, height, info.W, info.H, info.Bytes, alt);
+                if (candidate == span)
+                {
+                    log2 = alt;
+                    swizzled = candidate;
+                    break;
+                }
+            }
+        }
+        if (swizzled <= 0 || swizzled > span) swizzled = span;
+        bool srgb = (Bin.U32(data, brti + 0x1C) & 0xFF) == 0x06;
+        var layers = new List<CompressedTexture?>(arrayCount);
+        for (int layer = 0; layer < arrayCount; layer++)
+        {
+            int start = offsets[0] + layer * stride;
+            if (start < 0 || swizzled <= 0 || start + swizzled > data.Length)
+            {
+                layers.Add(null);
+                continue;
+            }
+            var linear = BlockLinear.Deswizzle(width, height, info.W, info.H, info.Bytes, tile, log2, data.AsSpan(start, swizzled));
+            layers.Add(new CompressedTexture
+            {
+                Name = $"{name}#{layer}",
+                Width = width,
+                Height = height,
+                FormatId = (int)Bin.U32(data, brti + 0x1C),
+                Codec = info.Codec,
+                Srgb = srgb,
+                BlockW = info.W,
+                BlockH = info.H,
+                BytesPerBlock = info.Bytes,
+                Blocks = linear,
+                MipCount = 1,
+                Layer = layer,
+                Note = $"{info.Name} layer {layer}",
+            });
+        }
+        return layers;
+    }
+
+    static int LastMipBytes(int width, int height, int blockW, int blockH, int bytesPer, int tile, int log2, int room)
+    {
+        int tight = BlockLinear.DivUp(width, blockW) * BlockLinear.DivUp(height, blockH) * bytesPer;
+        int size = tile == 1 ? tight : BlockLinear.SurfaceBytes(width, height, blockW, blockH, bytesPer, log2);
+        if (size <= 0) size = tight;
+        if (room < size) size = room;
+        return size;
     }
 
     static List<int> MipOffsets(byte[] data, int at)

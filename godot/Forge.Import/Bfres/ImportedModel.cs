@@ -11,6 +11,8 @@ public sealed class ImportedPart
     public List<int> Indices { get; init; } = new();
     public List<Vec2>? Uvs { get; init; }
     public List<Vec3>? Normals { get; init; }
+    /// <summary>MaterialAlb layer per vertex. -1 is the flat earth colour. Null when the mesh has no grid.</summary>
+    public List<int>? MaterialLayers { get; init; }
     public string Material { get; init; } = "";
     public int MaterialIndex { get; init; } = -1;
     public string Texture { get; init; } = "";

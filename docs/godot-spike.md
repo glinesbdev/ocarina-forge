@@ -8,7 +8,7 @@ Targeted engine: **Godot 4.7.2 stable .NET** (`4.7.2.stable.mono.official.ed1daf
 
 Verified here, on Linux, with no game dump and no GPU:
 
-- `dotnet test godot/Forge.Import.Tests/Forge.Import.Tests.csproj` — 9 tests, synthetic BFRES / BNTX / BYML / SARC / terrain / flight / cache only.
+- `dotnet test godot/Forge.Import.Tests/Forge.Import.Tests.csproj` — 16 tests, synthetic BFRES / BNTX / BYML / SARC / terrain / flight / cache only. That includes the mip-chain sizes (341 BC7 = 158416, 512 DXT1 = 174776, 171 DXT1 = 20040), the raw `_i0` byte, the yaw bone, volume names, a pack path string, and a `.mate` grid.
 - `dotnet build godot/viewer/OcarinaForge.Viewer.csproj`
 - Godot 4.7.2 headless `-- --self-test`. That builds a synthetic dump, loads three `Obj_Tree` placements plus one flat height tile, and quits 0. The log was `field actors 3 instances 7 terrain 1345 bc7 64`.
 
@@ -33,7 +33,11 @@ Switch 2 block-linear is the other reason not to hand the file to BfresLibrary. 
 
 BC7 is uploaded as compressed blocks (`Image.Format.BptcRgba`). The tests assert an 8×8 texture is 64 bytes, not 256 bytes of RGBA. Godot's `Image.CreateFromData` has no separate sRGB flag. Format `0x2006` (sRGB) and `0x2001` (UNORM) both go up as `BptcRgba`. The browser already treats that distinction as a real sampling difference; this spike does not claim to have solved it.
 
-ASTC terrain `MaterialAlb` is not decoded and not uploaded. AMD desktop GPUs often have no ASTC sampler, and expanding the atlas to RGBA would blow the memory number the comparison cares about. Terrain is a flat colour. The note is on the field.
+The first Windows run rejected 113 textures. `CreateFromData` wanted the chain through 1×1, and the reader stopped once a level fit in one block, so the buffer was 8 or 16 bytes short (one BC1 block, or one BC7 block, or the 2×2 and 1×1 BC1 levels). That hit 512 and 256 as well as 341 and 171. The upload now pads that tail, and it does not call `CreateFromData` when the length still disagrees. A mismatch is one reason in the load summary, not a backtrace per texture.
+
+`MaterialAlb` stays ASTC in the library. The viewer transcodes it to BC7 before the cache is written, because an AMD desktop GPU does not sample ASTC and uploading the blocks would still draw the flat colour. Godot's `Image.Decompress` then `Image.Compress(Bptc)` do it. `Image.Compress` only works in an editor build, which is how this project is launched. The long edge is capped at 1024, the same cap the browser uses for an albedo. Only layers the drawn `.mate` samples ask for are encoded. A `.mate` texel is material A, material B, blend, extra. 255 and 127 are not indices. Blend at or above 128 selects B. The shader samples that layer from a `Texture2DArray`; a missing index stays the flat earth colour. UVs are world XZ with an 8 m repeat, which is still a guess. If decompress or BC7 compress fails, the summary says so and the ground stays flat. That transcode was exercised here only on an 8×8 void-extent block, not on a retail atlas.
+
+The cache key includes the importer id `godot-spike-2`. A cache written by `godot-spike-1` is ignored, which is the one that stored the short mip chains. The folder can stay; the old files are a different hash.
 
 The first successful load writes a cache **outside the repo**:
 
@@ -51,11 +55,13 @@ Given the dump (the folder that contains `romfs/`, or `romfs` itself):
 2. Otherwise `user://ocarina-forge.cfg`, key `dump/path`.
 3. Otherwise a folder picker. Headless with no path prints usage and quits 2.
 
-It loads `Banc/HyruleField/HyruleField_Child_Static.bcett.byml` (`.zs` or plain) and the sibling `_Dynamic` file. System, area, effect, and marker actors are not meshed. The rest are looked up in this order: actor pack `ModelInfo` (`ModelProjectName` + `FmdbName`), `Model/<Project>.<Fmdb>.bfres`, then `Model/<Gyaml>.<Gyaml>.bfres`. An exact file that exists is not replaced by another fmdb in the same project. Textures come from the embedded BNTX, then `Tex/<name>.bntx` (case-insensitive file name), then the actor pack. A full romfs walk is not done.
+It loads `Banc/HyruleField/HyruleField_Child_Static.bcett.byml` (`.zs` or plain) and the sibling `_Dynamic` file. System, area, and effect actors are not meshed. So are markers (air walls, including the lowercase `Airwall` spelling, anchors, and names that end in `Actor`) and volumes whose names contain area, fog, volume, trigger, sensor, or collision. A `Land_` mesh is not a volume. Those skips are one count in the load summary, not a line per placement. The rest are looked up in this order: actor pack `ModelInfo` (`ModelProjectName` + `FmdbName`), `Model/<Project>.<Fmdb>.bfres`, `Model/<Gyaml>.<Gyaml>.bfres`, then a `Model/….bfres` string stored in the pack, then `Model/<Gyaml>.bfres`. An exact file that exists is not replaced by another fmdb in the same project. Textures come from the embedded BNTX, then `Tex/<name>.bntx` (case-insensitive file name), then the actor pack. A full romfs walk is not done.
+
+Standard shapes read `_n0` and bake it with the same bone as the positions. A shape with no normal gets one from its triangles, after the bind pose, so Godot is not lighting a zero normal. A zero normal plus a dropped albedo is what the first Windows fly-through showed: coherent ridges, white where the default material faced the light, black everywhere else. `_i0` on U8_4 and S8_4 is the raw first byte. The old reader normalised that byte, which can name the wrong bone and pull a skin-1 mesh apart. LOD 0 ends at 72 m and LOD 1 begins there, with no fade overlap. A texture that still fails to upload leaves an opaque flat colour (leaf green, rock grey, wood brown, or a warm grey) instead of a white alpha card.
 
 Repeated actors (two or more of the same model) are one `MultiMesh` per part. A unique actor is a `MeshInstance3D`. Occlusion culling is on in `project.godot`. The terrain also contributes an `ArrayOccluder3D` (at most about 20,000 triangles). Godot 4.7 has no runtime HLOD baker for a streamed dump, so distance uses visibility ranges on the game's own LODs:
 
-- a shape with a far LOD: LOD 0 ends near 80 m, LOD 1 begins near 64 m and ends at the far plane
+- a shape with a far LOD: LOD 0 ends at 72 m, LOD 1 begins at 72 m and ends at the far plane
 - a shape with no far mesh: under 1.2 m drops past 56 m, under 3 m past 96 m, under 8 m past 180 m, larger shapes stay to the far plane
 - terrain is not distance-culled
 - camera far is 8000 m
@@ -63,7 +69,7 @@ Repeated actors (two or more of the same model) are one `MultiMesh` per part. A 
 
 The free-fly camera is right-mouse look, WASD, Q/E or Space for vertical, Shift for faster, Esc to release the mouse. The overlay shows frame time, Godot's measured render CPU, GPU time when the renderer reports it, draw calls, object count, instance count, VRAM, texture memory, geometry bytes, and BC7 bytes.
 
-`--benchmark` flies `field-loop-160m` from `frontend/src/field-benchmark.js`: eye y = 190, look y = 150, 48 m ahead, 90 m/s, the 160 m loop back to the origin, stepping 1/60 s rather than the real frame delta. The JSON is version 1, scene `hyrule-field-child`, path `field-loop-160m`. `summary` has avg and p95 with the same percentile (`ceil(p/100*n)-1`). Browser-only fields (`submitMs`, `writeTex`, heap, and the rest) are left out. `batches` is the draw-call count, because Godot does not report three.js batch objects. `cpuMs` is measured render CPU plus frame setup. `gpuMs` is omitted when the renderer returns 0.
+`--benchmark` flies `field-loop-160m` from `frontend/src/field-benchmark.js`: eye y = 190, look y = 150, 48 m ahead, 90 m/s, the 160 m loop back to the origin, stepping 1/60 s rather than the real frame delta. The JSON is version 1, scene `hyrule-field-child`, path `field-loop-160m`. `summary` has avg and p95 with the same percentile (`ceil(p/100*n)-1`). Browser-only fields (`submitMs`, `writeTex`, heap, and the rest) are left out. `batches` is the draw-call count, because Godot does not report three.js batch objects. `cpuMs` is measured render CPU plus frame setup. `gpuMs` is omitted when the renderer returns 0. `load` is the same summary printed at the end of the run: actors loaded, missing, and skipped; textures ok and failed; shapes that failed to decode; and the top missing names and reasons.
 
 `--self-test` builds a synthetic dump under the temp directory, loads it, and quits 0. It does not need a dump or a GPU.
 
@@ -92,8 +98,11 @@ Windows, from the repo, in PowerShell:
 ```powershell
 dotnet test godot\Forge.Import.Tests\Forge.Import.Tests.csproj
 dotnet build godot\viewer\OcarinaForge.Viewer.csproj
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\OcarinaForge\godot-cache" -ErrorAction SilentlyContinue
 & "C:\Godot\Godot_v4.7.2-stable_mono_win64.exe" --path godot\viewer -- --dump "D:\dump" --benchmark --benchmark-out field-loop-160m.json
 ```
+
+`Remove-Item` drops the old `godot-spike-1` cache. The new importer id already ignores those files; deleting them only frees the disk. The first open after this build imports again, then transcodes the terrain layers, and writes a new cache. The console ends with a `load actors` / `load textures` / `load shapes` block instead of one line per texture.
 
 `D:\dump` is the folder that contains `romfs\`, or the `romfs` folder itself. The first launch with no `--dump` and no saved path opens a folder picker and stores the choice. Later launches reuse it. `--cache <dir>` moves the import cache.
 
@@ -103,9 +112,9 @@ The benchmark writes `field-loop-160m.json` in the current directory unless `--b
 
 ## Known gaps
 
-- Retail field numbers are not measured here.
-- Terrain albedo is a flat colour. `MaterialAlb` / `.mate` are not decoded.
-- `_a1` is remembered on the part and is not bound. The viewer samples `_a0` only.
+- Retail field numbers are not measured here. The Windows fly-through that produced the short mip errors has not been re-run.
+- `.mate` blend weights other than "128 or more selects B" are not mixed. `_a1` on actors is remembered and not bound. The viewer samples `_a0` only.
+- Terrain BC7 is capped at 1024 on the long edge. A retail `MaterialAlb` layer is 1365.
 - Const-colour shader params are not applied.
 - A shape that fails to decode records a note and stops the rest of that model. The cursor would no longer land on a shape header.
 - Flag `0x08` (vertex buffer past the end of the file) fails that actor with a clear error. `.bfres.mc` streams are not read.

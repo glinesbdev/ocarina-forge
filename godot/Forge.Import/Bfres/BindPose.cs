@@ -122,6 +122,62 @@ public static class BindPose
         }
     }
 
+    /// <summary>
+    /// Rotate normals with the same bone as <see cref="Bake"/>. The 3×3 is the inverse transpose,
+    /// which is what <c>_rigid_normals</c> applies, so a scaled bone does not shear the light.
+    /// A null matrix (a skin-1 bone with no rigid slot) leaves that normal where it is.
+    /// </summary>
+    public static void BakeNormals(List<Vec3> normals, IReadOnlyList<Bone> bones, IReadOnlyList<int> palette, int boneIndex, IReadOnlyList<int>? slots)
+    {
+        if (bones.Count == 0 || normals.Count == 0) return;
+        var worlds = Worlds(bones);
+        double[]? MatrixFor(int? slot)
+        {
+            int index = boneIndex;
+            if (slot is int chosen)
+            {
+                if (palette.Count > 0 && chosen >= 0 && chosen < palette.Count) index = palette[chosen];
+                else if (chosen >= 0 && chosen < bones.Count) index = chosen;
+            }
+            if (index < 0 || index >= bones.Count || index >= worlds.Count) return null;
+            if (slot is not null && bones[index].Rigid < 0) return null;
+            return worlds[index];
+        }
+        void One(int i, double[]? matrix)
+        {
+            if (matrix is null) return;
+            if (TransformNormal(matrix, normals[i]) is { } turned) normals[i] = turned;
+        }
+        if (slots is null)
+        {
+            var matrix = MatrixFor(null);
+            for (int i = 0; i < normals.Count; i++) One(i, matrix);
+            return;
+        }
+        for (int i = 0; i < normals.Count; i++)
+            One(i, MatrixFor(i < slots.Count ? slots[i] : null));
+    }
+
+    static Vec3? TransformNormal(double[] matrix, Vec3 normal)
+    {
+        double a0 = matrix[0], a1 = matrix[4], a2 = matrix[8];
+        double b0 = matrix[1], b1 = matrix[5], b2 = matrix[9];
+        double c0 = matrix[2], c1 = matrix[6], c2 = matrix[10];
+        static (double X, double Y, double Z) Cross((double X, double Y, double Z) u, (double X, double Y, double Z) v) =>
+            (u.Y * v.Z - u.Z * v.Y, u.Z * v.X - u.X * v.Z, u.X * v.Y - u.Y * v.X);
+        var ca = Cross((b0, b1, b2), (c0, c1, c2));
+        var cb = Cross((c0, c1, c2), (a0, a1, a2));
+        var cc = Cross((a0, a1, a2), (b0, b1, b2));
+        double det = a0 * ca.X + a1 * ca.Y + a2 * ca.Z;
+        if (Math.Abs(det) < 1e-12) return null;
+        double dx = ca.X * normal.X + cb.X * normal.Y + cc.X * normal.Z;
+        double dy = ca.Y * normal.X + cb.Y * normal.Y + cc.Y * normal.Z;
+        double dz = ca.Z * normal.X + cb.Z * normal.Y + cc.Z * normal.Z;
+        double length = Math.CopySign(Math.Sqrt(dx * dx + dy * dy + dz * dz), det);
+        if (Math.Abs(length) < 1e-12) return null;
+        return new Vec3(dx / length, dy / length, dz / length);
+    }
+
     static double[] ScaleInverse(Bone bone)
     {
         static double Inv(double value) => Math.Abs(value) > 1e-8 ? 1.0 / value : 1.0;

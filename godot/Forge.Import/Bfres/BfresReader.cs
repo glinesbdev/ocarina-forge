@@ -23,6 +23,23 @@ public static class BfresReader
         return file.Models();
     }
 
+    /// <summary>
+    /// Palette slot for <c>_i0</c>. U8, U8_2, U8_4, and S8_4 are the first byte, not a 0–1 colour.
+    /// Dividing a U8_4 byte by 255 and multiplying back can land on the next bone.
+    /// </summary>
+    public static int PaletteSlot(ReadOnlySpan<byte> buffer, int format, int at)
+    {
+        if ((uint)at >= (uint)buffer.Length)
+            throw new ImportException("a bone index does not fit in its buffer");
+        if (format is U8 or U8_2 or U8_4 or S8_4) return buffer[at];
+        if (format == U16_2)
+        {
+            if (at + 2 > buffer.Length) throw new ImportException("a bone index does not fit in its buffer");
+            return Bin.U16(buffer, at);
+        }
+        return -1;
+    }
+
     sealed class FileCursor
     {
         readonly byte[] _data;
@@ -516,6 +533,8 @@ public static class BfresReader
                                 Bake(positions, bones, palette, boneIndex, null);
                             var uvs = level.UvSets.Count == 0 ? null : level.UvSets[0].Select(item => new Vec2(item.U, item.V)).ToList();
                             var normals = level.Normals.Count == 0 ? null : level.Normals.Select(item => new Vec3(item.X, item.Y, item.Z)).ToList();
+                            if (normals is not null && bones.Count > 0)
+                                BindPose.BakeNormals(normals, bones, palette, boneIndex, null);
                             made.Add(PartFrom(name, positions, level.Indices, uvs, normals, material, materialIndex, level.Number));
                         }
                         return (made, end, false);
@@ -533,18 +552,20 @@ public static class BfresReader
             var (positions2, uvs2) = Vertices(fvtx, lod);
             if (positions2.Count == 0 || lod.Indices.Count == 0)
                 return (new List<ImportedPart>(), end, (flags & 0x10) != 0);
+            var normals2 = ReadNormals(fvtx, positions2.Count);
             if (bones.Count > 0 && skinCount is 0 or 1)
             {
                 List<int>? slots = skinCount == 1 ? SkinSlots(fvtx, positions2.Count) : null;
                 Bake(positions2, bones, palette, boneIndex, slots);
+                if (normals2 is not null) BindPose.BakeNormals(normals2, bones, palette, boneIndex, slots);
             }
             var made2 = new List<ImportedPart>
             {
-                PartFrom(name, positions2, lod.Indices, uvs2, null, material, materialIndex, 0),
+                PartFrom(name, positions2, lod.Indices, uvs2, normals2, material, materialIndex, 0),
             };
             if (meshCount > 1)
             {
-                (List<Vec3> Pos, List<Vec2>? Uv, List<int> Idx)? best = null;
+                (List<Vec3> Pos, List<Vec2>? Uv, List<Vec3>? Normal, List<int> Idx)? best = null;
                 int bestLevel = 0;
                 for (int level = 1; level < Math.Min(meshCount, 4); level++)
                 {
@@ -555,16 +576,21 @@ public static class BfresReader
                     try
                     {
                         var (farPos, farUv) = Vertices(fvtx, coarser);
+                        var farNormals = ReadNormals(fvtx, farPos.Count);
                         if (bones.Count > 0 && skinCount is 0 or 1)
-                            Bake(farPos, bones, palette, boneIndex, skinCount == 1 ? SkinSlots(fvtx, farPos.Count) : null);
+                        {
+                            var farSlots = skinCount == 1 ? SkinSlots(fvtx, farPos.Count) : null;
+                            Bake(farPos, bones, palette, boneIndex, farSlots);
+                            if (farNormals is not null) BindPose.BakeNormals(farNormals, bones, palette, boneIndex, farSlots);
+                        }
                         if (farPos.Count == 0) continue;
-                        best = (farPos, farUv, coarser.Indices);
+                        best = (farPos, farUv, farNormals, coarser.Indices);
                         bestLevel = level;
                     }
                     catch (ImportException) { continue; }
                 }
                 if (best is not null)
-                    made2.Add(PartFrom(name, best.Value.Pos, best.Value.Idx, best.Value.Uv, null, material, materialIndex, bestLevel));
+                    made2.Add(PartFrom(name, best.Value.Pos, best.Value.Idx, best.Value.Uv, best.Value.Normal, material, materialIndex, bestLevel));
             }
             return (made2, end, false);
         }
@@ -751,13 +777,29 @@ public static class BfresReader
             int stride = fvtx.Strides[attribute.Buffer];
             if (stride == 0) stride = FormatSize(attribute.Format);
             int at = index * stride + attribute.Offset;
-            return attribute.Format switch
+            int raw = PaletteSlot(buffer, attribute.Format, at);
+            if (raw >= 0) return raw;
+            return (int)Math.Round(Decode(fvtx, attribute, index)[0] * 255.0);
+        }
+
+        List<Vec3>? ReadNormals(FvtxBuffer fvtx, int count)
+        {
+            var attribute = Attr(fvtx, "_n0", "n0", "_n");
+            if (attribute is null) return null;
+            var normals = new List<Vec3>(count);
+            try
             {
-                U8 => buffer[at],
-                U8_2 => buffer[at],
-                U16_2 => Bin.U16(buffer, at),
-                _ => (int)Math.Round(Decode(fvtx, attribute, index)[0] * 255.0),
-            };
+                for (int index = 0; index < count; index++)
+                {
+                    var raw = Decode(fvtx, attribute, index);
+                    normals.Add(new Vec3(raw[0], raw.Length > 1 ? raw[1] : 0, raw.Length > 2 ? raw[2] : 0));
+                }
+            }
+            catch (ImportException)
+            {
+                return null;
+            }
+            return normals;
         }
 
         static double[] Decode(FvtxBuffer fvtx, Attribute attribute, int index)
@@ -829,6 +871,7 @@ public static class BfresReader
             }
             string materialName = material?.Name ?? "";
             string omit = ShapeFilter.OmitReason(name, materialName);
+            normals ??= positions.Count > 0 ? MeshNormals.Generate(positions, indices) : null;
             return new ImportedPart
             {
                 Name = name,

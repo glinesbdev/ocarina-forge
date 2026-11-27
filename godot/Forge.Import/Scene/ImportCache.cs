@@ -12,7 +12,7 @@ public static class ImportCache
 {
     public const string Magic = "OFM1";
     public const int Version = 1;
-    public const string ImporterVersion = "godot-spike-1";
+    public const string ImporterVersion = "godot-spike-2";
 
     public static string DefaultDirectory()
     {
@@ -96,7 +96,10 @@ public static class ImportCache
             Notes = field.Notes,
             GeometryBytes = field.GeometryBytes,
             Bc7Bytes = field.Bc7Bytes,
+            Report = field.Report,
         };
+        foreach (var image in field.TerrainAlbedo)
+            doc.TerrainAlbedo.Add(PackTexture(image.Name, image, blobs));
         foreach (var actor in field.Actors)
         {
             var stored = new CacheActor
@@ -136,8 +139,11 @@ public static class ImportCache
             Notes = doc.Notes,
             GeometryBytes = doc.GeometryBytes,
             Bc7Bytes = doc.Bc7Bytes,
+            Report = doc.Report ?? new LoadReport(),
             Terrain = doc.Terrain is null ? null : UnpackPart(doc.Terrain, blobs),
         };
+        foreach (var texture in doc.TerrainAlbedo)
+            field.TerrainAlbedo.Add(UnpackTexture(texture, blobs));
         var grouped = new Dictionary<string, ImportedModel>(StringComparer.Ordinal);
         foreach (var actor in doc.Actors)
         {
@@ -182,6 +188,12 @@ public static class ImportCache
         writer.Write(part.Uvs?.Count ?? 0);
         if (part.Uvs is not null)
             foreach (var uv in part.Uvs) { writer.Write((float)uv.U); writer.Write((float)uv.V); }
+        writer.Write(part.Normals?.Count ?? 0);
+        if (part.Normals is not null)
+            foreach (var normal in part.Normals) { writer.Write((float)normal.X); writer.Write((float)normal.Y); writer.Write((float)normal.Z); }
+        writer.Write(part.MaterialLayers?.Count ?? 0);
+        if (part.MaterialLayers is not null)
+            foreach (int layer in part.MaterialLayers) writer.Write(layer);
         int id = blobs.Count;
         blobs.Add(stream.ToArray());
         return new CachePart
@@ -209,9 +221,25 @@ public static class ImportCache
             uvs = new List<Vec2>(uvCount);
             for (int i = 0; i < uvCount; i++) uvs.Add(new Vec2(reader.ReadSingle(), reader.ReadSingle()));
         }
+        int normalCount = reader.ReadInt32();
+        List<Vec3>? normals = null;
+        if (normalCount > 0)
+        {
+            normals = new List<Vec3>(normalCount);
+            for (int i = 0; i < normalCount; i++)
+                normals.Add(new Vec3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle()));
+        }
+        int layerCount = reader.ReadInt32();
+        List<int>? layers = null;
+        if (layerCount > 0)
+        {
+            layers = new List<int>(layerCount);
+            for (int i = 0; i < layerCount; i++) layers.Add(reader.ReadInt32());
+        }
         return new ImportedPart
         {
             Name = part.Name, Lod = part.Lod, Positions = positions, Indices = indices, Uvs = uvs,
+            Normals = normals, MaterialLayers = layers,
             Material = part.Material, Texture = part.Texture, AlbedoSampler = part.Sampler,
             Alpha = part.Alpha, DoubleSided = part.DoubleSided, OmitReason = part.Omit, Water = part.Water,
         };
@@ -225,15 +253,33 @@ public static class ImportCache
         {
             Name = name, Width = image.Width, Height = image.Height, Format = image.FormatId,
             Codec = image.Codec.ToString(), Srgb = image.Srgb, Blob = id, Block = image.BytesPerBlock,
+            BlockW = image.BlockW, BlockH = image.BlockH, Layer = image.Layer,
         };
     }
 
-    static CompressedTexture UnpackTexture(CacheTexture texture, List<byte[]> blobs) => new()
+    static CompressedTexture UnpackTexture(CacheTexture texture, List<byte[]> blobs)
     {
-        Name = texture.Name, Width = texture.Width, Height = texture.Height, FormatId = texture.Format,
-        Codec = Enum.TryParse<GpuCodec>(texture.Codec, out var codec) ? codec : GpuCodec.Unknown,
-        Srgb = texture.Srgb, Blocks = blobs[texture.Blob], BytesPerBlock = texture.Block,
-    };
+        var codec = Enum.TryParse<GpuCodec>(texture.Codec, out var parsed) ? parsed : GpuCodec.Unknown;
+        int blockW = texture.BlockW;
+        int blockH = texture.BlockH;
+        int bytes = texture.Block;
+        if (blockW <= 0 || bytes <= 0)
+        {
+            (blockW, blockH, bytes) = codec switch
+            {
+                GpuCodec.Bc1 or GpuCodec.Bc4 => (4, 4, 8),
+                GpuCodec.Bc2 or GpuCodec.Bc3 or GpuCodec.Bc5 or GpuCodec.Bc6 or GpuCodec.Bc7 => (4, 4, 16),
+                GpuCodec.Rgba8 => (1, 1, 4),
+                _ => (Math.Max(1, blockW), Math.Max(1, blockH), Math.Max(1, bytes)),
+            };
+        }
+        return new CompressedTexture
+        {
+            Name = texture.Name, Width = texture.Width, Height = texture.Height, FormatId = texture.Format,
+            Codec = codec, Srgb = texture.Srgb, Blocks = blobs[texture.Blob], BytesPerBlock = bytes,
+            BlockW = blockW, BlockH = blockH, Layer = texture.Layer,
+        };
+    }
 
     sealed class CacheDoc
     {
@@ -243,8 +289,10 @@ public static class ImportCache
         public List<string> Notes { get; set; } = new();
         public long GeometryBytes { get; set; }
         public long Bc7Bytes { get; set; }
+        public LoadReport? Report { get; set; }
         public List<CacheActor> Actors { get; set; } = new();
         public CachePart? Terrain { get; set; }
+        public List<CacheTexture> TerrainAlbedo { get; set; } = new();
     }
 
     sealed class CacheActor
@@ -294,6 +342,9 @@ public static class ImportCache
         public string Codec { get; set; } = "";
         public bool Srgb { get; set; }
         public int Block { get; set; }
+        public int BlockW { get; set; }
+        public int BlockH { get; set; }
+        public int Layer { get; set; } = -1;
         public int Blob { get; set; }
     }
 }

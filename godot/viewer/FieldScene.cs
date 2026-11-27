@@ -29,7 +29,7 @@ public static class FieldScene
                 if (part.Lod > 1) continue;
                 if (part.Positions.Count == 0 || part.Indices.Count < 3) continue;
                 var mesh = MakeMesh(part);
-                var material = MakeMaterial(part, shared, textures, materials);
+                var material = MakeMaterial(part, shared, textures, materials, field.Report);
                 var transforms = actors.Select(actor => ToTransform(actor.Placement.Matrix())).ToArray();
                 var body = Spawn(part.Name + (part.Lod == 0 ? "" : $"_lod{part.Lod}"), mesh, material, transforms);
                 ApplyRange(body, part, hasFar);
@@ -41,12 +41,7 @@ public static class FieldScene
         if (field.Terrain is { Positions.Count: > 0, Indices.Count: >= 3 })
         {
             var mesh = MakeMesh(field.Terrain);
-            var material = new StandardMaterial3D
-            {
-                AlbedoColor = new Color(0.45f, 0.38f, 0.22f),
-                CullMode = BaseMaterial3D.CullModeEnum.Disabled,
-                Roughness = 1,
-            };
+            var material = TerrainMaterial(field);
             var body = Spawn("terrain", mesh, material, new[] { Transform3D.Identity });
             root.AddChild(body);
             root.AddChild(Occluder(field.Terrain));
@@ -85,16 +80,16 @@ public static class FieldScene
     {
         if (hasFar && part.Lod == 0)
         {
-            body.VisibilityRangeEnd = 80;
-            body.VisibilityRangeEndMargin = 16;
-            body.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Self;
+            body.VisibilityRangeEnd = 72;
+            body.VisibilityRangeEndMargin = 0;
+            body.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled;
         }
-        else if (part.Lod > 0)
+        else         if (part.Lod > 0)
         {
-            body.VisibilityRangeBegin = 64;
-            body.VisibilityRangeBeginMargin = 16;
+            body.VisibilityRangeBegin = 72;
+            body.VisibilityRangeBeginMargin = 0;
             body.VisibilityRangeEnd = 8000;
-            body.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Self;
+            body.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled;
         }
         else
         {
@@ -140,18 +135,25 @@ public static class FieldScene
             }
         }
         var indices = part.Indices.Select(index => index).ToArray();
+        Vector2[]? uv2 = null;
+        if (part.MaterialLayers is { Count: > 0 } && part.MaterialLayers.Count == part.Positions.Count)
+        {
+            uv2 = new Vector2[part.MaterialLayers.Count];
+            for (int i = 0; i < uv2.Length; i++) uv2[i] = new Vector2(part.MaterialLayers[i], 0);
+        }
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
         arrays[(int)Mesh.ArrayType.Index] = indices;
         if (uvs is not null) arrays[(int)Mesh.ArrayType.TexUV] = uvs;
+        if (uv2 is not null) arrays[(int)Mesh.ArrayType.TexUV2] = uv2;
         if (normals is not null) arrays[(int)Mesh.ArrayType.Normal] = normals;
         var mesh = new ArrayMesh();
         mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
         return mesh;
     }
 
-    static Material MakeMaterial(ImportedPart part, Dictionary<string, CompressedTexture> textures, Dictionary<string, Texture2D> uploaded, Dictionary<string, Material> cache)
+    static Material MakeMaterial(ImportedPart part, Dictionary<string, CompressedTexture> textures, Dictionary<string, Texture2D> uploaded, Dictionary<string, Material> cache, LoadReport report)
     {
         string key = part.Water ? "water" : $"{part.Alpha}|{part.DoubleSided}|{part.Texture}";
         if (cache.TryGetValue(key, out var existing)) return existing;
@@ -177,36 +179,145 @@ public static class FieldScene
                 material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
             if (part.Texture.Length > 0 && textures.TryGetValue(part.Texture, out var image))
             {
-                var texture = Upload(image, uploaded);
+                var texture = Upload(image, uploaded, report);
                 if (texture is not null) material.AlbedoTexture = texture;
+            }
+            if (material.AlbedoTexture is null)
+            {
+                material.AlbedoColor = FlatColor(part.Material, part.Texture);
+                material.Transparency = BaseMaterial3D.TransparencyEnum.Disabled;
             }
         }
         cache[key] = material;
         return material;
     }
 
-    public static Texture2D? Upload(CompressedTexture image, Dictionary<string, Texture2D> uploaded)
+    public static Image? ImageOf(CompressedTexture image, LoadReport? report)
+    {
+        var format = FormatOf(image);
+        if (format is null || image.Blocks.Length == 0)
+        {
+            report?.AddReason($"{image.Name}: {image.Codec} is not uploaded");
+            if (report is not null) report.TexturesFailed++;
+            return null;
+        }
+        bool pixels = image.Codec == GpuCodec.Rgba8;
+        int blockW = image.BlockW > 0 ? image.BlockW : pixels ? 1 : 4;
+        int blockH = image.BlockH > 0 ? image.BlockH : blockW;
+        int bytes = image.BytesPerBlock > 0 ? image.BytesPerBlock : pixels ? 4 : 16;
+        int mip0 = MipChain.LevelBytes(image.Width, image.Height, blockW, blockH, bytes, pixels);
+        if (image.Blocks.Length < mip0)
+        {
+            report?.AddReason($"{image.Name}: {image.Width}x{image.Height} {image.Codec} has {image.Blocks.Length} bytes, mip 0 needs {mip0}");
+            if (report is not null) report.TexturesFailed++;
+            return null;
+        }
+        bool chain = image.Blocks.Length > mip0;
+        byte[] data = chain
+            ? MipChain.Fit(image.Width, image.Height, blockW, blockH, bytes, pixels, image.Blocks)
+            : image.Blocks.AsSpan(0, mip0).ToArray();
+        int expected = chain ? MipChain.Expected(image.Width, image.Height, blockW, blockH, bytes, pixels) : mip0;
+        if (data.Length != expected)
+        {
+            report?.AddReason($"{image.Name}: {image.Width}x{image.Height} prepared {data.Length} bytes, Godot wants {expected}");
+            if (report is not null) report.TexturesFailed++;
+            return null;
+        }
+        var picture = Image.CreateFromData(image.Width, image.Height, chain, format.Value, data);
+        if (picture is null || picture.IsEmpty())
+        {
+            report?.AddReason($"{image.Name}: Image.CreateFromData rejected {image.Width}x{image.Height} {image.Codec}");
+            if (report is not null) report.TexturesFailed++;
+            return null;
+        }
+        if (report is not null) report.TexturesOk++;
+        return picture;
+    }
+
+    public static Texture2D? Upload(CompressedTexture image, Dictionary<string, Texture2D> uploaded, LoadReport? report)
     {
         if (uploaded.TryGetValue(image.Name, out var existing)) return existing;
-        var format = image.Codec switch
-        {
-            GpuCodec.Bc7 => Image.Format.BptcRgba,
-            GpuCodec.Bc1 => Image.Format.Dxt1,
-            GpuCodec.Bc3 => Image.Format.Dxt5,
-            GpuCodec.Rgba8 => Image.Format.Rgba8,
-            _ => (Image.Format?)null,
-        };
-        if (format is null || image.Blocks.Length == 0) return null;
-        int mip0 = BlockLinear.DivUp(image.Width, Math.Max(1, image.BlockW)) * BlockLinear.DivUp(image.Height, Math.Max(1, image.BlockH)) * Math.Max(1, image.BytesPerBlock);
-        if (image.Codec == GpuCodec.Rgba8) mip0 = image.Width * image.Height * 4;
-        bool mips = image.Blocks.Length > mip0;
-        var pixels = mips ? image.Blocks : image.Blocks.AsSpan(0, Math.Min(mip0, image.Blocks.Length)).ToArray();
-        var picture = Image.CreateFromData(image.Width, image.Height, mips && pixels.Length > mip0, format.Value, pixels);
-        if (picture is null || picture.IsEmpty()) return null;
+        var picture = ImageOf(image, report);
+        if (picture is null) return null;
         var texture = ImageTexture.CreateFromImage(picture);
         uploaded[image.Name] = texture;
         return texture;
     }
+
+    static Image.Format? FormatOf(CompressedTexture image) => image.Codec switch
+    {
+        GpuCodec.Bc7 => Image.Format.BptcRgba,
+        GpuCodec.Bc1 => Image.Format.Dxt1,
+        GpuCodec.Bc3 => Image.Format.Dxt5,
+        GpuCodec.Rgba8 => Image.Format.Rgba8,
+        GpuCodec.Astc when image.BlockW == 4 && image.BlockH == 4 => Image.Format.Astc4X4,
+        GpuCodec.Astc when image.BlockW == 8 && image.BlockH == 8 => Image.Format.Astc8X8,
+        _ => null,
+    };
+
+    static Color FlatColor(string material, string texture)
+    {
+        string blob = (material + " " + texture).ToLowerInvariant();
+        if (blob.Contains("leaf") || blob.Contains("plant") || blob.Contains("grass") || blob.Contains("vine") || blob.Contains("bush"))
+            return new Color(0.25f, 0.38f, 0.18f);
+        if (blob.Contains("rock") || blob.Contains("stone") || blob.Contains("cliff"))
+            return new Color(0.45f, 0.42f, 0.38f);
+        if (blob.Contains("wood") || blob.Contains("trunk") || blob.Contains("bark"))
+            return new Color(0.42f, 0.32f, 0.2f);
+        return new Color(0.55f, 0.52f, 0.48f);
+    }
+
+    static Material TerrainMaterial(ImportedField field)
+    {
+        var images = new Godot.Collections.Array<Image>();
+        foreach (var layer in field.TerrainAlbedo)
+        {
+            var picture = ImageOf(layer, field.Report);
+            if (picture is null)
+            {
+                images.Clear();
+                break;
+            }
+            images.Add(picture);
+        }
+        if (images.Count > 0)
+        {
+            var array = new Texture2DArray();
+            if (array.CreateFromImages(images) == Error.Ok)
+            {
+                var shader = new Shader { Code = TerrainShader };
+                var material = new ShaderMaterial { Shader = shader };
+                material.SetShaderParameter("albedo", array);
+                return material;
+            }
+            field.Report.AddReason("terrain texture array was rejected");
+        }
+        return new StandardMaterial3D
+        {
+            AlbedoColor = new Color(0.45f, 0.38f, 0.22f),
+            CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+            Roughness = 1,
+        };
+    }
+
+    const string TerrainShader = """
+        shader_type spatial;
+        render_mode cull_disabled;
+        uniform sampler2DArray albedo : source_color, repeat_enable, filter_linear_mipmap;
+        uniform vec3 earth = vec3(0.45, 0.38, 0.22);
+        varying flat int layer;
+        void vertex() {
+            layer = int(UV2.x);
+        }
+        void fragment() {
+            if (layer < 0) {
+                ALBEDO = earth;
+            } else {
+                ALBEDO = texture(albedo, vec3(UV, float(layer))).rgb;
+            }
+            ROUGHNESS = 1.0;
+        }
+        """;
 
     static OccluderInstance3D Occluder(ImportedPart terrain)
     {

@@ -22,6 +22,8 @@ public static class TerrainMesh
         public double CenterZ { get; init; }
         public double Edge { get; init; }
         public float[] Heights { get; init; } = Array.Empty<float>();
+        /// <summary>MaterialAlb index per height sample, or null. -1 is the flat earth colour.</summary>
+        public int[]? Layers { get; init; }
     }
 
     public static (double Scale, double HeightScale, List<(double X, double Z, double Edge, string Name)> Tiles) ReadTscb(byte[] data)
@@ -74,6 +76,52 @@ public static class TerrainMesh
         var values = AsFloats(block);
         if (values is null) throw new ImportException("height block is not a 257×257 grid");
         return values;
+    }
+
+    /// <summary>
+    /// One MaterialAlb index per sample. Retail <c>.mate</c> is the same TARB + zstd wrapper as
+    /// <c>.hght</c>. The image is 257×257 texels of material A, material B, blend, extra.
+    /// 255 and 127 are not layer indices. Blend at or above 128 selects material B; otherwise A.
+    /// A halfway 0x7f blend still uses A here. Returns null when the block is not that grid.
+    /// </summary>
+    public static int[]? ReadMate(byte[] file, ZstdDictionaries? dictionaries)
+    {
+        byte[] payload;
+        try { payload = UnpackHght(file, dictionaries); }
+        catch (ImportException) { return null; }
+        byte[]? block = Block(payload, 0x2C) ?? Block(payload, 0x1C);
+        if (block is null && payload.Length >= Size * Size * 4) block = payload;
+        if (block is null) return null;
+        var linear = MateBytes(block);
+        if (linear is null) return null;
+        var layers = new int[Size * Size];
+        int usable = 0;
+        for (int i = 0; i < layers.Length; i++)
+        {
+            int a = linear[i * 4];
+            int b = linear[i * 4 + 1];
+            int blend = linear[i * 4 + 2];
+            bool aOk = a is not 255 and not 127;
+            bool bOk = b is not 255 and not 127;
+            int layer = -1;
+            if (aOk && bOk) layer = blend >= 128 && blend != 255 ? b : a;
+            else if (aOk) layer = a;
+            else if (bOk) layer = b;
+            layers[i] = layer;
+            if (layer >= 0) usable++;
+        }
+        return usable * 2 >= layers.Length ? layers : null;
+    }
+
+    static byte[]? MateBytes(byte[] block)
+    {
+        int tight = Size * Size * 4;
+        if (block.Length == tight) return block;
+        int swizzled = BlockLinear.SurfaceBytes(Size, Size, 1, 1, 4, HeightLog2);
+        if (swizzled <= 0 || block.Length < swizzled) return null;
+        var linear = BlockLinear.Deswizzle(Size, Size, 1, 1, 4, 0, HeightLog2, block.AsSpan(0, swizzled));
+        if (linear.Length < tight) return null;
+        return linear.AsSpan(0, tight).ToArray();
     }
 
     public static ImportedPart Build(
@@ -134,6 +182,8 @@ public static class TerrainMesh
         }
         var positions = new List<Vec3>();
         var indices = new List<int>();
+        var uvs = new List<Vec2>();
+        var layers = new List<int>();
         foreach (var job in jobs)
         {
             if (job.Keep.Count == 0) continue;
@@ -151,6 +201,14 @@ public static class TerrainMesh
                 var position = new Vec3(unitX * scale + origin.X, height * heightScale + origin.Y - down, unitZ * scale + origin.Z);
                 int index = positions.Count;
                 positions.Add(position);
+                uvs.Add(new Vec2(position.X / 8.0, position.Z / 8.0));
+                int layer = -1;
+                if (job.Tile.Layers is { Length: > 0 } grid)
+                {
+                    int sample = sz * Size + sx;
+                    if ((uint)sample < (uint)grid.Length) layer = grid[sample];
+                }
+                layers.Add(layer);
                 if (down == 0) used[(row, col)] = index;
                 return index;
             }
@@ -194,14 +252,18 @@ public static class TerrainMesh
                 if (col == last) SkirtEdge(row, col + 1, row + 1, col + 1, "+x");
             }
         }
+        bool painted = layers.Any(layer => layer >= 0);
         return new ImportedPart
         {
             Name = "terrain",
             Positions = positions,
             Indices = indices,
+            Uvs = uvs,
+            Normals = MeshNormals.Generate(positions, indices),
+            MaterialLayers = painted ? layers : null,
             Material = "terrain",
             Alpha = "opaque",
-            DoubleSided = false,
+            DoubleSided = true,
         };
     }
 

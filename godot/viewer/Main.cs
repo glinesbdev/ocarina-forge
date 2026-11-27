@@ -141,15 +141,19 @@ public partial class Main : Node3D
             else
             {
                 _field = FieldLoader.Load(dump);
-                ImportCache.Save(cachePath, _field);
                 _status = "Imported from the dump.";
+            }
+            if (TexturePrep.Apply(_field) || cached is null)
+            {
+                ImportCache.Save(cachePath, _field);
+                if (cached is not null) _status = "Updated the cache.";
             }
             var node = FieldScene.Build(_field, out _instances, out _drawables);
             AddChild(node);
             _camera.Position = new Vector3(0, 190, 0);
             _camera.LookAt(new Vector3(0, 150, -48), Vector3.Up);
             GD.Print($"field actors {_field.Actors.Count} instances {_instances} terrain {_field.Terrain?.Positions.Count ?? 0} bc7 {_field.Bc7Bytes}");
-            foreach (string note in _field.Notes) GD.Print("note: " + note);
+            GD.Print(_field.Report.Format());
         }
         catch (Exception exc)
         {
@@ -168,6 +172,7 @@ public partial class Main : Node3D
             OpenDump(root);
             if (_failed || _field is null || _field.Actors.Count(actor => actor.Model is not null) != 3 || _field.Terrain is null)
                 throw new InvalidOperationException(_status);
+            GD.Print(TexturePrep.Probe());
             GD.Print("self-test ok");
             GetTree().Quit();
         }
@@ -212,6 +217,19 @@ public partial class Main : Node3D
             ["geomBytes"] = _field?.GeometryBytes,
             ["bc7Bytes"] = _field?.Bc7Bytes,
             ["instances"] = _instances,
+            ["load"] = _field is null ? null : new Dictionary<string, object?>
+            {
+                ["actorsLoaded"] = _field.Report.ActorsLoaded,
+                ["actorsMissing"] = _field.Report.ActorsMissing,
+                ["actorsSkipped"] = _field.Report.ActorsSkipped,
+                ["texturesOk"] = _field.Report.TexturesOk,
+                ["texturesFailed"] = _field.Report.TexturesFailed,
+                ["shapesFailed"] = _field.Report.ShapesFailed,
+                ["missing"] = _field.Report.Missing.OrderByDescending(item => item.Value).Take(8)
+                    .Select(item => new Dictionary<string, object> { ["name"] = item.Key, ["count"] = item.Value }).ToList(),
+                ["reasons"] = _field.Report.Reasons.OrderByDescending(item => item.Value).Take(8)
+                    .Select(item => new Dictionary<string, object> { ["reason"] = item.Key, ["count"] = item.Value }).ToList(),
+            },
             ["note"] = "Same camera path and 1/60 s step as the browser field-loop-160m. cpuMs is Godot's measured render CPU plus frame setup. gpuMs is present when the renderer reports it. submitMs, updateMs, writeTex, heapBytes and the other browser counters are absent. batches is the draw-call count; Godot does not report three.js batch objects.",
         };
         string json = JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true });

@@ -19,6 +19,9 @@ public sealed class ImportedField
     public long GeometryBytes { get; set; }
     public long Bc7Bytes { get; set; }
     public int Drawables { get; set; }
+    public LoadReport Report { get; set; } = new();
+    /// <summary>MaterialAlb layers in shader-index order, still ASTC until the viewer transcodes them.</summary>
+    public List<CompressedTexture> TerrainAlbedo { get; set; } = new();
 }
 
 public static class FieldLoader
@@ -45,6 +48,7 @@ public static class FieldLoader
         {
             if (!placement.Draw)
             {
+                field.Report.ActorsSkipped++;
                 field.Actors.Add(new FieldActor { Placement = placement, Note = placement.SkipReason });
                 continue;
             }
@@ -53,9 +57,14 @@ public static class FieldLoader
                 var found = ModelLocator.Find(dump, placement.Gyaml, field.Notes);
                 if (found is null)
                 {
+                    field.Report.Miss(placement.Gyaml);
                     field.Actors.Add(new FieldActor { Placement = placement, Note = $"no model for {placement.Gyaml}" });
-                    field.Notes.Add($"no model for {placement.Gyaml}");
                     continue;
+                }
+                foreach (string note in found.Model.Notes)
+                {
+                    field.Report.ShapesFailed++;
+                    field.Report.AddReason(note);
                 }
                 resolved = (found.Path, found.Model);
                 cache[placement.Gyaml] = resolved;
@@ -69,6 +78,7 @@ public static class FieldLoader
                 var image = ModelLocator.FindTexture(dump, resolved.Model, part.Texture, $"Pack/Actor/{placement.Gyaml}.pack.zs");
                 if (image is not null) textures[part.Texture] = image;
             }
+            field.Report.ActorsLoaded++;
             field.Actors.Add(new FieldActor
             {
                 Placement = placement,
@@ -102,11 +112,14 @@ public static class FieldLoader
         field.GeometryBytes = geom;
         field.Bc7Bytes = bc7;
         field.Drawables = drawables;
+        foreach (string note in field.Notes)
+            field.Report.AddReason(note);
         return field;
     }
 
     static void TryTerrain(DumpFolder dump, string banc, List<ActorPlacement> placements, ImportedField field)
     {
+        mateTiles = 0;
         Dictionary<string, object?>? document = null;
         foreach (string stem in TerrainMesh.LevelStems(banc))
         {
@@ -152,6 +165,21 @@ public static class FieldLoader
             try
             {
                 var payload = TerrainMesh.UnpackHght(dump.Read(path), dump.Dictionaries);
+                int[]? mate = null;
+                foreach (string matePath in new[]
+                {
+                    $"{folder}/{sceneDir}/{tile.Name}.mate.zs",
+                    $"{folder}/{sceneDir}/{tile.Name}.mate",
+                    $"TerrainArc/{sceneDir}/{tile.Name}.mate.zs",
+                    $"TerrainArc/{sceneDir}/{tile.Name}.mate",
+                })
+                {
+                    if (!dump.Exists(matePath)) continue;
+                    try { mate = TerrainMesh.ReadMate(dump.Read(matePath), dump.Dictionaries); }
+                    catch (ImportException) { mate = null; }
+                    break;
+                }
+                if (mate is not null) mateTiles++;
                 built.Add(new TerrainMesh.Tile
                 {
                     Name = tile.Name,
@@ -159,6 +187,7 @@ public static class FieldLoader
                     CenterZ = tile.Z,
                     Edge = tile.Edge,
                     Heights = TerrainMesh.DecodeHeights(payload),
+                    Layers = mate,
                 });
             }
             catch (ImportException exc)
@@ -168,7 +197,62 @@ public static class FieldLoader
         }
         if (built.Count == 0) return;
         field.Terrain = TerrainMesh.Build(built, scale, heightScale, origin, clip, steps);
-        field.Notes.Add("terrain albedo is a flat colour; MaterialAlb ASTC is not uploaded");
+        if (mateTiles == 0)
+            field.Report.AddReason("terrain has no material grid; albedo stays the flat colour");
+        else
+            AttachTerrainAlbedo(dump, field, mateTiles, built.Count);
+    }
+
+    static int mateTiles;
+
+    static void AttachTerrainAlbedo(DumpFolder dump, ImportedField field, int withGrid, int tiles)
+    {
+        var part = field.Terrain;
+        if (part?.MaterialLayers is null)
+        {
+            field.Report.AddReason($"terrain mate: {withGrid} of {tiles} tiles decoded, none of the drawn samples had a layer");
+            return;
+        }
+        var used = new List<int>();
+        foreach (int layer in part.MaterialLayers)
+            if (layer >= 0 && !used.Contains(layer)) used.Add(layer);
+        string path = dump.Exists("Tex/MaterialAlb.bntx.zs") ? "Tex/MaterialAlb.bntx.zs"
+            : dump.Exists("Tex/MaterialAlb.bntx") ? "Tex/MaterialAlb.bntx" : "";
+        if (path.Length == 0)
+        {
+            field.Report.AddReason("Tex/MaterialAlb.bntx is not in this dump");
+            return;
+        }
+        List<CompressedTexture?> layers;
+        try { layers = BntxReader.ReadLayers(dump.Read(path)); }
+        catch (ImportException exc)
+        {
+            field.Report.AddReason($"MaterialAlb: {exc.Message}");
+            return;
+        }
+        var chosen = new List<CompressedTexture>();
+        var map = new Dictionary<int, int>();
+        foreach (int index in used)
+        {
+            CompressedTexture? image = index >= 0 && index < layers.Count ? layers[index] : null;
+            if (image is null)
+            {
+                map[index] = -1;
+                continue;
+            }
+            map[index] = chosen.Count;
+            chosen.Add(image);
+        }
+        for (int i = 0; i < part.MaterialLayers.Count; i++)
+        {
+            int layer = part.MaterialLayers[i];
+            part.MaterialLayers[i] = layer >= 0 && map.TryGetValue(layer, out int compact) ? compact : -1;
+        }
+        field.TerrainAlbedo = chosen;
+        if (chosen.Count == 0)
+            field.Report.AddReason("MaterialAlb had none of the layers the material grid asked for");
+        else
+            field.Report.AddReason($"terrain albedo: {chosen.Count} MaterialAlb layers, ASTC until transcode ({withGrid} of {tiles} tiles had a grid)");
     }
 
     static string HeightPath(DumpFolder dump, string folder, string scene, string name)

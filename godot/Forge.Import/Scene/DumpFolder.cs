@@ -127,11 +127,33 @@ public static class ActorList
     {
         string category = Category(gyaml);
         if (category is "system" or "area" or "effect") return $"{category} actor is not drawn";
-        if (gyaml.StartsWith("EftLoc_", StringComparison.Ordinal) || gyaml.StartsWith("Loc_", StringComparison.Ordinal)
-            || gyaml.StartsWith("Tag_", StringComparison.Ordinal) || gyaml.Contains("Locator", StringComparison.Ordinal)
-            || gyaml.Contains("AirWall", StringComparison.Ordinal))
-            return "marker is not drawn";
+        if (IsMarker(gyaml)) return "marker is not drawn";
+        if (IsVolume(gyaml)) return "volume is not drawn";
         return "";
+    }
+
+    static bool IsMarker(string gyaml)
+    {
+        if (gyaml.Contains("airwall", StringComparison.OrdinalIgnoreCase)) return true;
+        if (gyaml.Contains("Anchor", StringComparison.OrdinalIgnoreCase)) return true;
+        if (gyaml.EndsWith("Actor", StringComparison.Ordinal)) return true;
+        if (gyaml.StartsWith("EftLoc_", StringComparison.Ordinal) || gyaml.StartsWith("Loc_", StringComparison.Ordinal)
+            || gyaml.StartsWith("Tag_", StringComparison.Ordinal) || gyaml.Contains("Locator", StringComparison.Ordinal))
+            return true;
+        return false;
+    }
+
+    /// <summary>
+    /// Areas, fog, and the other region actors. A <c>Land_</c> mesh is not one of these
+    /// unless its name is an air wall, which <see cref="IsMarker"/> already caught.
+    /// </summary>
+    static bool IsVolume(string gyaml)
+    {
+        if (gyaml.StartsWith("Land_", StringComparison.OrdinalIgnoreCase)) return false;
+        string lower = gyaml.ToLowerInvariant();
+        foreach (string word in new[] { "area", "volume", "fog", "trigger", "sensor", "collision", "collider" })
+            if (lower.Contains(word, StringComparison.Ordinal)) return true;
+        return false;
     }
 
     static string Text(Dictionary<string, object?> actor, string key) =>

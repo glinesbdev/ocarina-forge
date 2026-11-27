@@ -156,6 +156,119 @@ public class ImportTests
         }
     }
 
+    [Fact]
+    public void GodotMipChainCountsTheTailBlock()
+    {
+        Assert.Equal(158416, MipChain.Expected(341, 341, 4, 4, 16, false));
+        Assert.Equal(174776, MipChain.Expected(512, 512, 4, 4, 8, false));
+        Assert.Equal(20040, MipChain.Expected(171, 171, 4, 4, 8, false));
+        var shortChain = new byte[158400];
+        Assert.Equal(158416, MipChain.Fit(341, 341, 4, 4, 16, false, shortChain).Length);
+    }
+
+    [Fact]
+    public void MipReaderKeepsTheLevelAfterTheBlockSizedOne()
+    {
+        byte[] level0 = new byte[64];
+        byte[] level1 = new byte[16];
+        byte[] level2 = new byte[16];
+        level2[0] = 0xAB;
+        var file = BntxReader.WriteLinearMips("Tail", 8, 8, 0x2001, new[] { level0, level1, level2 });
+        var image = Assert.Single(BntxReader.Read(file));
+        Assert.Equal(64 + 16 + 16, image.Blocks.Length);
+        Assert.Equal(0xAB, image.Blocks[^16]);
+    }
+
+    [Fact]
+    public void BoneIndexIsTheRawByte()
+    {
+        Assert.Equal(200, BfresReader.PaletteSlot(new byte[] { 200, 1, 2, 3 }, 0x010B, 0));
+        Assert.Equal(255, BfresReader.PaletteSlot(new byte[] { 255, 0, 0, 0 }, 0x020B, 0));
+    }
+
+    [Fact]
+    public void YawBoneBakesLocalXToWorldMinusZAndTheNormalFollows()
+    {
+        var turn = BindPose.Euler(0, Math.PI / 2, 0);
+        var bones = new List<BindPose.Bone>
+        {
+            new(-1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0),
+            new(0, 0, 0, 0, turn.X, turn.Y, turn.Z, turn.W, 1, 1, 1, 0x1000, 0),
+            new(0, 4, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, -1),
+        };
+        var point = new List<(double X, double Y, double Z)> { (1, 0, 0) };
+        BindPose.Bake(point, bones, Array.Empty<int>(), 1, null);
+        Assert.InRange(point[0].X, -1e-4, 1e-4);
+        Assert.InRange(point[0].Z, -1 - 1e-4, -1 + 1e-4);
+        var placed = new List<(double X, double Y, double Z)> { (1, 0, 0), (0, 1, 0) };
+        BindPose.Bake(placed, bones, new[] { 1, 2 }, 0, new[] { 0, 1 });
+        Assert.InRange(placed[0].Z, -1 - 1e-4, -1 + 1e-4);
+        Assert.InRange(placed[1].X, -1e-4, 1e-4);
+        Assert.InRange(placed[1].Y, 1 - 1e-4, 1 + 1e-4);
+        var quadRaw = new List<(double X, double Y, double Z)> { (0, 0, 0), (0, 1, 0), (0, 0, 1) };
+        BindPose.Bake(quadRaw, bones, Array.Empty<int>(), 1, null);
+        var quad = quadRaw.Select(p => new Vec3(p.X, p.Y, p.Z)).ToList();
+        var normal = MeshNormals.Generate(quad, new List<int> { 0, 1, 2 })[0];
+        Assert.InRange(normal.Z, -1 - 1e-4, -1 + 1e-4);
+        Assert.InRange(normal.X, -1e-4, 1e-4);
+    }
+
+    [Fact]
+    public void VolumesAreQuietAndPlantsAreNot()
+    {
+        Assert.Contains("volume", ActorList.SkipReason("ForbidAutoPlacementAreaBox"));
+        Assert.Contains("volume", ActorList.SkipReason("VolumeFogArea"));
+        Assert.Contains("marker", ActorList.SkipReason("Land_HrlField_Airwall_Outer_Boundary"));
+        Assert.Contains("marker", ActorList.SkipReason("Obj_Gimmick_AnswerPosAnchor"));
+        Assert.Equal("", ActorList.SkipReason("Land_Graveyard_Plants_A_08"));
+    }
+
+    [Fact]
+    public void PackStringNamesTheModelFile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "of-model-" + Guid.NewGuid().ToString("N"));
+        string romfs = Path.Combine(root, "romfs");
+        Directory.CreateDirectory(Path.Combine(romfs, "Pack", "Actor"));
+        Directory.CreateDirectory(Path.Combine(romfs, "Model"));
+        File.WriteAllBytes(Path.Combine(romfs, "Model", "Plants.Plants_A.bfres"), File.ReadAllBytes(Fixture("v10-tree.bfres")));
+        var pack = SarcArchive.Pack(new Dictionary<string, byte[]>
+        {
+            ["note.txt"] = System.Text.Encoding.ASCII.GetBytes("see Model/Plants.Plants_A.bfres please"),
+        });
+        File.WriteAllBytes(Path.Combine(romfs, "Pack", "Actor", "Land_Plant.pack"), pack);
+        try
+        {
+            var found = ModelLocator.Find(DumpFolder.Open(root), "Land_Plant", new List<string>());
+            Assert.NotNull(found);
+            Assert.EndsWith("Model/Plants.Plants_A.bfres", found!.Path.Replace('\\', '/'));
+            Assert.NotEmpty(found.Model.Parts);
+        }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
+    public void MateGridPicksMaterialAUnlessBlendIsHigh()
+    {
+        const int tight = 257 * 257 * 4;
+        var payload = new byte[0x40 + tight];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x2C), 0x14);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0x30), tight);
+        for (int i = 0; i < 257 * 257; i++)
+        {
+            payload[0x40 + i * 4] = 3;
+            payload[0x40 + i * 4 + 1] = 9;
+            payload[0x40 + i * 4 + 2] = 0;
+        }
+        payload[0x40 + 2] = 200;
+        var layers = TerrainMesh.ReadMate(payload, null);
+        Assert.NotNull(layers);
+        Assert.Equal(9, layers![0]);
+        Assert.Equal(3, layers[1]);
+    }
+
     static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     sealed class ExpectedModel
