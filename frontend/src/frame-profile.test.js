@@ -10,10 +10,8 @@ import {
   PROFILE_READY_FRAMES,
   average,
   buildCapture,
-  classifyBatchKey,
   countTextures,
   createProfileWindow,
-  summarizeBatchKeys,
   formatProfileHud,
   percentile,
   recommendNext,
@@ -176,38 +174,10 @@ test("a capture is json and counts resident textures once per source", () => {
   const shared = { isTexture: true, source: { uuid: "src" }, uuid: "a" };
   const other = { isTexture: true, uuid: "b" };
   assert.equal(countTextures([
-    { map: shared, userData: { mossMap: shared, forgeArraySources: [shared, other] } },
+    { map: shared, userData: { mossMap: shared } },
     { map: other, color: 1 },
     null,
   ]), 2);
-  const array = { isTexture: true, isCompressedArrayTexture: true, uuid: "arr" };
-  const material = { userData: {} };
-  Object.defineProperty(material.userData, "forgeArrayAlbedo", {
-    value: array, writable: true, configurable: true, enumerable: false,
-  });
-  assert.equal(countTextures([material]), 1);
-  assert.equal(classifyBatchKey("arr:8x8|opaque|s2|cffffff|idx|uv"), "array");
-  assert.equal(classifyBatchKey("arr:8x8|opaque|s2|cffeeaa|idx|uv"), "tint");
-  assert.equal(classifyBatchKey("img|moss:r:1|opaque|s2|cffffff|idx|uv"), "blend");
-  assert.equal(classifyBatchKey("img|h:box|opaque"), "helper");
-  assert.equal(classifyBatchKey("img|water|opaque"), "water");
-  assert.equal(classifyBatchKey("img|terrain|opaque"), "terrain");
-  assert.equal(classifyBatchKey("8x8:abc|opaque"), "image");
-  assert.deepEqual(summarizeBatchKeys([
-    "arr:8x8|opaque|s2|cffffff|idx|uv",
-    "arr:8x8|opaque|s2|cffffff|idx|uv\u00001",
-    "img|water|opaque",
-  ]), { array: 1, image: 0, blend: 0, helper: 0, water: 1, terrain: 0, ground: 0, tint: 0 });
-  assert.equal(classifyBatchKey("img|ground|opaque"), "ground");
-  const dumped = buildCapture({
-    samples: [],
-    keyReasons: { array: 3, tint: 1 },
-    imagePack: { counts: { "mip-bytes:0:0/16": 2 }, images: [{ reason: "mip-bytes:0:0/16", width: 8, height: 8 }] },
-    at: "2026-11-27T00:00:00.000Z",
-  });
-  assert.deepEqual(dumped.keyReasons, { array: 3, tint: 1 });
-  assert.equal(dumped.imagePack.counts["mip-bytes:0:0/16"], 2);
-  assert.equal(dumped.imagePack.images[0].width, 8);
 });
 
 test("the hud carries the revision and the counters that used to be the stats line", () => {

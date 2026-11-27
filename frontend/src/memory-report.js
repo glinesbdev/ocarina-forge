@@ -1,7 +1,5 @@
 /** CPU/GPU memory accounting for the viewport: textures, geometries, batches, actors. */
 
-import { arrayTexturesOf } from "./texture-array.js";
-
 const TEXTURE_KEYS = [
   "map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap", "alphaMap",
   "bumpMap", "displacementMap", "envMap", "lightMap", "specularMap", "anisotropyMap",
@@ -147,7 +145,6 @@ function collectMaterialTextures(material, into) {
     }
     if (lit.blendMap) into.add(lit.blendMap);
   }
-  for (const texture of arrayTexturesOf(material)) into.add(texture);
 }
 
 function formatName(texture) {
@@ -352,8 +349,6 @@ export function collectMemoryReport(state = {}) {
       instances: stats.instances ?? null,
       culled: stats.culled ?? null,
       batchKeys: stats.batchKeys ?? null,
-      keyReasons: stats.keyReasons ?? null,
-      imagePack: stats.imagePack ?? null,
       pickUploads: stats.pickUploads ?? null,
     },
     profile: stats.profile ?? null,

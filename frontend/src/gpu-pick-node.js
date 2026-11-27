@@ -18,7 +18,6 @@ import {
   drawIndex,
   float,
   glslFn,
-  batchIndirectIndex,
   instanceIndex,
   int,
   ivec2,
@@ -26,13 +25,11 @@ import {
   positionWorld,
   reference,
   texture,
-  textureLoad,
   textureSize,
   uint,
   wgslFn,
 } from "three/tsl";
 import { pickMask, resolvePickTexture } from "./gpu-pick.js";
-import { isArrayTexture } from "./texture-array.js";
 
 const SPLIT_NODE_SYSTEM = "WebGPU loaded two copies of three's node system (three/webgpu and three/tsl). GPU picking is off; clicks use the CPU raycast.";
 
@@ -74,25 +71,11 @@ function watchedTexel(getTexture) {
   return node;
 }
 
-function layerIndex(layerNode, channel) {
-  const texel = textureLoad(layerNode, ivec2(int(batchIndirectIndex), int(0)));
-  const component = channel === 1 ? texel.g : channel === 2 ? texel.b : channel === 3 ? texel.a : texel.r;
-  return int(component);
-}
-
 function maskNode(material, hasUv) {
   const mask = pickMask(material);
   if (!mask.map || !hasUv) return;
   material.userData.forgePickMask = mask.map;
-  const ref = materialReference("userData.forgePickMask", "texture", material);
-  let sampled = ref;
-  if (isArrayTexture(mask.map)) {
-    ref.updateValue();
-    const layerRef = materialReference("userData.forgeLayerTexture", "texture", material);
-    layerRef.updateValue();
-    const index = material.userData.forgeLayerTexture ? layerIndex(layerRef.node, 0) : int(0);
-    sampled = ref.node.depth(index);
-  }
+  const sampled = materialReference("userData.forgePickMask", "texture", material);
   const texel = mask.channel === "g" ? sampled.g : sampled.a;
   texel.lessThanEqual(materialReference("alphaTest", "float", material)).discard();
 }
@@ -133,11 +116,10 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
     const object = getActiveObject ? getActiveObject() : null;
     const mask = pickMask(material);
     const cut = mask.map ? `cut-${mask.channel}` : "solid";
-    const array = isArrayTexture(mask.map) ? "arr" : "2d";
     const tex = object?.userData?.forgePickTexture?.uuid || "none";
-    if (object?.isInstancedMesh) return `forge-pick-inst-${object.uuid}-${cut}-${array}-${tex}`;
-    if (object?.isBatchedMesh) return `forge-pick-batch-${cut}-${array}-${tex}`;
-    return `forge-pick-mesh-${cut}-${array}`;
+    if (object?.isInstancedMesh) return `forge-pick-inst-${object.uuid}-${cut}-${tex}`;
+    if (object?.isBatchedMesh) return `forge-pick-batch-${cut}-${tex}`;
+    return `forge-pick-mesh-${cut}`;
   };
   material.fog = false;
   material.toneMapped = false;

@@ -8,7 +8,6 @@
  * `userData.name`; parts store that family as `materialKey`.
  */
 
-import { cloneMaterialPreservingTextures } from "./instance.js";
 import { noteTexturePipelineError } from "./texture-debug.js";
 
 const SRGB = "srgb";
@@ -119,7 +118,11 @@ export function separateSharedMaterials(parts) {
 }
 
 function cloneMaterial(material) {
-  if (typeof material.clone === "function") return cloneMaterialPreservingTextures(material);
+  if (typeof material.clone === "function") {
+    const copy = material.clone();
+    copy.userData = { ...(material.userData || {}) };
+    return copy;
+  }
   const copy = { ...material, map: material.map || null, userData: { ...(material.userData || {}) } };
   if (material.color && typeof material.color.clone === "function") copy.color = material.color.clone();
   return copy;

@@ -107,15 +107,9 @@ test("the profile detail keeps the counters that used to sit on the stats line",
       rendering: false,
       batchKeys: 50,
       pickUploads: 0,
-      keyReasons: { array: 12, image: 30, blend: 4, helper: 2, water: 1, terrain: 1 },
       sceneStream: { slowFrames: 2, maxCompileMs: 12.4 },
     }),
-    [
-      "idle",
-      "keys 50 · pick 0",
-      "array 12 · image 30 · blend 4 · helper 2 · water 1 · terrain 1",
-      "2 streaming frames >25 ms · compile 12.4 ms",
-    ],
+    ["idle", "keys 50 · pick 0", "2 streaming frames >25 ms · compile 12.4 ms"],
   );
 });
 
