@@ -13,8 +13,6 @@
  * keeps the cursor pixel.
  */
 
-import { holdTexture, isArrayTexture } from "./texture-array.js";
-
 export const PICK_LAYER = 1;
 export const PREVIEW_PICK_LAYER = 2;
 export const TERRAIN_PICK_LAYER = 3;
@@ -39,32 +37,11 @@ export function resolvePickTexture(value) {
  */
 export function pickMask(source) {
   if (!source || !(source.alphaTest > 0)) return { alphaTest: 0, map: null, channel: "a" };
-  const data = source.userData || {};
-  const map = resolvePickTexture(source.map) || resolvePickTexture(data.forgeArrayAlbedo);
+  const map = resolvePickTexture(source.map);
   if (map) return { alphaTest: source.alphaTest, map, channel: "a" };
-  const alphaMap = resolvePickTexture(source.alphaMap) || resolvePickTexture(data.forgeArrayAlpha);
+  const alphaMap = resolvePickTexture(source.alphaMap);
   if (alphaMap) return { alphaTest: source.alphaTest, map: alphaMap, channel: "g" };
-  const held = resolvePickTexture(data.forgePickMask);
-  if (held) {
-    const channel = data.forgePickMaskChannel === "g" ? "g" : "a";
-    return { alphaTest: source.alphaTest, map: held, channel };
-  }
   return { alphaTest: source.alphaTest, map: null, channel: "a" };
-}
-
-/** A stock map slot cannot hold an array. The id shader samples `forgePickMask` with the layer. */
-export function applyPickMask(material, mask, layerTexture) {
-  if (!material) return;
-  const map = mask && mask.channel !== "g" ? mask.map : null;
-  const alpha = mask && mask.channel === "g" ? mask.map : null;
-  material.map = isArrayTexture(map) ? null : (map || null);
-  material.alphaMap = isArrayTexture(alpha) ? null : (alpha || null);
-  material.alphaTest = mask && mask.alphaTest ? mask.alphaTest : 0;
-  material.userData = material.userData || {};
-  holdTexture(material.userData, "forgePickMask", (mask && mask.map) || null);
-  material.userData.forgePickMaskChannel = (mask && mask.channel) || "a";
-  material.userData.forgePickArray = isArrayTexture(mask && mask.map);
-  if (layerTexture !== undefined) holdTexture(material.userData, "forgeLayerTexture", layerTexture || null);
 }
 
 /** Readback width. WebGPU copies a whole aligned row; WebGL can read one pixel. */
@@ -503,18 +480,21 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
     uniforms.forgeDepthOnly.value = object?.userData?.forgePickDepthOnly ? 1 : 0;
     uniforms.forgePickIds.value = resolvePickTexture(object?.userData?.forgePickTexture) || zero;
     const mask = pickMask(src);
-    const nextMap = mask.channel === "a" && !isArrayTexture(mask.map) ? mask.map : null;
-    const nextAlpha = mask.channel === "g" && !isArrayTexture(mask.map) ? mask.map : null;
+    const nextMap = mask.channel === "a" ? mask.map : null;
+    const nextAlpha = mask.channel === "g" ? mask.map : null;
     const defineChange = (material.alphaTest > 0) !== (mask.alphaTest > 0)
       || Boolean(material.map) !== Boolean(nextMap)
-      || Boolean(material.alphaMap) !== Boolean(nextAlpha)
-      || (nodeMaterial?.userData?.forgePickArray === true) !== isArrayTexture(mask.map);
-    const layerTexture = src && src.userData ? src.userData.forgeLayerTexture : null;
-    applyPickMask(material, mask, layerTexture);
+      || Boolean(material.alphaMap) !== Boolean(nextAlpha);
+    material.alphaTest = mask.alphaTest;
+    material.map = nextMap;
+    material.alphaMap = nextAlpha;
     if (defineChange) material.needsUpdate = true;
     if (nodeMaterial) {
-      applyPickMask(nodeMaterial, mask, layerTexture);
-      if (defineChange) nodeMaterial.needsUpdate = true;
+      nodeMaterial.alphaTest = mask.alphaTest;
+      nodeMaterial.map = nextMap;
+      nodeMaterial.alphaMap = nextAlpha;
+      nodeMaterial.userData.forgePickMask = mask.map;
+      nodeMaterial.userData.forgePickMaskChannel = mask.channel;
     }
   }
 

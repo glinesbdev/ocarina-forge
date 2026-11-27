@@ -85,7 +85,6 @@ export function formatProfileDetail({
   server = "",
   batchKeys = null,
   pickUploads = null,
-  keyReasons = null,
 } = {}) {
   const lines = [];
   lines.push(rendering ? (fps ? `${fps} fps` : "…") : "idle");
@@ -116,13 +115,6 @@ export function formatProfileDetail({
     if (batchKeys != null) extra.push(`keys ${batchKeys}`);
     if (pickUploads != null) extra.push(`pick ${pickUploads}`);
     lines.push(extra.join(" · "));
-  }
-  if (keyReasons && typeof keyReasons === "object") {
-    const reasons = [];
-    for (const name of ["array", "image", "blend", "helper", "water", "terrain", "ground", "tint"]) {
-      if (keyReasons[name]) reasons.push(`${name} ${keyReasons[name]}`);
-    }
-    if (reasons.length) lines.push(reasons.join(" · "));
   }
   if (warmTotal != null) lines.push(`warm ${warmDone || 0}/${warmTotal}`);
   if (sceneStream) {

@@ -2,6 +2,25 @@
 
 Baseline on Bradyn’s PC, Kokiri Forest child Static+Dynamic, before this pass: about 55–65 fps, 200–275 draws, 10553 model draws if each copy was its own draw, and 1.4–1.8M triangles. The viewport status label is the draw counter. **Profile** adds the frame rate, instance count, and cull count.
 
+## Rolled back on `render-known-good`
+
+This branch is current `main` with pull request #70 reverted (`git revert -m 1 06cf8cd`) and the Field benchmark from #74 left in place. The renderer is the path at `bea2fb6`, the merge of #69.
+
+That commit is the last known-good. After #69 settled, Hyrule Field Child, Static + Dynamic, was one mesh per key: `batches` and `keys` were both 1004, `submit` was 44.5 ms, and textures were still one image per material. Pull request #70 says the wrong textures and the terrain that slides with the camera did not happen before that PR. The 44.5 ms figure is the slower correct baseline. #69 stays, because that settled capture is the result of #69. #57 (three 0.187.0) and #55 (the byte budget and compile-before-attach) stay too: that same Field was already on them. #74 stays: it only records the fly.
+
+#70 (`06cf8cd`, tip `e65af37`) is the suspect merge. Its commits, in order, and what Bradyn reported:
+
+| Commit | What it did | What the Field capture showed |
+| --- | --- | --- |
+| `b45754d` | Drop the mesh family from the batch key and pack same-size compressed images into `CompressedArrayTexture`. | The array was left on `material.map`. `textureSample` had no `array_index`, the command buffer was dropped, land went flat, and water stayed on the teal stand-in. `submit` 111.3 ms, `keys` 148 on a partial stream. |
+| `23c3763` | Sample the array with a layer index, off the stock map slots. | Land had albedo. No `texture_2d_array` sample error. `submit` 31.2 ms, `keys` 466. This is the only visual confirmation inside #70, and the later commits in the same merge shipped with it. |
+| `137ef86` | Release the packed CPU copies and stop serializing them. | 874 empty `writeTexture` calls. Land looked missing or flat while streaming. After it settled, `submit` was 44.3 ms, no better than the per-image 44.5 ms. |
+| `a351efc` | Upload a mip only after the GPU has the bytes, and copy a grow on the GPU. | The empty writes were gone. 1265 `copyTextureToTexture` errors remained: tail mips of 768 and 512 images had a width of 6, 3, or 1. `submit` 41.6 ms, heap 1927 MB. |
+| `3b7eb52` | Round those copies to the BC 4×4 block. | No WebGPU validation errors. Textures sat on the wrong models and then popped. The terrain slid as the camera moved. Bradyn wrote that this did not happen before #70. Heap 3348 MB. |
+| `e65af37` | Keep layer indices stable and pin the terrain matrix. | The attempted fix for the wrong textures and the slide. No later capture says terrain, textures, and water are correct. On current `main` they are still wrong, and water has regressed as well. |
+
+The Field benchmark on this branch uses the same JSON names as #74 (`submit`, `update`, `priority`, `labels`, `cull`, `writeTex`, `indirectFills`, `lodFlips`, heap avg/final, `capped`, `draws`, `batches`). A run here is the correct-rendering baseline to compare with `main`, not another pass of the array packer.
+
 ## Render on change
 
 `renderer.render` runs only from the animation frame requested by `requestRender`. Nothing calls `setAnimationLoop`. A frame schedules the next one only while the camera is moving (orbit damping, fly keys, or right-button look), the gizmo is dragging, or a model or terrain load is still in flight. Water does not animate, so it does not keep the loop. When that stops, **Profile** reads `idle` and the last draw count stays on the status label.
@@ -56,7 +75,7 @@ No Field was loaded here. The numbers below are from `frontend/src/batch-fill.te
 | cull, camera and selection unchanged | the instance loop | returns before the loop |
 | pick-id uploads while orbiting, no click | every dirty batch, every frame | 0 |
 
-On the Field capture, `batches` should move from 2253 toward `keys` once streaming settles. How far it falls depends on how many of those 2253 meshes shared a key. `keys` is the number to compare, not a guess from the 595 textures: the batch key also includes the mesh family, so two different meshes with the same image stay apart. The next section removes that family suffix and, on WebGPU, packs same-size compressed images into one array.
+On the Field capture, `batches` should move from 2253 toward `keys` once streaming settles. How far it falls depends on how many of those 2253 meshes shared a key. `keys` is the number to compare, not a guess from the 595 textures: the batch key also includes the mesh family, so two different meshes with the same image stay apart.
 
 ### Submit spike
 
@@ -65,148 +84,6 @@ On the Field capture, `batches` should move from 2253 toward `keys` once streami
 The 581.9 ms spike lines up with thousands of batch objects and 5920 draws, against 4 ms of GPU time. Fewer meshes is the change that can move `submit`. A custom indirect buffer, or raising the compile limit, is out of scope. If `batches` is near `keys` and `submit` is still hundreds of milliseconds, the rest is per-object work inside three’s render, not another rebuild.
 
 Check: rebuild the frontend, restart the editor, hard-reload, open the same Field view with **Profile** on. On a still camera, `cull` should read about 0. While orbiting with no click, `pick` should stay 0. After streaming settles, `batches` should be close to `keys`. Compare `submit` (latest, avg, p95) with the table above, and read `compile` on the stream line if a hitch lands while models are still arriving. Textures, GPU picking, the gizmo, and selection should behave as before.
-
-## Fewer batch keys
-
-After streaming settled, Field Child was one mesh per key: `batches` and `keys` were both 1004. The 3086 batches figure was mid-stream, while arrivals were still appending, and it is not the steady state. `submit` was 44.5 ms against 4.7 ms of GPU time and 0 ms of cull. That submit time is the CPU cost of about a thousand render objects inside `renderer.render` (a node material, its bindings, and a pipeline). Per-object frustum culling and opaque sorting are already off, so the instance walk is not the 44.5 ms. A quiet opaque mesh now skips the redundant merged-draw fill; that does not by itself turn 44 ms into a few milliseconds. Fewer meshes does, because the cost scales with the object count.
-
-The mesh family is no longer part of the batch key. `materialKey` stays on the part for the texture manifest. Two shapes that sample the same images, alpha, side, tint, and vertex layout share one mesh. The vertex layout includes each attribute's item size, so a geometry that cannot share a `BatchedMesh` stays on its own key instead of being dropped.
-
-On WebGPU, a compressed image (BC1, BC3, BC7, ASTC) joins an array with every other image of the same width, height, mip count, format, color space, wrap, repeat, offset, and uv channel. The batch key names that group, not the image. Each instance writes its layer into a float texture, and the colour node samples `texture(array, uv).depth(layer)`. Normal and roughness maps that pack the same way use the green and blue channels of that texel. Occlusion that shares the roughness image is the red channel of that same sample. A group holds at most 256 layers; the next image keeps its own key. Growing the array allocates a new texture and points the batches at it, because the GPU layer count is fixed. Blend, terrain, water, and helpers stay on the per-image key. WebGL does not build arrays. Material tint stays in the key: `setColorAt` is the selection tint, and a shared white material painted models a flat cream once before.
-
-The array is not assigned to `material.map`, `normalMap`, `roughnessMap`, `metalnessMap`, `aoMap`, `emissiveMap`, `alphaMap`, or the other stock slots. Those slots compile `textureSample(texture, sampler, uv)`. A `texture_2d_array` needs the layer as a fourth argument (`array_index`). `CompressedArrayTexture` is not `isArrayTexture`, so three does not insert that index on its own. One invalid fragment pipeline makes the command buffer invalid, and every later draw in the frame is dropped. That is why a Field view with the array left on `map` (and on `aoMap`, when the occlusion map was the same image) drew flat land and left the water on its unshaded colour. The colour, normal, roughness, occlusion, emissive, and alpha nodes sample `userData` with `.depth(layer)`. The id-buffer mask does the same when the cutout is an array. A clone, including the no-uv clone, clears those slots. WebGL never creates the packer, so its stock samplers only see 2D images.
-
-### Before
-
-27 Nov 2026, Bradyn’s Windows machine, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. The 3086 batches number from the same session was mid-stream. This environment has no game dump, so the Field column is not re-measured here.
-
-| | settled |
-| --- | --- |
-| cpu | 56.9 ms (avg 61.1, p95 70.4) |
-| update | 12.4 ms |
-| cull | 0.0 ms |
-| submit | 44.5 ms |
-| gpu | 4.7 ms |
-| obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 |
-
-### Measured here
-
-`frontend/src/texture-array.test.js`, Node, three r187, no GPU:
-
-| What | Before this change | After |
-| --- | --- | --- |
-| 8 mesh families, one shader key | 8 keys (the family was appended) | 1 key, 1 `BatchedMesh`, 8 instances |
-| 40 distinct BC7 images, one size class (8×8, sRGB) | 40 keys | 1 array, 40 layers, 1 key |
-| the same images split across 8×8 and 16×16, or sRGB and linear | 40 keys | 2 or 3 arrays, one key each |
-| a group already at its layer cap | the next image joins the array | that image keeps its own key |
-
-### Windows capture with the array on `map`
-
-27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on. The family merge worked (`keys` and `batches` both 148). The fragment shader did not: `textureSample` of a `texture_2d_array` had no `array_index`, the pipeline was invalid, and the command buffer was dropped. `submit` at 111.3 ms is that failure, not the cost of 148 batches and not the 7922 draw counter. `sub` was 403, which is lower than the settled 5872 draws from before. GPU time stayed near 5 ms, which is what a frame that never ran the draws looks like. `compile` 1710 ms is the streaming total, including the rejected shaders.
-
-| | before (settled, per image) | this capture (array on `map`) |
-| --- | --- | --- |
-| cpu | 56.9 ms (avg 61.1, p95 70.4) | 148.2 ms (avg 153.7, p95 220.5) |
-| update | 12.4 ms | 37.0 ms |
-| submit | 44.5 ms | 111.3 ms |
-| gpu | 4.7 ms | 5.7 ms (avg 5.2, p95 6.0) |
-| frame | | 183.2 ms |
-| obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 | 7271 / 148 / 148 / 7922 |
-| sub | | 403 |
-
-### Settled Field after the layer-index fix
-
-27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. Land has albedo. The console has no `texture_2d_array` sample error. `submit` 31.2 ms beats the per-image 44.5 ms. `keys` is 466, not the 148 from the broken capture: that run had only partly streamed (`dl` 85160 vs 285421, meshes 135 vs 275, tris 994.9k vs 2M). The layer-index fix did not change the batch key. What did cost memory is the packer keeping every source mip buffer and a spare-capacity copy of the array. `tex` 1692 counted both. Heap before this change was about 1075–1532 MB.
-
-| | before #70 (settled) | this capture |
-| --- | --- | --- |
-| cpu | 56.9 ms (avg 61.1, p95 70.4) | 42.4 ms (avg 57.3, p95 87.2) |
-| update | 12.4 ms | 11.2 ms |
-| submit | 44.5 ms | 31.2 ms |
-| gpu | 4.7 ms | 5.2 ms (avg 5.2, p95 5.8) |
-| frame | | 46.2 ms (avg 48.9, p95 65.0) |
-| obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 | 3970 / 466 / 466 / 5123 |
-| sub | | 466 |
-| tex / heap | 455–595 / 1075–1532 MB | 1692 / 3736.2 MB |
-| streaming | | conv 7107.3, dl 285421.3, up 3692.5, compile 530 ms, first edit 19.7 MiB |
-
-The packer now starts at one layer, frees the previous array's mip buffers when a class grows, and compacts back to the live layer count. Once those bytes are in the array, the per-image CPU buffer is released unless a drawn 2D material (blend, water, terrain, helper) still samples it. A full BC7 that replaced a low bitmap is rebatched onto that size class instead of leaving both copies resident. `tex` counts the textures the batches actually sample (the arrays, the layer lookups, and the images that stay 2D), not the packed-away sources.
-
-`Material.clone` JSON-serializes `userData`. The array batch was cloned with `forgeLit` still holding the compressed maps, which is the `Unable to serialize Texture.` flood. The clone pulls those textures out first. Array, layer, and pick textures are stored on non-enumerable fields, so a later serialize does not walk them.
-
-`keys` stays split by array class (size, mips, format, color space, wrap), and by helper, water, terrain, blend, tint, and images that cannot pack. Tint stays in the key. Dump JSON's `keyReasons` and the Profile detail line count those reasons (`array`, `image`, `blend`, `helper`, `water`, `terrain`, `tint`).
-
-### Field after releasing the CPU copies (`137ef86`)
-
-27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on. Heap is back to 1180.8 MB and the serialize warnings are gone. The console instead reports 874 `writeTexture` validation errors, all the same kind: the layout size is 16, 64, 144, 256, 1024, 4096, 9216, 16384, 65536, or 262144 bytes and the buffer is 0 bytes, offset 0, one layer. The targets are BC7 arrays (512² at 2–26 layers, 768² at 2–6 layers, Unorm and sRGB) and plain 2D images (512, 768, 1024). A lot of land looks missing or flat while the field is still streaming. This capture is mid-stream (`textures` 85/116, two still loading, `dl` 146188 against the settled 285421).
-
-| | settled before the memory fix | this capture (streaming) | after streaming settled |
-| --- | --- | --- | --- |
-| cpu | 42.4 ms (avg 57.3, p95 87.2) | 82.8 ms (avg 66.3, p95 89.5) | |
-| update | 11.2 ms | 26.5 ms | |
-| submit | 31.2 ms | 56.9 ms | 44.3 ms |
-| gpu | 5.2 ms | 6.4 ms | |
-| obj / batches / keys / draws | 3970 / 466 / 466 / 5123 | 7331 / 164 / 164 / 7823 | |
-| sub / pick | 466 / 0 | 328 / 1 | |
-| tex / heap | 1692 / 3736.2 MB | 428 / 1180.8 MB | heap stayed at 1180.8 MB |
-| keys | | array 19, image 50, blend 86, helper 2, water 7 | |
-| streaming | conv 7107.3, dl 285421.3, up 3692.5, compile 530 ms | conv 4079, dl 146188.3, up 2084.6, compile 722.5 ms | |
-
-`submit` at 44.3 ms is no better than the per-image 44.5 ms, and worse than the 31.2 ms from the run where the array uploads were valid. The arrays stay on. That 31.2 ms run is the measurement that a valid upload beats 44.5. The 44.3 ms is this bug, not the cost of packing.
-
-What the extra time is: `retireArray` emptied every mip (`Uint8Array(0)`) and did not clear `source.dataReady`, and `settlePackedArrays` released each packed source's CPU buffer before three had uploaded it. `updateTexture` then calls `writeTexture` with that empty buffer. The error is uncaptured (`Uncaptured WebGPU GPUValidationError`), so the call does not throw and three still stores the texture version. A settled, idle frame does not retry the same texture unless something sets `needsUpdate` again. Compact is not per frame. It runs when a batch is rebuilt, and it returns immediately once capacity equals the layer count. There is no per-frame array growth in the render loop. The 874 errors are one pass over every mip of every texture that was still bound with an empty buffer, and the rebuilds that were still running as the field finished (detail BC7, a class that grew) did it again inside `submit`. That is the gap from 31.2 ms to 44.3 ms.
-
-The packer now refuses that write. A buffer is released only after the GPU texture exists (`{ uploaded: true }`), and `dataReady` is cleared before the bytes are dropped. A grow or compact whose CPU chain is already gone copies the live layers with `copyTextureToTexture` and uploads only the new layer, and only when that layer's mip buffers are non-empty. A texture with an empty mip never gets `needsUpdate`. The source bytes stay until the array is on the GPU, then they are dropped, so the heap should stay at or under about 1.5 GB (1180.8 MB on this run).
-
-### Field after the empty-write fix (`a351efc`)
-
-27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. The 0-byte `writeTexture` errors, the serialize warnings, and the missing `array_index` errors are gone. The console has 1265 `copyTextureToTexture` errors instead. `copySize.width` is 6, 3, or 1, which is not a multiple of the BC 4×4 block. Those are the tail mips of a 768 image (768→6, →3, →1). A 512 chain fails the same way at 2 and 1. Each mip was its own command buffer, so one bad mip invalidated that buffer and the grow lost the layers already recorded in it.
-
-| | valid uploads | `137ef86` settled | `a351efc` settled |
-| --- | --- | --- | --- |
-| cpu | 42.4 ms (avg 57.3, p95 87.2) | | 64.0 ms (avg 63.9, p95 77.7) |
-| update | 11.2 ms | | 23.4 ms |
-| submit | 31.2 ms | 44.3 ms | 41.6 ms |
-| gpu | 5.2 ms | | 6.2 ms |
-| obj / batches / keys / draws | 3970 / 466 / 466 / 5123 | | 6973 / 399 / 399 / 8058 |
-| sub | 466 | | 686 |
-| tris / meshes | 2M / 275 | | 3.4M / 285 |
-| tex / heap | 1692 / 3736.2 MB | 428 / 1180.8 MB (mid-stream) | 1042 / 1927.1 MB |
-| keys | | array 19, image 50, blend 86, helper 2, water 7 | array 45, image 163, blend 173, helper 6, water 12 |
-| compile | 530 ms | 722.5 ms | 442.6 ms |
-
-`submit` 41.6 ms is still above the 31.2 ms bar, and heap 1927.1 MB is above 1.5 GB. `image` (163) and `blend` (173) are most of the 399 keys.
-
-The copy now uses the physical block size, `max(4, ceil(mip / 4) * 4)`, so 6 becomes 8 and 3 or 1 becomes 4. Every mip and every layer of one grow goes into one encoder, and only after those extents are computed. A failed grow disposes the destination it just allocated and leaves the previous array in place, so the two do not both stay live. The render loop does not grow again on its own. A refused image keeps its own key until the next batch rebuild tries once more. That retry is what turned later images into the 163 `image` keys: the class's CPU copy had already been released, the GPU copy threw on the tail mip, and the image was not recorded.
-
-Blend stays per image. A blend sample reads the base map, the moss map, and the moss ORM on two UV sets with a vertex mask. Putting a0, a1, and c0 into arrays means a new blend shader, not a one-line eligibility change, so it is not in this fix. Those 173 keys are 43% of 399. They would fall by however many blend images share a size class. They would not fall to 1.
-
-Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on. While it streams and after it settles, the console should have no `copyTextureToTexture` block-size error, no 0-byte `writeTexture`, no `Unable to serialize Texture.`, and no `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo during streaming and up close. Water should not stay on the flat teal stand-in. After streaming settles, `submit` should be in the 31 ms range, clearly under 44.5 ms, and heap at or under about 1.5 GB. `image` should drop as the 768, 384, and 96 classes join their arrays. `blend` stays. `keys` and `batches` stay equal. `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
-
-### Field after the block-size copy (`3b7eb52`)
-
-27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. No WebGPU validation errors. The console noise that remains is from browser extensions. Gizmos and panning feel right. Two new regressions: textures sit on the wrong models and then pop to the right ones, and the terrain slides as the camera moves. Memory is over the bar again.
-
-| | `a351efc` settled | `3b7eb52` settled |
-| --- | --- | --- |
-| cpu | 64.0 ms (avg 63.9, p95 77.7) | 49.5 ms (avg 61.9, p95 86.5) |
-| update | 23.4 ms | 12.9 ms |
-| submit | 41.6 ms | 36.6 ms |
-| gpu | 6.2 ms | 6.5 ms |
-| obj / batches / keys / draws | 6973 / 399 / 399 / 8058 | 5349 / 481 / 481 / 6638 |
-| sub | 686 | 480 |
-| tris / meshes | 3.4M / 285 | 2M / 248 |
-| tex / heap | 1042 / 1927.1 MB | 1278 / 3348.7 MB |
-| keys | array 45, image 163, blend 173, helper 6, water 12 | array 52, image 216, blend 201, helper 6, water 6 |
-| compile | 442.6 ms | 494.8 ms |
-
-At load the forge memory report was gpu 265 geom / 1685 tex, heap 1886 MB. `image` rose from 163 to 216 instead of falling. Dump JSON now includes `imagePack`: one entry per image that did not join an array, with the reason (`not-compressed`, `mip-bytes:<level>:<got>/<need>`, `gpu-copy`, `gpu-not-ready`, `upload`, `depth-cap`, `empty-mip`, `empty-layer`, `cpu-write`). A mip that is longer than one layer is padding and still packs. A shorter mip cannot.
-
-The wrong texture was the previous array being disposed while materials still sampled it. A grow copies layers `0..depth-1` in order and does not renumber a live image. The new array is published only after that image's layer is written. The previous GPU texture stays until `releaseSwapped`, which runs after every material has been pointed at the replacement in the same turn. The layer lookup is uploaded before it replaces the old one, and an instance whose layer was not written is hidden until it is.
-
-The terrain slide is the shared `modelWorldMatrix` node. It is one uniform for every material, so a later object's matrix was what the field sampled, and that matrix follows the camera. The field now samples a matrix copied from its own mesh in `onBeforeRender`, and that mesh is pinned back to the matrix it was authored with. Terrain and ground keep `|terrain` or `|ground` on the batch key, so they are not appended into a BatchedMesh with other models.
-
-Check: same build and hard-reload as above. While the field streams, each model should show its own texture, not another model's, and it should not pop later. Pan and fly: the terrain stays put. No WebGPU validation errors. After it settles, `submit` should be in the 31 ms range and clearly under 44.5 ms, heap at or under about 1.5 GB. Dump JSON `imagePack.images` lists any image that stayed on its own key and why. `keys` and `batches` stay equal. Gizmos, panning, picking, and selection stay as they are.
 
 ## Frustum and draw distance
 
@@ -530,7 +407,7 @@ Use the viewport status label to confirm the backend. A WebGPU run starts with `
 
 ## Field camera-path benchmark
 
-The Profile panel has a **Field benchmark** button. It is hidden until Profile is on. Nothing in the fly runs while that panel is closed and the page was not opened with `?benchmark=1`. Profile itself stays off unless the checkbox or `?profile=1` is set. The benchmark does not remember itself in local storage.
+On `render-known-good` this fly runs on the pre-#70 renderer, so the JSON is a correct-rendering baseline. The Profile panel has a **Field benchmark** button. It is hidden until Profile is on. Nothing in the fly runs while that panel is closed and the page was not opened with `?benchmark=1`. Profile itself stays off unless the checkbox or `?profile=1` is set. The benchmark does not remember itself in local storage.
 
 The path is the closed loop from the `perf-render-bundles` branch (`field-loop-160m`). Eight sides are 160 m on world XZ. The last segment returns to the origin on the diagonal. The eye is at y = 190, looking 48 m ahead at y = 150, at 90 m/s. The camera steps 1/60 s per frame, so the same machine takes the same number of samples. Orbit is restored when the loop ends.
 

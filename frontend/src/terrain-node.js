@@ -16,6 +16,9 @@ import {
   max,
   mix,
   mod,
+  modelWorldMatrix,
+  normalLocal,
+  positionWorld,
   pow,
   reference,
   step,
@@ -26,21 +29,17 @@ import {
 } from "three/tsl";
 
 export function attachTerrainColor(material) {
-  const worldUniform = material && material.userData && material.userData.terrainWorldMatrix;
-  if (!material || material.colorNode || !material.map || !worldUniform) return material;
+  if (!material || material.colorNode || !material.map) return material;
   const columns = reference("value", "float", material.userData.terrainColsUniform);
   const repeat = reference("value", "float", material.userData.terrainRepeatUniform);
   const debug = reference("value", "float", material.userData.terrainDebugUniform);
   const missing = reference("value", "float", material.userData.terrainLayerUniform);
   const atlasTexture = material.userData.terrainMap || material.map;
   // An explicit uv node. texture() with none reads attribute "uv", which
-  // terrain tiles do not have. World position comes from this mesh's own
-  // matrix, copied in onBeforeRender. The shared modelWorldMatrix node is one
-  // uniform for every material, and a later object's matrix was sliding the field.
+  // terrain tiles do not have.
   const atlas = texture(atlasTexture, vec2(0, 0));
-  const worldMatrix = reference("value", "mat4", worldUniform);
-  const world = worldMatrix.mul(attribute("position", "vec3")).xyz;
-  const normal = attribute("normal", "vec3").transformDirection(worldMatrix).normalize();
+  const world = positionWorld;
+  const normal = normalLocal.transformDirection(modelWorldMatrix).normalize();
 
   const terrainCell = Fn(([worldUv, slot]) => {
     const columnsSafe = max(columns, float(1));
