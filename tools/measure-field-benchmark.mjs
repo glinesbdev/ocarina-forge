@@ -35,6 +35,10 @@ while (!flight.done && steps < 5000) {
       heapBytes: 1000 + steps,
       draws: 10,
       batches: 4,
+      tilesLoaded: 0,
+      tilesVisible: 0,
+      tilesBytes: 0,
+      bakeMs: 0,
       gpuMs: steps % 60 === 0 ? null : 0.5,
     });
   }
@@ -55,6 +59,8 @@ const payload = {
 const axisSides = sides.slice(0, -1);
 const closed = pose.done === true && pose.x === 0 && pose.z === 0;
 const sidesOk = axisSides.every((length) => length === 160);
-payload.ok = closed && sidesOk && summary.submitMs.n > 0 && summary.gpuMs.n < summary.frames;
+payload.tiles = { enabled: false, loaded: 0, visible: 0, cachedBytes: 0, bakeMs: 0 };
+payload.ok = closed && sidesOk && summary.submitMs.n > 0 && summary.gpuMs.n < summary.frames
+  && summary.tilesLoaded.n > 0 && summary.bakeMs.n > 0;
 console.log(JSON.stringify(payload, null, 2));
 if (!payload.ok) process.exitCode = 1;

@@ -126,12 +126,14 @@ The dense cell split as build 26 ms, join+instance 88 ms, simplify 59 ms, meshop
 
 ## Phases
 
-Each phase is a toggle and a measurement. The bar is the Field numbers already in `docs/performance.md` (44.5 ms at 1004 keys, 31.2 ms at 466 keys on the valid array upload). This note does not add a tiles runtime.
+Each phase is a toggle and a measurement. The bar is a Field fly with correct rendering. The known-good path after the texture-array rollback is the one to beat: CPU submit around 26–30 ms, about 1000 batches, GPU near 1 ms. Phase 0 is the camera-path benchmark. The experimental tileset behind **Tiles (experimental)** and `?tiles=1` bakes static scenery, streams it with core `TilesRenderer` plus `GLTFExtensionsPlugin`, and reads `_feature_id_0` in the existing pick pass. That is the work the list below split across phases 1–3. It stays off unless the checkbox or the query flag is set.
 
-0. **Measure.** The Field camera-path benchmark is the **Field benchmark** button on the Profile panel, and `?benchmark=1`. It flies the fixed 160 m loop and prints JSON (`submit`, `update`, `priority`, `labels`, `cull`, `writeTex`, `indirectFills`, `lodFlips`, heap avg/final, `capped`, `draws`, `batches`). How to run it and read the JSON is in [performance.md](performance.md#field-camera-path-benchmark). It stays off until Profile or that query flag. No bake and no tiles.
-1. **Bake one cell.** Offline glTF for one cell from scene data, written as an editor cache, not into a mod. Record seconds and bytes next to the synthetic table. No viewport change.
-2. **Stream that cell.** `TilesRenderer` plus `GLTFExtensionsPlugin` only, tileset URL under a directory, LRU raised to the editor's budget, parent rotation for `gltfUpAxis: y`. Stock materials first. Blend uses the existing TSL hook. Terrain, water, and dynamic actors stay. `BatchedTilesPlugin` is not registered.
-3. **Pick and edit.** The id node reads `_feature_id_0`. Selecting an actor pulls that tile back to individual instances, then an incremental rebake writes the cell again.
+0. **Measure.** The Field camera-path benchmark is the **Field benchmark** button on the Profile panel, and `?benchmark=1`. It flies the fixed 160 m loop and prints JSON (`submit`, `update`, `priority`, `labels`, `cull`, `writeTex`, `indirectFills`, `lodFlips`, heap avg/final, `capped`, `draws`, `batches`, and the tile counters `tilesLoaded`, `tilesVisible`, `tilesBytes`, `bakeMs`). How to run it and read the JSON is in [performance.md](performance.md#field-camera-path-benchmark). It stays off until Profile or that query flag. With Tiles off the tile counts are zero.
+1. **Bake.** Static scenery is grouped into 256 m cells. Each cell is instanced, joined per material image, meshopt-compressed, and given one coarser HLOD. The cache key is the cell content hash, so an unchanged cell is not written again. Bytes below are still the synthetic spike, not Field.
+2. **Stream.** `TilesRenderer` plus `GLTFExtensionsPlugin` only. The tileset URL is `/api/scene-tiles/<hash>/tileset.json`. The LRU is raised to 2 GB at the call site. The tileset sets `gltfUpAxis` to `z` so the library does not apply the +90° X correction it uses for `y`. On load, materials are rebound to the Forge maps already in the scene, including the blend TSL hook when the live material has one. Terrain, water, and dynamic actors stay. `BatchedTilesPlugin` is not registered.
+3. **Pick and edit.** The id node reads `_feature_id_0` before the batch or instance id. Selecting an actor hides that cell's leaf and HLOD and shows the cell's per-actor objects. A saved transform rebakes the cells whose hash changed.
+
+Still open: HLOD quality on a real Field cell, and a per-actor hide inside a merged mesh instead of swapping the whole cell back to instances.
 
 ## Risks
 
@@ -139,7 +141,7 @@ Each phase is a toggle and a measurement. The bar is the Field numbers already i
 - Registering any plugin in the WebGL table puts a WebGL call on the WebGPU device. The batching plugin already threw in the spike.
 - The default LRU (about 430 MB) is smaller than the Field working set described in `docs/performance.md`. Raise it at the call site.
 - Actor ids outside [-1, 1] are skipped by meshopt quantize. They survived as uncompressed floats. Scaling them into that range would destroy the id.
-- A tileset URL at the host root hits the base-path join. Use a directory, or take the upstreamable fix.
+- A tileset URL at the host root hits the base-path join. The bake is served under `/api/scene-tiles/<hash>/`. The library is not patched.
 - The first tiles render on this SwiftShader recorded 0 draws and a `popErrorScope` error, and pixel readback never returned. The second render submitted the mesh. That sequence is this software GPU. It is not a change to make inside `TilesRenderer`.
 
 ## What stays put

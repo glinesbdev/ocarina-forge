@@ -54,6 +54,7 @@ from ocarina_forge.grounddebug import query_ground
 from ocarina_forge.lighting import lighting_report
 from ocarina_forge.surface_pack import load_or_build_surface
 from ocarina_forge.scene_preview import corrected_terrain_path, prepare_scene_terrain, preview_bank, preview_path, terrain_fit_pending
+from ocarina_forge.scene_tiles import bake_scene_tiles, tile_file
 from ocarina_forge.shared_models import VERSION as SHARED_MODEL_VERSION, read_shared_texture, shared_model_path, shared_texture_path
 from ocarina_forge.warm import scene_warm_queue
 
@@ -1519,6 +1520,21 @@ def download_zip():
     if not zips:
         raise BancError("No zip has been built yet. Build the mod with the zip option first.", "not_found")
     return FileResponse(zips[-1], filename=zips[-1].name, media_type="application/zip")
+
+
+@app.post("/api/scene-tiles/bake")
+async def scene_tiles_bake(body: dict | None = None):
+    body = body or {}
+    dump = _open_dump()
+    return await asyncio.to_thread(bake_scene_tiles, dump, body.get("actors") or [])
+
+
+@app.get("/api/scene-tiles/{key}/{file_path:path}")
+def scene_tile_file(key: str, file_path: str):
+    path = tile_file(key, file_path)
+    note_access(path)
+    media = "application/json" if path.suffix == ".json" else "model/gltf-binary"
+    return FileResponse(path, media_type=media)
 
 
 @app.post("/api/import/ato")

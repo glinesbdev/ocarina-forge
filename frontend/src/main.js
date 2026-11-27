@@ -452,6 +452,15 @@ if (profileBox) {
     }
   });
 }
+const tilesBox = $("show-tiles");
+if (tilesBox && viewport.setTiles) {
+  const tilesOn = new URLSearchParams(window.location.search).get("tiles") === "1";
+  tilesBox.checked = tilesOn;
+  if (tilesOn) viewport.setTiles(true);
+  tilesBox.addEventListener("change", () => {
+    viewport.setTiles(tilesBox.checked);
+  });
+}
 const benchQuery = new URLSearchParams(window.location.search).get("benchmark") === "1";
 if (benchQuery && viewport.startFieldBenchmark) {
   if (profileBox) {

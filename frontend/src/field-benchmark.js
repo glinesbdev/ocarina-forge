@@ -92,6 +92,7 @@ const SUMMARY_FIELDS = [
   "writeTex", "indirectFills", "lodFlips", "heapBytes", "draws", "batches",
   "cpuMs", "gpuMs", "flyMs", "textureMs", "pipelines", "versions", "binds",
   "geomBytes", "bc7Bytes", "objects",
+  "tilesLoaded", "tilesVisible", "tilesBytes", "bakeMs",
 ];
 
 function finite(value) {

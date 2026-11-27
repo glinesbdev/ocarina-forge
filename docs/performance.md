@@ -435,6 +435,15 @@ The JSON is printed in the DevTools console and copied to the clipboard. After t
 | `heap.avg` / `heap.final` | JS heap during the fly, and the last sample |
 | `capped` | Resident cap count when the fly ended |
 | `geomBytes` / `bc7Bytes` | Geometry and BC7 bytes from the resident budget at the end |
+| `summary.tilesLoaded` / `tilesVisible` / `tilesBytes` | Tiles resident, tiles in frame, and LRU bytes. All zero while Tiles is off |
+| `summary.bakeMs` / `tiles.bakeMs` | Wall time of the last scenery bake. Zero until a bake runs |
+| `tiles.enabled` | Whether the experimental tileset was on for the fly |
+
+## Tiles (experimental)
+
+Static scenery on a Static banc can be baked into a quadtree and drawn with `TilesRenderer`. The checkbox is **Tiles (experimental)**, and `?tiles=1` turns it on. It stays off otherwise, and off does not construct the tiles renderer. Dynamic actors, terrain, water, lights, collision, and effects stay on the current batches. Selecting an actor hides that tile and shows the actor's own objects, so the gizmo and undo keep working. Saving a transform rebakes the cells whose content hash changed.
+
+The bake is an editor cache. Compare a tiles-off fly with a tiles-on fly on the same Field load. `summary.draws` and `summary.batches` are the numbers that should move. `tiles.bakeMs` is the bake, not the frame.
 
 The HUD, while Profile is on, adds `writeTex`, `pipelines`, `versions`, `binds`, `priority`, `labels`, `lod`, `indirect`, `geom`, and `bc7`. Those lines are absent when a sample has no counters. With Profile off, `writeTexture` and `createBindGroup` are not wrapped.
 

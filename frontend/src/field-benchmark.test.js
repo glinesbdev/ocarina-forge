@@ -60,6 +60,18 @@ test("the benchmark stays off unless Profile or the query flag starts it", () =>
   assert.doesNotMatch(viewport, /render-bundles/);
   assert.doesNotMatch(viewport, /blend-array/);
   assert.match(main, /get\("benchmark"\) === "1"/);
+  assert.match(main, /get\("tiles"\) === "1"/);
+  assert.match(viewport, /import\("\.\/scene-tiles-runtime\.js"\)/);
+  assert.doesNotMatch(viewport, /from "3d-tiles-renderer/);
+  assert.match(viewport, /tileHides\(/);
+  const runtime = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");
+  assert.match(runtime, /GLTFExtensionsPlugin/);
+  assert.doesNotMatch(runtime, /BatchedTilesPlugin/);
+  assert.doesNotMatch(runtime, /TilesFadePlugin/);
+  assert.doesNotMatch(runtime, /MeshFeatures/);
+  assert.match(runtime, /maxBytesSize = TILE_CACHE_BYTES/);
+  assert.match(html, /Tiles \(experimental\)/);
+  assert.doesNotMatch(html, /id="show-tiles"[^>]*checked/);
   assert.doesNotMatch(html, /id="show-profile"[^>]*checked/);
   assert.doesNotMatch(main, /ocarinaforge\.benchmark/);
 });
