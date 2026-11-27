@@ -65,10 +65,16 @@ test("the benchmark stays off unless Profile or the query flag starts it", () =>
   assert.doesNotMatch(viewport, /from "3d-tiles-renderer/);
   assert.match(viewport, /tileHides\(/);
   const runtime = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");
-  assert.match(runtime, /GLTFExtensionsPlugin/);
+  assert.match(runtime, /3d-tiles-renderer\/three/);
+  assert.match(runtime, /setMeshoptDecoder/);
+  assert.match(runtime, /KTX2Loader/);
+  assert.match(runtime, /addHandler/);
+  assert.doesNotMatch(runtime, /import\(["'][^"']*GLTFExtensionsPlugin/);
+  assert.doesNotMatch(runtime, /from ["'][^"']*GLTFExtensionsPlugin/);
   assert.doesNotMatch(runtime, /BatchedTilesPlugin/);
   assert.doesNotMatch(runtime, /TilesFadePlugin/);
   assert.doesNotMatch(runtime, /MeshFeatures/);
+  assert.doesNotMatch(runtime, /TextureReadUtility/);
   assert.match(runtime, /maxBytesSize = TILE_CACHE_BYTES/);
   assert.match(html, /Tiles \(experimental\)/);
   assert.doesNotMatch(html, /id="show-tiles"[^>]*checked/);

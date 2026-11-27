@@ -1,15 +1,21 @@
 /**
  * 3D Tiles for one baked scene. Imported only after the tiles toggle is on.
- * The core renderer and the glTF extension plugin are the only registrations.
- * Batching, fade, and metadata plugins are WebGL and stay out.
+ *
+ * The glTF loader is ours. `GLTFExtensionsPlugin` always imports the mesh
+ * features reader, and that file constructs a WebGLRenderer. The WebGPU build
+ * of three does not export that class, so the production build fails. Feature
+ * ids stay ordinary `_feature_id_0` attributes. The pick pass reads them
+ * directly and does not use the metadata extension.
  */
 
 const TILE_CACHE_BYTES = 2 * 1024 ** 3;
+const GLTF_FILE = /\.(gltf|glb)$/i;
 
 export async function createTileLayer({ url, scene, camera, renderer, pickLayer, prepare }) {
-  const { TilesRenderer } = await import("3d-tiles-renderer/src/three/renderer/tiles/TilesRenderer.js");
-  const { GLTFExtensionsPlugin } = await import("3d-tiles-renderer/src/three/plugins/GLTFExtensionsPlugin.js");
-  const { LRUCache } = await import("3d-tiles-renderer/src/core/renderer/utilities/LRUCache.js");
+  const { TilesRenderer } = await import("3d-tiles-renderer/three");
+  const { LRUCache } = await import("3d-tiles-renderer/core");
+  const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+  const { KTX2Loader } = await import("three/addons/loaders/KTX2Loader.js");
   const { MeshoptDecoder } = await import("meshoptimizer/decoder");
   await MeshoptDecoder.ready;
   const tiles = new TilesRenderer(url);
@@ -17,7 +23,7 @@ export async function createTileLayer({ url, scene, camera, renderer, pickLayer,
   cache.minBytesSize = TILE_CACHE_BYTES / 2;
   cache.maxBytesSize = TILE_CACHE_BYTES;
   tiles.lruCache = cache;
-  tiles.registerPlugin(new GLTFExtensionsPlugin({ meshoptDecoder: MeshoptDecoder }));
+  const releaseLoaders = installTileLoaders(tiles, MeshoptDecoder, renderer);
   tiles.setCamera(camera);
   tiles.setResolutionFromRenderer(camera, renderer);
   tiles.addEventListener("load-model", (event) => {
@@ -61,8 +67,26 @@ export async function createTileLayer({ url, scene, camera, renderer, pickLayer,
       });
     },
     dispose() {
+      releaseLoaders();
       tiles.dispose();
       tiles.group.removeFromParent();
     },
+  };
+}
+
+function installTileLoaders(tiles, meshoptDecoder, renderer) {
+  const loader = new GLTFLoader(tiles.manager);
+  loader.setMeshoptDecoder(meshoptDecoder);
+  const ktx2 = new KTX2Loader(tiles.manager).setTranscoderPath("/basis/");
+  try {
+    if (renderer && typeof ktx2.detectSupport === "function") ktx2.detectSupport(renderer);
+  } catch {
+    // detectSupport reads device features. Geometry still parses if it throws.
+  }
+  loader.setKTX2Loader(ktx2);
+  tiles.manager.addHandler(GLTF_FILE, loader);
+  return () => {
+    tiles.manager.removeHandler(GLTF_FILE);
+    if (typeof ktx2.dispose === "function") ktx2.dispose();
   };
 }
