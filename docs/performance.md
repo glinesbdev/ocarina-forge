@@ -543,4 +543,6 @@ No Field was loaded here. Headless Chrome, SwiftShader, 27 Nov 2026, synthetic g
 | Bundles off | 5.0 ms | 8.3 ms | 1081 | 1081 draws, 51841 triangles | 55.8 MB |
 | Bundles on | 2.4 ms | 3.6 ms | 1 (bundled ranges are not counted) | 1081 draws, 51841 triangles, 16.4 ms | 57.8 MB |
 
-The replay was faster on this grid and the heap did not double. That is not the Field bar (submit well below 29.7 ms, heap at or under about 1 GB, on Bradyn's machine). LOD that changes a cell's visible ranges re-records it, and this page never did that. Retest steps are in the rendering note.
+The replay was faster on this grid and the heap did not double. That is not the Field bar (submit well below 29.7 ms, heap at or under about 1 GB, on Bradyn's machine). LOD that changes a cell's visible ranges re-records it, and this page never did that.
+
+Bradyn's Field fly on this branch, before the placement fix: bundles off drew in the right place, bundles on did not. A static `BundleGroup` skips the matrices-texture upload, so `setMatrixAt` after the record never moves the instance. Cells are dynamic now. The same fly was capped (geom + bc7 about 1.52 GB, hard cap 1.5 GB, 569–596 models held as boxes). That is a different resident set from the still view at heap 902 MB. `update` was about 30 ms on both sides. The benchmark JSON now splits that timer. Retest steps are in the rendering note.

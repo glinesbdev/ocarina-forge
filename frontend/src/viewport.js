@@ -51,6 +51,7 @@ import { buildCapture, countTextures, createProfileWindow, formatProfileHud, rec
 import {
   aabbIntersectsFrustum,
   boxReady,
+  bundleBindingStamp,
   cellFromBatchKey,
   cellOfPosition,
   createFlight,
@@ -3259,6 +3260,8 @@ let convertSlots = 8;
   let previewPickDirty = false;
   let placeholderPickDirty = false;
   let statPickUploads = 0;
+  let statIndirectFills = 0;
+  let statLodFlips = 0;
 
   function bumpCull() {
     cullSerial += 1;
@@ -3303,7 +3306,10 @@ let convertSlots = 8;
     if (group) return group;
     group = new THREE.BundleGroup();
     group.name = `forge-cell-${cell}`;
-    group.static = true;
+    // static bundles skip per-object binding updates, including the matrices
+    // texture. A later setMatrixAt then never reaches the GPU. Dynamic
+    // bundles still replay the draws; they upload that texture in place.
+    group.static = false;
     group.frustumCulled = false;
     group.matrixAutoUpdate = false;
     group.userData.forgeCell = cell;
@@ -3322,6 +3328,20 @@ let convertSlots = 8;
     const group = ensureBundleGroup(cell);
     if (mesh.parent !== group) group.add(mesh);
     touchBundle(cell);
+  }
+
+  // A replaced matrices or indirect texture, or a mesh hidden by the scene
+  // preview, is invisible to a bundle that was already recorded.
+  function refreshBundleBindings() {
+    if (!bundlesActive()) return;
+    for (const batch of batches) {
+      const mesh = batch && batch.mesh;
+      if (!mesh || !mesh.parent || mesh.parent.isBundleGroup !== true) continue;
+      const stamp = bundleBindingStamp(mesh);
+      if (mesh.userData.forgeBundleStamp === stamp) continue;
+      mesh.userData.forgeBundleStamp = stamp;
+      touchBundle(cellFromBatchKey(batch.key));
+    }
   }
 
   function pruneBundleGroups() {
@@ -3502,9 +3522,10 @@ let convertSlots = 8;
         const broken = inCell && entry.key === selected;
         const show = broken ? false : (inCell ? entry.pivot.visible && lod === slot.lod : probe.inFrustum && lod === slot.lod);
         if (slot.shown !== show) {
-          const wasHidden = slot.shown === false;
           slot.shown = show;
-          if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
+          statLodFlips += 1;
+          // The instance matrix was written when the slot was created or moved.
+          // Writing it again uploads the whole matrices texture for a LOD pop.
           slot.mesh.setVisibleAt(slot.index, show);
           const batch = slot.batchKey ? batchFiller.get(slot.batchKey) : null;
           if (batch) batch.pickIdsDirty = true;
@@ -3680,7 +3701,14 @@ let convertSlots = 8;
       // r187 draws the merged ranges. Filling them after previousRender is
       // too late for this frame, and the WebGPU onBeforeRender does not
       // fill them at all.
-      if (webgpuBatch) scheduleMergedDraws(mesh, cameraArg, geometry, shown);
+      if (webgpuBatch) {
+        const fills = mesh._visibilityChanged === true
+          || mesh.perObjectFrustumCulled === true
+          || mesh.sortObjects === true
+          || !(mesh._mergedDrawCount > 0);
+        scheduleMergedDraws(mesh, cameraArg, geometry, shown);
+        if (fills) statIndirectFills += 1;
+      }
       previousRender(rendererArg, sceneArg, cameraArg, geometry, shown, ...rest);
     };
     mesh.layers.enable(PICK_LAYER);
@@ -4202,8 +4230,11 @@ let convertSlots = 8;
         const position = part.geometry.getAttribute && part.geometry.getAttribute("position");
         if (!position || !position.count) continue;
         const loose = bundlesActive() && entry.key === selected;
+        // Transparent draws sort by camera and rewrite the indirect map every
+        // frame. A replayed bundle keeps the old draw ranges, so those meshes
+        // stay on the direct path.
         const groupKey = groupedBatchKey(part.batchKey, {
-          enabled: bundlesActive(),
+          enabled: bundlesActive() && !(part.material && part.material.transparent),
           x: entry.pivot.position.x,
           z: entry.pivot.position.z,
           loose,
@@ -6926,6 +6957,14 @@ uniform float terrainLayerMissing;`
       versions: gpuProfile && gpuProfile.last ? gpuProfile.last.versions : 0,
       binds: gpuProfile && gpuProfile.last ? gpuProfile.last.binds : 0,
       bundleRecords: counters.bundleRecords,
+      preCullMs: lastCpu.preCullMs,
+      flyMs: lastCpu.flyMs,
+      priorityMs: lastCpu.priorityMs,
+      textureMs: lastCpu.textureMs,
+      labelsMs: lastCpu.labelsMs,
+      gpuSampleMs: lastCpu.gpuSampleMs,
+      indirectFills: lastCpu.indirectFills,
+      lodFlips: lastCpu.lodFlips,
       geomBytes: assetBudgetCache ? assetBudgetCache.geometry : null,
       bc7Bytes: assetBudgetCache ? assetBudgetCache.bc7 : null,
     });
@@ -7083,6 +7122,8 @@ uniform float terrainLayerMissing;`
   function tick() {
     frameHandle = 0;
     if (!running) return;
+    statIndirectFills = 0;
+    statLodFlips = 0;
     const tickAt = performance.now();
     const gap = lastTickAt ? tickAt - lastTickAt : 0;
     lastTickAt = tickAt;
@@ -7090,6 +7131,7 @@ uniform float terrainLayerMissing;`
     const dt = Math.min(timer.getDelta(), 0.05);
     const benchmarkFlying = stepBenchmark(dt);
     const flying = benchmarkFlying ? false : updateFly(dt);
+    const flyMs = performance.now() - tickAt;
     const damped = benchmarkFlying || looking ? false : ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
     if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
     const now = performance.now();
@@ -7113,6 +7155,8 @@ uniform float terrainLayerMissing;`
       lastLoadDirection.copy(loadForward);
       syncLabels();
     }
+    const priorityStart = performance.now();
+    let priorityMs = 0;
     if (!priorityAnchored || cameraNeedsPriorityUpdate(
       { position: priorityPos, direction: priorityDir },
       { position: camera.position, direction: loadForward },
@@ -7121,17 +7165,20 @@ uniform float terrainLayerMissing;`
       priorityDir.copy(loadForward);
       priorityAnchored = true;
       prioritizeLoad();
+      priorityMs = performance.now() - priorityStart;
     }
     const updateMs = performance.now() - tickAt;
     const cullStart = performance.now();
     syncBatchVisibility();
     const cullMs = performance.now() - cullStart;
     const tailStart = performance.now();
+    const textureStart = performance.now();
     const parseDetail = detailParses.shift();
     if (parseDetail) parseDetail();
     if (detailParses.length) requestRender();
     updateTextureDetail(now, Boolean(parseDetail));
     repackDetailedTextures();
+    const textureMs = performance.now() - textureStart;
     guardMissingUv();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
@@ -7145,6 +7192,7 @@ uniform float terrainLayerMissing;`
     const submitStart = performance.now();
     if (profiling) frameTimer.beginFrame();
     pinSurfaceMeshes();
+    refreshBundleBindings();
     try {
       renderer.render(scene, camera);
     } finally {
@@ -7153,6 +7201,7 @@ uniform float terrainLayerMissing;`
     }
     const afterStart = performance.now();
     flushTextureCpuRelease();
+    const gpuSampleStart = performance.now();
     if (gpuProfile) {
       const materials = [];
       for (const batch of batches) materials.push(batch.mesh.material);
@@ -7169,7 +7218,10 @@ uniform float terrainLayerMissing;`
         loading: pendingLoads > 0,
       });
     }
+    const gpuSampleMs = performance.now() - gpuSampleStart;
+    const labelsStart = performance.now();
     labels.render(scene, camera);
+    const labelsMs = performance.now() - labelsStart;
     const extra = performance.now() - afterStart;
     const roundMs = (value) => Math.max(0, Math.round(value * 100) / 100);
     lastCpu = {
@@ -7177,6 +7229,14 @@ uniform float terrainLayerMissing;`
       cullMs: roundMs(cullMs),
       submitMs: roundMs(submitMs),
       cpuMs: roundMs(updateMs + updateTail + cullMs + submitMs + extra),
+      preCullMs: roundMs(updateMs),
+      flyMs: roundMs(flyMs),
+      priorityMs: roundMs(priorityMs),
+      textureMs: roundMs(textureMs),
+      labelsMs: roundMs(labelsMs),
+      gpuSampleMs: roundMs(gpuSampleMs),
+      indirectFills: statIndirectFills,
+      lodFlips: statLodFlips,
     };
     const again = benchmarkRun != null || keepRendering({
       flying,

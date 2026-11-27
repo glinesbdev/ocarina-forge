@@ -53,6 +53,18 @@ export function materialBatchKey(key) {
   return raw.slice(0, cut);
 }
 
+/**
+ * Identity of the GPU resources a recorded bundle bound for one mesh.
+ * A new matrices, indirect, or color texture is a new bind group. A visibility
+ * change has to be re-recorded, because a bundle ignores a later `visible` flag.
+ * Same-texture matrix edits are not in this stamp: those upload in place.
+ */
+export function bundleBindingStamp(mesh) {
+  const id = (texture) => (texture && texture.uuid) || "";
+  const visible = mesh && mesh.visible === false ? 0 : 1;
+  return `${id(mesh && mesh._matricesTexture)}|${id(mesh && mesh._indirectTexture)}|${id(mesh && mesh._colorsTexture)}|${visible}`;
+}
+
 export function cellFromBatchKey(key) {
   const raw = String(key || "").split("\u0000")[0];
   const at = raw.lastIndexOf(CELL_MARK);
@@ -225,7 +237,9 @@ export function createFlight(spec = FIELD_FLIGHT) {
 
 const SUMMARY_FIELDS = [
   "cpuMs", "updateMs", "cullMs", "submitMs", "gpuMs",
-  "gpuDraws", "draws", "bundleRecords", "writeTex", "pipelines", "versions", "binds",
+  "preCullMs", "flyMs", "priorityMs", "textureMs", "labelsMs", "gpuSampleMs",
+  "gpuDraws", "draws", "bundleRecords", "writeTex", "indirectFills", "lodFlips",
+  "pipelines", "versions", "binds",
   "heapBytes", "geomBytes", "bc7Bytes",
 ];
 

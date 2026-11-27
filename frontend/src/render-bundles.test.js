@@ -12,6 +12,7 @@ import {
   emptyBox,
   expandBox,
   groupedBatchKey,
+  bundleBindingStamp,
   materialBatchKey,
   nominalCellBox,
   streamSettled,
@@ -95,6 +96,24 @@ test("the viewport toggle defaults off and the benchmark is on the profile panel
   assert.match(main, /ocarinaforge\.renderBundles/);
   assert.match(main, /setRenderBundles/);
   assert.match(viewport, /bundlesSupported\(\)/);
+  assert.match(viewport, /group\.static = false/);
+  assert.match(viewport, /refreshBundleBindings/);
+});
+
+test("a bundle re-records when its texture or visibility changes", () => {
+  const mesh = {
+    visible: true,
+    _matricesTexture: { uuid: "matrices-a" },
+    _indirectTexture: { uuid: "indirect-a" },
+    _colorsTexture: { uuid: "colors-a" },
+  };
+  const first = bundleBindingStamp(mesh);
+  mesh._matricesTexture = { uuid: "matrices-b" };
+  assert.notEqual(bundleBindingStamp(mesh), first);
+  mesh._matricesTexture = { uuid: "matrices-a" };
+  assert.equal(bundleBindingStamp(mesh), first);
+  mesh.visible = false;
+  assert.notEqual(bundleBindingStamp(mesh), first);
 });
 
 test("benchmark summary reports avg and p95 and skips null gpu samples", () => {

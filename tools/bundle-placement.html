@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Bundle placement</title>
+</head>
+<body>
+  <script type="module">
+    import * as THREE from "/three/three.webgpu.js";
+
+    function centroid(bytes, width, height, match) {
+      let count = 0;
+      let x = 0;
+      let y = 0;
+      for (let row = 0; row < height; row += 1) {
+        for (let col = 0; col < width; col += 1) {
+          const index = (row * width + col) * 4;
+          if (!match(bytes[index], bytes[index + 1], bytes[index + 2])) continue;
+          count += 1;
+          x += col;
+          y += row;
+        }
+      }
+      if (!count) return { count: 0, x: null, y: null };
+      return { count, x: Math.round((x / count) * 10) / 10, y: Math.round((y / count) * 10) / 10 };
+    }
+
+    const isRed = (r, g, b) => r > 180 && g < 80 && b < 80;
+    const isGreen = (r, g, b) => g > 180 && r < 80 && b < 80;
+    const summarize = (bytes, width, height) => ({
+      red: centroid(bytes, width, height, isRed),
+      green: centroid(bytes, width, height, isGreen),
+    });
+    const close = (a, b) => Boolean(
+      a && b && a.count && b.count
+      && Math.abs(a.x - b.x) < 2 && Math.abs(a.y - b.y) < 2,
+    );
+
+    try {
+      if (!navigator.gpu) throw new Error("navigator.gpu is missing");
+      const adapter = await navigator.gpu.requestAdapter();
+      if (!adapter) throw new Error("requestAdapter returned null");
+      const renderer = new THREE.WebGPURenderer({ antialias: false, alpha: false });
+      renderer.toneMapping = THREE.NoToneMapping;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      await renderer.init();
+      const width = 128;
+      const height = 128;
+      const target = new THREE.RenderTarget(width, height);
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x000000);
+      const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+      camera.position.set(0, 2, 12);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld(true);
+
+      const material = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: true });
+      const source = new THREE.BoxGeometry(1, 1, 1);
+      const mesh = new THREE.BatchedMesh(4, source.attributes.position.count * 2, source.index.count * 2, material);
+      mesh.frustumCulled = false;
+      mesh.perObjectFrustumCulled = false;
+      mesh.sortObjects = false;
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.identity();
+      mesh.matrixWorld.identity();
+      mesh.matrixWorldAutoUpdate = false;
+      const geometryA = mesh.addGeometry(source);
+      const geometryB = mesh.addGeometry(new THREE.BoxGeometry(1, 1, 1));
+      const red = mesh.addInstance(geometryA);
+      const green = mesh.addInstance(geometryB);
+      mesh.setMatrixAt(red, new THREE.Matrix4().makeTranslation(0, 0, 0));
+      mesh.setMatrixAt(green, new THREE.Matrix4().makeTranslation(3, 0, 0));
+      mesh.setColorAt(red, new THREE.Color(1, 0, 0));
+      mesh.setColorAt(green, new THREE.Color(0, 1, 0));
+      mesh.onBeforeRender = function fill() {
+        mesh._updateDrawParameters(camera, mesh.geometry, mesh.material, "merged");
+      };
+
+      const group = new THREE.BundleGroup();
+      group.frustumCulled = false;
+      group.matrixAutoUpdate = false;
+
+      async function shot() {
+        renderer.setRenderTarget(target);
+        renderer.render(scene, camera);
+        const bytes = await renderer.readRenderTargetPixelsAsync(target, 0, 0, width, height);
+        renderer.setRenderTarget(null);
+        return summarize(bytes, width, height);
+      }
+
+      scene.add(mesh);
+      const direct = await shot();
+      scene.remove(mesh);
+      group.static = true;
+      group.add(mesh);
+      scene.add(group);
+      group.needsUpdate = true;
+      const bundled = await shot();
+      const replay = await shot();
+      mesh.setMatrixAt(green, new THREE.Matrix4().makeTranslation(3, 2, 0));
+      const staticStale = await shot();
+      group.static = false;
+      const dynamicUpload = await shot();
+      scene.remove(group);
+      scene.add(mesh);
+      const directMoved = await shot();
+
+      scene.remove(mesh);
+      group.add(mesh);
+      scene.add(group);
+      group.needsUpdate = true;
+      await shot();
+      mesh.visible = false;
+      const hiddenNoRecord = await shot();
+      group.needsUpdate = true;
+      const hiddenRecord = await shot();
+
+      const same = close(direct.red, bundled.red) && close(direct.green, bundled.green)
+        && close(replay.red, bundled.red) && close(replay.green, bundled.green);
+      const staticHeld = close(staticStale.green, bundled.green);
+      const dynamicMatchesDirect = close(dynamicUpload.green, directMoved.green)
+        && close(dynamicUpload.red, directMoved.red);
+      const hiddenStillDraws = hiddenNoRecord.red.count > 0;
+      const hiddenClears = hiddenRecord.red.count === 0 && hiddenRecord.green.count === 0;
+
+      window.__bundlePlacement = {
+        ok: same && staticHeld && dynamicMatchesDirect && hiddenStillDraws && hiddenClears,
+        webgpu: renderer.backend.isWebGPUBackend === true,
+        same,
+        staticHeld,
+        dynamicMatchesDirect,
+        hiddenStillDraws,
+        hiddenClears,
+        direct,
+        bundled,
+        replay,
+        staticStale,
+        dynamicUpload,
+        directMoved,
+        hiddenNoRecord,
+        hiddenRecord,
+      };
+    } catch (error) {
+      window.__bundlePlacement = { ok: false, reason: error && error.stack ? error.stack : String(error) };
+    }
+  </script>
+</body>
+</html>

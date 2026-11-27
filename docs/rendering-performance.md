@@ -202,7 +202,7 @@ Static scenery can be recorded into a WebGPU render bundle, one bundle per 64 m 
 
 This is not a geometry merge. Issue #5's chunk merge is still separate. The batch key gains `|cell:ix,iz` while the toggle is on, so each existing `BatchedMesh` is split by the actor pivot's world XZ. Water, terrain, ground, and helpers stay on the normal key. `keys` on the HUD is the material key, so it stays comparable to the 391-key Field. `batches` counts the split meshes.
 
-three r187 records the group's draws into a `GPURenderBundle` when `BundleGroup.version` changes. Setting `needsUpdate` is what bumps that version. A later frame replays the bundle: it refreshes node bindings per render object and does not encode those draws again. `group.visible` shows or hides the whole cell. That does not re-record. A cell is re-recorded when its loaded content changes (a model is added or removed, an array layer rebinds, or instance visibility changes the merged ranges) or an edit is committed (move, add, delete, undo). Distance LOD still calls `setVisibleAt`, and those ranges are draw arguments, so a flythrough that changes LOD re-records the cell. `bundles` on the HUD is that count. Replay does not help if it stays high.
+three r187 records the group's draws into a `GPURenderBundle` when `BundleGroup.version` changes. Setting `needsUpdate` is what bumps that version. A later frame replays the bundle and does not encode those draws again. The group is **not** `static`. A static bundle returns from `NodeMaterialObserver.needsRefresh` before the matrices-texture check, so `setMatrixAt` never reaches the GPU. A dynamic bundle still replays; it uploads that same texture when its version changes. `group.visible` shows or hides the whole cell. That does not re-record. A cell is re-recorded when its loaded content changes (a model is added or removed, an array layer rebinds, or instance visibility changes the merged ranges) or an edit is committed (move, add, delete, undo). Distance LOD still calls `setVisibleAt`, and those ranges are draw arguments, so a flythrough that changes LOD re-records the cell. `bundles` on the HUD is that count. Replay does not help if it stays high.
 
 The editor path stays outside the bundle. Selecting an actor rebuilds that actor onto a `|loose:` key, parented to the scene, so the GPU id pass, the gizmo, the selection tint, and a drag all hit a normal batched instance. The cell the actor left is re-recorded. Committing the drag, or undo, re-records again. Drag frames do not. Deselect puts the actor back in its cell.
 
@@ -223,6 +223,39 @@ The first bundle frame recorded the same 1081 draws and 51841 triangles (16.4 ms
 
 This does not say the Field's 29.7 ms submit is beaten. The grid has no streaming, no texture arrays, no LOD, and one material. A Field flythrough that re-records cells can lose the difference. The bar is still Bradyn's Windows/AMD/Chrome run below.
 
+### Placement
+
+Bundles off and on have to draw an instance in the same place. `tools/bundle-placement.html` renders one `BatchedMesh` (two geometries, so the second draw has `firstInstance > 0`) with the Forge batch setup: `matrixWorld` identity, `matrixWorldAutoUpdate` false, frustum and sort off. `node tools/measure-bundle-placement.mjs` reads the pixels in headless Chrome, SwiftShader, 27 Nov 2026.
+
+| | red centroid | green centroid |
+| --- | --- | --- |
+| Direct, and the bundle record and replay | 63.5, 64 | 97.6, 63.9 |
+| `setMatrixAt` moves green to (3, 2, 0), bundle still `static` | unchanged | unchanged (97.6, 63.9) |
+| Same edit, `static = false` | 63.5, 64 | 98.7, 40.4, matching a direct render of the moved mesh |
+| `mesh.visible = false` without re-recording | the boxes stay | the boxes stay |
+| `needsUpdate` after that hide | empty | empty |
+
+The record itself is the right place, including two geometries and a later camera move. The failure is a matrix written after the record. A static replay never uploads it. That is the on-only placement bug: off uploads on the next draw, on kept the recorded texture. Cells are now dynamic. A visibility change, or a new matrices/indirect/color texture object, still bumps the cell version, because a bundle ignores `mesh.visible` and a replaced texture is a new bind group. `setInstanceCount` replaces that texture. On this machine the old texture stayed bound for a direct redraw as well, so that path is not the on-only bug. `material.needsUpdate` after the replace drew nothing here, so the shader is not rebuilt that way.
+
+Transparent materials are not cell-split. Their sort rewrites the indirect map every frame, and a replay would keep the old draw ranges. Terrain, water, ground, and helpers were already excluded. Terrain still samples its own matrix.
+
+The scene preview sets `mesh.visible = false` on a batched mesh it replaces. Off honors that. On used to keep drawing the recorded mesh. The stamp re-records that cell.
+
+### Bradyn's Field run (Windows, AMD, Chrome)
+
+Same benchmark, bundles off then on. Avg / p95. Placement was correct off and wrong on. This is the run the placement fix is for. It is not a win.
+
+| | cpu | update | cull | submit | gpu | gpuDraws | draws | bundleRecords | writeTex | heap avg (final) | geom | bc7 | capped |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Off | 57.4 / 74.3 | 29.6 / 44.7 | 6.2 / 7.6 | 21.7 / 27.1 | 0.69 | 381 / 1185 | 401 | 0 | 43.9 / 47 | 1.35 GB (1.307) | 768 MB | 750 MB | 569 |
+| On | 53.6 / 73.5 | 31.1 / 47.2 | 7.1 / 9.2 | 15.4 / 22.0 | 0.69 | 548 / 1622 | 1589 / 2539 | 0.41 / 2 (415 total) | 18.2 / 34 | 1.07 GB (1.05) | 749 MB | 683 MB | 596 |
+
+`writeTex` near 44 with bundles off is the LOD path, not a per-frame rewrite of every batch. `scheduleMergedDraws` calls `_updateDrawParameters` only when visibility changed or the mesh sorts or frustum-culls. That call sets `indirectTexture.needsUpdate`, and WebGPU uploads it. The fly moves every frame, and the benchmark skips the cull early-out, so LOD pops land in this number. Showing a slot also called `setMatrixAt` for a matrix that was already written at append time, which uploaded the whole matrices texture again. That second write is gone. The summary now has `indirectFills` and `lodFlips` beside `writeTex`. On was lower (18) because a static bundle skipped the upload. That skip is the stale matrix. Dynamic bundles upload when the texture version changes, so on should move back toward off. `binds` on was 2.5 / 6 and off was about 0.
+
+The residency cap is unchanged: soft **1.2 GB** of geometry CPU plus BC7, hard **1.5 GB** (`RESIDENT_BYTE_SOFT` / `RESIDENT_BYTE_HARD`). 768 + 750 MB is about 1.52 GB, past the hard cap. `capped` 569 and 596 is how many models the budget is holding as helper boxes, and those boxes add draws. The still view on main `e65af37` was heap 902 MB and not capped because that camera did not stream this loop. Off versus on is the same fly. Neither number is the still-view 29.7 ms / 902 MB / not-capped capture. Submit off was already 21.7 ms with `gpuDraws` 381, not 29.7 ms with about 4673 calls.
+
+`update` near 30 ms and `cull` near 6–7 ms are on both sides, so they are not the bundle. `update` is everything in the tick except cull and submit: the camera step, `prioritizeLoad` (only after a 2 m move or a 30° turn), texture detail, the GPU-profile walk, and label render. Cull is `syncBatchVisibility`. It is forced every benchmark frame. A still view takes the `shouldRecull` early-out, which is why that capture showed cull 0. The summary now splits `preCullMs`, `flyMs`, `priorityMs`, `textureMs`, `labelsMs`, and `gpuSampleMs`. This machine has no dump, so those pieces are for the retest.
+
 ### Windows retest
 
 1. `npm run build --prefix frontend`
@@ -231,9 +264,10 @@ This does not say the Field's 29.7 ms submit is beaten. The grid has no streamin
 4. Open Hyrule Field Child, Static + Dynamic, with **Profile** on.
 5. Leave **Bundles** off. Wait until streaming settles. Click **Field benchmark**.
 6. Turn **Bundles** on. Wait until the view settles again. Click **Field benchmark**.
-7. Paste both JSON summaries. Read `summary.submitMs` (avg and p95), `summary.gpuMs`, `summary.gpuDraws`, `summary.bundleRecords`, `summary.writeTex`, `heapBytes`, `geomBytes`, `bc7Bytes`, and `capped`.
+7. Paste both JSON summaries. Read `summary.submitMs` (avg and p95), `summary.gpuMs`, `summary.gpuDraws`, `summary.bundleRecords`, `summary.writeTex`, `summary.indirectFills`, `summary.lodFlips`, `summary.preCullMs`, `summary.flyMs`, `summary.priorityMs`, `summary.textureMs`, `summary.labelsMs`, `summary.gpuSampleMs`, `heapBytes`, `geomBytes`, `bc7Bytes`, and `capped`.
+8. With bundles on, objects have to sit where they sit with bundles off. A tree or a building in the wrong place means the cell is still showing a stale matrix.
 
-The success bar, against main `e65af37` on that machine (cpu 41.3, update 11.6, cull 0, submit 29.7 ms, gpu 5.5 ms, obj 4282, batches=keys=391, sub 699, draws 5372, about 4673 real GPU calls, heap 902 MB, nothing capped): submit well below 29.7 ms, heap at or under about 1 GB, nothing capped, and the picture the same as main. `gpu draws` is the real GPU call count. `bundles` near 0 during the fly is the replay. If submit does not fall, this spike does not beat main.
+The success bar, against main `e65af37` on that machine (cpu 41.3, update 11.6, cull 0, submit 29.7 ms, gpu 5.5 ms, obj 4282, batches=keys=391, sub 699, draws 5372, about 4673 real GPU calls, heap 902 MB, nothing capped): submit well below 29.7 ms, heap at or under about 1 GB, nothing capped, and the picture the same as main. The fly streams past the 1.5 GB hard cap, so its heap and `capped` count are not that still view. `gpu draws` is the real GPU call count. `bundles` near 0 during the fly is the replay. Placement has to match before submit is a result. If submit does not fall, this spike does not beat main.
 
 No game or file format changed. Longshot's modding API does not describe render bundles or scenery cells. `docs/formats.md` is unchanged.
 
