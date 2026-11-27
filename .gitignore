@@ -22,3 +22,10 @@ tools/wasm-bench/dist/
 tools/wasm-bench/pkg/
 tools/wasm-bench/data/*.bin
 tools/wasm-bench/data/*.json
+
+# Godot spike. Imported and cached output stays on the machine that owns the dump.
+**/.godot/
+godot/**/bin/
+godot/**/obj/
+godot/**/*.user
+godot-cache/
