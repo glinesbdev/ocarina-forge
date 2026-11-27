@@ -1,0 +1,118 @@
+[
+  {
+    "name": "Obj_Tree",
+    "parts": [
+      {
+        "name": "Trunk",
+        "lod": 0,
+        "positions": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            2.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            3.0,
+            0.0
+          ]
+        ],
+        "indices": [
+          0,
+          1,
+          2
+        ],
+        "uvs": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        "material": "Mt_Bark",
+        "texture": "Bark_Alb",
+        "albedo_sampler": "_a0",
+        "alpha": "opaque",
+        "double_sided": false,
+        "binds": [
+          [
+            "_a0",
+            "Bark_Alb"
+          ],
+          [
+            "_n0",
+            "Bark_Nrm"
+          ]
+        ]
+      },
+      {
+        "name": "Leaves",
+        "lod": 0,
+        "positions": [
+          [
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            2.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            3.0,
+            0.0
+          ]
+        ],
+        "indices": [
+          0,
+          1,
+          2
+        ],
+        "uvs": [
+          [
+            0.0,
+            0.0
+          ],
+          [
+            1.0,
+            0.0
+          ],
+          [
+            0.0,
+            1.0
+          ]
+        ],
+        "material": "Mt_Bark",
+        "texture": "Bark_Alb",
+        "albedo_sampler": "_a0",
+        "alpha": "opaque",
+        "double_sided": false,
+        "binds": [
+          [
+            "_a0",
+            "Bark_Alb"
+          ],
+          [
+            "_n0",
+            "Bark_Nrm"
+          ]
+        ]
+      }
+    ],
+    "notes": []
+  }
+]
