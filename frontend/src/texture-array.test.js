@@ -9,6 +9,7 @@ import { cloneMaterialPreservingTextures, materialForGeometry } from "./instance
 import {
   arrayMapToken,
   canPackTexture,
+  compressedCopyPlan,
   compressedLayerBytes,
   createTextureArrayPacker,
   isArrayTexture,
@@ -175,6 +176,9 @@ test("WebGL never constructs the array packer", () => {
   assert.match(viewport, /uploadLayer: uploadPackedArrayLayer/);
   assert.match(viewport, /forgePackedHold/);
   assert.match(viewport, /releaseTextureCpu\(texture, \{ uploaded: true \}\)/);
+  assert.match(viewport, /compressedCopyPlan\(src\.mipmaps/);
+  assert.match(viewport, /createCommandEncoder\(\{ label: "packed-array-grow" \}\)/);
+  assert.doesNotMatch(viewport, /backend\.copyTextureToTexture/);
   assert.match(viewport, /WebGL keeps a per-image key/);
   assert.match(viewport, /cloneMaterialPreservingTextures\(source\)/);
   assert.match(viewport, /settlePackedArrays\(\)/);
@@ -248,6 +252,66 @@ test("the layer texel stores albedo, normal, and roughness", () => {
   assert.equal(texture.image.data[10], 7);
   assert.equal(writeLayerTexel(texture, 4, 1, 0, 0, 0), false);
   texture.dispose();
+});
+
+function logicalChain(size) {
+  const mips = [];
+  let width = size;
+  let height = size;
+  while (true) {
+    mips.push({ width, height });
+    if (width === 1 && height === 1) break;
+    width = Math.max(1, width >> 1);
+    height = Math.max(1, height >> 1);
+  }
+  return mips;
+}
+
+test("compressed copies round a partial block up to 4", () => {
+  for (const size of [768, 384, 96]) {
+    const logical = logicalChain(size);
+    const plan = compressedCopyPlan(logical, THREE.RGBA_BPTC_Format, 2);
+    assert.ok(plan);
+    assert.equal(plan.length, logical.length);
+    for (const copy of plan) {
+      assert.equal(copy.width % 4, 0, `${size} level ${copy.level} width ${copy.width}`);
+      assert.equal(copy.height % 4, 0, `${size} level ${copy.level} height ${copy.height}`);
+      assert.ok(copy.width >= 4 && copy.height >= 4);
+      assert.equal(copy.depth, 2);
+    }
+    const extent = (logicalWidth) => plan.find((copy) => logical[copy.level].width === logicalWidth);
+    assert.equal(extent(6).width, 8);
+    assert.equal(extent(6).height, 8);
+    assert.equal(extent(3).width, 4);
+    assert.equal(extent(1).width, 4);
+    assert.equal(extent(size).width, size);
+  }
+  assert.equal(compressedCopyPlan([], THREE.RGBA_BPTC_Format, 1), null);
+});
+
+test("a failed GPU grow drops the new array and keeps the previous one", () => {
+  let built = null;
+  const packer = createTextureArrayPacker({
+    copyLayers(src, dst) {
+      built = dst;
+      return false;
+    },
+    uploadLayer() {
+      return true;
+    },
+  });
+  const first = bc7(8, 8, 1);
+  const second = bc7(8, 8, 2);
+  arrayMapToken(first, packer);
+  const array = packer.layerOf(first).array;
+  array.userData.forgeGpuUploaded = true;
+  assert.equal(releaseTextureCpu(array, { uploaded: true }), true);
+  assert.equal(arrayMapToken(second, packer), "");
+  assert.equal(packer.layerOf(first).array, array);
+  assert.equal(packer.stats().arrays, 1);
+  assert.equal(built.userData.forgeCpuReleased, true);
+  assert.equal(built.source.dataReady, false);
+  assert.notEqual(built, array);
 });
 
 test("an upload plan rejects a zero-length mip", () => {

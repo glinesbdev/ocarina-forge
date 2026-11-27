@@ -45,14 +45,37 @@ function blockFor(format) {
   return BLOCKS.get(format) || null;
 }
 
-/** Block-rounded extent for a compressed copy or write. Null when the format is unknown. */
+/**
+ * Physical size of one compressed mip. BC is a 4×4 block, so a logical 6
+ * rounds to 8 and a 3 or 1 rounds to 4. `copyTextureToTexture` rejects a
+ * width that is not a multiple of that block.
+ */
 export function compressedCopySize(width, height, format) {
   const block = blockFor(format);
   if (!block) return null;
+  const round = (value, unit) => Math.max(unit, Math.ceil((value || 1) / unit) * unit);
   return {
-    width: Math.max(block.width, Math.ceil((width || 1) / block.width) * block.width),
-    height: Math.max(block.height, Math.ceil((height || 1) / block.height) * block.height),
+    width: round(width, block.width),
+    height: round(height, block.height),
   };
+}
+
+/**
+ * Every mip of one grow, rounded, before any encoder is opened. Null when a
+ * mip has no block size. `depth` is the layer count copied with each mip.
+ */
+export function compressedCopyPlan(mips, format, layerCount) {
+  if (!blockFor(format) || !Array.isArray(mips) || !mips.length) return null;
+  const depth = layerCount | 0;
+  if (depth < 1) return null;
+  const copies = [];
+  for (let level = 0; level < mips.length; level += 1) {
+    const mip = mips[level] || {};
+    const extent = compressedCopySize(mip.width, mip.height, format);
+    if (!extent) return null;
+    copies.push({ level, width: extent.width, height: extent.height, depth });
+  }
+  return copies;
 }
 
 /**
@@ -260,7 +283,12 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
       // this image on its own key. Do not build an array from empty mips.
       if (typeof copyLayers !== "function" || previous.userData?.forgeGpuUploaded !== true) return false;
       const array = buildPackedArray(texture, capacity, null, 0, true);
-      if (!copyLayers(previous, array, group.depth)) return false;
+      if (!copyLayers(previous, array, group.depth)) {
+        // The destination was allocated and may already have a GPU texture.
+        // Drop it. The previous array is still the one the batches sample.
+        retireArray(array);
+        return false;
+      }
       array.userData.forgeGpuUploaded = true;
       releaseTextureCpu(array, { uploaded: true });
       swapped.set(previous, array);
@@ -341,7 +369,10 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
         // from a released chain would upload empty mips.
         if (typeof copyLayers !== "function" || previous.userData?.forgeGpuUploaded !== true) continue;
         const array = buildPackedArray(previous, group.depth, null, 0, true);
-        if (!copyLayers(previous, array, group.depth)) continue;
+        if (!copyLayers(previous, array, group.depth)) {
+          retireArray(array);
+          continue;
+        }
         array.userData.forgeGpuUploaded = true;
         releaseTextureCpu(array, { uploaded: true });
         swapped.set(previous, array);

@@ -60,6 +60,7 @@ import {
   arrayMaterialEligible,
   arrayTexturesOf,
   canPackTexture,
+  compressedCopyPlan,
   createLayerTexture,
   createTextureArrayPacker,
   holdTexture,
@@ -3685,14 +3686,17 @@ let convertSlots = 8;
     return drawn;
   }
 
-  // Copy `layerCount` layers of a packed array on the GPU. The destination's
-  // CPU buffers are not uploaded: dataReady is false, and initTexture only
-  // allocates the image. Returns false when the GPU texture is not ready, so
-  // the packer keeps the image on its own key instead of writing an empty mip.
+  // Copy `layerCount` layers of every mip in one command buffer. Extents are
+  // the physical block size (a BC 6px mip is 8, a 3 or 1 is 4). A bad extent
+  // is refused before the encoder exists: one invalid copy throws away the
+  // whole buffer, including the mips that would have fit.
   function copyPackedArrayLayers(src, dst, layerCount) {
     const backend = renderer && renderer.backend;
-    if (!backend || typeof backend.copyTextureToTexture !== "function") return false;
+    const device = backend && backend.device;
+    if (!device || typeof device.createCommandEncoder !== "function") return false;
     if (!textureGpuReady(backend, src)) return false;
+    const plan = compressedCopyPlan(src.mipmaps, src.format, layerCount);
+    if (!plan) return false;
     if (dst.source) dst.source.dataReady = false;
     dst.needsUpdate = true;
     try {
@@ -3701,23 +3705,19 @@ let convertSlots = 8;
       return false;
     }
     if (!textureGpuReady(backend, dst)) return false;
-    const mips = src.mipmaps || [];
+    const sourceGPU = backend.get(src).texture;
+    const destGPU = backend.get(dst).texture;
+    if (!sourceGPU || !destGPU) return false;
     try {
-      for (let level = 0; level < mips.length; level += 1) {
-        const mip = mips[level];
-        // The copy size is the mip's size. A 1×1 tail is the whole subresource;
-        // rounding it up to the block would run past the texture and fail.
-        const width = Math.max(1, (mip && mip.width) || 1);
-        const height = Math.max(1, (mip && mip.height) || 1);
-        backend.copyTextureToTexture(
-          src,
-          dst,
-          new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(width, height, layerCount)),
-          new THREE.Vector3(0, 0, 0),
-          level,
-          level,
+      const encoder = device.createCommandEncoder({ label: "packed-array-grow" });
+      for (const copy of plan) {
+        encoder.copyTextureToTexture(
+          { texture: sourceGPU, mipLevel: copy.level, origin: { x: 0, y: 0, z: 0 } },
+          { texture: destGPU, mipLevel: copy.level, origin: { x: 0, y: 0, z: 0 } },
+          { width: copy.width, height: copy.height, depthOrArrayLayers: copy.depth },
         );
       }
+      device.queue.submit([encoder.finish()]);
     } catch {
       return false;
     }

@@ -158,7 +158,30 @@ What the extra time is: `retireArray` emptied every mip (`Uint8Array(0)`) and di
 
 The packer now refuses that write. A buffer is released only after the GPU texture exists (`{ uploaded: true }`), and `dataReady` is cleared before the bytes are dropped. A grow or compact whose CPU chain is already gone copies the live layers with `copyTextureToTexture` and uploads only the new layer, and only when that layer's mip buffers are non-empty. A texture with an empty mip never gets `needsUpdate`. The source bytes stay until the array is on the GPU, then they are dropped, so the heap should stay at or under about 1.5 GB (1180.8 MB on this run).
 
-Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on. While it streams, the console should have no `writeTexture` validation error, no `Unable to serialize Texture.`, and no `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo during streaming, not only after it settles, and up close after the full images replace the low bitmaps. Water should not stay on the flat teal stand-in. After streaming settles, `submit` has to be clearly under 44.5 ms, in the 31 ms range or better. Heap at or under about 1.5 GB. `tex` should stay well under 1692. Compare `keys` and `batches` with 466 and with 1004, and read the key-reason line (or Dump JSON `keyReasons`). `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
+### Field after the empty-write fix (`a351efc`)
+
+27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. The 0-byte `writeTexture` errors, the serialize warnings, and the missing `array_index` errors are gone. The console has 1265 `copyTextureToTexture` errors instead. `copySize.width` is 6, 3, or 1, which is not a multiple of the BC 4×4 block. Those are the tail mips of a 768 image (768→6, →3, →1). A 512 chain fails the same way at 2 and 1. Each mip was its own command buffer, so one bad mip invalidated that buffer and the grow lost the layers already recorded in it.
+
+| | valid uploads | `137ef86` settled | `a351efc` settled |
+| --- | --- | --- | --- |
+| cpu | 42.4 ms (avg 57.3, p95 87.2) | | 64.0 ms (avg 63.9, p95 77.7) |
+| update | 11.2 ms | | 23.4 ms |
+| submit | 31.2 ms | 44.3 ms | 41.6 ms |
+| gpu | 5.2 ms | | 6.2 ms |
+| obj / batches / keys / draws | 3970 / 466 / 466 / 5123 | | 6973 / 399 / 399 / 8058 |
+| sub | 466 | | 686 |
+| tris / meshes | 2M / 275 | | 3.4M / 285 |
+| tex / heap | 1692 / 3736.2 MB | 428 / 1180.8 MB (mid-stream) | 1042 / 1927.1 MB |
+| keys | | array 19, image 50, blend 86, helper 2, water 7 | array 45, image 163, blend 173, helper 6, water 12 |
+| compile | 530 ms | 722.5 ms | 442.6 ms |
+
+`submit` 41.6 ms is still above the 31.2 ms bar, and heap 1927.1 MB is above 1.5 GB. `image` (163) and `blend` (173) are most of the 399 keys.
+
+The copy now uses the physical block size, `max(4, ceil(mip / 4) * 4)`, so 6 becomes 8 and 3 or 1 becomes 4. Every mip and every layer of one grow goes into one encoder, and only after those extents are computed. A failed grow disposes the destination it just allocated and leaves the previous array in place, so the two do not both stay live. The render loop does not grow again on its own. A refused image keeps its own key until the next batch rebuild tries once more. That retry is what turned later images into the 163 `image` keys: the class's CPU copy had already been released, the GPU copy threw on the tail mip, and the image was not recorded.
+
+Blend stays per image. A blend sample reads the base map, the moss map, and the moss ORM on two UV sets with a vertex mask. Putting a0, a1, and c0 into arrays means a new blend shader, not a one-line eligibility change, so it is not in this fix. Those 173 keys are 43% of 399. They would fall by however many blend images share a size class. They would not fall to 1.
+
+Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on. While it streams and after it settles, the console should have no `copyTextureToTexture` block-size error, no 0-byte `writeTexture`, no `Unable to serialize Texture.`, and no `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo during streaming and up close. Water should not stay on the flat teal stand-in. After streaming settles, `submit` should be in the 31 ms range, clearly under 44.5 ms, and heap at or under about 1.5 GB. `image` should drop as the 768, 384, and 96 classes join their arrays. `blend` stays. `keys` and `batches` stay equal. `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
 
 ## Frustum and draw distance
 
