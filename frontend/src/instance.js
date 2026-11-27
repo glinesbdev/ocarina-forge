@@ -11,6 +11,40 @@
 
 import { holdTexture, LIVE_ARRAY_FIELDS, releaseArraySlots } from "./texture-array.js";
 
+/**
+ * Terrain and ground stay on their own batch key. A family merge must not
+ * put either into a BatchedMesh that also draws props.
+ */
+export function surfaceKind(material, geometry, name = "") {
+  const data = (material && material.userData) || {};
+  if (data.blend || data.blendNode) return "";
+  const stored = geometry && geometry.userData && geometry.userData.forgePartName;
+  const label = `${name || ""} ${stored || ""} ${data.name || ""} ${(material && material.name) || ""}`;
+  if (data.forgeSurface === "terrain" || data.forgeSurface === "ground") return data.forgeSurface;
+  if (data.terrainNode || data.terrainShader || data.banc === "terrain" || /@terrain|\bterrain\b/i.test(label)) return "terrain";
+  if (data.groundSurface || data.banc === "ground" || /ground-surface|ground_surface/i.test(label)) return "ground";
+  const attrs = geometry && typeof geometry.getAttribute === "function" ? geometry.getAttribute.bind(geometry) : null;
+  if (attrs && attrs("uv1") && attrs("uv2") && attrs("uv3")) return "terrain";
+  return "";
+}
+
+/**
+ * Put the mesh back on the matrix it was authored with. A later camera move
+ * must not be what `matrixWorld` holds: the field is not parented to the camera.
+ */
+export function pinAuthoredMatrix(object) {
+  if (!object || !object.matrix || !object.matrixWorld) return object;
+  if (typeof object.updateMatrix === "function") object.updateMatrix();
+  const parent = object.parent;
+  if (parent && parent.matrixWorld && typeof object.matrixWorld.multiplyMatrices === "function") {
+    object.matrixWorld.multiplyMatrices(parent.matrixWorld, object.matrix);
+  } else if (typeof object.matrixWorld.copy === "function") {
+    object.matrixWorld.copy(object.matrix);
+  }
+  object.matrixWorldAutoUpdate = false;
+  return object;
+}
+
 // Verified initial state from the shipped GameDataList. Forge has no live save flags.
 const PRESENCE_DEFAULTS = new Map([["IsHyruleFieldBridgeClose", false]]);
 

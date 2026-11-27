@@ -170,13 +170,17 @@ test("a capture is json and counts resident textures once per source", () => {
     "arr:8x8|opaque|s2|cffffff|idx|uv",
     "arr:8x8|opaque|s2|cffffff|idx|uv\u00001",
     "img|water|opaque",
-  ]), { array: 1, image: 0, blend: 0, helper: 0, water: 1, terrain: 0, tint: 0 });
+  ]), { array: 1, image: 0, blend: 0, helper: 0, water: 1, terrain: 0, ground: 0, tint: 0 });
+  assert.equal(classifyBatchKey("img|ground|opaque"), "ground");
   const dumped = buildCapture({
     samples: [],
     keyReasons: { array: 3, tint: 1 },
+    imagePack: { counts: { "mip-bytes:0:0/16": 2 }, images: [{ reason: "mip-bytes:0:0/16", width: 8, height: 8 }] },
     at: "2026-11-27T00:00:00.000Z",
   });
   assert.deepEqual(dumped.keyReasons, { array: 3, tint: 1 });
+  assert.equal(dumped.imagePack.counts["mip-bytes:0:0/16"], 2);
+  assert.equal(dumped.imagePack.images[0].width, 8);
 });
 
 test("the hud carries the revision and the counters that used to be the stats line", () => {

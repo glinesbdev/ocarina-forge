@@ -119,7 +119,7 @@ export function formatProfileDetail({
   }
   if (keyReasons && typeof keyReasons === "object") {
     const reasons = [];
-    for (const name of ["array", "image", "blend", "helper", "water", "terrain", "tint"]) {
+    for (const name of ["array", "image", "blend", "helper", "water", "terrain", "ground", "tint"]) {
       if (keyReasons[name]) reasons.push(`${name} ${keyReasons[name]}`);
     }
     if (reasons.length) lines.push(reasons.join(" · "));

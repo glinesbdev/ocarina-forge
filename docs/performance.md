@@ -183,6 +183,31 @@ Blend stays per image. A blend sample reads the base map, the moss map, and the 
 
 Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on. While it streams and after it settles, the console should have no `copyTextureToTexture` block-size error, no 0-byte `writeTexture`, no `Unable to serialize Texture.`, and no `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo during streaming and up close. Water should not stay on the flat teal stand-in. After streaming settles, `submit` should be in the 31 ms range, clearly under 44.5 ms, and heap at or under about 1.5 GB. `image` should drop as the 768, 384, and 96 classes join their arrays. `blend` stays. `keys` and `batches` stay equal. `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
 
+### Field after the block-size copy (`3b7eb52`)
+
+27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. No WebGPU validation errors. The console noise that remains is from browser extensions. Gizmos and panning feel right. Two new regressions: textures sit on the wrong models and then pop to the right ones, and the terrain slides as the camera moves. Memory is over the bar again.
+
+| | `a351efc` settled | `3b7eb52` settled |
+| --- | --- | --- |
+| cpu | 64.0 ms (avg 63.9, p95 77.7) | 49.5 ms (avg 61.9, p95 86.5) |
+| update | 23.4 ms | 12.9 ms |
+| submit | 41.6 ms | 36.6 ms |
+| gpu | 6.2 ms | 6.5 ms |
+| obj / batches / keys / draws | 6973 / 399 / 399 / 8058 | 5349 / 481 / 481 / 6638 |
+| sub | 686 | 480 |
+| tris / meshes | 3.4M / 285 | 2M / 248 |
+| tex / heap | 1042 / 1927.1 MB | 1278 / 3348.7 MB |
+| keys | array 45, image 163, blend 173, helper 6, water 12 | array 52, image 216, blend 201, helper 6, water 6 |
+| compile | 442.6 ms | 494.8 ms |
+
+At load the forge memory report was gpu 265 geom / 1685 tex, heap 1886 MB. `image` rose from 163 to 216 instead of falling. Dump JSON now includes `imagePack`: one entry per image that did not join an array, with the reason (`not-compressed`, `mip-bytes:<level>:<got>/<need>`, `gpu-copy`, `gpu-not-ready`, `upload`, `depth-cap`, `empty-mip`, `empty-layer`, `cpu-write`). A mip that is longer than one layer is padding and still packs. A shorter mip cannot.
+
+The wrong texture was the previous array being disposed while materials still sampled it. A grow copies layers `0..depth-1` in order and does not renumber a live image. The new array is published only after that image's layer is written. The previous GPU texture stays until `releaseSwapped`, which runs after every material has been pointed at the replacement in the same turn. The layer lookup is uploaded before it replaces the old one, and an instance whose layer was not written is hidden until it is.
+
+The terrain slide is the shared `modelWorldMatrix` node. It is one uniform for every material, so a later object's matrix was what the field sampled, and that matrix follows the camera. The field now samples a matrix copied from its own mesh in `onBeforeRender`, and that mesh is pinned back to the matrix it was authored with. Terrain and ground keep `|terrain` or `|ground` on the batch key, so they are not appended into a BatchedMesh with other models.
+
+Check: same build and hard-reload as above. While the field streams, each model should show its own texture, not another model's, and it should not pop later. Pan and fly: the terrain stays put. No WebGPU validation errors. After it settles, `submit` should be in the 31 ms range and clearly under 44.5 ms, heap at or under about 1.5 GB. Dump JSON `imagePack.images` lists any image that stayed on its own key and why. `keys` and `batches` stay equal. Gizmos, panning, picking, and selection stay as they are.
+
 ## Frustum and draw distance
 
 Each instance has its own world bounding sphere: the mesh sphere transformed by that actor’s matrix, not a sphere at the world origin and not the distance from the camera to the origin. The gap used for **Draw** and the size rules is the distance to the sphere surface, so a large mesh is not culled while its bounds are still inside the cap. A sphere outside the frustum is hidden. **Draw** can also drop anything past 200, 400, or 800 m. **Auto** leaves the size rules (small props with no far mesh fade by 56 / 96 / 180 m). The selection is not distance-culled. The field is not in this loop and its mesh is not frustum-culled, so flying back cannot drop the terrain on a bad sphere. The camera far plane grows as you fly, from at least 8000 m. `culled` in **Profile** is the hidden instances. The batch mesh itself is not frustum-culled; a sphere on the untransformed geometry used to hide every copy once the camera looked away from the origin.

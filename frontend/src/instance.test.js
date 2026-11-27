@@ -3,7 +3,8 @@ import test from "node:test";
 
 import * as THREE from "three";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { createBatchFiller } from "./batch-fill.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, pinAuthoredMatrix, presentByDefault, refreshBatchKeys, scheduleMergedDraws, surfaceKind } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -454,4 +455,60 @@ test("copies that share an albedo share a batch key", () => {
   const house = { image: "roof", alpha: "opaque", side: 0, tint: "ffffff", indexed: "idx", attributes: "position,uv" };
   assert.equal(batchKey(house), batchKey({ ...house }));
   assert.notEqual(batchKey(house), batchKey({ ...house, image: "wall" }));
+});
+
+test("terrain and ground never share a batch with another model, and the camera does not move them", () => {
+  const terrain = new THREE.MeshStandardMaterial();
+  terrain.userData.terrainShader = true;
+  const ground = new THREE.MeshStandardMaterial();
+  ground.userData.groundSurface = true;
+  const prop = new THREE.MeshStandardMaterial();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), 3));
+  assert.equal(surfaceKind(terrain, geo, "Field"), "terrain");
+  assert.equal(surfaceKind(ground, geo, "ground-surface"), "ground");
+  assert.equal(surfaceKind(prop, geo, "Pot"), "");
+  const keyFor = (material, name) => {
+    const kind = surfaceKind(material, geo, name);
+    return `img|opaque${kind ? `|${kind}` : ""}`;
+  };
+  const terrainKey = keyFor(terrain, "Field");
+  const groundKey = keyFor(ground, "ground-surface");
+  const propKey = keyFor(prop, "Pot");
+  assert.notEqual(terrainKey, propKey);
+  assert.notEqual(groundKey, propKey);
+  assert.notEqual(terrainKey, groundKey);
+  const filler = createBatchFiller({
+    createMesh() {
+      return new THREE.BatchedMesh(4, 64, 64, new THREE.MeshBasicMaterial());
+    },
+  });
+  filler.append(terrainKey, terrain, [{ geometry: geo, part: { name: "Field" } }]);
+  filler.append(groundKey, ground, [{ geometry: geo, part: { name: "ground-surface" } }]);
+  filler.append(propKey, prop, [{ geometry: geo, part: { name: "Pot" } }]);
+  assert.equal(filler.stats().batches, 3);
+  assert.equal(filler.get(terrainKey).mesh.isBatchedMesh, true);
+  assert.notEqual(filler.get(terrainKey).mesh, filler.get(propKey).mesh);
+  assert.notEqual(filler.get(groundKey).mesh, filler.get(propKey).mesh);
+
+  const field = new THREE.Mesh(geo, terrain);
+  field.position.set(4, 0, 8);
+  field.updateMatrix();
+  field.updateMatrixWorld(true);
+  const authored = field.matrixWorld.elements.slice();
+  const camera = new THREE.PerspectiveCamera();
+  camera.position.set(30, 12, -6);
+  camera.updateMatrixWorld(true);
+  field.matrixWorld.copy(camera.matrixWorld);
+  pinAuthoredMatrix(field);
+  for (let i = 0; i < 16; i += 1) assert.equal(field.matrixWorld.elements[i], authored[i]);
+  camera.position.set(-10, 40, 3);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld(true);
+  pinAuthoredMatrix(field);
+  for (let i = 0; i < 16; i += 1) assert.equal(field.matrixWorld.elements[i], authored[i]);
+  geo.dispose();
+  terrain.dispose();
+  ground.dispose();
+  prop.dispose();
 });

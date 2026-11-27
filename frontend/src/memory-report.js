@@ -353,6 +353,7 @@ export function collectMemoryReport(state = {}) {
       culled: stats.culled ?? null,
       batchKeys: stats.batchKeys ?? null,
       keyReasons: stats.keyReasons ?? null,
+      imagePack: stats.imagePack ?? null,
       pickUploads: stats.pickUploads ?? null,
     },
     profile: stats.profile ?? null,

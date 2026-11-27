@@ -13,8 +13,12 @@
  * A grown array is a new texture. While the previous texture still has its
  * CPU mips, those bytes are copied into the new one. Once that CPU copy has
  * been released, the grow copies layers on the GPU (`copyLayers`) and uploads
- * only the new layer. The retired texture has `dataReady` cleared before its
- * mip buffers are emptied, so three cannot `writeTexture` a 0-byte mip.
+ * only the new layer. Layers are append-only: a grow or a compact copies
+ * `0..depth-1` in order and never renumbers a live image. The previous GPU
+ * texture stays bound until `releaseSwapped`, which the view calls after it
+ * has pointed every material at the new array in the same frame. The CPU
+ * mips are sealed immediately (`dataReady` false, buffers emptied) so three
+ * cannot `writeTexture` a 0-byte mip while that GPU texture is still sampled.
  */
 import * as THREE from "three";
 import { releaseTextureCpu, repairCompressedTexture, requestCompressedUpload } from "./gpu-texture.js";
@@ -128,22 +132,38 @@ function pair(value, fallback) {
 }
 
 /**
- * Size class for a compressed image. Empty when the image cannot share an array
- * (uncompressed, unknown format, or a mip whose byte length is not one layer).
+ * Why a compressed image cannot join an array. Empty when it can.
+ * A mip longer than one layer is padding and still packs; a shorter mip cannot.
  */
-export function textureArrayGroupKey(texture) {
-  if (!texture || texture.isCompressedTexture !== true || texture.isCompressedArrayTexture === true) return "";
+export function packBlocker(texture) {
+  if (!texture || texture.isCompressedTexture !== true) return "not-compressed";
+  if (texture.isCompressedArrayTexture === true) return "already-array";
   const mips = texture.mipmaps;
-  if (!Array.isArray(mips) || !mips.length) return "";
+  if (!Array.isArray(mips) || !mips.length) return "no-mips";
   const format = texture.format;
-  if (!blockFor(format)) return "";
+  if (!blockFor(format)) return "format";
   const width = mips[0].width || (texture.image && texture.image.width) || 0;
   const height = mips[0].height || (texture.image && texture.image.height) || 0;
-  if (!width || !height) return "";
-  for (const mip of mips) {
-    const bytes = compressedLayerBytes(mip.width, mip.height, format);
-    if (!mip.data || mip.data.byteLength !== bytes) return "";
+  if (!width || !height) return "size";
+  for (let level = 0; level < mips.length; level += 1) {
+    const mip = mips[level];
+    const bytes = compressedLayerBytes(mip && mip.width, mip && mip.height, format);
+    const got = mip && mip.data ? mip.data.byteLength : 0;
+    if (!bytes || got < bytes) return `mip-bytes:${level}:${got}/${bytes}`;
   }
+  return "";
+}
+
+/**
+ * Size class for a compressed image. Empty when the image cannot share an array
+ * (uncompressed, unknown format, or a mip shorter than one layer).
+ */
+export function textureArrayGroupKey(texture) {
+  if (packBlocker(texture)) return "";
+  const mips = texture.mipmaps;
+  const format = texture.format;
+  const width = mips[0].width || (texture.image && texture.image.width) || 0;
+  const height = mips[0].height || (texture.image && texture.image.height) || 0;
   const space = texture.colorSpace || "";
   return [
     `${width}x${height}`,
@@ -168,7 +188,8 @@ export function arrayMaterialEligible(material) {
   if (!material || !material.map || !canPackTexture(material.map)) return false;
   const data = material.userData || {};
   if (data.blend || data.blendNode || data.terrainNode || data.terrainShader || data.waterStandIn || data.helper) return false;
-  if (data.banc === "terrain" || data.banc === "water") return false;
+  if (data.banc === "terrain" || data.banc === "water" || data.banc === "ground" || data.groundSurface) return false;
+  if (data.forgeSurface === "terrain" || data.forgeSurface === "ground") return false;
   return true;
 }
 
@@ -178,9 +199,15 @@ export function arrayMaterialEligible(material) {
  * A group that is already at `maxDepth` returns "" and that image keeps its own key.
  */
 export function arrayMapToken(texture, packer) {
-  if (!packer || !canPackTexture(texture)) return "";
+  if (!packer) return "";
+  const blocker = packBlocker(texture);
+  if (blocker) {
+    if (typeof packer.noteReject === "function") packer.noteReject(texture, blocker);
+    return "";
+  }
   const placed = packer.layerOf(texture);
   if (!placed) return "";
+  if (typeof packer.notePacked === "function") packer.notePacked(texture);
   return `arr:${placed.group.key}`;
 }
 
@@ -188,10 +215,11 @@ function identityOf(texture) {
   return (texture && texture.source) || texture;
 }
 
-function retireArray(texture) {
+function sealArray(texture) {
   if (!texture) return;
-  // Clear the upload gate before the bytes go. dispose() does not stop a
-  // texture that is still bound this frame from writeTexture'ing its mips.
+  // Clear the upload gate before the bytes go. The GPU image stays until
+  // releaseSwapped, so a material still pointing here samples the old layers
+  // instead of a destroyed texture or a half-copied replacement.
   if (texture.source) texture.source.dataReady = false;
   texture.userData = texture.userData || {};
   texture.userData.forgeCpuReleased = true;
@@ -201,7 +229,11 @@ function retireArray(texture) {
       if (level && level.data && level.data.byteLength) level.data = new Uint8Array(0);
     }
   }
-  if (typeof texture.dispose === "function") texture.dispose();
+}
+
+function retireArray(texture) {
+  sealArray(texture);
+  if (texture && typeof texture.dispose === "function") texture.dispose();
 }
 
 function cpuIntact(texture) {
@@ -270,52 +302,104 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
   // so the previous object is disposed and its JS buffers are dropped.
   // `takeSwapped` is the old → new chain since the last call.
   const swapped = new Map();
+  // Previous GPU textures. Sealed (CPU gone) but not disposed until the view
+  // has rebound every material onto the replacement.
+  const pendingDispose = [];
+  const rejects = new Map();
 
-  function ensure(group, needed, texture) {
+  function noteReject(texture, reason) {
+    const id = identityOf(texture) || texture;
+    if (!id) return;
+    const mip = texture && texture.mipmaps && texture.mipmaps[0];
+    const image = texture && texture.image;
+    rejects.set(id, {
+      reason: reason || "unpacked",
+      width: (mip && mip.width) || (image && image.width) || 0,
+      height: (mip && mip.height) || (image && image.height) || 0,
+      format: texture && texture.format != null ? texture.format : "",
+      name: (texture && (texture.name || (texture.userData && texture.userData.forgeFullTexture))) || "",
+    });
+  }
+
+  function notePacked(texture) {
+    const id = identityOf(texture) || texture;
+    if (id) rejects.delete(id);
+  }
+
+  function imagePackReport() {
+    const counts = {};
+    const images = [];
+    for (const info of rejects.values()) {
+      const reason = info.reason || "unpacked";
+      counts[reason] = (counts[reason] || 0) + 1;
+      images.push(info);
+    }
+    return { counts, images };
+  }
+
+  function queueDispose(texture) {
+    if (!texture || pendingDispose.includes(texture)) return;
+    sealArray(texture);
+    pendingDispose.push(texture);
+  }
+
+  function releaseSwapped() {
+    const pending = pendingDispose.splice(0, pendingDispose.length);
+    for (const texture of pending) {
+      if (texture && typeof texture.dispose === "function") texture.dispose();
+    }
+  }
+
+  // Build the next array without publishing it. A failed layer write drops
+  // the destination and leaves the previous array, still with its GPU image,
+  // as the one materials sample.
+  function growArray(group, needed, texture) {
     let capacity = group.capacity || initialDepth;
     while (capacity < needed) capacity *= 2;
     if (capacity > maxDepth) capacity = maxDepth;
-    if (needed > capacity) return false;
-    if (group.array && group.capacity >= needed) return true;
+    if (needed > capacity) return { reason: "depth-cap" };
+    if (group.array && group.capacity >= needed) return { array: group.array, previous: null, capacity: group.capacity };
     const previous = group.array;
     if (previous && !cpuIntact(previous)) {
-      // The CPU chain is gone. Copy the live layers on the GPU, or leave
-      // this image on its own key. Do not build an array from empty mips.
-      if (typeof copyLayers !== "function" || previous.userData?.forgeGpuUploaded !== true) return false;
+      if (typeof copyLayers !== "function" || previous.userData?.forgeGpuUploaded !== true) return { reason: "gpu-not-ready" };
       const array = buildPackedArray(texture, capacity, null, 0, true);
       if (!copyLayers(previous, array, group.depth)) {
-        // The destination was allocated and may already have a GPU texture.
-        // Drop it. The previous array is still the one the batches sample.
         retireArray(array);
-        return false;
+        return { reason: "gpu-copy" };
       }
       array.userData.forgeGpuUploaded = true;
       releaseTextureCpu(array, { uploaded: true });
-      swapped.set(previous, array);
-      retireArray(previous);
-      group.array = array;
-      group.capacity = capacity;
-      group.fullUpload = false;
-      return true;
+      return { array, previous, capacity };
     }
     const array = buildPackedArray(texture, capacity, previous, group.depth);
     if (uploadWouldSeeEmptyMip(array)) {
-      if (array.source) array.source.dataReady = false;
-      return false;
+      retireArray(array);
+      return { reason: "empty-mip" };
     }
-    if (previous) {
-      swapped.set(previous, array);
-      retireArray(previous);
+    return { array, previous, capacity };
+  }
+
+  function publish(group, staged, gpu) {
+    if (staged.array === group.array) return;
+    if (staged.previous) {
+      swapped.set(staged.previous, staged.array);
+      queueDispose(staged.previous);
     }
-    group.array = array;
-    group.capacity = capacity;
-    group.fullUpload = Boolean(previous);
-    return true;
+    group.array = staged.array;
+    group.capacity = staged.capacity;
+    group.fullUpload = !gpu && Boolean(staged.previous);
+  }
+
+  function dropStaged(group, staged) {
+    if (staged && staged.array && staged.array !== group.array) retireArray(staged.array);
   }
 
   function layerOf(texture) {
     const key = textureArrayGroupKey(texture);
-    if (!key) return null;
+    if (!key) {
+      noteReject(texture, packBlocker(texture) || "unpacked");
+      return null;
+    }
     let group = groups.get(key);
     if (!group) {
       group = { key, layers: new Map(), depth: 0, capacity: 0, array: null, fullUpload: false };
@@ -324,39 +408,64 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     const id = identityOf(texture);
     const existing = group.layers.get(id);
     if (existing != null) return { group, layer: existing, array: group.array };
-    if (group.depth >= maxDepth) return null;
-    if (!ensure(group, group.depth + 1, texture)) return null;
+    if (group.depth >= maxDepth) {
+      noteReject(texture, "depth-cap");
+      return null;
+    }
+    const staged = growArray(group, group.depth + 1, texture);
+    if (!staged.array) {
+      noteReject(texture, staged.reason || "grow");
+      return null;
+    }
     const layer = group.depth;
-    if (group.array.userData?.forgeGpuResident || !cpuIntact(group.array)) {
+    const array = staged.array;
+    const gpu = Boolean(array.userData?.forgeGpuResident) || !cpuIntact(array);
+    if (gpu) {
       const writes = texture.mipmaps.map((mip) => ({
         width: mip.width,
         height: mip.height,
         data: mip.data && mip.data.byteLength ? mip.data.slice() : new Uint8Array(0),
       }));
-      if (writes.some((mip) => mip.data.byteLength === 0)) return null;
-      if (typeof uploadLayer !== "function" || !uploadLayer(group.array, layer, writes)) return null;
-      group.layers.set(id, layer);
-      group.depth += 1;
-      packedTextures.add(texture);
-      group.fullUpload = false;
-      return { group, layer, array: group.array };
+      if (writes.some((mip) => mip.data.byteLength === 0)) {
+        dropStaged(group, staged);
+        noteReject(texture, "empty-layer");
+        return null;
+      }
+      if (typeof uploadLayer !== "function" || !uploadLayer(array, layer, writes)) {
+        dropStaged(group, staged);
+        noteReject(texture, "upload");
+        return null;
+      }
+    } else {
+      const format = texture.format;
+      for (let level = 0; level < texture.mipmaps.length; level += 1) {
+        const mip = texture.mipmaps[level];
+        const bytes = compressedLayerBytes(mip.width, mip.height, format);
+        const target = array.mipmaps[level] && array.mipmaps[level].data;
+        if (!target || target.byteLength < (layer + 1) * bytes || !mip.data || mip.data.byteLength < bytes) {
+          dropStaged(group, staged);
+          noteReject(texture, `cpu-write:${level}`);
+          return null;
+        }
+        target.set(mip.data.subarray(0, bytes), layer * bytes);
+      }
+      if (uploadWouldSeeEmptyMip(array)) {
+        dropStaged(group, staged);
+        noteReject(texture, "empty-mip");
+        return null;
+      }
     }
-    const format = texture.format;
-    for (let level = 0; level < texture.mipmaps.length; level += 1) {
-      const mip = texture.mipmaps[level];
-      const bytes = compressedLayerBytes(mip.width, mip.height, format);
-      const target = group.array.mipmaps[level] && group.array.mipmaps[level].data;
-      if (!target || target.byteLength < (layer + 1) * bytes || !mip.data || mip.data.byteLength < bytes) return null;
-      target.set(mip.data.subarray(0, bytes), layer * bytes);
-    }
-    if (uploadWouldSeeEmptyMip(group.array)) return null;
+    publish(group, staged, gpu);
     group.layers.set(id, layer);
     group.depth += 1;
     packedTextures.add(texture);
-    if (group.fullUpload) group.array.layerUpdates.clear();
-    else group.array.addLayerUpdate(layer);
-    requestCompressedUpload(group.array);
+    if (!gpu) {
+      if (group.fullUpload) group.array.layerUpdates.clear();
+      else group.array.addLayerUpdate(layer);
+      requestCompressedUpload(group.array);
+    }
     group.fullUpload = false;
+    notePacked(texture);
     return { group, layer, array: group.array };
   }
 
@@ -376,15 +485,18 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
         array.userData.forgeGpuUploaded = true;
         releaseTextureCpu(array, { uploaded: true });
         swapped.set(previous, array);
-        retireArray(previous);
+        queueDispose(previous);
         group.array = array;
         group.capacity = group.depth;
         continue;
       }
       const array = buildPackedArray(previous, group.depth, previous, group.depth);
-      if (uploadWouldSeeEmptyMip(array)) continue;
+      if (uploadWouldSeeEmptyMip(array)) {
+        retireArray(array);
+        continue;
+      }
       swapped.set(previous, array);
-      retireArray(previous);
+      queueDispose(previous);
       group.array = array;
       group.capacity = group.depth;
     }
@@ -394,6 +506,8 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     if (!live || typeof live.has !== "function") return;
     for (const [key, group] of groups) {
       if (group.array && live.has(group.array)) continue;
+      const index = pendingDispose.indexOf(group.array);
+      if (index >= 0) pendingDispose.splice(index, 1);
       retireArray(group.array);
       groups.delete(key);
     }
@@ -428,13 +542,29 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
   }
 
   function dispose() {
+    releaseSwapped();
     for (const group of groups.values()) retireArray(group.array);
     groups.clear();
     swapped.clear();
     packedTextures.clear();
+    rejects.clear();
   }
 
-  return { groupKey: textureArrayGroupKey, layerOf, stats, takeSwapped, dispose, compact, retain, sources, arrayFor };
+  return {
+    groupKey: textureArrayGroupKey,
+    layerOf,
+    stats,
+    takeSwapped,
+    releaseSwapped,
+    dispose,
+    compact,
+    retain,
+    sources,
+    arrayFor,
+    noteReject,
+    notePacked,
+    imagePackReport,
+  };
 }
 
 /** One RGBA float texel per instance: albedo, normal, roughness, extra layer. */
@@ -449,6 +579,16 @@ export function createLayerTexture(capacity) {
   texture.flipY = false;
   texture.needsUpdate = true;
   return texture;
+}
+
+/** A wider lookup. Existing instance texels are copied in order and not renumbered. */
+export function replaceLayerTexture(current, capacity) {
+  const next = createLayerTexture(capacity);
+  const previous = current && current.image && current.image.data;
+  if (previous && next.image && next.image.data) {
+    next.image.data.set(previous.subarray(0, Math.min(previous.length, next.image.data.length)));
+  }
+  return next;
 }
 
 /** Stock samplers. An array here becomes `texture_2d_array` with no `array_index`. */

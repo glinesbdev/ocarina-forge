@@ -217,7 +217,7 @@ export function countTextures(materials) {
   return seen.size;
 }
 
-const KEY_REASON_ORDER = ["array", "image", "blend", "helper", "water", "terrain", "tint"];
+const KEY_REASON_ORDER = ["array", "image", "blend", "helper", "water", "terrain", "ground", "tint"];
 
 /** Why a batch key did not join another mesh. Overflow suffixes are ignored. */
 export function classifyBatchKey(key) {
@@ -225,6 +225,7 @@ export function classifyBatchKey(key) {
   if (raw.includes("|h:")) return "helper";
   if (raw.includes("|water")) return "water";
   if (raw.includes("|terrain")) return "terrain";
+  if (raw.includes("|ground")) return "ground";
   if (raw.includes("|moss:")) return "blend";
   if (!raw.includes("arr:")) return "image";
   const tint = raw.match(/\|c([0-9a-f]+)\|/i);
@@ -233,7 +234,7 @@ export function classifyBatchKey(key) {
 }
 
 export function summarizeBatchKeys(keys) {
-  const counts = { array: 0, image: 0, blend: 0, helper: 0, water: 0, terrain: 0, tint: 0 };
+  const counts = { array: 0, image: 0, blend: 0, helper: 0, water: 0, terrain: 0, ground: 0, tint: 0 };
   const seen = new Set();
   for (const key of keys || []) {
     if (key == null || key === false) continue;
@@ -264,6 +265,7 @@ export function buildCapture({
   samples = [],
   server = null,
   keyReasons = null,
+  imagePack = null,
   at = new Date().toISOString(),
 } = {}) {
   const frames = samples.map((sample) => ({ ...sample }));
@@ -280,5 +282,6 @@ export function buildCapture({
     recommendation: recommendNext(summary, { gpuState }),
     server,
     keyReasons,
+    imagePack,
   };
 }

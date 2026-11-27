@@ -20,6 +20,8 @@ import {
   textureArrayGroupKey,
   writeLayerTexel,
   createLayerTexture,
+  packBlocker,
+  replaceLayerTexture,
 } from "./texture-array.js";
 
 function bc7(width, height, seed, { colorSpace = THREE.SRGBColorSpace, mips = 1 } = {}) {
@@ -182,6 +184,11 @@ test("WebGL never constructs the array packer", () => {
   assert.match(viewport, /WebGL keeps a per-image key/);
   assert.match(viewport, /cloneMaterialPreservingTextures\(source\)/);
   assert.match(viewport, /settlePackedArrays\(\)/);
+  assert.match(viewport, /releaseSwapped\(\)/);
+  assert.match(viewport, /replaceLayerTexture\(/);
+  assert.match(viewport, /pinAuthoredMatrix\(mesh\)/);
+  assert.match(viewport, /pinSurfaceMeshes\(\)/);
+  assert.match(viewport, /imagePack: imagePackDump\(\)/);
   assert.doesNotMatch(viewport, /material = source\.clone\(\)/);
   assert.doesNotMatch(viewport, /material\.map = albedo\.array/);
   assert.doesNotMatch(viewport, /material\.normalMap = placed/);
@@ -362,4 +369,65 @@ test("growing after the CPU copy is released copies on the GPU and does not uplo
   assert.equal(uploads.length, 1);
   assert.ok(uploads[0].bytes.every((bytes) => bytes > 0));
   assert.equal(packer.layerOf(second).layer, 1);
+});
+
+test("layer indices of existing images stay put across a grow and a compact", () => {
+  let disposed = 0;
+  const packer = createTextureArrayPacker({ initialDepth: 1, maxDepth: 8 });
+  const first = bc7(8, 8, 1);
+  const second = bc7(8, 8, 2);
+  const third = bc7(8, 8, 3);
+  assert.equal(packer.layerOf(first).layer, 0);
+  const before = packer.layerOf(first).array;
+  const originalDispose = before.dispose.bind(before);
+  before.dispose = () => {
+    disposed += 1;
+    originalDispose();
+  };
+  assert.equal(packer.layerOf(second).layer, 1);
+  assert.equal(packer.layerOf(first).layer, 0);
+  assert.equal(packer.layerOf(first).array !== before, true);
+  assert.equal(disposed, 0);
+  assert.equal(packer.layerOf(third).layer, 2);
+  assert.equal(packer.layerOf(second).layer, 1);
+  assert.equal(packer.layerOf(first).layer, 0);
+  packer.compact();
+  assert.equal(packer.layerOf(first).layer, 0);
+  assert.equal(packer.layerOf(second).layer, 1);
+  assert.equal(packer.layerOf(third).layer, 2);
+  assert.equal(disposed, 0);
+  packer.releaseSwapped();
+  assert.ok(disposed >= 1);
+
+  const lookup = createLayerTexture(2);
+  writeLayerTexel(lookup, 0, 3, 1, 2, 0);
+  writeLayerTexel(lookup, 1, 4, 5, 6, 7);
+  const wider = replaceLayerTexture(lookup, 4);
+  assert.equal(wider.image.data[0], 3);
+  assert.equal(wider.image.data[1], 1);
+  assert.equal(wider.image.data[4], 4);
+  assert.equal(wider.image.data[7], 7);
+  lookup.dispose();
+  wider.dispose();
+});
+
+test("a padded mip still packs and a short one is logged per image", () => {
+  const padded = bc7(4, 4, 1);
+  const bytes = compressedLayerBytes(4, 4, THREE.RGBA_BPTC_Format);
+  const extra = new Uint8Array(bytes + 16);
+  extra[0] = 9;
+  padded.mipmaps[0].data = extra;
+  assert.equal(packBlocker(padded), "");
+  const packer = createTextureArrayPacker();
+  assert.equal(arrayMapToken(padded, packer).startsWith("arr:"), true);
+  const short = bc7(4, 4, 2);
+  short.mipmaps[0].data = new Uint8Array(4);
+  const reason = packBlocker(short);
+  assert.match(reason, /^mip-bytes:0:4\//);
+  assert.equal(arrayMapToken(short, packer), "");
+  const report = packer.imagePackReport();
+  assert.equal(report.counts[reason], 1);
+  assert.equal(report.images.length, 1);
+  assert.equal(report.images[0].reason, reason);
+  assert.equal(report.images[0].width, 4);
 });

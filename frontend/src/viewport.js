@@ -54,19 +54,19 @@ import { applyTextureManifest, formatTextureReport, presentTextures, restoreShow
 import { helperKind } from "./scene-helper.js";
 import { formatActorTextureDebug, formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, pinAuthoredMatrix, presentByDefault, refreshBatchKeys, scheduleMergedDraws, surfaceKind } from "./instance.js";
 import {
   arrayMapToken,
   arrayMaterialEligible,
   arrayTexturesOf,
   canPackTexture,
   compressedCopyPlan,
-  createLayerTexture,
   createTextureArrayPacker,
   holdTexture,
   isArrayTexture,
   layerWritePlan,
   releaseArraySlots,
+  replaceLayerTexture,
   writeLayerTexel,
 } from "./texture-array.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -2902,6 +2902,8 @@ let convertSlots = 8;
       const geometry = child.geometry.clone();
       if (!isIdentityMatrix(local)) geometry.applyMatrix4(local);
       geometry.computeBoundingSphere();
+      geometry.userData = geometry.userData || {};
+      geometry.userData.forgePartName = child.userData && child.userData.name ? child.userData.name : (child.name || "");
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
       let material = prepareMaterial(source);
@@ -3146,9 +3148,9 @@ let convertSlots = 8;
     }).join(",");
   }
 
-  function mapToken(material, texture) {
+  function mapToken(material, texture, allowArray = true) {
     if (!texture) return "flat";
-    if (texturePacker && arrayMaterialEligible(material)) {
+    if (allowArray && texturePacker && arrayMaterialEligible(material)) {
       const token = arrayMapToken(texture, texturePacker);
       if (token) return token;
     }
@@ -3156,8 +3158,10 @@ let convertSlots = 8;
   }
 
   function batchKeyFor(material, geometry) {
+    const surface = surfaceKind(material, geometry);
+    const allowArray = surface === "";
     const image = material.map
-      ? mapToken(material, material.map)
+      ? mapToken(material, material.map, allowArray)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
     const blend = material.userData && material.userData.blend;
@@ -3169,16 +3173,18 @@ let convertSlots = 8;
     const orm1Map = material.userData && material.userData.orm1Map;
     const normal1Map = material.userData && material.userData.normal1Map;
     const surfaceKey = (roughMap || normalMap || orm1Map || normal1Map)
-      ? `|orm:${roughMap ? mapToken(material, roughMap) : "flat"}|n:${normalMap ? mapToken(material, normalMap) : "flat"}|orm1:${orm1Map && orm1Map.image ? imageSignature(orm1Map.image, orm1Map) : "flat"}|n1:${normal1Map && normal1Map.image ? imageSignature(normal1Map.image, normal1Map) : "flat"}${material.metalnessMap && material.metalnessMap === roughMap ? "|metal:orm" : ""}`
+      ? `|orm:${roughMap ? mapToken(material, roughMap, allowArray) : "flat"}|n:${normalMap ? mapToken(material, normalMap, allowArray) : "flat"}|orm1:${orm1Map && orm1Map.image ? imageSignature(orm1Map.image, orm1Map) : "flat"}|n1:${normal1Map && normal1Map.image ? imageSignature(normal1Map.image, normal1Map) : "flat"}${material.metalnessMap && material.metalnessMap === roughMap ? "|metal:orm" : ""}`
       : "";
     const userData = material.userData || {};
     const role = userData.helper
       ? `|h:${userData.helper}`
       : (userData.waterStandIn || userData.banc === "water")
         ? "|water"
-        : (userData.terrainNode || userData.terrainShader || userData.banc === "terrain")
-          ? "|terrain"
-          : "";
+        : surface === "ground"
+          ? "|ground"
+          : (surface === "terrain" || userData.terrainNode || userData.terrainShader || userData.banc === "terrain")
+            ? "|terrain"
+            : "";
     return batchKey({
       image: image + blendKey + surfaceKey + role,
       alpha,
@@ -3494,14 +3500,26 @@ let convertSlots = 8;
   function ensureLayerTexture(material, capacity) {
     const current = material.userData.forgeLayerTexture;
     const width = current && current.image ? current.image.width | 0 : 0;
-    if (current && width >= capacity) return { texture: current, replaced: false };
-    const next = createLayerTexture(Math.max(capacity, 8));
-    if (current && current.image && current.image.data) {
-      next.image.data.set(current.image.data.subarray(0, Math.min(current.image.data.length, next.image.data.length)));
+    if (current && width >= capacity) return { texture: current, replaced: false, previous: null };
+    // Keep the previous lookup bound until the copy is uploaded. A zero texture
+    // sampled for one frame paints every instance with layer 0.
+    const next = replaceLayerTexture(current, Math.max(capacity, width, 8));
+    return { texture: next, replaced: true, previous: current || null };
+  }
+
+  function publishLayerTexture(material, slot) {
+    if (!slot || !slot.replaced) return true;
+    try {
+      if (typeof renderer.initTexture === "function") renderer.initTexture(slot.texture);
+    } catch {
+      if (slot.texture && slot.texture !== slot.previous && typeof slot.texture.dispose === "function") slot.texture.dispose();
+      return false;
     }
-    if (current && typeof current.dispose === "function") current.dispose();
-    holdTexture(material.userData, "forgeLayerTexture", next);
-    return { texture: next, replaced: true };
+    holdTexture(material.userData, "forgeLayerTexture", slot.texture);
+    if (slot.previous && typeof slot.previous.dispose === "function") slot.previous.dispose();
+    slot.replaced = false;
+    slot.previous = null;
+    return true;
   }
 
   function installArrayBatch(batch, added) {
@@ -3533,11 +3551,17 @@ let convertSlots = 8;
     const layerSlot = ensureLayerTexture(material, cap);
     let rebuildNodes = layerSlot.replaced || material.colorNode == null;
     const place = (texture) => (texture && canPackTexture(texture) ? texturePacker.layerOf(texture) : null);
+    let wrote = false;
     for (const item of added) {
       const partMaterial = item.record && item.record.part && item.record.part.material;
       if (!partMaterial || !partMaterial.map) continue;
       const albedo = place(partMaterial.map);
-      if (!albedo) continue;
+      if (!albedo) {
+        // Layer 0 is a real image. Hide the instance until its own layer is stored.
+        if (typeof mesh.setVisibleAt === "function") mesh.setVisibleAt(item.instanceId, false);
+        continue;
+      }
+      if (typeof mesh.setVisibleAt === "function") mesh.setVisibleAt(item.instanceId, true);
       if (material.userData.forgeArrayAlbedo !== albedo.array) {
         holdTexture(material.userData, "forgeArrayAlbedo", albedo.array);
         rebuildNodes = true;
@@ -3581,6 +3605,14 @@ let convertSlots = 8;
         extraLayer = placedExtra.layer;
       }
       writeLayerTexel(layerSlot.texture, item.instanceId, albedo.layer, normalLayer, roughLayer, extraLayer);
+      wrote = true;
+    }
+    if (wrote && !publishLayerTexture(material, layerSlot)) {
+      for (const item of added) {
+        if (typeof mesh.setVisibleAt === "function") mesh.setVisibleAt(item.instanceId, false);
+      }
+    } else if (!wrote && layerSlot.replaced && layerSlot.texture && layerSlot.texture !== layerSlot.previous) {
+      if (typeof layerSlot.texture.dispose === "function") layerSlot.texture.dispose();
     }
     if (rebuildNodes && mapNodes.bindArrayMaterial) {
       material.colorNode = null;
@@ -3615,7 +3647,10 @@ let convertSlots = 8;
   function retargetArrayTextures() {
     if (!texturePacker || !mapNodes) return;
     const swapped = texturePacker.takeSwapped();
-    if (!swapped) return;
+    if (!swapped) {
+      if (typeof texturePacker.releaseSwapped === "function") texturePacker.releaseSwapped();
+      return;
+    }
     for (const batch of batches) {
       const material = batch.mesh && batch.mesh.material;
       const userData = material && material.userData;
@@ -3649,6 +3684,9 @@ let convertSlots = 8;
       const albedoTexture = userData.forgeArrayAlbedo;
       batch.mesh.userData.forgeAlbedo = albedoTexture && albedoTexture.isTexture === true ? albedoTexture : null;
     }
+    // The new array is what the materials sample now. Dispose the previous GPU
+    // texture in this same turn, after the rebind, not when the grow ran.
+    if (texturePacker && typeof texturePacker.releaseSwapped === "function") texturePacker.releaseSwapped();
   }
 
   function liveCompressedArrays() {
@@ -4547,6 +4585,9 @@ vec2 blendMossUv;`;
       material.map.needsUpdate = true;
       material.userData.terrainMap = material.map;
     }
+    if (!material.userData.terrainWorldMatrix) {
+      material.userData.terrainWorldMatrix = { value: new THREE.Matrix4() };
+    }
     const previous = material.onBeforeCompile;
     material.onBeforeCompile = (shader) => {
       if (previous && previous !== material.onBeforeCompile) previous(shader);
@@ -4609,11 +4650,33 @@ uniform float terrainLayerMissing;`
     return material;
   }
 
+  function pinSurfaceMeshes() {
+    const visit = (root) => {
+      if (!root || typeof root.traverse !== "function") return;
+      root.traverse((child) => {
+        if (!child.isMesh) return;
+        const material = Array.isArray(child.material) ? child.material[0] : child.material;
+        const data = material && material.userData;
+        const kind = surfaceKind(material, child.geometry, child.name || "");
+        if (kind !== "terrain" && kind !== "ground" && !(data && (data.terrainShader || data.terrainNode || data.groundSurface))) return;
+        pinAuthoredMatrix(child);
+        const world = data && data.terrainWorldMatrix;
+        if (world && world.value) world.value.copy(child.matrixWorld);
+      });
+    };
+    visit(terrainRoot);
+  }
+
   function bindTerrainMesh(mesh) {
     mesh.frustumCulled = false;
     mesh.onBeforeRender = () => {
       const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
       if (!material || !material.userData) return;
+      // The field is authored in world space. Restore that matrix before the
+      // node uniform is uploaded, so a camera matrix cannot slide the mesh.
+      pinAuthoredMatrix(mesh);
+      const world = material.userData.terrainWorldMatrix;
+      if (world && world.value) world.value.copy(mesh.matrixWorld);
       const atlas = material.userData.terrainMap;
       // The node colour samples terrainMap. Putting map back asks the standard
       // node for attribute "uv", which terrain tiles do not have.
@@ -6553,8 +6616,14 @@ uniform float terrainLayerMissing;`
       server: serverHead,
       batchKeys: batchKeyCount(),
       keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
+      imagePack: imagePackDump(),
       pickUploads: statPickUploads,
     };
+  }
+
+  function imagePackDump() {
+    if (!texturePacker || typeof texturePacker.imagePackReport !== "function") return null;
+    return texturePacker.imagePackReport();
   }
 
   function dumpProfile() {
@@ -6566,6 +6635,7 @@ uniform float terrainLayerMissing;`
       samples: profileWindow.samples(),
       server: serverHead ? { head: serverHead, lines: serverLines.slice() } : null,
       keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
+      imagePack: imagePackDump(),
     });
   }
 
@@ -6727,6 +6797,7 @@ uniform float terrainLayerMissing;`
     let submitMs = 0;
     const submitStart = performance.now();
     if (profiling) frameTimer.beginFrame();
+    pinSurfaceMeshes();
     try {
       renderer.render(scene, camera);
     } finally {
@@ -6840,6 +6911,7 @@ uniform float terrainLayerMissing;`
         batchCount: profileWindow.latest() ? profileWindow.latest().batches : batches.length,
         batchKeys: batchKeyCount(),
         keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
+        imagePack: imagePackDump(),
         pickUploads: profileWindow.latest() && profileWindow.latest().pickUploads != null
           ? profileWindow.latest().pickUploads
           : statPickUploads,
