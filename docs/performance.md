@@ -136,11 +136,29 @@ The packer now starts at one layer, frees the previous array's mip buffers when 
 
 `keys` stays split by array class (size, mips, format, color space, wrap), and by helper, water, terrain, blend, tint, and images that cannot pack. Tint stays in the key. Dump JSON's `keyReasons` and the Profile detail line count those reasons (`array`, `image`, `blend`, `helper`, `water`, `terrain`, `tint`).
 
-### Estimated on Field
+### Field after releasing the CPU copies (`137ef86`)
 
-Not re-measured here. `submit` should stay near the settled 31.2 ms while `keys` stays in the hundreds, and should fall further if Dump JSON shows most keys are `image` (the low bitmaps that now join a size class). It should not go back to 44.5 ms or 111.3 ms. Heap should come back to the pre-#70 range, about 1075–1532 MB or under, once the source buffers and the spare array layers are gone. `tex` should sit well under 1692. It will not match 455–595 exactly: each array batch also has a live layer texture. GPU time stays near 5 ms. The arrays stay on.
+27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on. Heap is back to 1180.8 MB and the serialize warnings are gone. The console instead reports 874 `writeTexture` validation errors, all the same kind: the layout size is 16, 64, 144, 256, 1024, 4096, 9216, 16384, 65536, or 262144 bytes and the buffer is 0 bytes, offset 0, one layer. The targets are BC7 arrays (512² at 2–26 layers, 768² at 2–6 layers, Unorm and sRGB) and plain 2D images (512, 768, 1024). A lot of land looks missing or flat while the field is still streaming. This capture is mid-stream (`textures` 85/116, two still loading, `dl` 146188 against the settled 285421).
 
-Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on and wait until streaming settles. The console should not report `Unable to serialize Texture.` and should not report a `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo, including up close after the full images replace the low bitmaps, and the water should not stay on the flat teal stand-in. Compare heap with 1075–1532 MB and `tex` with 1692. Compare `keys` and `batches` with 466 and with 1004, and read the key-reason line (or Dump JSON `keyReasons`). Compare `submit` with 31.2 ms and with 44.5 ms. `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
+| | settled before the memory fix | this capture (streaming) | after streaming settled |
+| --- | --- | --- | --- |
+| cpu | 42.4 ms (avg 57.3, p95 87.2) | 82.8 ms (avg 66.3, p95 89.5) | |
+| update | 11.2 ms | 26.5 ms | |
+| submit | 31.2 ms | 56.9 ms | 44.3 ms |
+| gpu | 5.2 ms | 6.4 ms | |
+| obj / batches / keys / draws | 3970 / 466 / 466 / 5123 | 7331 / 164 / 164 / 7823 | |
+| sub / pick | 466 / 0 | 328 / 1 | |
+| tex / heap | 1692 / 3736.2 MB | 428 / 1180.8 MB | heap stayed at 1180.8 MB |
+| keys | | array 19, image 50, blend 86, helper 2, water 7 | |
+| streaming | conv 7107.3, dl 285421.3, up 3692.5, compile 530 ms | conv 4079, dl 146188.3, up 2084.6, compile 722.5 ms | |
+
+`submit` at 44.3 ms is no better than the per-image 44.5 ms, and worse than the 31.2 ms from the run where the array uploads were valid. The arrays stay on. That 31.2 ms run is the measurement that a valid upload beats 44.5. The 44.3 ms is this bug, not the cost of packing.
+
+What the extra time is: `retireArray` emptied every mip (`Uint8Array(0)`) and did not clear `source.dataReady`, and `settlePackedArrays` released each packed source's CPU buffer before three had uploaded it. `updateTexture` then calls `writeTexture` with that empty buffer. The error is uncaptured (`Uncaptured WebGPU GPUValidationError`), so the call does not throw and three still stores the texture version. A settled, idle frame does not retry the same texture unless something sets `needsUpdate` again. Compact is not per frame. It runs when a batch is rebuilt, and it returns immediately once capacity equals the layer count. There is no per-frame array growth in the render loop. The 874 errors are one pass over every mip of every texture that was still bound with an empty buffer, and the rebuilds that were still running as the field finished (detail BC7, a class that grew) did it again inside `submit`. That is the gap from 31.2 ms to 44.3 ms.
+
+The packer now refuses that write. A buffer is released only after the GPU texture exists (`{ uploaded: true }`), and `dataReady` is cleared before the bytes are dropped. A grow or compact whose CPU chain is already gone copies the live layers with `copyTextureToTexture` and uploads only the new layer, and only when that layer's mip buffers are non-empty. A texture with an empty mip never gets `needsUpdate`. The source bytes stay until the array is on the GPU, then they are dropped, so the heap should stay at or under about 1.5 GB (1180.8 MB on this run).
+
+Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on. While it streams, the console should have no `writeTexture` validation error, no `Unable to serialize Texture.`, and no `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo during streaming, not only after it settles, and up close after the full images replace the low bitmaps. Water should not stay on the flat teal stand-in. After streaming settles, `submit` has to be clearly under 44.5 ms, in the 31 ms range or better. Heap at or under about 1.5 GB. `tex` should stay well under 1692. Compare `keys` and `batches` with 466 and with 1004, and read the key-reason line (or Dump JSON `keyReasons`). `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
 
 ## Frustum and draw distance
 

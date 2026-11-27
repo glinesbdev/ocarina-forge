@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as THREE from "three";
+import { releaseTextureCpu } from "./gpu-texture.js";
 import { createBatchFiller } from "./batch-fill.js";
 import { refreshBatchKeys } from "./instance.js";
 import { readFileSync } from "node:fs";
@@ -11,7 +12,9 @@ import {
   compressedLayerBytes,
   createTextureArrayPacker,
   isArrayTexture,
+  layerWritePlan,
   releaseArraySlots,
+  uploadWouldSeeEmptyMip,
   STOCK_TEXTURE_SLOTS,
   textureArrayGroupKey,
   writeLayerTexel,
@@ -167,7 +170,11 @@ test("a clone and a no-uv material do not keep an array on a stock slot", () => 
 
 test("WebGL never constructs the array packer", () => {
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
-  assert.match(viewport, /const texturePacker = mapNodes \? createTextureArrayPacker\(\) : null/);
+  assert.match(viewport, /createTextureArrayPacker\(\{/);
+  assert.match(viewport, /copyLayers: copyPackedArrayLayers/);
+  assert.match(viewport, /uploadLayer: uploadPackedArrayLayer/);
+  assert.match(viewport, /forgePackedHold/);
+  assert.match(viewport, /releaseTextureCpu\(texture, \{ uploaded: true \}\)/);
   assert.match(viewport, /WebGL keeps a per-image key/);
   assert.match(viewport, /cloneMaterialPreservingTextures\(source\)/);
   assert.match(viewport, /settlePackedArrays\(\)/);
@@ -196,6 +203,8 @@ test("a single image allocates one layer and compact drops spare capacity", () =
   assert.equal(slim.mipmaps[0].data[0], 1);
   assert.equal(slim.mipmaps[0].data[2 * bytes], 3);
   assert.equal(fat.mipmaps[0].data.byteLength, 0);
+  assert.equal(fat.source.dataReady, false);
+  assert.equal(uploadWouldSeeEmptyMip(fat), false);
   assert.equal(grown.takeSwapped().get(fat), slim);
 });
 
@@ -210,6 +219,8 @@ test("an array no batch samples is disposed with its mip buffers", () => {
   packer.retain(new Set([kept]));
   assert.equal(packer.stats().arrays, 1);
   assert.equal(dropped.mipmaps[0].data.byteLength, 0);
+  assert.equal(dropped.source.dataReady, false);
+  assert.equal(uploadWouldSeeEmptyMip(dropped), false);
   assert.equal(packer.sources().has(keep), true);
 });
 
@@ -237,4 +248,54 @@ test("the layer texel stores albedo, normal, and roughness", () => {
   assert.equal(texture.image.data[10], 7);
   assert.equal(writeLayerTexel(texture, 4, 1, 0, 0, 0), false);
   texture.dispose();
+});
+
+test("an upload plan rejects a zero-length mip", () => {
+  const empty = { width: 4, height: 4, data: new Uint8Array(0) };
+  assert.equal(layerWritePlan(empty, THREE.RGBA_BPTC_Format), null);
+  const broken = bc7(4, 4, 1);
+  broken.mipmaps[0].data = new Uint8Array(0);
+  assert.equal(uploadWouldSeeEmptyMip(broken), true);
+  const sound = bc7(4, 4, 2);
+  const plan = layerWritePlan(sound.mipmaps[0], sound.format);
+  assert.equal(plan.data.byteLength, compressedLayerBytes(4, 4, THREE.RGBA_BPTC_Format));
+  assert.equal(uploadWouldSeeEmptyMip(sound), false);
+});
+
+test("growing after the CPU copy is released copies on the GPU and does not upload an empty mip", () => {
+  const copies = [];
+  const uploads = [];
+  const packer = createTextureArrayPacker({
+    copyLayers(src, dst, depth) {
+      copies.push({ src, dst, depth });
+      dst.userData.forgeGpuUploaded = true;
+      return true;
+    },
+    uploadLayer(dst, layer, writes) {
+      uploads.push({ dst, layer, bytes: writes.map((mip) => mip.data.byteLength) });
+      return writes.every((mip) => layerWritePlan(mip, dst.format) && mip.data.byteLength > 0);
+    },
+  });
+  const first = bc7(8, 8, 1);
+  const second = bc7(8, 8, 2);
+  arrayMapToken(first, packer);
+  const array = packer.layerOf(first).array;
+  array.userData.forgeGpuUploaded = true;
+  assert.equal(releaseTextureCpu(array, { uploaded: true }), true);
+  assert.equal(array.source.dataReady, false);
+  assert.equal(uploadWouldSeeEmptyMip(array), false);
+  assert.equal(arrayMapToken(second, packer).startsWith("arr:"), true);
+  const grown = packer.layerOf(second).array;
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0].src, array);
+  assert.equal(copies[0].dst, grown);
+  assert.equal(copies[0].depth, 1);
+  assert.notEqual(grown, array);
+  assert.equal(grown.source.dataReady, false);
+  assert.equal(uploadWouldSeeEmptyMip(grown), false);
+  assert.equal(uploadWouldSeeEmptyMip(array), false);
+  assert.equal(array.source.dataReady, false);
+  assert.equal(uploads.length, 1);
+  assert.ok(uploads[0].bytes.every((bytes) => bytes > 0));
+  assert.equal(packer.layerOf(second).layer, 1);
 });

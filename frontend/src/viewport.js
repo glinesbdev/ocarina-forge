@@ -64,6 +64,7 @@ import {
   createTextureArrayPacker,
   holdTexture,
   isArrayTexture,
+  layerWritePlan,
   releaseArraySlots,
   writeLayerTexel,
 } from "./texture-array.js";
@@ -153,7 +154,10 @@ export async function createViewport(host, hooks) {
   const useGpuPick = !created.nodes || (Boolean(pickNodes) && pickNodes.nodeSystemsDiffer !== true);
   // WebGL keeps a per-image key. The array packer exists only when the node
   // materials that sample `texture().depth(layer)` are loaded.
-  const texturePacker = mapNodes ? createTextureArrayPacker() : null;
+  const texturePacker = mapNodes ? createTextureArrayPacker({
+    copyLayers: copyPackedArrayLayers,
+    uploadLayer: uploadPackedArrayLayer,
+  }) : null;
   const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
   const frameTimer = createFrameTimer(renderer);
@@ -654,6 +658,10 @@ let convertSlots = 8;
     const groups = new Map();
     for (const texture of live) {
       if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) continue;
+      // A packed source is sealed (dataReady false) until its array is on the
+      // GPU. It will never become textureGpuReady itself, so the drawn-texture
+      // path must not keep requesting frames for it.
+      if (texture.userData?.forgePackedHold) continue;
       const key = sourceKey(texture);
       const group = groups.get(key) || [];
       group.push(texture);
@@ -680,9 +688,13 @@ let convertSlots = 8;
     for (const key of [...textureCpuReleaseFrames.keys()]) {
       if (!groups.has(key)) textureCpuReleaseFrames.delete(key);
     }
-    if (!ready.length) {
-      textureCpuReleaseDirty = groups.size > 0;
+    const packedSources = packedSourcesReady();
+    const packedArrays = packedArraysReady();
+    if (!ready.length && !packedSources.length && !packedArrays.length) {
+      textureCpuReleaseDirty = groups.size > 0 || packedSourcesReady().length > 0 || packedArraysReady().length > 0;
       // Keep drawing a couple of extra frames so new uploads can retire.
+      // A held source whose array is not on the GPU yet waits for the next
+      // real frame. Requesting one here would spin once streaming stops.
       if ([...textureCpuReleaseFrames.values()].some((frames) => frames > 0 && frames < 3)) requestRender();
       return;
     }
@@ -694,13 +706,22 @@ let convertSlots = 8;
     void Promise.resolve(wait).catch(() => {}).then(() => {
       for (const texture of ready) {
         if (texture.needsUpdate || texture.source?.needsUpdate) continue;
-        releaseTextureCpu(texture);
+        releaseTextureCpu(texture, { uploaded: true });
         textureCpuReleaseFrames.delete(sourceKey(texture));
+      }
+      noteUploadedArrays();
+      for (const texture of packedSourcesReady()) releaseTextureCpu(texture, { uploaded: true });
+      for (const texture of packedArraysReady()) {
+        texture.userData.forgeGpuUploaded = true;
+        releaseTextureCpu(texture, { uploaded: true });
       }
     }).finally(() => {
       textureCpuReleaseInFlight = false;
-      textureCpuReleaseDirty = collectLiveTextures().size > 0
-        && [...collectLiveTextures()].some((texture) => !texture.userData?.forgeCpuReleased && !texture.source?.userData?.forgeCpuReleased);
+      textureCpuReleaseDirty = [...collectLiveTextures()].some((texture) => (
+        !texture.userData?.forgePackedHold
+        && !texture.userData?.forgeCpuReleased
+        && !texture.source?.userData?.forgeCpuReleased
+      )) || packedSourcesReady().length > 0 || packedArraysReady().length > 0;
       if (textureCpuReleaseDirty) requestRender();
     });
   }
@@ -3664,9 +3685,124 @@ let convertSlots = 8;
     return drawn;
   }
 
-  // Drop spare array layers, drop arrays no batch samples, and drop the CPU
-  // copy of a source whose bytes now live only in an array. A 2D draw (blend,
-  // water, terrain, helper) keeps its buffer until the GPU upload path releases it.
+  // Copy `layerCount` layers of a packed array on the GPU. The destination's
+  // CPU buffers are not uploaded: dataReady is false, and initTexture only
+  // allocates the image. Returns false when the GPU texture is not ready, so
+  // the packer keeps the image on its own key instead of writing an empty mip.
+  function copyPackedArrayLayers(src, dst, layerCount) {
+    const backend = renderer && renderer.backend;
+    if (!backend || typeof backend.copyTextureToTexture !== "function") return false;
+    if (!textureGpuReady(backend, src)) return false;
+    if (dst.source) dst.source.dataReady = false;
+    dst.needsUpdate = true;
+    try {
+      if (!textureGpuReady(backend, dst) && typeof renderer.initTexture === "function") renderer.initTexture(dst);
+    } catch {
+      return false;
+    }
+    if (!textureGpuReady(backend, dst)) return false;
+    const mips = src.mipmaps || [];
+    try {
+      for (let level = 0; level < mips.length; level += 1) {
+        const mip = mips[level];
+        // The copy size is the mip's size. A 1×1 tail is the whole subresource;
+        // rounding it up to the block would run past the texture and fail.
+        const width = Math.max(1, (mip && mip.width) || 1);
+        const height = Math.max(1, (mip && mip.height) || 1);
+        backend.copyTextureToTexture(
+          src,
+          dst,
+          new THREE.Box3(new THREE.Vector3(0, 0, 0), new THREE.Vector3(width, height, layerCount)),
+          new THREE.Vector3(0, 0, 0),
+          level,
+          level,
+        );
+      }
+    } catch {
+      return false;
+    }
+    dst.userData.forgeGpuUploaded = true;
+    return true;
+  }
+
+  // One new layer, from a copied mip chain. A 0-length mip is refused.
+  function uploadPackedArrayLayer(texture, layer, writes) {
+    const backend = renderer && renderer.backend;
+    const device = backend && backend.device;
+    const queue = device && device.queue;
+    if (!queue || typeof queue.writeTexture !== "function") return false;
+    if (!textureGpuReady(backend, texture)) return false;
+    const gpu = backend.get(texture).texture;
+    if (!gpu) return false;
+    for (let level = 0; level < writes.length; level += 1) {
+      const plan = layerWritePlan(writes[level], texture.format);
+      if (!plan || plan.data.byteLength === 0) return false;
+      queue.writeTexture(
+        { texture: gpu, mipLevel: level, origin: { x: 0, y: 0, z: layer } },
+        plan.data,
+        { offset: 0, bytesPerRow: plan.bytesPerRow, rowsPerImage: plan.rowsPerImage },
+        { width: plan.width, height: plan.height, depthOrArrayLayers: 1 },
+      );
+    }
+    texture.userData.forgeGpuUploaded = true;
+    return true;
+  }
+
+  function noteUploadedArrays() {
+    const backend = renderer && renderer.backend;
+    if (!backend || typeof backend.get !== "function") return;
+    for (const texture of liveCompressedArrays()) {
+      if (!texture || texture.userData?.forgeGpuUploaded || texture.userData?.forgeCpuReleased) continue;
+      if (!textureGpuReady(backend, texture)) continue;
+      let record = null;
+      try {
+        record = backend.get(texture);
+      } catch {
+        continue;
+      }
+      if (record && record.version != null && record.version !== texture.version) continue;
+      texture.userData.forgeGpuUploaded = true;
+    }
+  }
+
+  function packedSourcesReady() {
+    if (!texturePacker || typeof texturePacker.sources !== "function" || typeof texturePacker.arrayFor !== "function") return [];
+    const backend = renderer && renderer.backend;
+    const drawn = collectDrawnSources();
+    const ready = [];
+    for (const texture of texturePacker.sources()) {
+      if (!texture || texture.userData?.forgeCpuReleased || texture.userData?.forgeFullTexture) continue;
+      const source = texture.source || texture;
+      if (drawn.has(source)) continue;
+      const array = texturePacker.arrayFor(texture);
+      if (!array || !textureGpuReady(backend, array)) continue;
+      ready.push(texture);
+    }
+    return ready;
+  }
+
+  function packedArraysReady() {
+    const backend = renderer && renderer.backend;
+    const ready = [];
+    for (const texture of liveCompressedArrays()) {
+      if (!texture || texture.userData?.forgeCpuReleased || !texture.userData?.forgeGpuUploaded) continue;
+      if (!textureGpuReady(backend, texture)) continue;
+      let record = null;
+      try {
+        record = backend && typeof backend.get === "function" ? backend.get(texture) : null;
+      } catch {
+        continue;
+      }
+      if (record && record.version != null && texture.source?.dataReady !== false && record.version !== texture.version) continue;
+      ready.push(texture);
+    }
+    return ready;
+  }
+
+  // Drop spare array layers and arrays no batch samples. A packed source keeps
+  // its bytes until the array is on the GPU; until then three must not upload
+  // that 2D image (dataReady false). A drawn 2D material (blend, water,
+  // terrain, helper) keeps the existing upload path.
   function settlePackedArrays() {
     if (!texturePacker) return;
     if (typeof texturePacker.compact === "function") texturePacker.compact();
@@ -3675,11 +3811,15 @@ let convertSlots = 8;
     if (typeof texturePacker.sources !== "function") return;
     const drawn = collectDrawnSources();
     for (const texture of texturePacker.sources()) {
-      if (!texture || texture.userData?.forgeFullTexture) continue;
+      if (!texture || texture.userData?.forgeFullTexture || texture.userData?.forgeCpuReleased) continue;
       const source = texture.source || texture;
       if (drawn.has(source)) continue;
-      releaseTextureCpu(texture);
+      texture.userData = texture.userData || {};
+      texture.userData.forgePackedHold = true;
+      if (texture.source) texture.source.dataReady = false;
     }
+    textureCpuReleaseDirty = true;
+    requestRender();
   }
 
   function refreshArrayLayers(parts) {
@@ -5919,6 +6059,12 @@ uniform float terrainLayerMissing;`
     texture.format = full.format;
     texture.type = full.type;
     texture.isCompressedTexture = Boolean(full.isCompressedTexture);
+    // The low bitmap may already have been sealed. The full image is a new
+    // source with its own bytes, and it has to be allowed to upload.
+    delete texture.userData.forgeCpuReleased;
+    delete texture.userData.forgePackedHold;
+    delete texture.userData.forgeGpuUploaded;
+    delete texture.userData.forgeGpuResident;
     if (texture.isCompressedTexture) {
       repairCompressedTexture(texture);
     } else {
