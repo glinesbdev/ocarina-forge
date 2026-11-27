@@ -6441,12 +6441,18 @@ uniform float terrainLayerMissing;`
     tileLayer = layer;
   }
 
+  function tileErrorLine(message) {
+    const lines = String(message || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    return lines.find((line) => line.startsWith("Error:")) || lines.find((line) => !line.startsWith("The tile bake failed")) || "The tile bake failed.";
+  }
+
   function noteTileBakeError(error) {
     const message = error && error.message ? String(error.message) : String(error || "The tile bake failed.");
     tileSettleBake = false;
     if (tileBakeError === message) return;
     tileBakeError = message;
     console.error(message);
+    if (hooks.onTileBakeError) hooks.onTileBakeError(tileErrorLine(message));
   }
 
   async function ensureTiles(reason) {
@@ -6541,6 +6547,21 @@ uniform float terrainLayerMissing;`
     benchmarkRun = null;
     syncProfileCounting();
     if (!run) return null;
+    if (run.failed) {
+      benchmarkResult = {
+        version: 1,
+        scene: "hyrule-field-child",
+        path: "field-loop-160m",
+        settled: false,
+        frames: 0,
+        error: tileBakeError,
+        tiles: { enabled: tilesOn, loaded: 0, visible: 0, cachedBytes: 0, bakeMs: tileBakeMs },
+        note: "The tile bake failed, so the fly did not start. The message was shown once.",
+      };
+      console.info(JSON.stringify(benchmarkResult, null, 2));
+      requestRender();
+      return benchmarkResult;
+    }
     if (run.saved) {
       camera.position.copy(run.saved.position);
       orbit.target.copy(run.saved.target);
@@ -6607,11 +6628,18 @@ uniform float terrainLayerMissing;`
       if (tilesOn && !run.tilesReady) {
         if (!run.tilesPromise) {
           run.tilesPromise = ensureTiles("benchmark").then((status) => {
-            if (status === "applied" || status === "empty" || status === "failed" || status === "off" || !tilesOn) run.tilesReady = true;
-            else run.tilesPromise = null;
+            if (status === "failed") {
+              run.failed = true;
+              run.tilesReady = true;
+              run.complete = true;
+            } else if (status === "applied" || status === "empty" || status === "off" || !tilesOn) {
+              run.tilesReady = true;
+            } else run.tilesPromise = null;
             requestRender();
           }, () => {
+            run.failed = true;
             run.tilesReady = true;
+            run.complete = true;
             requestRender();
           });
         }

@@ -281,6 +281,7 @@ viewport = await createViewport($("viewport"), {
     }
   },
   onDeviceLost: (message) => toast(message, { persistent: true }),
+  onTileBakeError: (message) => toast(message, { persistent: true }),
   onFrame() {
     refreshStreamLog();
   },

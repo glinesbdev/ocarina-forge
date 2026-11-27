@@ -105,7 +105,10 @@ test("the baker selftest prints its own result", () => {
   const line = run.stdout.trim().split("\n").pop();
   const report = JSON.parse(line);
   assert.equal(report.ok, true);
-  assert.equal(report.featureId, 7);
+  assert.equal(report.sources, 2);
+  assert.deepEqual(report.featureIds, [7, 11]);
+  assert.equal(report.buffers.leaf, 1);
+  assert.ok(report.buffers.hlod <= 1);
 });
 
 test("a hit on _feature_id_0 resolves to that actor", () => {
@@ -131,6 +134,55 @@ test("a hit on _feature_id_0 resolves to that actor", () => {
     tilesBytes: 0,
     bakeMs: 3,
   });
+});
+
+test("two source documents bake to one buffer in the cell and the HLOD", async () => {
+  const root = await mkdtemp(join(tmpdir(), "forge-tiles-"));
+  try {
+    const tree = join(root, "tree.glb");
+    const rock = join(root, "rock.glb");
+    await writeTriangle(tree, "bark");
+    await writeTriangle(rock, "stone");
+    clearSourceCache();
+    const job = {
+      cells: [{
+        id: "0_0",
+        leaf: join(root, "leaf.glb"),
+        hlod: join(root, "hlod.glb"),
+        meta: join(root, "meta.json"),
+        actors: [
+          { ...actor(7, 0, tree), gyaml: "Obj_Tree" },
+          { ...actor(11, 8, rock), gyaml: "Obj_Rock" },
+        ],
+      }],
+    };
+    const report = await bakeJob(job);
+    assert.deepEqual(report.cells[0].actors, [7, 11]);
+    const reader = new NodeIO()
+      .registerExtensions([EXTMeshGPUInstancing, EXTMeshoptCompression, KHRMaterialsUnlit])
+      .registerDependencies({ "meshopt.decoder": MeshoptDecoder });
+    const leaf = await reader.readBinary(await readFile(job.cells[0].leaf));
+    const hlod = await reader.readBinary(await readFile(job.cells[0].hlod));
+    assert.equal(leaf.getRoot().listBuffers().length, 1);
+    assert.ok(hlod.getRoot().listBuffers().length <= 1);
+    const ids = new Set();
+    for (const node of leaf.getRoot().listNodes()) {
+      const batch = node.getExtension("EXT_mesh_gpu_instancing");
+      const instancedIds = batch?.getAttribute("_FEATURE_ID_0")?.getArray();
+      if (instancedIds) for (const value of instancedIds) ids.add(Math.round(value));
+      const mesh = node.getMesh();
+      if (!mesh) continue;
+      for (const prim of mesh.listPrimitives()) {
+        const array = prim.getAttribute("_FEATURE_ID_0")?.getArray();
+        if (!array) continue;
+        for (let index = 0; index < array.length; index += 1) ids.add(Math.round(array[index]));
+      }
+    }
+    assert.ok(ids.has(7) && ids.has(11), `feature ids ${[...ids].join(",")}`);
+  } finally {
+    clearSourceCache();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("two bakes of the same actors are byte-identical and keep feature ids", async () => {
@@ -183,6 +235,7 @@ test("two bakes of the same actors are byte-identical and keep feature ids", asy
     assert.ok(ids.has(11), `feature ids ${[...ids].join(",")}`);
     const hlod = await readFile(join(root, "a", "hlod.glb"));
     assert.ok(hlod.byteLength > 0);
+    assert.ok(doc.getRoot().listBuffers().length <= 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -318,19 +318,19 @@ async function bakeCell(cell) {
   await doc.transform(joinMeshes(), prune());
   const triangles = countTris(doc);
   const bounds = boundsOf(doc);
-  const plain = await io.writeBinary(doc);
-  await doc.transform(unpartition(), meshopt({ encoder: MeshoptEncoder, level: "medium" }));
-  await writeGlb(cell.leaf, await io.writeBinary(doc));
+  // copyToDocument keeps one buffer per source model. A GLB may contain only one.
+  const plain = await glbBytes(doc);
+  await doc.transform(meshopt({ encoder: MeshoptEncoder, level: "medium" }));
+  await writeGlb(cell.leaf, await glbBytes(doc));
   let hlodTriangles = triangles;
   try {
     const hlod = await io.readBinary(plain);
     await hlod.transform(
       simplify({ simplifier: MeshoptSimplifier, ratio: 0.1, error: 1 }),
-      unpartition(),
       meshopt({ encoder: MeshoptEncoder, level: "medium" }),
     );
     hlodTriangles = countTris(hlod);
-    await writeGlb(cell.hlod, await io.writeBinary(hlod));
+    await writeGlb(cell.hlod, await glbBytes(hlod));
   } catch {
     await writeGlb(cell.hlod, plain);
   }
@@ -348,6 +348,13 @@ async function bakeCell(cell) {
   await mkdir(parentDir(metaPath), { recursive: true });
   writeFileSync(metaPath, JSON.stringify(meta));
   return meta;
+}
+
+async function glbBytes(doc) {
+  await doc.transform(unpartition());
+  const buffers = doc.getRoot().listBuffers().length;
+  if (buffers > 1) throw new Error(`GLB still has ${buffers} buffers after unpartition.`);
+  return io.writeBinary(doc);
 }
 
 async function writeGlb(file, bytes) {
@@ -387,40 +394,66 @@ async function main(jobPath) {
   else console.log(JSON.stringify(report));
 }
 
+async function triangleDocument(name, positions) {
+  const doc = new Document();
+  const buffer = doc.createBuffer();
+  const prim = doc.createPrimitive()
+    .setAttribute("POSITION", doc.createAccessor().setType("VEC3").setArray(new Float32Array(positions)).setBuffer(buffer))
+    .setIndices(doc.createAccessor().setType("SCALAR").setArray(new Uint32Array([0, 1, 2])).setBuffer(buffer));
+  const scene = doc.createScene();
+  scene.addChild(doc.createNode("lod0:Body:0").setMesh(doc.createMesh(name).addPrimitive(prim)));
+  doc.getRoot().setDefaultScene(scene);
+  return doc;
+}
+
+async function bufferCount(file) {
+  const bytes = await readFile(localBakePath(file));
+  const doc = await io.readBinary(bytes);
+  return doc.getRoot().listBuffers().length;
+}
+
 export async function selfTest() {
   const root = await mkdtemp(path.join(tmpdir(), "forge-tiles-"));
   try {
-    const glb = path.join(root, "tree.glb");
-    const doc = new Document();
-    const buffer = doc.createBuffer();
-    const prim = doc.createPrimitive()
-      .setAttribute("POSITION", doc.createAccessor().setType("VEC3").setArray(new Float32Array([
-        0, 0, 0, 1, 0, 0, 0, 1, 0,
-      ])).setBuffer(buffer))
-      .setIndices(doc.createAccessor().setType("SCALAR").setArray(new Uint32Array([0, 1, 2])).setBuffer(buffer));
-    const scene = doc.createScene();
-    scene.addChild(doc.createNode("lod0:Body:0").setMesh(doc.createMesh("Tree").addPrimitive(prim)));
-    doc.getRoot().setDefaultScene(scene);
-    await writeGlb(glb, await io.writeBinary(doc));
+    const tree = path.join(root, "tree.glb");
+    const rock = path.join(root, "rock.glb");
+    await writeGlb(tree, await io.writeBinary(await triangleDocument("Tree", [0, 0, 0, 1, 0, 0, 0, 1, 0])));
+    await writeGlb(rock, await io.writeBinary(await triangleDocument("Rock", [2, 0, 0, 3, 0, 0, 2, 1, 0])));
     clearSourceCache();
     const leaf = path.join(root, "leaf.glb");
+    const hlod = path.join(root, "hlod.glb");
     const report = await bakeJob({
       cells: [{
         id: "0_0",
         leaf,
-        hlod: path.join(root, "hlod.glb"),
+        hlod,
         meta: path.join(root, "meta.json"),
-        actors: [{
-          featureId: 7,
-          gyaml: "Obj_Tree",
-          glb,
-          translation: [0, 0, 0],
-          rotation: [0, 0, 0],
-          scale: [1, 1, 1],
-          parts: [{ family: "Body:0", image: "Tree_Alb", alpha: "opaque" }],
-        }],
+        actors: [
+          {
+            featureId: 7,
+            gyaml: "Obj_Tree",
+            glb: tree,
+            translation: [0, 0, 0],
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+            parts: [{ family: "Body:0", image: "Tree_Alb", alpha: "opaque" }],
+          },
+          {
+            featureId: 11,
+            gyaml: "Obj_Rock",
+            glb: rock,
+            translation: [4, 0, 0],
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+            parts: [{ family: "Body:0", image: "Rock_Alb", alpha: "opaque" }],
+          },
+        ],
       }],
     });
+    const buffers = { leaf: await bufferCount(leaf), hlod: await bufferCount(hlod) };
+    if (buffers.leaf > 1 || buffers.hlod > 1) {
+      throw new Error(`GLB has more than one buffer (leaf ${buffers.leaf}, hlod ${buffers.hlod}).`);
+    }
     const windows = localBakePath("C:\\Users\\gline\\src\\ocarina-forge-gh\\__forge_tile_selftest_missing__.glb");
     if (windows.startsWith("file:") || windows.includes("/agent/") || windows.includes("\\agent\\")) {
       throw new Error(`A Windows path was rewritten: ${windows}`);
@@ -434,7 +467,15 @@ export async function selfTest() {
     if (!missing || /network request blocked/i.test(missing)) {
       throw new Error(missing || "A missing Windows path did not fail as a file read.");
     }
-    return { ok: true, featureId: report.cells[0].actors[0], triangles: report.cells[0].triangles, windows, missing };
+    return {
+      ok: true,
+      sources: 2,
+      featureIds: report.cells[0].actors,
+      triangles: report.cells[0].triangles,
+      buffers,
+      windows,
+      missing,
+    };
   } finally {
     clearSourceCache();
     await rm(root, { recursive: true, force: true });
