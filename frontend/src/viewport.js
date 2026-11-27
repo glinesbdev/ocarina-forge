@@ -48,7 +48,7 @@ import { compileObjectPipeline, createBackendRenderer, drawTotal, warmWebGLProgr
 import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { api } from "./api.js";
-import { createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
+import { benchmarkMayFly, createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
 import { actorKeyFromFeature, featureIdOnHit, shouldRequestTileBake, tileCounters, tileEligible, tileHides } from "./scene-tiles.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
@@ -396,6 +396,9 @@ export async function createViewport(host, hooks) {
   let tileActors = new Map();
   const tileLoaded = new Set();
   let tileBakeMs = 0;
+  let tileBakeStatus = "off";
+  let tileCellCount = 0;
+  let tileActorCount = 0;
   let tileBakeToken = 0;
   let tileBakeTimer = 0;
   let tileSettleBake = false;
@@ -6503,31 +6506,52 @@ uniform float terrainLayerMissing;`
     }
   }
 
+  function rememberTileBake(result, status) {
+    tileBakeStatus = status;
+    tileBakeMs = Number(result && result.bakeMs) || tileBakeMs;
+    tileCellCount = Number(result && result.tiles) || 0;
+    tileActorCount = result && result.actors ? Object.keys(result.actors).length : 0;
+  }
+
   async function requestTileBake() {
+    if (entries.size === 0) {
+      tileBakeStatus = "waiting";
+      return "waiting";
+    }
     const token = ++tileBakeToken;
+    tileBakeStatus = "pending";
     let result = null;
     try {
       result = await api.bakeSceneTiles({ actors: collectTileActors() });
     } catch (error) {
       noteTileBakeError(error);
+      tileBakeStatus = "failed";
       fallBackToBatches();
       return "failed";
     }
-    if (token !== tileBakeToken || !tilesOn) return "stale";
-    tileBakeMs = Number(result && result.bakeMs) || 0;
+    if (token !== tileBakeToken || !tilesOn) {
+      tileBakeStatus = "stale";
+      return "stale";
+    }
     if (!result || !result.url) {
+      rememberTileBake(result, "empty");
       fallBackToBatches();
       return "empty";
     }
+    rememberTileBake(result, "applied");
     applyTileManifest(result);
     try {
       await mountTileLayer(result.url);
     } catch (error) {
       noteTileBakeError(error);
+      tileBakeStatus = "failed";
       fallBackToBatches();
       return "failed";
     }
-    if (token !== tileBakeToken || !tilesOn) return "stale";
+    if (token !== tileBakeToken || !tilesOn) {
+      tileBakeStatus = "stale";
+      return "stale";
+    }
     bumpCull();
     requestRender();
     return "applied";
@@ -6608,6 +6632,10 @@ uniform float terrainLayerMissing;`
       capped: statCapped,
       tiles: {
         enabled: tilesOn,
+        status: tilesOn ? (tileBakeStatus || "pending") : "off",
+        error: tileBakeError || "",
+        cells: tileCellCount,
+        actorsBaked: tileActorCount,
         loaded: samples.length ? samples[samples.length - 1].tilesLoaded || 0 : 0,
         visible: samples.length ? samples[samples.length - 1].tilesVisible || 0 : 0,
         cachedBytes: samples.length ? samples[samples.length - 1].tilesBytes || 0 : 0,
@@ -6634,30 +6662,47 @@ uniform float terrainLayerMissing;`
     if (!run.flight) {
       const pending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
         || (modelStage && modelStage.pending && modelStage.pending.size > 0);
-      const settled = streamSettled({
+      const busy = !streamSettled({
         queued: statQueued,
         loading: statLoading,
         background: (statDeferred || 0) + (statBackgroundLoading || 0),
         pending: pending ? 1 : 0,
       });
+      if (busy) run.sawWork = true;
+      const mayFly = benchmarkMayFly({
+        actors: entries.size,
+        busy,
+        loaded: statLoaded,
+        resident: residentMeshNames().size,
+        sawWork: Boolean(run.sawWork),
+      });
       run.waited += 1;
-      if (!settled && run.waited < 60 * 90) return true;
+      // No scene yet is not a settled Field. Once actors exist, match main:
+      // wait for streaming to go idle, and give up after about 90 seconds.
+      if (!mayFly && (entries.size === 0 || run.waited < 60 * 90)) return true;
       if (tilesOn && !run.tilesReady) {
         if (!run.tilesPromise) {
           run.tilesPromise = ensureTiles("benchmark").then((status) => {
-            if (status === "failed" || status === "applied" || status === "empty" || status === "off" || !tilesOn) {
+            run.tilesPromise = null;
+            if (status === "waiting" || status === "pending") {
+              requestRender();
+              return;
+            }
+            if (status === "failed" || status === "applied" || status === "empty" || status === "off" || status === "stale" || !tilesOn) {
               run.tilesReady = true;
-            } else run.tilesPromise = null;
+            }
             requestRender();
           }, () => {
+            run.tilesPromise = null;
             fallBackToBatches();
+            tileBakeStatus = "failed";
             run.tilesReady = true;
             requestRender();
           });
         }
         if (!run.tilesReady && run.waited < 60 * 180) return true;
       }
-      run.settled = settled;
+      run.settled = mayFly && !busy;
       run.waitFrames = run.waited;
       run.flight = createFlight();
       run.recording = true;
@@ -6748,7 +6793,7 @@ uniform float terrainLayerMissing;`
       transform.size = THREE.MathUtils.clamp(distance / 14, 0.55, 2.4);
     }
     const updateTail = performance.now() - tailStart;
-    if (tilesOn && tileSettleBake && !tileBakeError && !(benchmarkRun && benchmarkRun.tilesPromise)) {
+    if (tilesOn && tileSettleBake && !tileBakeError && entries.size > 0 && !(benchmarkRun && benchmarkRun.tilesPromise)) {
       const tilesPending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
         || (modelStage && modelStage.pending && modelStage.pending.size > 0);
       if (!tilesPending) {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { FIELD_FLIGHT, createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
+import { FIELD_FLIGHT, benchmarkMayFly, createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
 
 test("the field loop uses 160 m sides and closes", () => {
   const points = FIELD_FLIGHT.points;
@@ -31,6 +31,14 @@ test("the field loop uses 160 m sides and closes", () => {
 test("a settled stream is idle and a pending load is not", () => {
   assert.equal(streamSettled({ queued: 0, loading: 0, background: 0, pending: 0 }), true);
   assert.equal(streamSettled({ queued: 1, loading: 0, background: 0, pending: 0 }), false);
+});
+
+test("the fly does not start before a scene has streamed", () => {
+  assert.equal(benchmarkMayFly({ actors: 0, busy: false, resident: 0 }), false);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: false, loaded: 0, resident: 0, sawWork: false }), false);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: true, resident: 20, sawWork: true }), false);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: false, resident: 800, sawWork: true }), true);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: false, loaded: 120, resident: 0 }), true);
 });
 
 test("the summary reports avg and p95 and skips null gpu samples", () => {
@@ -70,6 +78,10 @@ test("the benchmark stays off unless Profile or the query flag starts it", () =>
   assert.match(viewport, /tileLoaded/);
   assert.match(viewport, /onTileBakeError/);
   assert.match(viewport, /bakeMs: tileBakeMs/);
+  assert.match(viewport, /benchmarkMayFly/);
+  assert.match(viewport, /entries\.size === 0/);
+  assert.match(viewport, /actorsBaked: tileActorCount/);
+  assert.match(viewport, /status: tilesOn/);
   assert.match(main, /onTileBakeError/);
   assert.match(viewport, /shouldRequestTileBake/);
   const runtime = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");

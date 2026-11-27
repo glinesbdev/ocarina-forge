@@ -107,6 +107,24 @@ test("the tile runtime has no unbound constructor names", () => {
   assert.deepEqual(unboundConstructions(source), []);
 });
 
+test("a new tile cache does not sort with a null comparator", async () => {
+  const { tileCache } = await import("./scene-tiles-runtime.js");
+  const { LRUCache } = await import("3d-tiles-renderer/core");
+  const fresh = new LRUCache();
+  assert.equal(fresh.unloadPriorityCallback, null);
+  assert.throws(() => [2, 1].sort(fresh.unloadPriorityCallback), /comparison function/);
+  const cache = tileCache(LRUCache, fresh);
+  assert.equal(typeof cache.unloadPriorityCallback, "function");
+  assert.deepEqual([2, 1].sort(cache.unloadPriorityCallback), [2, 1]);
+  const ranked = new LRUCache();
+  ranked.unloadPriorityCallback = (a, b) => a.rank - b.rank;
+  const copied = tileCache(LRUCache, ranked);
+  assert.deepEqual(
+    [{ rank: 2 }, { rank: 1 }].sort(copied.unloadPriorityCallback),
+    [{ rank: 1 }, { rank: 2 }],
+  );
+});
+
 test("the tile runtime constructs GLTFLoader from its own imports", async () => {
   const { installTileLoaders } = await import("./scene-tiles-runtime.js");
   const { LoadingManager } = await import("three");

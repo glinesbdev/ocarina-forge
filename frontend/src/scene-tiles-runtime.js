@@ -19,6 +19,19 @@ import { MeshoptDecoder } from "meshoptimizer/decoder";
 const TILE_CACHE_BYTES = 2 * 1024 ** 3;
 const GLTF_FILE = /\.(gltf|glb)$/i;
 
+/**
+ * A fresh LRUCache leaves `unloadPriorityCallback` null. TilesRenderer sorts
+ * the download queue with that callback and throws if it is null.
+ */
+export function tileCache(LRUCache, previous) {
+  const cache = new LRUCache();
+  cache.minBytesSize = TILE_CACHE_BYTES / 2;
+  cache.maxBytesSize = TILE_CACHE_BYTES;
+  const callback = previous && previous.unloadPriorityCallback;
+  cache.unloadPriorityCallback = typeof callback === "function" ? callback : (a, b) => 0;
+  return cache;
+}
+
 export async function createTileLayer({ url, scene, camera, renderer, pickLayer, prepare, onModel }) {
   const { TilesRenderer } = await import("3d-tiles-renderer/three");
   const { LRUCache } = await import("3d-tiles-renderer/core");
@@ -26,9 +39,7 @@ export async function createTileLayer({ url, scene, camera, renderer, pickLayer,
   const tiles = new TilesRenderer(url);
   let releaseLoaders = () => {};
   try {
-    const cache = new LRUCache();
-    cache.minBytesSize = TILE_CACHE_BYTES / 2;
-    cache.maxBytesSize = TILE_CACHE_BYTES;
+    const cache = tileCache(LRUCache, tiles.lruCache);
     tiles.lruCache = cache;
     releaseLoaders = installTileLoaders(tiles, renderer);
     tiles.setCamera(camera);
