@@ -628,10 +628,26 @@ function padShortTailMips(texture) {
   return changed;
 }
 
+/**
+ * RGBA32Float is 16 bytes per texel. `writeTexture` may use an unaligned
+ * bytesPerRow when the copy is a single row, which is why a height-1 lookup
+ * uploads. A second row is rejected unless bytesPerRow is a multiple of 256,
+ * so a blend lookup (height 3) rounds the width up to a multiple of 16.
+ * Instance 0 stays at x = 0. The pad is unused texels, not a renumber.
+ */
+export const LAYER_TEXEL_BYTES = 16;
+export const LAYER_ROW_ALIGNMENT = 256 / LAYER_TEXEL_BYTES;
+
+export function layerTextureWidth(capacity, rows = 1) {
+  const width = Math.max(1, capacity | 0);
+  if ((rows | 0) <= 1) return width;
+  return Math.ceil(width / LAYER_ROW_ALIGNMENT) * LAYER_ROW_ALIGNMENT;
+}
+
 /** One RGBA float texel per instance. `rows` is 1 for a plain array, 3 for a blend. */
 export function createLayerTexture(capacity, rows = 1) {
-  const width = Math.max(1, capacity | 0);
   const height = Math.max(1, rows | 0);
+  const width = layerTextureWidth(capacity, height);
   const data = new Float32Array(width * height * 4);
   const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.FloatType);
   texture.colorSpace = THREE.NoColorSpace;

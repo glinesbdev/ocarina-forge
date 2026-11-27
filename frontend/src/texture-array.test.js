@@ -28,6 +28,8 @@ import {
   arrayMaterialEligible,
   BLEND_LAYER_MAP,
   blendChannelIndex,
+  layerTextureWidth,
+  LAYER_TEXEL_BYTES,
 } from "./texture-array.js";
 
 function bc7(width, height, seed, { colorSpace = THREE.SRGBColorSpace, mips = 1 } = {}) {
@@ -471,27 +473,42 @@ test("blend layer lookup maps a0, a1, and c0 without renumbering on grow", () =>
   assert.equal(blendChannelIndex("g"), 1);
   assert.equal(blendChannelIndex("a"), 3);
   assert.deepEqual(BLEND_LAYER_MAP, { a0: 0, a1: 1, c0: 2, orm: 3 });
-  const lookup = createLayerTexture(2, 3);
-  assert.equal(writeBlendLayerTexel(lookup, 1, 5, 9, BLEND_LAYER_MAP.c0 === 2 ? 1 : -1, 4), true);
+  // A blend batch starts at 8 instances. Height 3 must still produce a
+  // 256-byte row or WebGPU rejects the upload and every sample reads layer 0.
+  assert.equal(layerTextureWidth(8, 1), 8);
+  assert.equal(layerTextureWidth(8, 3), 16);
+  assert.equal((layerTextureWidth(8, 3) * LAYER_TEXEL_BYTES) % 256, 0);
+  assert.equal((layerTextureWidth(200, 3) * LAYER_TEXEL_BYTES) % 256, 0);
+  const lookup = createLayerTexture(8, 3);
+  assert.equal(lookup.image.height, 3);
+  assert.equal(lookup.image.width, 16);
+  assert.equal(writeBlendLayerTexel(lookup, 1, 5, 9, 1, 4), true);
   assert.equal(writeBlendSurfaceTexel(lookup, 1, 6, 7, 8, 0), true);
   assert.equal(writeBlendPlacementTexel(lookup, 1, 4, 2, 0.25, 0), true);
   const row0 = (0 * lookup.image.width + 1) * 4;
+  const row1 = (1 * lookup.image.width + 1) * 4;
+  const row2 = (2 * lookup.image.width + 1) * 4;
   assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.a0], 5);
   assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.a1], 9);
   assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.c0], 1);
   assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.orm], 4);
-  const row1 = (1 * lookup.image.width + 1) * 4;
   assert.equal(lookup.image.data[row1], 6);
   assert.equal(lookup.image.data[row1 + 1], 7);
   assert.equal(lookup.image.data[row1 + 2], 8);
-  const wider = replaceLayerTexture(lookup, 4, 3);
+  assert.equal(lookup.image.data[row2], 4);
+  assert.equal(lookup.image.data[row2 + 1], 2);
+  assert.equal(lookup.image.data[row2 + 2], 0.25);
+  assert.notEqual(row0, row2);
+  const wider = replaceLayerTexture(lookup, 20, 3);
+  assert.equal(wider.image.width, 32);
   const moved = (0 * wider.image.width + 1) * 4;
   assert.equal(wider.image.data[moved + BLEND_LAYER_MAP.a0], 5);
   assert.equal(wider.image.data[moved + BLEND_LAYER_MAP.a1], 9);
   assert.equal(wider.image.data[moved + BLEND_LAYER_MAP.c0], 1);
-  const movedSurface = (1 * wider.image.width + 1) * 4;
-  assert.equal(wider.image.data[movedSurface + 2], 8);
-  assert.equal(writeLayerTexel(lookup, 4, 1, 0, 0, 0), false);
+  const movedScale = (2 * wider.image.width + 1) * 4;
+  assert.equal(wider.image.data[movedScale], 4);
+  assert.equal(wider.image.data[movedScale + 1], 2);
+  assert.equal(writeLayerTexel(lookup, lookup.image.width, 1, 0, 0, 0), false);
   lookup.dispose();
   wider.dispose();
 });
