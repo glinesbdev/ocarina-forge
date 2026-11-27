@@ -51,7 +51,7 @@ from ocarina_forge.cache_prune import (
     write_version_sidecar,
 )
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
-from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, rank_albedo, texture_rank
+from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, is_colour_bind, parse, rank_albedo, texture_rank
 from ocarina_forge.blend import color_span, overlay_plan, sampler_indices, skin_overlay_plan, span_from_colors
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
@@ -78,7 +78,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-64\0"
+_CACHE_VERSION = b"models-67\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -345,7 +345,12 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                 }
                 continue
             if part.stand_in == "water":
-                color = _WATER if part.texture == _WATER_TEX or image is None else (0.35, 0.55, 0.55, 0.2)
+                # The ripple image is already the teal. Multiplying it by the
+                # same tint again flattens the wave into one cyan sheet.
+                if part.texture == _WATER_TEX or image is None:
+                    color = (1.0, 1.0, 1.0, _WATER[3])
+                else:
+                    color = (0.35, 0.55, 0.55, 0.2)
                 alpha = "blend"
             elif part.proxy and image is None:
                 color = _TERRAIN
@@ -369,6 +374,10 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                 blend_slot = {
                     "channel": part.blend.get("channel") or "r",
                     "uv": part.blend.get("uv") or "_u0",
+                    "scale": [float(item) for item in (part.blend.get("scale") or [1, 1])[:2]],
+                    "translate": [float(item) for item in (part.blend.get("translate") or [0, 0])[:2]],
+                    "sampler": part.blend.get("sampler") or "",
+                    "texture": part.overlay_texture or part.blend.get("texture") or "",
                 }
                 if part.blend.get("skin"):
                     blend_slot["skin"] = True
@@ -376,6 +385,13 @@ def _texture_manifest(gyaml: str, models, external: dict) -> dict:
                     if part.blend.get("skinColor"):
                         blend_slot["skinColor"] = [float(channel) for channel in part.blend["skinColor"][:4]]
                 slot["blend"] = blend_slot
+            slot["texture"] = part.texture or ""
+            slot["sampler"] = part.albedo_sampler or ""
+            if image is not None:
+                slot["format"] = _image_format_label(image)
+            if part.stand_in == "water" and (part.texture == _WATER_TEX or image is None):
+                slot["standIn"] = "water"
+                slot["texture"] = part.texture or _WATER_TEX
             slot["status"] = "ready"
             slot["found"] = found
             slot["error"] = ""
@@ -639,6 +655,24 @@ def _stamp_flat_sources(models, dump=None, hint: str = "") -> None:
             )
 
 
+def _stamp_flat_water(models) -> None:
+    """Mark a water material on the geometry file without decoding its image."""
+    for model in models:
+        model_name = getattr(model, "name", "") or ""
+        materials = model.materials or []
+        for part in model.parts:
+            labels = [model_name, part.name, part.material]
+            if 0 <= part.material_index < len(materials):
+                material = materials[part.material_index]
+                labels.append(getattr(material, "name", "") or "")
+                labels.extend(tex for _slot, tex in (getattr(material, "binds", None) or []) if tex)
+            if not _water_names(*labels):
+                continue
+            part.stand_in = "water"
+            part.alpha = "blend"
+            part.base_color = _WATER
+
+
 def _present_companions(dump, hint: str) -> list[str]:
     """``.Tex.bfres`` files that exist. A pack was already opened by the Tex lookup.
 
@@ -690,6 +724,11 @@ def _convert_uncached(blob: bytes, dump, hint: str, terrain: bool, clock: Conver
             _plan_layer_blends(models)
             _stamp_flat_sources(models, dump, hint)
             _drop_textures(models)
+            # The geometry file does not decode the ripple. Tag the material
+            # anyway so the viewer generates tiled UVs. Without the tag, a
+            # water plane that has no TEXCOORD samples nothing and stays the
+            # flat cyan tint when the stand-in arrives.
+            _stamp_flat_water(models)
             external, log, raws = {}, [], []
         else:
             _fill_texture_names(models, dump)
@@ -949,12 +988,16 @@ def _write_bwtx(path: Path, decoded: list) -> None:
         blocks = getattr(image, "blocks", b"") or b""
         payload += struct.pack("<HHHI", getattr(image, "block_w", 0), getattr(image, "block_h", 0), getattr(image, "bytes_per", 0), len(blocks))
         payload += blocks
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(b"BWTX" + struct.pack("<H", 2) + zlib.compress(bytes(payload), 1))
-    os.replace(tmp, path)
-    write_version_sidecar(path, bntx_version())
-    note_written(path)
+    from ocarina_forge.shared_models import write_cached_bytes
+
+    encoded = b"BWTX" + struct.pack("<H", 2) + zlib.compress(bytes(payload), 1)
+    result = write_cached_bytes(path, encoded)
+    try:
+        write_version_sidecar(path, bntx_version())
+    except OSError:
+        pass
+    if result == "written":
+        note_written(path)
 
 
 def _pack_str(text: str) -> bytes:
@@ -1058,12 +1101,19 @@ def _encode_cached(image, alpha: str, gpu: bool = False) -> bytes:
     encoded = gpu_image(image, alpha) if gpu else None
     if not encoded:
         encoded, _mime = encode_albedo(image.width, image.height, image.rgba, alpha)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_bytes(encoded)
-    os.replace(tmp, path)
-    write_version_sidecar(path, bntx_version())
-    note_written(path)
+    from ocarina_forge.shared_models import write_cached_bytes
+
+    # A sharing violation must not become "decode error" for the whole actor.
+    # The caller still has ``encoded`` when the rename does not land.
+    result = write_cached_bytes(path, encoded)
+    try:
+        write_version_sidecar(path, bntx_version())
+    except OSError:
+        pass
+    if result == "written":
+        note_written(path)
+    elif result == "existing":
+        note_access(path)
     _remember_img(token, encoded)
     return encoded
 
@@ -1124,20 +1174,24 @@ def _consider_water(names: list[str], binds, result: dict) -> dict:
 
 
 def _water_ripple():
-    """A small tiled colour so a moat is not a flat sheet when the albedo is missing."""
+    """A small tiled colour so a moat is not a flat sheet when the albedo is missing.
+
+    The wave has to be obvious at a 4 m tile. A few steps of the same cyan,
+    multiplied again by the material tint, reads as one flat sheet.
+    """
     from ocarina_forge.formats.bntx import Texture
 
     width = height = 16
     rgba = bytearray(width * height * 4)
     for y in range(height):
         for x in range(width):
-            wave = ((x * 3 + y * 5) % 8) / 7
-            band = 1 if (x // 4 + y // 4) % 2 == 0 else 0
-            red = int(18 + wave * 20)
-            green = int(70 + wave * 40 + band * 12)
-            blue = int(88 + wave * 36)
+            crest = 0.5 + 0.5 * math.sin((x * 0.85 + y * 0.35) * math.pi / 2)
+            band = 1 if ((x // 2) + (y // 3)) % 2 == 0 else 0
+            red = int(8 + crest * 36)
+            green = int(42 + crest * 120 + band * 28)
+            blue = int(58 + crest * 96)
             at = (y * width + x) * 4
-            rgba[at : at + 4] = bytes((red, green, blue, 210))
+            rgba[at : at + 4] = bytes((red, green, blue, 255))
     return Texture(_WATER_TEX, width, height, bytes(rgba), 0, "generated water stand-in")
 
 
@@ -1304,14 +1358,53 @@ def _borrow_sibling(dump, model, sources, hints, material, external, raws):
     return None
 
 
+_HELPER_TOKENS = (
+    ("blackfade", "fade"),
+    ("fadeblack", "fade"),
+    ("blackborad", "board"),
+    ("blackboard", "board"),
+    ("darkplane", "dark"),
+    ("shadowboard", "shadow"),
+)
+
+
+def _helper_kind(*names: str) -> str:
+    """Fade, black-board, dark-plane, and shadow-board shapes.
+
+    The retail names are ``BlackFade`` and ``BlackBorad`` (the file spells
+    the board that way). ``fadeblack`` is not a substring of ``blackfade``,
+    so the old omit left these planes in the mesh. They are tagged and the
+    view hides them. Longshot does not name a blend equation for them.
+    """
+    compact = "".join(names).lower().replace("_", "").replace(" ", "")
+    for token, kind in _HELPER_TOKENS:
+        if token in compact:
+            return kind
+    return ""
+
+
+def _image_format_label(image) -> str:
+    """``bc7 srgb 0x2006 1024x1024`` or ``bc7 linear 0x2001 1024x1024``.
+
+    NVN low byte ``0x06`` is sRGB and ``0x01`` is UNORM. The KTX vkFormat
+    follows that nibble (146 versus 145). The label is what texdebug prints.
+    """
+    codec = getattr(image, "codec", "") or ""
+    fmt = int(getattr(image, "fmt", 0) or 0)
+    nibble = fmt & 0xFF
+    transfer = "srgb" if nibble == 0x06 else "linear" if nibble == 0x01 else ""
+    head = codec or (format(fmt, "#x") if fmt else "")
+    parts = [part for part in (head, transfer, format(fmt, "#x") if fmt and codec else "") if part]
+    size = f"{getattr(image, 'width', 0)}x{getattr(image, 'height', 0)}"
+    return f"{' '.join(parts)} {size}".strip()
+
+
 def _omit_reason(shape: str, material: str) -> str:
     compact = f"{shape} {material}".lower().replace("_", "").replace(" ", "")
     if "watervolume" in compact:
         return "water volume is not drawn"
     if "bakeshadowproxy" in compact:
         return "bake shadow proxy is not drawn"
-    if "fadeblack" in compact:
-        return "fade black is not drawn"
     if "innermesh" in compact:
         return "inner mesh is not drawn"
     if "eyeouter" in compact or "eyeshadow" in compact:
@@ -1348,6 +1441,7 @@ def _mark_omitted(models) -> None:
             for part, name in labeled
         )
         for part, name in labeled:
+            part.helper = _helper_kind(part.name, name)
             reason = _omit_reason(part.name, name)
             low = f"{part.name} {name}".lower()
             if not reason and front and "back" in low and ("water" in low or "flow" in low):
@@ -1489,14 +1583,19 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                         normal_png = None
             elif part.blend and part.overlay_texture:
                 moss_png = extra_png(part.overlay_texture)
-            if part.blend and part.overlay_texture and (moss_png or part.blend.get("skin")):
+            # The geometry file has no texels. A two-layer mix still needs the
+            # vertex mask and extras.blend, or the viewer samples only _a0.
+            # Requiring the overlay image dropped that mask on ?flat=1, and the
+            # albedo colour node then drew one texture for the whole part.
+            overlay_name = part.overlay_texture or (part.blend or {}).get("texture") or ""
+            if part.blend and overlay_name:
                 blend_body = {
                     "channel": part.blend.get("channel") or "r",
                     "uv": part.blend.get("uv") or "_u0",
                     "scale": list(part.blend.get("scale") or [1, 1]),
                     "translate": list(part.blend.get("translate") or [0, 0]),
                     "sampler": part.blend.get("sampler") or "",
-                    "texture": part.overlay_texture,
+                    "texture": overlay_name,
                 }
                 if part.blend.get("skin"):
                     blend_body["skin"] = True
@@ -1516,11 +1615,14 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     line = _layer_note(part)
                     if line not in notes:
                         notes.append(line)
-                elif moss_png and not any(note.startswith("blend ") for note in notes):
+                elif not any(note.startswith("blend ") for note in notes):
                     notes.append(
-                        f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {part.overlay_texture}"
+                        f"blend {_c0_label(part.blend)} on {part.blend.get('sampler') or '_a1'} {overlay_name}"
                     )
             drawn_colors = part.colors if blend_extra else None
+            part_extras = dict(blend_extra or {})
+            if part.helper:
+                part_extras["helper"] = part.helper
             primitives.append(
                 Primitive(
                     part.positions,
@@ -1541,7 +1643,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                     normal_png=normal_png,
                     emissive_png=emissive_png,
                     moss_png=moss_png,
-                    extras=blend_extra,
+                    extras=part_extras or None,
                     orm_png=orm_png,
                     orm1_png=orm1_png,
                     normal1_png=normal1_png,
@@ -1571,7 +1673,7 @@ def _assemble(models, external: dict, log: list[dict] | None = None) -> tuple[by
                             normal_png=normal_png,
                             emissive_png=emissive_png,
                             moss_png=moss_png,
-                            extras=blend_extra,
+                            extras=part_extras or None,
                             orm_png=orm_png,
                             orm1_png=orm1_png,
                             normal1_png=normal1_png,
@@ -1675,6 +1777,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 _apply_stand_in(part, choice, external)
                 if choice.get("image") is not None and choice["wanted"]:
                     external[choice["wanted"]] = choice["image"]
+    _share_lod_colour(models)
     return external, log, raws
 
 
@@ -1911,13 +2014,104 @@ def _skin_swatch(color) -> object:
     return Texture("skin", 1, 1, rgba, 0, "skin tint")
 
 
+def _two_channel_reason(image) -> str:
+    """BC4 and BC5 are not albedo. ``0x1E01`` is BC5 UNORM and draws white and black."""
+    if image is None:
+        return ""
+    codec = (getattr(image, "codec", "") or "").lower()
+    try:
+        fmt = int(getattr(image, "fmt", 0) or 0)
+    except (TypeError, ValueError):
+        fmt = 0
+    family = fmt & 0xFF00
+    if codec.startswith("bc5") or family == 0x1E00:
+        return "BC5 is a two-channel map and is not a colour"
+    if codec.startswith("bc4") or family == 0x1D00:
+        return "BC4 is a single channel and is not a colour"
+    return ""
+
+
+def _colour_image(found: dict) -> dict:
+    """Drop a decoded lightmap or normal so it cannot become the albedo."""
+    if not isinstance(found, dict):
+        return found
+    reason = _two_channel_reason(found.get("image"))
+    if not reason:
+        return found
+    copied = dict(found)
+    copied["image"] = None
+    copied["error"] = reason
+    return copied
+
+
+def _share_lod_colour(models) -> None:
+    """A far LOD uses the near LOD's albedo when they share the material name.
+
+    Lake Hyrule's grass and soil far meshes arrived with an empty sampler.
+    The near mesh had already resolved the material. The far mesh keeps that
+    result instead of a second lookup that can only see bake0.
+    """
+    for model in models:
+        donor: dict[str, object] = {}
+        for part in model.parts:
+            if part.lod:
+                continue
+            key = (part.material or "").strip()
+            if not key:
+                continue
+            current = donor.get(key)
+            if current is None or (_usable_albedo(part) and not _usable_albedo(current)):
+                donor[key] = part
+        for part in model.parts:
+            if not part.lod:
+                continue
+            source = donor.get((part.material or "").strip())
+            if source is None or source is part or _usable_albedo(part):
+                continue
+            if _usable_albedo(source):
+                _copy_colour(part, source)
+            elif getattr(source, "base_color", None) and not part.base_color:
+                part.base_color = source.base_color
+
+
+def _usable_albedo(part) -> bool:
+    return is_colour_bind(getattr(part, "albedo_sampler", "") or "", getattr(part, "texture", "") or "")
+
+
+def _copy_colour(part, donor) -> None:
+    part.texture = donor.texture
+    part.albedo_sampler = donor.albedo_sampler
+    part.texture_found = donor.texture_found
+    part.texture_pending = donor.texture_pending
+    part.texture_failure = donor.texture_failure
+    part.texture_error = donor.texture_error
+    part.overlay_texture = donor.overlay_texture
+    part.blend = donor.blend
+    part.normal_texture = donor.normal_texture
+    part.emission_texture = donor.emission_texture
+    part.normal1_texture = donor.normal1_texture
+    part.orm_image = donor.orm_image
+    part.orm1_image = donor.orm1_image
+    part.surface_note = donor.surface_note
+    part.emission_image = donor.emission_image
+    part.emission_note = donor.emission_note
+    part.alpha = donor.alpha
+    part.cutoff = donor.cutoff
+    if getattr(donor, "wrap", ""):
+        part.wrap = donor.wrap
+    if donor.base_color:
+        part.base_color = donor.base_color
+
+
 def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
     """The second albedo, or a skin tint under the one albedo, when a mask exists."""
     span = _span_for_material(model, material)
     plan = overlay_plan(material, span) or skin_overlay_plan(material, span)
     if not plan:
         return {}
-    found = _load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws)
+    if not is_colour_bind(plan.get("sampler") or "", plan.get("texture") or ""):
+        return {}
+    found = _colour_image(_load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws))
     image = found.get("image")
     located = found.get("found") or ""
     if image is None or not (located == "embedded" or _stem(located).lower() == _stem(plan["texture"]).lower()):
@@ -1970,6 +2164,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             layer=layer,
             flatten_alpha=True,
         )
+        found = _colour_image(found)
         last = found
         for path in found.get("tried") or []:
             if path not in tried:
@@ -1993,7 +2188,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             misses.append(f"{name}: eyebrow does not use the face texture")
             flat_color = _BROW
             continue
-        found = _load_named(dump, model, name, hints, material.alpha, material.cutoff, external, raws)
+        found = _colour_image(_load_named(dump, model, name, hints, material.alpha, material.cutoff, external, raws))
         last = found
         for path in found.get("tried") or []:
             if path not in tried:
@@ -2009,7 +2204,9 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         hinted = _hint_alb_path(dump, hints)
         if hinted:
             stem = _stem(hinted)
-            found = _load_named(dump, model, stem, hints, material.alpha, material.cutoff, external, raws, forced=hinted)
+            found = _colour_image(
+                _load_named(dump, model, stem, hints, material.alpha, material.cutoff, external, raws, forced=hinted)
+            )
             last = found
             for path in found.get("tried") or []:
                 if path not in tried:
@@ -2023,13 +2220,22 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         borrowed = _borrow_sibling(dump, model, sources, hints, material, external, raws)
         if borrowed is not None:
             sampler, sibling, found, missing = borrowed
-            winner = (sampler, sibling, found)
+            found = _colour_image(found)
             last = found
             for path in found.get("tried") or []:
                 if path not in tried:
                     tried.append(path)
-            note = f"borrowed {sibling} because {missing} is missing"
-            found["error"] = f"{note}. {found.get('error') or ''}".strip(". ")
+            if found.get("image") is None:
+                misses.append(f"{sibling}: {found.get('error') or 'not a colour'}")
+            else:
+                note = f"borrowed {sibling} because {missing} is missing"
+                found = dict(found)
+                found["error"] = f"{note}. {found.get('error') or ''}".strip(". ")
+                winner = (sampler, sibling, found)
+                last = found
+    if winner is None and flat_color is None and getattr(material, "base_color", None):
+        flat_color = material.base_color
+        misses.append("no albedo sampler; flat colour from the shader")
     if winner is None and flat_color is None:
         label = " ".join(name for _sampler, name in sources) or material.name
         category = _category_color(label)
@@ -2818,9 +3024,11 @@ def _albedo_sources(material) -> list[tuple[str, str]]:
     """
     unused = _unused_sampler_names(material)
     if not unused:
-        return list(material.albedo)
-    binds = [(slot, tex) for slot, tex in material.binds if slot not in unused]
-    return rank_albedo(binds)
+        ranked = list(material.albedo)
+    else:
+        binds = [(slot, tex) for slot, tex in material.binds if slot not in unused]
+        ranked = rank_albedo(binds)
+    return [(slot, tex) for slot, tex in ranked if is_colour_bind(slot, tex)]
 
 
 def _unused_sampler_names(material) -> set[str]:

@@ -3,7 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { pickMask } from "./gpu-pick.js";
-import { applyTextureManifest, clearTextureMaps, formatTextureReport, materialKey, presentTextures } from "./texture-apply.js";
+import { resetTexturePipelineError, texturePipelineError } from "./texture-debug.js";
+import { applyTextureManifest, clearTextureMaps, formatTextureReport, materialKey, presentTextures, restoreShownMaps } from "./texture-apply.js";
 import { createTextureQueue, orderTextureJobs, simulateTextureWave, textureSlotLimit } from "./texture-stream.js";
 
 function color(rgb) {
@@ -42,6 +43,91 @@ function material() {
 function texture(url) {
   return { url, isTexture: true, disposed: false, dispose() { this.disposed = true; } };
 }
+
+test("a failed image request warns once and leaves the material untextured", async () => {
+  resetTexturePipelineError();
+  const warns = [];
+  const original = console.warn;
+  console.warn = (message) => warns.push(String(message));
+  try {
+    const mesh = material();
+    const report = await applyTextureManifest(
+      [{ materialKey: "Body:0", material: mesh }],
+      { materials: { "Body:0": { map: "/api/model-textures/albedo.ktx2" } } },
+      async () => {
+        throw new Error("texture download failed (404)");
+      },
+    );
+    assert.equal(mesh.map, null);
+    assert.equal(report[0].status, "not-applied");
+    assert.equal(texturePipelineError(), "texture download failed (404)");
+    assert.deepEqual(warns, ["Texture pipeline: texture download failed (404)"]);
+  } finally {
+    console.warn = original;
+    resetTexturePipelineError();
+  }
+});
+
+test("a water stand-in records the ripple and does not keep the cyan multiply", async () => {
+  const mesh = material();
+  mesh.transparent = true;
+  await applyTextureManifest(
+    [{ materialKey: "Sheet:0", material: mesh }],
+    {
+      materials: {
+        "Sheet:0": {
+          map: "/api/model-textures/ripple.ktx2",
+          standIn: "water",
+          texture: "ocarina-forge-water",
+          sampler: "_a0",
+          format: "generated 16x16",
+          color: [1, 1, 1, 0.62],
+          alpha: "blend",
+        },
+      },
+    },
+    async () => texture("/api/model-textures/ripple.ktx2"),
+  );
+  assert.equal(mesh.userData.waterStandIn, true);
+  assert.equal(mesh.userData.forgeAlbedoName, "ocarina-forge-water");
+  assert.equal(mesh.userData.forgeAlbedoSampler, "_a0");
+  assert.equal(mesh.userData.forgeAlbedoFormat, "generated 16x16");
+  assert.deepEqual(mesh.color.rgb, [1, 1, 1]);
+});
+
+test("a blend manifest records the overlay when the geometry file had no extras", async () => {
+  const mesh = material();
+  await applyTextureManifest(
+    [{ materialKey: "Ground:0", material: mesh }],
+    {
+      materials: {
+        "Ground:0": {
+          map: "/api/model-textures/base.ktx2",
+          moss: "/api/model-textures/grass.ktx2",
+          color: [1, 1, 1, 1],
+          blend: { channel: "r", uv: "_u0", scale: [4, 4], translate: [0, 0], sampler: "_a1", texture: "Island_Grass_Alb" },
+        },
+      },
+    },
+    async (url) => texture(url),
+  );
+  assert.equal(mesh.map.url, "/api/model-textures/base.ktx2");
+  assert.equal(mesh.userData.blendMap.url, "/api/model-textures/grass.ktx2");
+  assert.equal(mesh.userData.blend.texture, "Island_Grass_Alb");
+  assert.equal(mesh.userData.blend.channel, "r");
+  assert.deepEqual(mesh.userData.blend.scale, [4, 4]);
+});
+
+test("a UNORM BC7 albedo keeps the linear colour space", async () => {
+  const mesh = material();
+  await applyTextureManifest(
+    [{ materialKey: "Body:0", material: mesh }],
+    { materials: { "Body:0": { map: "/api/model-textures/albedo.ktx2", color: [1, 1, 1, 1] } } },
+    async (url) => ({ ...texture(url), colorSpace: "srgb-linear", userData: { forgeTransfer: "linear" } }),
+  );
+  assert.equal(mesh.map.colorSpace, "srgb-linear");
+  assert.equal(mesh.map.userData.forgeTransfer, "linear");
+});
 
 test("a manifest keys the glTF node without its lod prefix", () => {
   assert.equal(materialKey("lod0:Body:0"), "Body:0");
@@ -189,6 +275,32 @@ test("a shared material is cloned once per shape key", async () => {
   assert.doesNotMatch(note, /Body_low:5: applied CmnTex_Chara_Mt_Rock/);
 });
 
+test("a blend lod clone receives the same albedo as lod0", async () => {
+  const near = material();
+  const far = material();
+  const parts = [
+    { name: "lod0Cliff0", materialKey: "Cliff:2", material: near },
+    { name: "lod1Cliff0", materialKey: "Cliff:2", material: far },
+  ];
+  await applyTextureManifest(parts, {
+    materials: {
+      "Cliff:2": {
+        map: "/api/model-textures/cliff.ktx2",
+        sampler: "_a0",
+        texture: "UmeCliff_B_Near_Alb",
+        color: [1, 1, 1, 1],
+        status: "ready",
+        found: "UmeCliff_B_Near_Alb",
+      },
+    },
+  }, async (url) => texture(url));
+  assert.notEqual(near, far);
+  assert.equal(near.map.url, "/api/model-textures/cliff.ktx2");
+  assert.equal(far.map.url, "/api/model-textures/cliff.ktx2");
+  assert.equal(far.userData.forgeAlbedoSampler, "_a0");
+  assert.equal(far.userData.forgeAlbedoName, "UmeCliff_B_Near_Alb");
+});
+
 test("a skin tint is named and a tiling albedo repeats", async () => {
   const mesh = material();
   const parts = [{ name: "lod0Body_low0", materialKey: "Body_low:5", material: mesh }];
@@ -224,6 +336,7 @@ test("the texture toggle does not ask the model loader to run", () => {
   assert.match(geometry, /flat: "1"/);
   assert.doesNotMatch(geometry, /textures/);
   assert.match(main, /fetchTextures:/);
+  assert.match(main, /textures: load\.textures \? "1" : "0"/);
   assert.match(main, /id="show-textures"|show-textures/);
   assert.match(main, /setTextureShown/);
   assert.match(main, /Load textures/);
@@ -275,6 +388,17 @@ test("show, hide, and show again swaps resident maps and does not fetch", async 
   assert.equal(mesh.map.url, "/api/model-textures/albedo.ktx2");
   assert.equal(pickMask(mesh).map, mesh.map);
   assert.equal(batchMate.map, mesh.map);
+});
+
+test("restoreShownMaps puts a saved map back on a material the stage bar is showing", () => {
+  const held = { isTexture: true };
+  const material = { map: null, needsUpdate: false, userData: { forgeLit: { map: held } } };
+  assert.equal(restoreShownMaps([{ material }], false), 0);
+  assert.equal(material.map, null);
+  assert.equal(restoreShownMaps([{ material }, { material }], true), 1);
+  assert.equal(material.map, held);
+  assert.equal(material.needsUpdate, true);
+  assert.equal(restoreShownMaps([{ material }], true), 0);
 });
 
 test("a show toggle during the stream reveals what is resident and leaves the rest counted", async () => {

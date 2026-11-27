@@ -8,6 +8,8 @@
  * `userData.name`; parts store that family as `materialKey`.
  */
 
+import { noteTexturePipelineError } from "./texture-debug.js";
+
 const SRGB = "srgb";
 const LINEAR = "srgb-linear";
 // three.js RepeatWrapping. A character albedo whose UVs or SRT leave 0–1 has to tile.
@@ -138,11 +140,21 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
   const report = [];
   const jobs = [];
   const seen = new Set();
+  const painted = new Map();
   for (const part of parts || []) {
     const key = materialKey(part);
-    if (seen.has(key)) continue;
-    seen.add(key);
     const slot = materials[key];
+    if (seen.has(key)) {
+      // A blend mask clones the material, so LOD1 is a second object with the
+      // same key. The first assign does not reach it. Paint that clone too.
+      if (slot && hasSlotImage(slot) && part.material && painted.get(key) !== part.material) {
+        jobs.push(assignSlot(part.material, slot, loadTexture).then(() => {}));
+        painted.set(key, part.material);
+      }
+      continue;
+    }
+    seen.add(key);
+    painted.set(key, part.material);
     if (!part.material) {
       report.push({ key, status: "not-applied", error: "not applied. This mesh has no material.", found: "" });
       continue;
@@ -212,7 +224,10 @@ async function assignSlot(material, slot, loadTexture) {
     if (!pending.has(url)) {
       pending.set(url, Promise.resolve()
         .then(() => loadTexture(url))
-        .catch(() => null));
+        .catch((error) => {
+          noteTexturePipelineError(error || `texture download failed (${url})`);
+          return null;
+        }));
     }
     return pending.get(url);
   };
@@ -224,7 +239,9 @@ async function assignSlot(material, slot, loadTexture) {
     take(slot.moss),
   ]);
   const plain = userData.forgePlain;
-  replaceMap(material, "map", map, plain, SRGB);
+  const albedo = asTexture(map);
+  const albedoTransfer = albedo && albedo.userData && albedo.userData.forgeTransfer;
+  replaceMap(material, "map", map, plain, albedoTransfer === "linear" ? LINEAR : SRGB);
   replaceMap(material, "normalMap", normalMap, plain, LINEAR);
   replaceMap(material, "roughnessMap", orm, plain, LINEAR);
   replaceMap(material, "metalnessMap", orm, plain, LINEAR);
@@ -237,16 +254,29 @@ async function assignSlot(material, slot, loadTexture) {
     userData.blendMap = mossTex;
     if (userData.blendMapUniform) userData.blendMapUniform.value = mossTex;
   }
-  if (slot.blend && userData.blend) {
-    if (slot.blend.skin && !userData.blend.skin) userData.blend.skin = true;
-    if (slot.blend.skinVertex && !userData.blend.skinVertex) userData.blend.skinVertex = true;
-    if (slot.blend.skinColor && !userData.blend.skinColor) userData.blend.skinColor = slot.blend.skinColor;
+  if (slot.blend) {
+    const prior = userData.blend && typeof userData.blend === "object" ? userData.blend : {};
+    userData.blend = {
+      ...prior,
+      channel: slot.blend.channel || prior.channel || "r",
+      uv: slot.blend.uv || prior.uv || "_u0",
+      scale: prior.scale || slot.blend.scale || [1, 1],
+      translate: prior.translate || slot.blend.translate || [0, 0],
+      sampler: prior.sampler || slot.blend.sampler || "",
+      texture: prior.texture || slot.blend.texture || "",
+    };
+    if (slot.blend.skin || prior.skin) userData.blend.skin = true;
+    if (slot.blend.skinVertex || prior.skinVertex) userData.blend.skinVertex = true;
+    if (slot.blend.skinColor || prior.skinColor) userData.blend.skinColor = slot.blend.skinColor || prior.skinColor;
   }
   if (slot.color && material.color && typeof material.color.setRGB === "function") {
     const color = slot.color;
     material.color.setRGB(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
   }
-  const albedo = asTexture(material.map);
+  if (slot.standIn === "water") userData.waterStandIn = true;
+  if (slot.texture) userData.forgeAlbedoName = String(slot.texture);
+  if (slot.sampler) userData.forgeAlbedoSampler = String(slot.sampler);
+  if (slot.format) userData.forgeAlbedoFormat = String(slot.format);
   if (albedo && slot.tile) {
     albedo.wrapS = REPEAT;
     albedo.wrapT = REPEAT;
@@ -276,6 +306,34 @@ async function assignSlot(material, slot, loadTexture) {
  * Synchronous. Does not fetch, decode, or dispose. Batches share `part.material`,
  * so writing the maps here updates those draws.
  */
+/**
+ * Put `forgeLit` back on the material when the stage bar is showing textures.
+ * A later clear can leave the snapshot full and the live slots empty. Hiding
+ * textures does not call this.
+ */
+export function restoreShownMaps(parts, shown) {
+  if (!shown) return 0;
+  const seen = new Set();
+  let restored = 0;
+  for (const part of parts || []) {
+    const material = part && part.material;
+    if (!material || seen.has(material)) continue;
+    seen.add(material);
+    const lit = material.userData && material.userData.forgeLit;
+    if (!lit) continue;
+    let changed = false;
+    for (const key of MAP_KEYS) {
+      const held = lit[key];
+      if (!held || held.isTexture !== true || material[key] === held) continue;
+      material[key] = held;
+      changed = true;
+      restored += 1;
+    }
+    if (changed) material.needsUpdate = true;
+  }
+  return restored;
+}
+
 export function presentTextures(parts, shown) {
   const seen = new Set();
   let swapped = 0;

@@ -4,7 +4,7 @@
  * Roughness, metal, AO, and the overlay normal use that same weight.
  * WebGL keeps the GLSL path and writes the same uniform objects.
  */
-import { Fn, attribute, float, mix, smoothstep, step, texture, uv, vec3, vec4, reference, normalMap } from "three/tsl";
+import { Fn, attribute, float, materialReference, mix, smoothstep, step, texture, uv, vec3, vec4, reference, normalMap } from "three/tsl";
 
 export function attachBlend(material) {
   const blend = material.userData && material.userData.blend;

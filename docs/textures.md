@@ -76,7 +76,7 @@ The viewer ignores that ranking. A 16-byte element is Switch 2. A line marked `d
 
 ## Cache
 
-The glb prefix is `models-64`. Decoded BNTX images are keyed with `bntx-6`, so an old `bntx/*.bwtx` is not reused. A `bntx-6` file also stores the linear blocks. Startup pruning removes entries whose recorded version is not current; entries with no version stay until the size cap evicts them. Albedo in a packed glb is a KTX2 of those blocks (BC1, BC3, or BC7; ASTC is re-encoded to BC7) plus a JPEG or PNG fallback. The editor's geometry glb leaves those images out. They are files in the shared texture store, named by `GET /api/models/<Gyaml>/textures`, and the manifest is cached under `texman/`. See [performance.md](performance.md) and [formats.md](formats.md).
+The glb prefix is `models-67`. Decoded BNTX images are keyed with `bntx-6`, so an old `bntx/*.bwtx` is not reused. A `bntx-6` file also stores the linear blocks. Startup pruning removes entries whose recorded version is not current; entries with no version stay until the size cap evicts them. Albedo in a packed glb is a KTX2 of those blocks (BC1, BC3, or BC7; ASTC is re-encoded to BC7) plus a JPEG or PNG fallback. The editor's geometry glb leaves those images out. They are files in the shared texture store, named by `GET /api/models/<Gyaml>/textures`, and the manifest is cached under `texman/`. See [performance.md](performance.md) and [formats.md](formats.md).
 
 ## Check on a dump
 
@@ -92,4 +92,4 @@ From the repo, with the venv active and the dump that contains `romfs`:
 
 ## WebGPU compressed uploads
 
-On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r170's missing BC7 `getFormat` case is patched at init and by a Vite plugin. See `docs/rendering-performance.md`.
+On WebGPU, packed OCFG/KTX2 maps upload as BC7 or BC1 when the adapter has `texture-compression-bc`. Caps come from `renderer.backend.hasFeature`, not from the canvas context's WebGL extensions. three r187's `getFormat` maps `RGBA_BPTC_Format` itself, so Forge does not patch it. See `docs/rendering-performance.md`.

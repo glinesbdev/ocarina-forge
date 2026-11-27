@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { backendLabel, compileObjectPipeline, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, guardWebgpuSetPipeline, initFailureReason, inspectWebGPU, patchWebgpuBc7Format, PIPELINE_COMPILE_LIMIT, pipelineCompileInFlight, rendererChoice, rendererSearch, repairCompileAsyncTransparents, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
+import { backendLabel, compileObjectPipeline, createBackendRenderer, dismissWebgpuNotice, drawCount, drawTotal, guardWebgpuSetPipeline, initFailureReason, inspectWebGPU, PIPELINE_COMPILE_LIMIT, pipelineCompileInFlight, rendererChoice, rendererSearch, stripLegacyGpu, warmWebGLPrograms, webgpuFallbackNote, webgpuNoticeVisible } from "./backend.js";
 import { buildNoticeId, buildNoticeVisible, describeBuildMismatch, dismissBuildNotice, shortRevision } from "./build-info.js";
 import { formatStatusLabel } from "./frame.js";
 
@@ -72,55 +72,15 @@ test("WebGPU compiles a batch before attach and caps how many run at once", asyn
   assert.deepEqual(webglCalls, []);
 });
 
-test("a transparent batch survives r170 compileAsync's missing double-pass list", () => {
-  const camera = { isCamera: true };
-  const scene = { isScene: true, overrideMaterial: null };
-  const lights = {};
-  const blend = { transparent: true, side: 2, forceSinglePass: false, name: "alpha" };
-  const list = [{ object: { material: blend }, material: blend }];
-  const seen = [];
-  const renderer = {
-    _renderObjects(renderList, cameraArg, sceneArg) {
-      for (const item of renderList) {
-        if (sceneArg.overrideMaterial !== null) {
-          const overrideMaterial = sceneArg.overrideMaterial;
-          void overrideMaterial.isShadowNodeMaterial;
-        }
-        seen.push({ camera: cameraArg, scene: sceneArg, material: item.material });
-      }
-    },
-    _renderTransparents(renderList, doublePassList, cameraArg, sceneArg, lightsNode) {
-      if (doublePassList.length > 0) {
-        this._renderObjects(doublePassList, cameraArg, sceneArg, lightsNode, "backSide");
-        this._renderObjects(renderList, cameraArg, sceneArg, lightsNode);
-      } else {
-        this._renderObjects(renderList, cameraArg, sceneArg, lightsNode);
-      }
-    },
-  };
-  assert.throws(
-    () => renderer._renderTransparents(list, camera, scene, lights),
-    (error) => error instanceof TypeError && /isShadowNodeMaterial/.test(error.message),
-  );
-  assert.equal(repairCompileAsyncTransparents(renderer), true);
-  assert.equal(repairCompileAsyncTransparents(renderer), false);
-  renderer._renderTransparents(list, camera, scene, lights);
-  assert.deepEqual(seen, [{ camera, scene, material: blend }]);
-
-  const passed = [];
-  renderer._renderObjects = (renderList, cameraArg, sceneArg, lightsArg) => {
-    passed.push({ renderList, camera: cameraArg, scene: sceneArg, lights: lightsArg });
-  };
-  const doublePass = [{ material: blend }];
-  renderer._renderTransparents(list, doublePass, camera, scene, lights);
-  assert.equal(passed.length, 2);
-  assert.equal(passed[0].renderList, doublePass);
-  assert.equal(passed[0].camera, camera);
-  assert.equal(passed[0].scene, scene);
-  assert.equal(passed[0].lights, lights);
-  assert.equal(passed[1].renderList, list);
-  assert.equal(passed[1].camera, camera);
-  assert.equal(passed[1].scene, scene);
+test("r187 compileAsync passes the double-pass list into _renderTransparents", () => {
+  const source = readFileSync(new URL("../node_modules/three/src/renderers/common/Renderer.js", import.meta.url), "utf8");
+  const start = source.indexOf("async compileAsync(");
+  const end = source.indexOf("\trender( scene", start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  assert.match(body, /_renderTransparents\( transparentObjects, transparentDoublePassObjects, camera, sceneRef, lightsNode \)/);
+  const backend = readFileSync(new URL("./backend.js", import.meta.url), "utf8");
+  assert.doesNotMatch(backend, /repairCompileAsyncTransparents/);
 });
 
 test("a compileAsync failure is logged once and the batch promise still resolves", async () => {
@@ -262,14 +222,21 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   assert.match(backend, /new THREE\.WebGLRenderer\(\{ antialias: true \}\)/);
   assert.match(backend, /guardWebgpuSetPipeline\(gpuRenderer\)/);
-  assert.match(backend, /repairCompileAsyncTransparents\(gpuRenderer\)/);
-  assert.match(backend, /PIPELINE_COMPILE_LIMIT = 6/);
+  assert.doesNotMatch(backend, /patchWebgpuBc7Format/);
+  assert.doesNotMatch(backend, /repairCompileAsyncTransparents/);
+  assert.match(backend, /PIPELINE_COMPILE_LIMIT = 1/);
+  assert.match(viewport, /new THREE\.Timer\(\)/);
+  assert.match(viewport, /timer\.update\(tickAt\)/);
+  assert.doesNotMatch(viewport, /new THREE\.Clock\(\)/);
   assert.match(backend, /WebGPU \(WebGL2 fallback\)/);
   assert.match(backend, /backendLabel\(gpuRenderer\)/);
   assert.match(viewport, /attachTerrainColor\(material\)/);
   assert.match(viewport, /attachCutout\(material\)/);
-  assert.match(viewport, /groupGeometryDraws\(mesh\)/);
-  assert.match(viewport, /patchBatchedDraw\(renderer\.backend\)/);
+  assert.match(viewport, /scheduleMergedDraws\(mesh,/);
+  assert.doesNotMatch(viewport, /groupGeometryDraws|patchBatchedDraw/);
+  assert.match(viewport, /textureGpuReady\(renderer\.backend, texture\)/);
+  assert.match(viewport, /refreshBatchKeys\(parts, batchKeyFor\)/);
+  assert.match(viewport, /batchMissesUpload\(parts, batches\)/);
   assert.doesNotMatch(viewport, /geometry\.uuid\}`/);
   assert.match(viewport, /!material\.userData\.terrainNode/);
   const cutout = readFileSync(new URL("./cutout-node.js", import.meta.url), "utf8");
@@ -311,36 +278,17 @@ test("the viewport keeps the WebGL2 graph and WebGPU shader hooks", () => {
   }
 });
 
-test("patchWebgpuBc7Format maps BC7 before the r170 getFormat switch", () => {
-  const calls = [];
-  const utils = {
-    getFormat(texture) {
-      calls.push(texture);
-      return "not-bc7";
-    },
-  };
-  const renderer = { backend: { textureUtils: utils } };
-  assert.equal(patchWebgpuBc7Format(renderer), true);
-  assert.equal(utils.getFormat({ format: 36492, colorSpace: "srgb" }), "bc7-rgba-unorm-srgb");
-  assert.equal(utils.getFormat({ format: 36492, colorSpace: "" }), "bc7-rgba-unorm");
-  assert.equal(utils.getFormat({ format: 33779 }), "not-bc7");
-  assert.equal(calls.length, 1);
-  assert.equal(patchWebgpuBc7Format(renderer), true);
-});
-
-test("patchWebgpuBc7Format rewrites the r170 sRGB typo and hooks late textureUtils", () => {
-  const utils = {
-    getFormat(texture) {
-      if (texture && texture.format === 36492) return "bc7-rgba-srgb";
-      return "other";
-    },
-  };
-  const backend = {};
-  const renderer = { backend };
-  assert.equal(patchWebgpuBc7Format(renderer), false);
-  backend.textureUtils = utils;
-  assert.equal(utils.getFormat({ format: 36492, colorSpace: "srgb" }), "bc7-rgba-unorm-srgb");
-  assert.equal(utils.getFormat({ format: 1 }), "other");
+test("r187 getFormat maps BC7 and compressed array layers upload from mip bytes", () => {
+  const utils = readFileSync(new URL("../node_modules/three/src/renderers/webgpu/utils/WebGPUTextureUtils.js", import.meta.url), "utf8");
+  assert.match(utils, /case RGBA_BPTC_Format:/);
+  assert.match(utils, /GPUTextureFormat\.BC7RGBAUnormSRGB/);
+  assert.match(utils, /GPUTextureFormat\.BC7RGBAUnorm/);
+  assert.doesNotMatch(utils, /bc7-rgba-srgb/);
+  assert.match(utils, /isCompressedArrayTexture && texture\.layerUpdates/);
+  assert.match(utils, /origin\.z = layerIndex/);
+  const draw = readFileSync(new URL("../node_modules/three/src/renderers/webgpu/WebGPUBackend.js", import.meta.url), "utf8");
+  assert.match(draw, /object\._mergedDrawStarts/);
+  assert.match(draw, /firstInstance \+= instanceCount/);
 });
 
 test("a WebGPU choice that lands on classic WebGL names the reason", async () => {

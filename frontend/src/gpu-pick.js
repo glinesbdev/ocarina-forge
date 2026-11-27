@@ -318,7 +318,7 @@ function fillIdTexture(texture, ids) {
  * Owns the offscreen target, the id table, and the override material.
  * `readPixel` is injectable in tests.
  */
-export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeMaterial = null }) {
+export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeMaterial = null, gpuPick = true }) {
   const zero = zeroTexture(THREE);
   const uniforms = {
     forgePickIds: { value: zero },
@@ -521,6 +521,7 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
   }
 
   async function renderPick({ ndcX, ndcY, preview = false, terrain = false, output = 0, excluded = [] }) {
+    if (!gpuPick) throw new Error("GPU picking is off.");
     const camera = getCamera();
     if (!camera || !renderer || !scene) throw new Error("The pick target is not ready.");
     const { strip } = aim(camera, ndcX, ndcY);

@@ -8,7 +8,9 @@ import {
   createGpuTextureLoader,
   gpuTexturesEnabled,
   releaseTextureCpu,
+  adoptRendererTexture,
   repairCompressedTexture,
+  textureGpuReady,
   textureSupport,
 } from "./gpu-texture.js";
 import { loadForgeImageSource } from "./gltf-image-source.js";
@@ -48,9 +50,11 @@ import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
-import { applyTextureManifest, formatTextureReport, presentTextures, separateSharedMaterials } from "./texture-apply.js";
+import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
+import { helperKind } from "./scene-helper.js";
+import { formatActorTextureDebug, formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
-import { actorLocked, actorShown, applyActorMatrix, batchKey, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, groupGeometryDraws, patchBatchedDraw, presentByDefault } from "./instance.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -126,9 +130,13 @@ export async function createViewport(host, hooks) {
     terrainNodes = await import("./terrain-node.js");
     mapNodes = await import("./cutout-node.js");
     blendNodes = await import("./blend-node.js");
-    pickNodes = await import("./gpu-pick-node.js");
+    try {
+      pickNodes = await import("./gpu-pick-node.js");
+    } catch (error) {
+      console.error("GPU pick material did not load; clicks use the CPU raycast.", error);
+    }
   }
-  if (renderer.backend && renderer.backend.isWebGPUBackend === true) patchBatchedDraw(renderer.backend);
+  const useGpuPick = !created.nodes || (Boolean(pickNodes) && pickNodes.nodeSystemsDiffer !== true);
   const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
   const frameTimer = createFrameTimer(renderer);
@@ -154,7 +162,8 @@ export async function createViewport(host, hooks) {
     renderer,
     scene,
     getCamera: () => camera,
-    createNodeMaterial: pickNodes ? (args) => pickNodes.createNodePickMaterial(args) : null,
+    createNodeMaterial: useGpuPick && pickNodes ? (args) => pickNodes.createNodePickMaterial(args) : null,
+    gpuPick: useGpuPick,
   });
   await gpuPicker.attachNodeMaterial();
   let pickFallbackWarned = false;
@@ -390,8 +399,23 @@ export async function createViewport(host, hooks) {
   }
 
   const ktx2Loader = new KTX2Loader().setTranscoderPath("/basis/");
-  ktx2Loader.detectSupport(renderer);
-  const gpuCaps = textureSupport(renderer.getContext(), renderer);
+  // r187's detectSupport calls renderer.hasFeature, which throws until init().
+  // createBackendRenderer already awaits init. A renderer handed in later still
+  // has to be ready before the transcoder reads BC7 support.
+  if (renderer.isWebGPURenderer && typeof renderer.hasInitialized === "function" && !renderer.hasInitialized() && typeof renderer.init === "function") {
+    await renderer.init();
+  }
+  try {
+    ktx2Loader.detectSupport(renderer);
+  } catch (error) {
+    noteTexturePipelineError(error);
+  }
+  let gpuCaps = { s3tc: false, bptc: false, astc: false, webgpu: Boolean(renderer.isWebGPURenderer) };
+  try {
+    gpuCaps = textureSupport(renderer.getContext(), renderer);
+  } catch (error) {
+    noteTexturePipelineError(error);
+  }
   const gl = renderer.getContext();
   let loadingGyaml = "";
   function reportGpuFallback(reason) {
@@ -462,6 +486,7 @@ let convertSlots = 8;
   let hideVolumes = false;
   let showGround = false;
   let showWater = true;
+  let showHelpers = false;
   const layerVisibility = {
     models: true,
     terrain: true,
@@ -474,6 +499,10 @@ let convertSlots = 8;
   };
   let statLayersOff = [];
   let textureAllow = true;
+  let textureRequested = 0;
+  let textureFetched = 0;
+  let textureDecoded = 0;
+  let textureAssigned = 0;
   let texturesShown = true;
   let texturesShownArmed = false;
   let textureGeneration = 0;
@@ -554,7 +583,7 @@ let convertSlots = 8;
   let lastPointer = null;
   let gizmoUsed = false;
   const keys = new Set();
-  const clock = new THREE.Clock();
+  const timer = new THREE.Timer();
 
   function clearGrid() {
     if (!grid) return;
@@ -608,6 +637,14 @@ let convertSlots = 8;
     const ready = [];
     for (const [key, group] of groups) {
       if (group.some((texture) => texture.needsUpdate || texture.source?.needsUpdate)) {
+        textureCpuReleaseFrames.delete(key);
+        continue;
+      }
+      // A texture that was never uploaded still has its CPU mips. Dropping
+      // them leaves the next compile sampling an empty image. WebGL has no
+      // backend.get texture record; it uploads on the draw that cleared needsUpdate.
+      if (renderer.backend && renderer.backend.isWebGPUBackend === true
+        && !group.some((texture) => textureGpuReady(renderer.backend, texture))) {
         textureCpuReleaseFrames.delete(key);
         continue;
       }
@@ -827,11 +864,21 @@ let convertSlots = 8;
     paintFrame(lastRendering, false);
   }
 
+  function adoptMap(texture) {
+    const adopted = adoptRendererTexture(THREE, texture);
+    return adopted && adopted.isTexture === true ? adopted : null;
+  }
+
   function refreshTextureMaterial(material) {
     if (!material) return;
-    const map = material.map && material.map.isTexture === true ? material.map : null;
+    let map = material.map && material.map.isTexture === true ? material.map : null;
     if (material.map && !map) material.map = null;
     if (map) {
+      const adopted = adoptMap(map);
+      if (adopted && adopted !== map) {
+        material.map = adopted;
+        map = adopted;
+      }
       map.colorSpace = THREE.SRGBColorSpace;
       map.wrapS = THREE.RepeatWrapping;
       map.wrapT = THREE.RepeatWrapping;
@@ -845,41 +892,135 @@ let convertSlots = 8;
     }
     for (const key of ["normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap"]) {
       const tex = material[key];
-      if (tex && tex.isTexture === true) asDataMap(tex);
-      else if (tex) material[key] = null;
+      if (tex && tex.isTexture === true) {
+        const adopted = adoptMap(tex);
+        if (adopted && adopted !== tex) material[key] = adopted;
+        asDataMap(material[key]);
+      } else if (tex) material[key] = null;
     }
-    // The cutout node captures the map it saw. A later assign has to build it
+    // The colour node captures the map it saw. A later assign has to build it
     // again, and only from a real three.js texture. That recompiles the
-    // material. The mesh stays.
+    // material. The mesh stays. A blend plans two layers. Replacing that
+    // with the albedo node draws whichever image is in material.map, including
+    // a mask, and never samples the overlay.
     if (mapNodes) {
-      material.colorNode = null;
-      material.alphaTestNode = null;
-      if (material.userData) material.userData.cutoutNode = false;
-      if (material.alphaTest > 0 && map) mapNodes.attachCutout(material);
+      const userData = material.userData;
+      const blendPlanned = Boolean(userData && userData.blend);
+      const keep = userData && (userData.terrainNode || userData.blendNode || userData.terrainShader);
+      if (blendPlanned) {
+        if (userData.albedoNode && !userData.blendNode) {
+          material.colorNode = null;
+          userData.albedoNode = false;
+        }
+      } else if (!keep) {
+        material.colorNode = null;
+        material.alphaTestNode = null;
+        if (userData) {
+          userData.cutoutNode = false;
+          userData.albedoNode = false;
+        }
+        if (material.alphaTest > 0 && map) mapNodes.attachCutout(material);
+        else if (map && mapNodes.attachAlbedo) mapNodes.attachAlbedo(material);
+      }
     }
     material.needsUpdate = true;
   }
 
+  function rebindDrawnMaps() {
+    if (!texturesShown) return 0;
+    const partsByMesh = new Map();
+    for (const entry of entries.values()) {
+      const parts = entry.parts || [];
+      for (const slot of entry.slots || []) {
+        if (!slot.mesh) continue;
+        const part = parts.find((item) => item.family === slot.family && item.lod === slot.lod && item.material);
+        if (!part) continue;
+        const list = partsByMesh.get(slot.mesh);
+        if (list) list.push(part);
+        else partsByMesh.set(slot.mesh, [part]);
+      }
+    }
+    let changed = 0;
+    for (const [mesh, parts] of partsByMesh) {
+      const decision = materialToDraw(mesh, parts);
+      if (!decision || decision.missingUv || !decision.material) continue;
+      if (mesh.material !== decision.material) {
+        mesh.material = decision.material;
+        changed += 1;
+      }
+      if (mesh.userData.forgeAlbedo !== decision.map) {
+        decision.material.needsUpdate = true;
+        mesh.userData.forgeAlbedo = decision.map;
+        changed += 1;
+      }
+      if (mapNodes && mapNodes.attachAlbedo && !decision.material.colorNode) {
+        const userData = decision.material.userData || {};
+        if (!userData.blend && !userData.blendNode) mapNodes.attachAlbedo(decision.material);
+      }
+    }
+    return changed;
+  }
+
+  function retileWaterStandIns(parts) {
+    let changed = 0;
+    const seen = new Set();
+    for (const part of parts || []) {
+      const material = part && part.material;
+      const geometry = part && part.geometry;
+      if (!material || !geometry || seen.has(geometry)) continue;
+      if (!material.userData || !material.userData.waterStandIn) continue;
+      seen.add(geometry);
+      const channel = material.map && Number.isInteger(material.map.channel) ? material.map.channel : 0;
+      if (ensureWaterUv(geometry, channel, { retile: true })) changed += 1;
+    }
+    return changed;
+  }
+
   function finishTextureEdit(parts) {
+    if (texturesShown) restoreShownMaps(parts, true);
     const seen = new Set();
     for (const part of parts || []) {
       if (!part.material || seen.has(part.material)) continue;
       seen.add(part.material);
       refreshTextureMaterial(part.material);
     }
+    // Geometry glbs have no images, so the mesh was compiled against a flat
+    // material. The manifest writes the BC7 onto that material afterwards.
+    // A new key, or a mesh that still has the pre-upload stamp, has to be
+    // built again so compileAsync sees the map. Rebind first so the mesh
+    // already on screen samples the map without waiting out that rebuild.
+    // The stand-in ripple is 16×16. A 0..1 chart stretches it into one flat
+    // cyan sheet, so those UVs are replaced before the batch is built again.
+    const retiled = retileWaterStandIns(parts);
+    uvDirty = true;
+    const rebound = rebindDrawnMaps();
+    // The albedo guard above clears a colour node that was sampling one map.
+    // Install the mix after that, once both images and the vertex mask exist.
+    refreshBlendMaps(parts);
+    if (retiled || rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
+    noteTextureDebug();
+    logSelectionTextureDebug();
   }
 
   function loadOwnedTexture(url) {
     return sharedImage(url, () => new Promise((resolve, reject) => {
       gpuTextureLoader.load(url, (texture) => {
-        if (texture && texture.isTexture === true) resolve(texture);
+        const adopted = adoptRendererTexture(THREE, texture);
+        if (adopted && adopted.isTexture === true) resolve(adopted);
         else reject(new Error("decoded image is not a three.js texture"));
       }, undefined, reject);
     })).then((texture) => {
-      if (!texture || texture.isTexture !== true || typeof texture.clone !== "function") return null;
+      if (!texture || texture.isTexture !== true || typeof texture.clone !== "function") {
+        noteTexturePipelineError("decoded image is not a three.js texture");
+        return null;
+      }
       const copy = texture.clone();
-      if (!copy || copy.isTexture !== true) return null;
+      if (!copy || copy.isTexture !== true) {
+        noteTexturePipelineError("decoded image could not be cloned");
+        return null;
+      }
       copy.needsUpdate = true;
+      textureDecoded += 1;
       return copy;
     });
   }
@@ -893,12 +1034,12 @@ let convertSlots = 8;
     });
     if (!plan.textures) return textureDocs.get(gyaml);
     const pending = typeof hooks.fetchTextures === "function"
-      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch((error) => ({
-        materials: {},
-        status: "missing",
-        error: `file not found: texture request failed (${error && error.message ? error.message : error})`,
-      }))
-      : Promise.resolve({ materials: {} });
+      ? Promise.resolve(hooks.fetchTextures(gyaml, sceneAbort.signal)).catch((error) => {
+        const message = `file not found: texture request failed (${error && error.message ? error.message : error})`;
+        noteTexturePipelineError(message);
+        return { materials: {}, status: "missing", error: message };
+      })
+      : Promise.resolve({ materials: {}, error: "texture request is not connected" });
     textureDocs.set(gyaml, pending);
     return pending;
   }
@@ -933,7 +1074,9 @@ let convertSlots = 8;
     const generation = textureGeneration;
     for (const job of textureQueue.take(room)) {
       textureActive += 1;
-      void paintActorTextures(job.gyaml, job.url, generation).catch(() => {}).finally(() => {
+      void paintActorTextures(job.gyaml, job.url, generation).catch((error) => {
+        noteTexturePipelineError(error);
+      }).finally(() => {
         textureActive = Math.max(0, textureActive - 1);
         if (generation !== textureGeneration) return;
         textureQueue.finish(job.gyaml);
@@ -948,6 +1091,7 @@ let convertSlots = 8;
     if (!textureAllow || !gyaml || !url) return;
     const rank = textureRank(gyaml);
     if (!textureQueue.note({ gyaml, url, distance: rank.distance, visible: rank.visible })) return;
+    textureRequested += 1;
     pumpTextures();
   }
 
@@ -960,6 +1104,20 @@ let convertSlots = 8;
     }
   }
 
+  function promoteBlendMask(material, geometry) {
+    const blend = material && material.userData && material.userData.blend;
+    if (!blend || !geometry || typeof geometry.getAttribute !== "function") return;
+    if (!geometry.getAttribute("blendMask") && geometry.getAttribute("color")) {
+      geometry.setAttribute("blendMask", geometry.getAttribute("color"));
+      geometry.deleteAttribute("color");
+      material.vertexColors = false;
+    }
+    const blendUv = blend.uv;
+    if ((blendUv === "_u1" || blendUv === "u1") && geometry.getAttribute("uv1") && !geometry.getAttribute("blendUv")) {
+      geometry.setAttribute("blendUv", geometry.getAttribute("uv1"));
+    }
+  }
+
   function refreshBlendMaps(parts) {
     for (const part of parts || []) {
       const material = part && part.material;
@@ -969,6 +1127,7 @@ let convertSlots = 8;
         material.userData.blendMapUniform.value = material.userData.blendMap;
       }
       const geometry = part.geometry;
+      promoteBlendMask(material, geometry);
       const hasMask = geometry && geometry.getAttribute && geometry.getAttribute("blendMask");
       if (hasMask && !material.userData.blendShader) installBlendShader(material);
       if (blendNodes && hasMask && material.userData.blendMap && material.map && !material.userData.blendNode) {
@@ -980,17 +1139,25 @@ let convertSlots = 8;
   async function paintActorTextures(gyaml, url, generation = textureGeneration) {
     if (!url) return;
     const parsed = parsedTemplates.get(url);
-    if (!parsed) return;
+    if (!parsed) {
+      noteTexturePipelineError(`texture job for ${gyaml || "a model"} ran before its mesh was parsed`);
+      return;
+    }
     const manifest = await textureManifest(gyaml);
+    textureFetched += 1;
+    if (manifest && manifest.skipped) noteTexturePipelineError(manifest.reason || "Textures are not loaded.");
+    else if (manifest && manifest.error && !Object.keys(manifest.materials || {}).length) noteTexturePipelineError(manifest.error);
     if (generation !== textureGeneration) return;
     if (!parsedTemplates.has(url)) return;
     let report;
     try {
       report = await applyTextureManifest(parsed.parts, manifest, loadOwnedTexture);
     } catch (error) {
+      noteTexturePipelineError(error);
       rememberTextureNote(gyaml, `decode error: ${error && error.message ? error.message : error}`);
       return;
     }
+    textureAssigned += (report || []).filter((row) => row && row.status === "applied").length;
     rememberTextureNote(gyaml, formatTextureReport(report));
     refreshBlendMaps(parsed.parts);
     if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
@@ -1016,6 +1183,7 @@ let convertSlots = 8;
     texturesShownArmed = true;
     texturesShown = next;
     presentResidentTextures();
+    noteTextureDebug();
   }
 
   function setTextureLoad(on) {
@@ -1052,6 +1220,13 @@ let convertSlots = 8;
       if (batch.water) batch.mesh.visible = showWater && !scenePreview?.hidden.includes(batch.mesh);
     }
     for (const mesh of scenePreview?.waterMeshes ?? []) mesh.visible = showWater;
+  }
+
+  function applyHelpers() {
+    for (const batch of batches) {
+      if (batch.helper) batch.mesh.visible = showHelpers;
+    }
+    for (const mesh of scenePreview?.helperMeshes ?? []) mesh.visible = showHelpers;
   }
 
   function clearActors(options = {}) {
@@ -1502,7 +1677,9 @@ let convertSlots = 8;
         const original = part.material;
         originals.add(original);
         const water = name !== "@terrain" && isPreviewWater(original, part.userData.name || part.name, name);
+        const helper = helperKind(part.userData.name || "", part.name || "", original && original.name, name);
         part.userData.previewWater = water;
+        part.userData.previewHelper = helper;
         const label = `${part.name} ${name}`;
         let color = original.color.getHex();
         if (color === 0xffffff) {
@@ -1562,7 +1739,7 @@ let convertSlots = 8;
     const controller = new AbortController();
     const preview = {
       controller, terrainPending, terrain: null, asset: null, root: new THREE.Group(), hidden: [],
-      models: new Map(), placements: new Map(), bounds: new Map(), waterMeshes: new Set(),
+      models: new Map(), placements: new Map(), bounds: new Map(), waterMeshes: new Set(), helperMeshes: new Set(),
     };
     scenePreview = preview;
     try {
@@ -1641,6 +1818,10 @@ let convertSlots = 8;
               mesh.renderOrder = 2;
               mesh.visible = showWater;
               preview.waterMeshes.add(mesh);
+            }
+            if (part.userData.previewHelper) {
+              mesh.visible = showHelpers;
+              preview.helperMeshes.add(mesh);
             }
             placements.forEach((entry, index) => {
               displayedActorMatrix(entry, matrix).multiply(local);
@@ -2518,7 +2699,10 @@ let convertSlots = 8;
   function bindNamedTexture(parser, index, imageName) {
     const slot = resolveTextureIndex(parser.json, index, imageName);
     if (slot < 0) return Promise.resolve(null);
-    return parser.getDependency("texture", slot).catch(() => null);
+    return parser.getDependency("texture", slot).catch((error) => {
+      noteTexturePipelineError(error || "glTF texture dependency failed");
+      return null;
+    });
   }
 
   async function bindSurfaceMaps(gltf) {
@@ -2629,8 +2813,11 @@ let convertSlots = 8;
       const source = Array.isArray(child.material) ? child.material[0] : child.material;
       if (!source) return;
       let material = prepareMaterial(source);
-      if (material.map && (material.userData.banc || material.name) === "water") {
-        ensureWaterUv(geometry, material.map.channel);
+      if ((material.userData && material.userData.banc) === "water" || material.name === "water") {
+        // The stand-in ripple is published after this geometry is batched.
+        // A water plane with no TEXCOORD would sample nothing and stay the flat cyan tint.
+        const channel = material.map && Number.isInteger(material.map.channel) ? material.map.channel : 0;
+        ensureWaterUv(geometry, channel);
       }
       if (material.userData && material.userData.blend && geometry.getAttribute("color")) {
         material = cloneMaterialPreservingTextures(material);
@@ -2811,8 +2998,9 @@ let convertSlots = 8;
 
   const imageKeys = new WeakMap();
 
-  function imageSignature(image) {
+  function imageSignature(image, texture) {
     if (!image) return "none";
+    if (texture && texture.isCompressedTexture) return imageIdentity(texture);
     const cached = imageKeys.get(image);
     if (cached) return cached;
     const width = image.width || image.videoWidth || 0;
@@ -2833,7 +3021,9 @@ let convertSlots = 8;
       }
       key = `${key}:${hash >>> 0}`;
     } catch {
-      key = `${key}:${image.src || "bitmap"}`;
+      // A compressed image is not drawable. Sharing "bitmap" across every
+      // same-size map put those models on the first material.
+      key = texture ? imageIdentity(texture) : `${key}:${image.src || image.uuid || "image"}`;
     }
     imageKeys.set(image, key);
     return key;
@@ -2841,18 +3031,23 @@ let convertSlots = 8;
 
   function batchKeyFor(material, geometry) {
     const image = material.map && material.map.image
-      ? imageSignature(material.map.image)
+      ? imageSignature(material.map.image, material.map)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
     const blend = material.userData && material.userData.blend;
-    const blendImage = material.userData && material.userData.blendMap && material.userData.blendMap.image;
-    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage) : "flat"}` : "";
-    const roughImage = material.roughnessMap && material.roughnessMap.image;
-    const normalImage = material.normalMap && material.normalMap.image;
-    const orm1Image = material.userData && material.userData.orm1Map && material.userData.orm1Map.image;
-    const normal1Image = material.userData && material.userData.normal1Map && material.userData.normal1Map.image;
+    const blendMap = material.userData && material.userData.blendMap;
+    const blendImage = blendMap && blendMap.image;
+    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage, blendMap) : "flat"}` : "";
+    const roughMap = material.roughnessMap;
+    const normalMap = material.normalMap;
+    const orm1Map = material.userData && material.userData.orm1Map;
+    const normal1Map = material.userData && material.userData.normal1Map;
+    const roughImage = roughMap && roughMap.image;
+    const normalImage = normalMap && normalMap.image;
+    const orm1Image = orm1Map && orm1Map.image;
+    const normal1Image = normal1Map && normal1Map.image;
     const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
-      ? `|orm:${roughImage ? imageSignature(roughImage) : "flat"}|n:${normalImage ? imageSignature(normalImage) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image) : "flat"}`
+      ? `|orm:${roughImage ? imageSignature(roughImage, roughMap) : "flat"}|n:${normalImage ? imageSignature(normalImage, normalMap) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image, orm1Map) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image, normal1Map) : "flat"}`
       : "";
     return batchKey({
       image: image + blendKey + surfaceKey,
@@ -3032,6 +3227,9 @@ let convertSlots = 8;
         indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
       }
       if (!verts || !group.records.length) continue;
+      group.material = materialForBatch(group.records, group.material);
+      const sampleGeometry = group.geometries.values().next().value;
+      group.material = materialForGeometry(group.material, sampleGeometry);
       let mesh;
       try {
         mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
@@ -3057,25 +3255,30 @@ let convertSlots = 8;
       if (label) mesh.name = label;
       const previousRender = mesh.onBeforeRender.bind(mesh);
       const webgpuBatch = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+      const albedo = group.material.map && group.material.map.isTexture === true ? group.material.map : null;
+      mesh.userData.forgeAlbedo = albedo;
       mesh.onBeforeRender = function pickAndGroup(rendererArg, sceneArg, cameraArg, geometry, material, ...rest) {
-        // A quiet frame leaves the grouped ranges in place. Grouping them
-        // again would treat each run as one instance and restart the next
-        // geometry at slot 1.
         const picking = Boolean(sceneArg.overrideMaterial && sceneArg.overrideMaterial.userData && sceneArg.overrideMaterial.userData.forgePick);
         if (picking) gpuPicker.prepareObject(mesh, mesh.material);
-        const dirty = mesh._visibilityChanged || mesh.perObjectFrustumCulled || mesh.sortObjects;
-        previousRender(rendererArg, sceneArg, cameraArg, geometry, picking ? mesh.material : material, ...rest);
-        if (webgpuBatch && dirty) groupGeometryDraws(mesh);
+        const drawMaterial = picking ? mesh.material : material;
+        // r187 draws the merged ranges. Filling them after previousRender is
+        // too late for this frame, and the WebGPU onBeforeRender does not
+        // fill them at all.
+        if (webgpuBatch) scheduleMergedDraws(mesh, cameraArg, geometry, drawMaterial);
+        previousRender(rendererArg, sceneArg, cameraArg, geometry, drawMaterial, ...rest);
       };
       mesh.layers.enable(PICK_LAYER);
       mesh.userData.forgePickKind = 1;
       mesh.renderOrder = 1;
       const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
       const water = tag === "water";
+      const helper = (group.material.userData && group.material.userData.helper)
+        || helperKind(label, group.material.name, group.material.userData && group.material.userData.name);
       if (water) {
         mesh.renderOrder = 2;
         mesh.visible = showWater;
       }
+      if (helper) mesh.visible = showHelpers;
       const geomIds = new Map();
       let built = true;
       for (const [uuid, geometry] of group.geometries) {
@@ -3137,7 +3340,7 @@ let convertSlots = 8;
       mesh.userData.pick = { ids, geometries, spheres, count };
       mesh.userData.forgeIndirect = mesh._indirectTexture;
       mesh.computeBoundingSphere();
-      pendingMeshes.push({ mesh, ids, water });
+      pendingMeshes.push({ mesh, ids, water, helper: Boolean(helper) });
     }
     const compileStarted = performance.now();
     // compileObjectPipeline logs a compile failure once and still resolves.
@@ -3184,6 +3387,7 @@ let convertSlots = 8;
     syncPickIds();
     releaseUnselectedPartGeometry();
     guardMissingUv();
+    noteTextureDebug();
     return true;
   }
 
@@ -4084,6 +4288,7 @@ uniform float terrainLayerMissing;`
     attach();
     syncLabels();
     updateSnapGrid(selected ? entries.get(selected) : null);
+    logSelectionTextureDebug();
     requestRender();
   }
 
@@ -4107,6 +4312,7 @@ uniform float terrainLayerMissing;`
       }
     }
     const token = ++orbitToken;
+    if (!useGpuPick) return;
     enqueuePick(async () => {
       try {
         const point = await gpuPicker.pickDistance({ ndcX: ndc.x, ndcY: ndc.y, terrain: true, preview: false });
@@ -4369,12 +4575,13 @@ uniform float terrainLayerMissing;`
     lastLightingNote = resolved.note;
   }
 
-  function setFlags({ hidden, labels, categories: next, volumes, ground, water, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers, shadows, ao, effectGizmos, editorDefaults }) {
+  function setFlags({ hidden, labels, categories: next, volumes, ground, water, helpers, boxes, terrainDebug, subTerrain, blendMask, distance, visibleLayers, shadows, ao, effectGizmos, editorDefaults }) {
     if (hidden !== undefined) showHidden = hidden;
     if (labels !== undefined) showLabels = labels;
     if (volumes !== undefined) hideVolumes = volumes;
     if (ground !== undefined) showGround = Boolean(ground);
     if (water !== undefined) showWater = Boolean(water);
+    if (helpers !== undefined) showHelpers = Boolean(helpers);
     if (terrainDebug !== undefined) showTerrainDebug = Boolean(terrainDebug);
     if (subTerrain !== undefined) showSub = Boolean(subTerrain);
     if (blendMask !== undefined) showBlendMask = Boolean(blendMask);
@@ -4418,6 +4625,7 @@ uniform float terrainLayerMissing;`
     syncPickIds();
     applyGround();
     applyWater();
+    applyHelpers();
     applyTerrainUniforms();
     applyBlendUniforms();
     drawLinks();
@@ -4879,6 +5087,7 @@ uniform float terrainLayerMissing;`
 
   async function groupsAt(event, { preview, peel }) {
     const ndc = setPointer(event);
+    if (!useGpuPick) return aimed(event, preview);
     try {
       const keys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview, peel });
       return groupsFromPick(keys, volumeRayHits(raycaster));
@@ -4922,6 +5131,15 @@ uniform float terrainLayerMissing;`
 
   async function pickAt(event) {
     const ndc = setPointer(event);
+    if (!useGpuPick) {
+      const groups = aimed(event, true);
+      const repeat = Boolean(
+        lastClick && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) < 6 && lastClick.signature === signature(groups),
+      );
+      lastClick = { x: event.clientX, y: event.clientY, front: groups.solids[0] || null, signature: signature(groups) };
+      hooks.onSelect(chooseHit({ ...groups, selected, alt: event.altKey, repeat }));
+      return;
+    }
     try {
       const frontKeys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview: true, peel: false });
       const front = frontKeys[0] || null;
@@ -5291,6 +5509,9 @@ uniform float terrainLayerMissing;`
     if (!renderer.isWebGPURenderer || !uvDirty) return;
     uvDirty = false;
     dropMapWithoutUv(scene);
+    // A colour node keeps its map. A clone that dropped the map while the
+    // part still holds it is pointed back at that part when the batch has uv.
+    rebindDrawnMaps();
   }
 
   function requestRender() {
@@ -5302,7 +5523,7 @@ uniform float terrainLayerMissing;`
     const info = (renderer.info && renderer.info.render) || {};
     const webgpu = Boolean(renderer.isWebGPURenderer);
     const subDraws = renderer.backend && renderer.backend.isWebGPUBackend === true
-      ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+      ? batches.reduce((sum, batch) => sum + batchSubDrawCount(batch.mesh), 0)
       : 0;
     const drawCalls = webgpu ? Number(info.drawCalls) || 0 : Number(info.calls) || 0;
     const batchCount = batches.length;
@@ -5313,6 +5534,213 @@ uniform float terrainLayerMissing;`
       draws: drawTotal(info, webgpu, subDraws),
       triangles: Number(info.triangles) || 0,
     };
+  }
+
+  let textureDebugSignature = "";
+  let selectionDebugSignature = "";
+
+  function attributeSpan(attribute) {
+    let minU = Infinity;
+    let maxU = -Infinity;
+    let minV = Infinity;
+    let maxV = -Infinity;
+    const count = Math.min(attribute.count || 0, 4096);
+    for (let i = 0; i < count; i += 1) {
+      const u = attribute.getX(i);
+      const v = attribute.getY(i);
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    if (!Number.isFinite(minU)) return "";
+    return ` ${minU.toFixed(3)}..${maxU.toFixed(3)},${minV.toFixed(3)}..${maxV.toFixed(3)}`;
+  }
+
+  function textureDebugSelection() {
+    const entry = selected ? entries.get(selected) : null;
+    if (!entry) return "";
+    const parts = [];
+    for (const part of entry.parts || []) {
+      const material = part && part.material;
+      const geometry = part && part.geometry;
+      const userData = (material && material.userData) || {};
+      const map = material && material.map && material.map.isTexture === true ? material.map : null;
+      const attributes = [];
+      const named = geometry && geometry.attributes ? geometry.attributes : null;
+      if (named) {
+        for (const name of Object.keys(named)) {
+          const attr = named[name];
+          const span = attr && (name === "uv" || name.startsWith("uv")) ? attributeSpan(attr) : "";
+          attributes.push(`${name}${span}`);
+        }
+      }
+      const color = material && material.color;
+      parts.push({
+        name: part.name || part.materialKey || "",
+        material: (material && material.name) || "",
+        banc: userData.banc || "",
+        sampler: userData.forgeAlbedoSampler || "",
+        texture: userData.forgeAlbedoName || "",
+        format: userData.forgeAlbedoFormat || "",
+        map: Boolean(map),
+        url: (map && map.name) || userData.forgeMapUrl || "",
+        compressed: Boolean(map && map.isCompressedTexture),
+        channel: map && Number.isInteger(map.channel) ? map.channel : 0,
+        vertexColors: Boolean(material && material.vertexColors),
+        colorNode: Boolean(material && (material.colorNode || userData.albedoNode || userData.cutoutNode)),
+        albedoNode: Boolean(userData.albedoNode),
+        blend: Boolean(userData.blend || userData.blendNode),
+        blendNode: Boolean(userData.blendNode),
+        moss: Boolean(userData.blendMap),
+        blendTexture: (userData.blend && userData.blend.texture) || "",
+        blendChannel: (userData.blend && userData.blend.channel) || "",
+        ao: Boolean(material && material.aoMap),
+        alphaTest: material && material.alphaTest ? material.alphaTest : 0,
+        transparent: Boolean(material && material.transparent),
+        helper: (userData.helper) || helperKind(part.name, part.materialKey, material && material.name),
+        space: (map && map.colorSpace) || (map && map.userData && map.userData.forgeTransfer) || "",
+        color: color ? [color.r, color.g, color.b] : [],
+        attributes,
+      });
+    }
+    const roles = [];
+    for (const row of (entry.modelMeta && entry.modelMeta.textureLog) || []) {
+      if (!row) continue;
+      const albedo = (row.roles || []).find((role) => role && role[2] === "albedo");
+      roles.push({
+        material: row.material || "",
+        sampler: albedo ? albedo[0] : "",
+        texture: albedo ? albedo[1] : "",
+        uv: albedo ? albedo[3] : "",
+        alpha: row.alpha || "",
+      });
+    }
+    return formatActorTextureDebug({
+      gyaml: entry.gyaml || "",
+      name: entry.name || "",
+      parts,
+      roles,
+    });
+  }
+
+  function logSelectionTextureDebug() {
+    let search = "";
+    let stored = null;
+    try {
+      search = window.location.search;
+      stored = window.localStorage.getItem("ocarinaforge.texdebug");
+    } catch {
+      return;
+    }
+    if (!textureDebugEnabled(search, stored)) return;
+    const text = textureDebugSelection();
+    if (!text || text === selectionDebugSignature) return;
+    selectionDebugSignature = text;
+    console.info(text);
+  }
+
+
+  function noteTextureDebug() {
+    let search = "";
+    let stored = null;
+    try {
+      search = window.location.search;
+      stored = window.localStorage.getItem("ocarinaforge.texdebug");
+    } catch {
+      return;
+    }
+    if (!textureDebugEnabled(search, stored)) return;
+    const Texture = THREE.Texture;
+    const seenParts = new Set();
+    let partMaps = 0;
+    let litOnly = 0;
+    for (const parsed of parsedTemplates.values()) {
+      for (const part of parsed.parts || []) {
+        const material = part && part.material;
+        if (!material || seenParts.has(material)) continue;
+        seenParts.add(material);
+        const map = material.map && material.map.isTexture === true ? material.map : null;
+        const lit = material.userData && material.userData.forgeLit && material.userData.forgeLit.map;
+        if (map) partMaps += 1;
+        else if (lit && lit.isTexture === true) litOnly += 1;
+      }
+    }
+    const samples = [];
+    let meshMaps = 0;
+    let missingUv = 0;
+    let foreign = 0;
+    let uploaded = 0;
+    const seenMesh = new Set();
+    for (const batch of batches) {
+      const mesh = batch && batch.mesh;
+      if (!mesh || seenMesh.has(mesh)) continue;
+      seenMesh.add(mesh);
+      const material = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+      const map = material && material.map && material.map.isTexture === true ? material.map : null;
+      if (map) {
+        meshMaps += 1;
+        if (typeof Texture === "function" && !(map instanceof Texture)) foreign += 1;
+        if (textureGpuReady(renderer.backend, map)) uploaded += 1;
+      }
+      let partMap = null;
+      let partMaterial = null;
+      for (const entry of entries.values()) {
+        const slot = (entry.slots || []).find((item) => item.mesh === mesh);
+        if (!slot) continue;
+        const part = (entry.parts || []).find((item) => item.family === slot.family && item.lod === slot.lod);
+        const candidate = part && part.material && part.material.map;
+        if (candidate && candidate.isTexture === true) {
+          partMap = candidate;
+          partMaterial = part.material;
+          break;
+        }
+      }
+      const channel = Number.isInteger((map || partMap) && (map || partMap).channel) ? (map || partMap).channel : 0;
+      const uvName = channel > 0 ? `uv${channel}` : "uv";
+      const geometry = mesh.geometry;
+      const hasUv = Boolean(geometry && (typeof geometry.hasAttribute === "function"
+        ? geometry.hasAttribute(uvName)
+        : geometry.attributes && geometry.attributes[uvName]));
+      if (partMap && !hasUv) missingUv += 1;
+      if (samples.length < 6 && partMap && (!map || !hasUv || (typeof Texture === "function" && !(partMap instanceof Texture)))) {
+        samples.push({
+          name: mesh.name || "batch",
+          meshMap: Boolean(map),
+          partMap: true,
+          uv: hasUv,
+          channel,
+          compressed: Boolean(partMap.isCompressedTexture),
+          foreign: typeof Texture === "function" && !(partMap instanceof Texture),
+          uploaded: textureGpuReady(renderer.backend, partMap),
+          sameMaterial: material === partMaterial,
+          helper: (partMaterial && partMaterial.userData && partMaterial.userData.helper)
+            || helperKind(mesh.name, partMaterial && partMaterial.name),
+        });
+      }
+    }
+    const report = {
+      shown: texturesShown,
+      allow: textureAllow,
+      batches: batches.length,
+      meshMaps,
+      partMaps,
+      litOnly,
+      missingUv,
+      foreign,
+      uploaded,
+      profileTex: profileTextureCount(),
+      requested: textureRequested,
+      fetched: textureFetched,
+      decoded: textureDecoded,
+      assigned: textureAssigned,
+      error: texturePipelineError(),
+      samples,
+    };
+    const text = formatTextureDebug(report);
+    if (text === textureDebugSignature) return;
+    textureDebugSignature = text;
+    console.info(text);
   }
 
   function profileTextureCount() {
@@ -5472,7 +5900,7 @@ uniform float terrainLayerMissing;`
       info,
       Boolean(renderer.isWebGPURenderer),
       renderer.backend && renderer.backend.isWebGPUBackend === true
-        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        ? batches.reduce((sum, batch) => sum + batchSubDrawCount(batch.mesh), 0)
         : 0,
     );
     const background = (statDeferred || 0) + (statBackgroundLoading || 0);
@@ -5486,6 +5914,7 @@ uniform float terrainLayerMissing;`
       capped: statCapped,
       texturesDone: statTexturesDone,
       texturesTotal: statTexturesTotal,
+      texturesHidden: !texturesShown && statTexturesDone > 0,
       layersOff: statLayersOff,
       memory: {
         geometries: renderer.info && renderer.info.memory ? renderer.info.memory.geometries : null,
@@ -5503,7 +5932,8 @@ uniform float terrainLayerMissing;`
     const tickAt = performance.now();
     const gap = lastTickAt ? tickAt - lastTickAt : 0;
     lastTickAt = tickAt;
-    const dt = Math.min(clock.getDelta(), 0.05);
+    timer.update(tickAt);
+    const dt = Math.min(timer.getDelta(), 0.05);
     const flying = updateFly(dt);
     const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
     if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
@@ -5644,7 +6074,7 @@ uniform float terrainLayerMissing;`
       info,
       Boolean(renderer.isWebGPURenderer),
       renderer.backend && renderer.backend.isWebGPUBackend === true
-        ? batches.reduce((sum, batch) => sum + (batch.mesh._multiDrawCount || 0), 0)
+        ? batches.reduce((sum, batch) => sum + batchSubDrawCount(batch.mesh), 0)
         : 0,
     );
   }
@@ -5848,6 +6278,7 @@ uniform float terrainLayerMissing;`
       return lastLightingNote;
     },
     modelInfo,
+    textureDebugSelection,
     auditPlacements,
     auditView,
     shaderDiagnostics,
@@ -5904,6 +6335,7 @@ uniform float terrainLayerMissing;`
       }
       observer.disconnect();
       frameTimer.dispose();
+      timer.dispose();
       statusEl.remove();
       profileEl.remove();
       observer.disconnect();

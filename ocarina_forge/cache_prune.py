@@ -116,8 +116,17 @@ def write_version_sidecar(path: Path, version: str) -> None:
     try:
         tmp.write_text(json.dumps({"version": version}), encoding="utf-8")
         os.replace(tmp, side)
+    except OSError as error:
+        # WinError 32 / Errno 13: the sidecar is a stamp, not the texture.
+        # A locked rename must not fail the image that was already encoded.
+        winerror = getattr(error, "winerror", None)
+        if not isinstance(error, PermissionError) and winerror != 32:
+            raise
     finally:
-        tmp.unlink(missing_ok=True)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
     note_written(side)
 
 

@@ -4,7 +4,24 @@ import test from "node:test";
 test("the WebGPU pick material builds for meshes with and without maps", async () => {
   globalThis.self = globalThis;
   const THREE = await import("three/webgpu");
-  const { createNodePickMaterial } = await import("./gpu-pick-node.js");
+  const { createNodePickMaterial, nodeSystemsDiffer, rejectSplitNodeSystem } = await import("./gpu-pick-node.js");
+  assert.equal(nodeSystemsDiffer, false);
+  const reported = [];
+  const previousError = console.error;
+  console.error = (...args) => {
+    reported.push(args.join(" "));
+  };
+  try {
+    const split = function SplitNode() {};
+    const other = function OtherNode() {};
+    assert.equal(rejectSplitNodeSystem(split, other), true);
+    assert.equal(rejectSplitNodeSystem(split, split), false);
+  } finally {
+    console.error = previousError;
+  }
+  assert.equal(reported.length, 1);
+  assert.match(reported[0], /two copies of three's node system/);
+  assert.match(reported[0], /CPU raycast/);
   const canvas = {
     width: 4,
     height: 4,
@@ -29,6 +46,11 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
 
   function shaderFor(renderer, object) {
     renderer.hasFeature = () => false;
+    // init() is what installs Bindings. A shader build before that sees null,
+    // and r187 still calls getSharedBindGroup when the field is not undefined.
+    if (renderer._bindings == null) {
+      renderer._bindings = { getSharedBindGroup(group) { return group; } };
+    }
     const builder = renderer.backend.createNodeBuilder(object, renderer);
     builder.camera = new THREE.PerspectiveCamera();
     builder.build();
@@ -42,6 +64,18 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
   const plainShader = shaderFor(webgpu, new THREE.Mesh(geometry, plain));
   assert.match(plainShader, /textureLoad/);
   assert.doesNotMatch(plainShader, /Need a three\.js texture/);
+  // The unpack is a native function. Its body is the source string, so a node
+  // build cannot replace an operand with render.cameraProjectionMatrix.
+  const packBody = plainShader.slice(plainShader.indexOf("fn pack24"), plainShader.indexOf("@fragment"));
+  assert.match(packBody, /fn pack24\s*\(\s*value\s*:\s*u32\s*\)\s*->\s*vec4<f32>/);
+  assert.match(packBody, /f32\(value & 255u\) \/ 255\.0/);
+  assert.match(packBody, /f32\(\(value \/ 256u\) & 255u\) \/ 255\.0/);
+  assert.match(packBody, /f32\(\(value \/ 65536u\) & 255u\) \/ 255\.0/);
+  assert.doesNotMatch(packBody, /camera|render\./);
+  assert.match(plainShader, /pack24\s*\(\s*u32\s*\(/);
+  assert.doesNotMatch(plainShader, /pack24\s*\(\s*render\./);
+  assert.doesNotMatch(plainShader, /camera(?:Projection|View)Matrix\s*\//);
+  assert.doesNotMatch(plainShader, /\/\s*render\.camera(?:Projection|View)Matrix/);
 
   const mapped = createNodePickMaterial({ uniforms, getActiveObject: () => null });
   mapped.alphaTest = 0.4;
@@ -96,4 +130,7 @@ test("the WebGPU pick material builds for meshes with and without maps", async (
   const glShader = shaderFor(webglBackend, new THREE.Mesh(geometry, fallback));
   assert.match(glShader, /discard/);
   assert.match(glShader, /texture/);
+  assert.match(glShader, /vec4 pack24\s*\(\s*uint value\s*\)/);
+  assert.match(glShader, /float\(\(value \/ 256u\) & 255u\)/);
+  assert.doesNotMatch(glShader, /pack24\s*\(\s*render\./);
 });

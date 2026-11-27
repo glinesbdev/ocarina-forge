@@ -76,6 +76,10 @@ export const api = {
   actorTextures: (gyaml, options = {}) => {
     const params = new URLSearchParams();
     if (options.load) params.set("load", options.load);
+    // The load list alone is not enough. `models,terrain,water,collision,…`
+    // is the Layout preset, and Layout means textures off when this flag is
+    // absent. Terrain already sends it. Actor images have to as well.
+    if (options.textures != null && options.textures !== "") params.set("textures", String(options.textures));
     const query = params.toString();
     return request(`/api/models/${encodeURIComponent(gyaml)}/textures${query ? `?${query}` : ""}`, options.signal ? { signal: options.signal } : {});
   },

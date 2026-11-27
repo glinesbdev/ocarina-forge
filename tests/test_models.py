@@ -157,10 +157,60 @@ def test_moat_and_stream_count_as_water_and_a_bounds_box_is_omitted():
     assert not _water_names("Npc_River_A")
     assert _omit_reason("Occluder_A", "Mt_White") == "occluder is not drawn"
     assert _omit_reason("MiniMap_Castle", "") == "minimap model is not drawn"
+    assert _omit_reason("VFX_BlackFade_01", "Mt_VFX_BlackFade44") == ""
     box = Part("Bounds", [(0, 0, 0), (8, 0, 0), (8, 4, 6)], [0, 1, 2], None, "", "")
     tiny = Part("Courtyard", [(i * 0.01, 0, 0) for i in range(30)], [0, 1, 2], [(0, 0)] * 30, "alb", "")
     assert _untextured_bounds_box(box, [(box, ""), (tiny, "alb")])
     assert not _untextured_bounds_box(tiny, [(box, ""), (tiny, "alb")])
+
+
+def test_fade_and_dark_planes_stay_in_the_mesh_and_are_tagged():
+    from ocarina_forge.formats.bfres import parse, sample_v10_bfres
+    from ocarina_forge.models import _assemble, _helper_kind, _image_format_label
+
+    assert _helper_kind("BlackBoard", "Mt_BlackBorad_Room000") == "board"
+    assert _helper_kind("pPlane1", "Mt_DarkPlane_A0") == "dark"
+    assert _helper_kind("ShadowBoard1", "Mt_ShadowBoard_A43") == "shadow"
+    assert _helper_kind("VFX_BlackFade_01", "Mt_VFX_BlackFade44") == "fade"
+    assert _helper_kind("BlackFadeA", "Mt_Etc_LakeHrl_VFXBlackFade_A1") == "fade"
+    assert _helper_kind("Land_LakeHrl_Tree_A_01", "Mt_Bark") == ""
+
+    class _Image:
+        def __init__(self, fmt):
+            self.codec = "bc7"
+            self.fmt = fmt
+            self.width = 32
+            self.height = 16
+
+    assert _image_format_label(_Image(0x2006)) == "bc7 srgb 0x2006 32x16"
+    assert _image_format_label(_Image(0x2001)) == "bc7 linear 0x2001 32x16"
+
+    blob = sample_v10_bfres(
+        "Tree",
+        [
+            {"name": "Mt_Bark", "samplers": [("_a0", "Tree_Alb")], "mode": "opaque"},
+            {"name": "Mt_VFX_BlackFade44", "samplers": [], "mode": "opaque"},
+            {"name": "Mt_DarkPlane_A0", "samplers": [], "mode": "opaque"},
+            {"name": "Mt_ShadowBoard_A43", "samplers": [], "mode": "opaque"},
+            {"name": "Mt_BlackBorad_Room000", "samplers": [], "mode": "opaque"},
+        ],
+        shapes=[
+            {"name": "Land_LakeHrl_Tree_A_01", "material": 0},
+            {"name": "VFX_BlackFade_01", "material": 1},
+            {"name": "pPlane1", "material": 2},
+            {"name": "ShadowBoard1", "material": 3},
+            {"name": "BlackBoard", "material": 4},
+        ],
+    )
+    glb, _info = _assemble(parse(blob), {})
+    doc = _document(glb)
+    kinds = [material.get("extras", {}).get("helper", "") for material in doc["materials"]]
+    assert kinds.count("fade") == 1
+    assert "dark" in kinds and "shadow" in kinds and "board" in kinds
+    assert "" in kinds
+    names = [mesh["name"] for mesh in doc["meshes"]]
+    assert any("Land_LakeHrl_Tree_A_01" in name for name in names)
+    assert any("VFX_BlackFade_01" in name for name in names)
 
 
 def test_base_color_prefers_albedo():
@@ -623,7 +673,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-64", "79f25da863720dab5206ce767f2851f952609b060772ec2d4c173e7b9a3fba78")
+    pinned = ("models-67", "c735c685f06389dd5b2cbdafa8836ba5b7413f3145f1ed72be65c2d39841e2dd")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -3050,6 +3100,19 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
     assert "baseColorTexture" in doc["materials"][0]["pbrMetallicRoughness"]
     assert doc["materials"][0]["alphaMode"] == "BLEND"
     assert doc["materials"][0]["extras"]["banc"] == "water"
+    from ocarina_forge.models import describe_actor_textures
+
+    flat = describe_actor(dump, "Tm_Pond", flat=True)
+    flat_doc = _document((tmp_path / "cache" / flat["digest"][:2] / f"{flat['digest']}.glb").read_bytes())
+    flat_mat = flat_doc["materials"][0]
+    assert flat_mat["extras"]["banc"] == "water"
+    assert "baseColorTexture" not in flat_mat["pbrMetallicRoughness"]
+    manifest = describe_actor_textures(dump, "Tm_Pond")
+    slot = next(iter(manifest["materials"].values()))
+    assert slot["standIn"] == "water"
+    assert slot["texture"] == "ocarina-forge-water"
+    assert slot["color"][0] == 1.0
+    assert slot["color"][3] == 0.62
 
 
 def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeypatch):
@@ -3294,6 +3357,103 @@ def test_meshopt_overlay_maps_stay_real_texture_indices():
     broken, binary = split_glb(glb)
     broken["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"]["index"] = 99
     assert any("baseColorTexture" in issue for issue in glb_issues(join_glb(broken, binary)))
+
+
+def test_a_bake_only_material_stays_flat_and_lod1_reuses_lod0(tmp_path, monkeypatch):
+    monkeypatch.setenv("OCARINA_FORGE_CACHE", str(tmp_path / "cache"))
+    from ocarina_forge.formats.bfres import Material, Model, Part, sample_v10_bfres
+    from ocarina_forge.formats.bntx import Texture, write_rgba
+    from ocarina_forge.formats.byml import dumps
+    from ocarina_forge.formats.sarc import pack
+    from ocarina_forge.formats.zsio import compress
+    from ocarina_forge.models import _NEUTRAL, _choose_material, _share_lod_colour
+
+    binds = [("bake0", "CmnTex_BakeDefault"), ("bake1", "CmnTex_BakeLightDefault")]
+    white = Texture("CmnTex_BakeDefault", 1, 1, bytes([255, 255, 255, 255]), 0x1E01, codec="bc5")
+    light = Texture("CmnTex_BakeLightDefault", 1, 1, bytes([240, 240, 240, 255]), 0x1E01, codec="bc5")
+    grass = Texture("Island_Grass_Alb", 1, 1, bytes([40, 130, 50, 255]), 0x2006, codec="bc7")
+    only = Material("Mt_Land_LakeHrl_Island_E_Grass", binds=binds, albedo=rank_albedo(binds), base_color=(0.31, 0.42, 0.18, 1.0))
+    choice = _choose_material(
+        None,
+        Model("island", materials=[only], images={"CmnTex_BakeDefault": white, "CmnTex_BakeLightDefault": light}),
+        only,
+        [],
+        False,
+        {},
+        [],
+    )
+    assert choice["image"] is None
+    assert "Bake" not in (choice.get("wanted") or "")
+    assert choice.get("sampler") in ("", None)
+    assert choice["base_color"] == (0.31, 0.42, 0.18, 1.0)
+    named = Material(
+        "Mt_Land_LakeHrl_Island_E_Grass",
+        binds=[("bake0", "CmnTex_BakeDefault"), ("_a0", "Island_Grass_Alb")],
+        albedo=rank_albedo([("bake0", "CmnTex_BakeDefault"), ("_a0", "Island_Grass_Alb")]),
+    )
+    picked = _choose_material(
+        None,
+        Model("island", materials=[named], images={"Island_Grass_Alb": grass, "CmnTex_BakeDefault": white}),
+        named,
+        [],
+        False,
+        {},
+        [],
+    )
+    assert picked["sampler"] == "_a0"
+    assert picked["wanted"] == "Island_Grass_Alb"
+    assert picked["image"] is grass
+    bc5 = Texture("Grass_Alb", 1, 1, bytes([255, 255, 255, 255]), 0x1E01, codec="bc5")
+    two = Material("Mt_Grass", binds=[("_a0", "Grass_Alb")], albedo=[("_a0", "Grass_Alb")])
+    rejected = _choose_material(None, Model("m", materials=[two], images={"Grass_Alb": bc5}), two, [], False, {}, [])
+    assert rejected["image"] is None
+    assert "BC5" in (rejected["entry"]["error"] or "")
+
+    near = Part("Cliff", [(0.0, 0.0, 0.0)], [0], [(0.0, 0.0)], "UmeCliff_B_Near_Alb", "Mt_Land_LakeHrl_Island_E_Grass", 0)
+    near.albedo_sampler = "_a0"
+    far = Part("CliffFar", [(0.0, 0.0, 0.0)], [0], [(0.0, 0.0)], "CmnTex_BakeDefault", "Mt_Land_LakeHrl_Island_E_Grass", 3)
+    far.lod = 1
+    far.albedo_sampler = "bake0"
+    _share_lod_colour([Model("island", parts=[near, far])])
+    assert far.texture == "UmeCliff_B_Near_Alb"
+    assert far.albedo_sampler == "_a0"
+
+    data = sample_v10_bfres(
+        "Island",
+        [{"name": "Mt_Land_LakeHrl_Island_E_Grass", "samplers": binds, "mode": "opaque"}],
+        shapes=[{"name": "Cliff", "material": 0}],
+    )
+    dump = Dump(build_fixture(tmp_path / "dump"))
+    dicts = dump.dicts()
+    gyaml = "Land_LakeHrl_Island_E_05"
+    info = dumps({"FmdbName": gyaml, "ModelProjectName": gyaml})
+    archive = pack(
+        {
+            f"Actor/{gyaml}.engine__actor__ActorParam.bgyml": dumps({"Name": gyaml}),
+            f"Component/ModelInfo/{gyaml}.engine__component__ModelInfo.bgyml": info,
+        }
+    )
+    (dump.romfs / "Pack" / "Actor" / f"{gyaml}.pack.zs").write_bytes(compress(archive, 4, dicts, level=3))
+    (dump.romfs / "Model" / f"{gyaml}.{gyaml}.bfres.zs").write_bytes(compress(data, 1, dicts, level=3))
+    (dump.romfs / "Tex" / "CmnTex_BakeDefault.bntx.zs").write_bytes(
+        compress(write_rgba("CmnTex_BakeDefault", 2, 2, bytes([255, 255, 255, 255]) * 4), 1, dicts, level=3)
+    )
+    from ocarina_forge import models as model_mod
+
+    model_mod._LISTING.clear()
+    model_mod._TEX_INDEX.clear()
+    resolved = describe_actor(dump, gyaml)
+    assert resolved["status"] == "mesh"
+    assert resolved["textures"] == 0
+    row = resolved["textureLog"][0]
+    assert "Bake" not in (row.get("wanted") or "")
+    assert row.get("sampler") != "bake0"
+    factor = _document((cache_dir() / resolved["digest"][:2] / f"{resolved['digest']}.glb").read_bytes())["materials"][0][
+        "pbrMetallicRoughness"
+    ]["baseColorFactor"]
+    assert abs(factor[0] - _NEUTRAL[0]) < 0.02
+    assert abs(factor[1] - _NEUTRAL[1]) < 0.02
+    assert abs(factor[2] - _NEUTRAL[2]) < 0.02
 
 
 def test_every_fixture_glb_passes_the_loader_checks(tmp_path, monkeypatch):

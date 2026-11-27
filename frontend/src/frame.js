@@ -30,6 +30,7 @@ export function formatStatusLabel({
   capped = 0,
   texturesDone = null,
   texturesTotal = null,
+  texturesHidden = false,
   layersOff = null,
   memory = null,
 } = {}) {
@@ -44,6 +45,7 @@ export function formatStatusLabel({
   const texTotal = Number(texturesTotal) || 0;
   const texDone = Number(texturesDone) || 0;
   if (texTotal > 0 && texDone < texTotal) parts.push(`textures ${texDone}/${texTotal}`);
+  if (texturesHidden) parts.push("textures hidden");
   if (layersOff && layersOff.length) parts.push(`off: ${layersOff.join(", ")}`);
   if (memory) parts.push(formatMemoryNote(memory));
   return parts.join(" · ");

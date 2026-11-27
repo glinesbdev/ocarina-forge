@@ -16,9 +16,18 @@ const KTX_MAGIC = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb, 0x0d, 0x0a, 0
 
 export const VK_FORMAT = {
   bc1: 133,
+  bc1srgb: 134,
   bc3: 137,
   bc7: 145,
+  bc7srgb: 146,
 };
+
+/** sRGB block formats are sampled as sRGB. UNORM block formats stay linear. */
+export function colorSpaceFor(vkFormat) {
+  if (vkFormat === VK_FORMAT.bc1srgb || vkFormat === VK_FORMAT.bc7srgb) return "srgb";
+  if (vkFormat === VK_FORMAT.bc1 || vkFormat === VK_FORMAT.bc3 || vkFormat === VK_FORMAT.bc7) return "linear";
+  return "";
+}
 
 export function splitPacked(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
@@ -86,6 +95,50 @@ export function repairCompressedTexture(texture) {
   texture.needsUpdate = true;
 }
 
+let reportedForeignTexture = false;
+
+/**
+ * A loader that imported `three` from a second build returns a texture whose
+ * constructor is not the renderer's. `isTexture` is still true, so the map is
+ * assigned, and an `instanceof Texture` check in the other build then skips
+ * the upload. Rebuild the image with the renderer's constructors.
+ */
+export function adoptRendererTexture(THREE, texture) {
+  if (!texture || texture.isTexture !== true) return null;
+  const Texture = THREE && THREE.Texture;
+  if (typeof Texture !== "function" || texture instanceof Texture) return texture;
+  const image = texture.image || {};
+  let copy = null;
+  if (texture.isCompressedTexture === true && THREE.CompressedTexture) {
+    copy = new THREE.CompressedTexture(
+      Array.isArray(texture.mipmaps) ? texture.mipmaps : [],
+      image.width || 0,
+      image.height || 0,
+      texture.format,
+      texture.type,
+    );
+    copy.generateMipmaps = false;
+    copy.flipY = false;
+  } else if (image) {
+    copy = new THREE.Texture(image);
+    copy.flipY = texture.flipY === true;
+  }
+  if (!copy || copy.isTexture !== true) return texture;
+  if (texture.colorSpace) copy.colorSpace = texture.colorSpace;
+  copy.wrapS = texture.wrapS;
+  copy.wrapT = texture.wrapT;
+  copy.magFilter = texture.magFilter;
+  copy.minFilter = texture.minFilter;
+  copy.anisotropy = texture.anisotropy;
+  copy.needsUpdate = true;
+  copy.userData = { ...(texture.userData || {}), forgeAdopted: true };
+  if (!reportedForeignTexture) {
+    reportedForeignTexture = true;
+    console.warn("Texture loader returned a texture from a different three copy. Rebuilt it with the renderer constructors.");
+  }
+  return copy;
+}
+
 
 function emptyTexelData(data) {
   if (!data) return data;
@@ -105,6 +158,23 @@ export function textureImageSize(texture) {
   const width = Number(image.width || (mip && mip.width) || 0) || 0;
   const height = Number(image.height || (mip && mip.height) || 0) || 0;
   return { width, height };
+}
+
+/**
+ * True once WebGPU has a real image for this texture. `needsUpdate` can clear
+ * without `backend.get(texture)` holding a GPU texture, and releasing the CPU
+ * mips then leaves the sample bound to nothing.
+ */
+export function textureGpuReady(backend, texture) {
+  if (!texture || !backend || typeof backend.get !== "function") return false;
+  let data;
+  try {
+    data = backend.get(texture);
+  } catch {
+    return false;
+  }
+  if (!data || data.isDefaultTexture === true) return false;
+  return Boolean(data.texture || data.externalTexture);
 }
 
 export function releaseTextureCpu(texture) {
@@ -168,14 +238,16 @@ export function chooseTexture(buffer, options) {
   const packed = splitPacked(buffer);
   const info = readKtx2(packed.ktx);
   const format = enabled && info ? formatFor(info.vkFormat, caps) : 0;
+  const colorSpace = colorSpaceFor(info && info.vkFormat);
   if (format) {
     if (canUploadCompressed(gl, format, info.levels)) {
-      return { kind: "compressed", format, width: info.width, height: info.height, levels: info.levels, reason: "" };
+      return { kind: "compressed", format, colorSpace, width: info.width, height: info.height, levels: info.levels, reason: "" };
     }
     if (info.levels.length > 1 && canUploadCompressed(gl, format, [info.levels[0]])) {
       return {
         kind: "compressed",
         format,
+        colorSpace,
         width: info.width,
         height: info.height,
         levels: [info.levels[0]],
@@ -285,9 +357,13 @@ export function createGpuTextureLoader(options) {
           choice.format,
         );
         texture.needsUpdate = true;
-        texture.colorSpace = THREE.SRGBColorSpace;
+        const transfer = choice.colorSpace === "linear" ? "linear" : "srgb";
+        texture.colorSpace = transfer === "linear" && THREE.LinearSRGBColorSpace
+          ? THREE.LinearSRGBColorSpace
+          : THREE.SRGBColorSpace;
         texture.flipY = false;
         texture.generateMipmaps = false;
+        texture.userData = { ...(texture.userData || {}), forgeTransfer: transfer };
         onLoad(texture);
         return;
       }
@@ -395,9 +471,9 @@ const ASTC = {
 
 export function formatFor(vkFormat, support) {
   const caps = support || {};
-  if (vkFormat === VK_FORMAT.bc1 && caps.s3tc) return 33777;
+  if ((vkFormat === VK_FORMAT.bc1 || vkFormat === VK_FORMAT.bc1srgb) && caps.s3tc) return 33777;
   if (vkFormat === VK_FORMAT.bc3 && caps.s3tc) return 33779;
-  if (vkFormat === VK_FORMAT.bc7 && caps.bptc) return 36492;
+  if ((vkFormat === VK_FORMAT.bc7 || vkFormat === VK_FORMAT.bc7srgb) && caps.bptc) return 36492;
   if (ASTC[vkFormat] && caps.astc) return ASTC[vkFormat];
   return 0;
 }

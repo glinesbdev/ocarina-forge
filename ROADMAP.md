@@ -26,13 +26,17 @@ The first step is the profiling HUD, so the rest of this list is driven by a spl
 - [#6 Indirect and multi-draw where WebGPU allows](https://github.com/glinesbdev/ocarina-forge/issues/6) — use indirect and multi-draw on the paths WebGPU allows.
 - [#7 Use texture arrays to cut bind and material switches](https://github.com/glinesbdev/ocarina-forge/issues/7) — pack textures into arrays so the viewer binds and switches materials less often.
 - [#8 Smarter streaming and residency budget](https://github.com/glinesbdev/ocarina-forge/issues/8) — done: a 1.2 GB geometry-plus-BC7 budget, a behind-camera penalty, a 2 m / 30° priority gate, and an unload cooldown. The unique-mesh count is a 4096 last resort so Kokiri is not cut off at 240.
-- [#9 Compile shader pipelines in the background](https://github.com/glinesbdev/ocarina-forge/issues/9) — done: WebGPU compiles a batch before attaching it, at most six at a time, and skips a draw whose pipeline is not ready. three stays on r170.
+- [#9 Compile shader pipelines in the background](https://github.com/glinesbdev/ocarina-forge/issues/9) — done: WebGPU compiles a batch before attaching it, one `compileAsync` at a time on r187, and skips a draw whose pipeline is not ready.
 
 ## Editing and collision
 
 - [#10 Make an actor's collision follow it when moved](https://github.com/glinesbdev/ocarina-forge/issues/10) — research how actor collision is stored, then move that collision with the actor.
 - [#11 Move decorations with their parent piece](https://github.com/glinesbdev/ocarina-forge/issues/11) — when a piece moves, the decorations that sit on it move with it.
 - [#12 Snap bug: gizmo drops to the ground while the model stays in the air](https://github.com/glinesbdev/ocarina-forge/issues/12) — with Snap on, the gizmo falls to the ground while the model stays up. Fix this together with [#10](https://github.com/glinesbdev/ocarina-forge/issues/10) and [#11](https://github.com/glinesbdev/ocarina-forge/issues/11).
+
+## Follow-up
+
+- Water stand-in. The retest of `a20b4fd` draws the lake as a harsh tiled teal pattern. Leave that until after the performance work. The helper planes and the BC7 colour space are separate.
 
 ## Exploration
 

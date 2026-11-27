@@ -41,3 +41,16 @@ test("water keeps its authored texture coordinates", () => {
   ensureWaterUv(mesh);
   assert.equal(mesh.getAttribute("uv"), authored);
 });
+
+test("a stand-in ripple retile replaces a unit chart and keeps a repeating one", () => {
+  const lake = geometryWithPositions([0, 5, 0, 80, 5, 0, 0, 5, 40]);
+  lake.setAttribute("uv", new Float32BufferAttribute([0, 0, 1, 0, 0, 1], 2));
+  assert.equal(ensureWaterUv(lake, 0, { retile: true }), true);
+  assert.deepEqual([...lake.getAttribute("uv").array], [0, 0, 20, 0, 0, 10]);
+
+  const tiled = geometryWithPositions([0, 0, 0, 8, 0, 0, 0, 0, 4]);
+  const authored = new Float32BufferAttribute([0, 0, 4, 0, 0, 3], 2);
+  tiled.setAttribute("uv", authored);
+  assert.equal(ensureWaterUv(tiled, 0, { retile: true }), false);
+  assert.equal(tiled.getAttribute("uv"), authored);
+});

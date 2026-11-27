@@ -10,12 +10,14 @@
  * the uniform, because wrapping the uniform in reference(..., "texture") and
  * then textureLoad() stores the reference itself as the texture.
  */
-import { NodeMaterial } from "three/webgpu";
+import { Node, NodeMaterial } from "three/webgpu";
 import {
   Fn,
+  Node as TslNode,
   cameraPosition,
   drawIndex,
   float,
+  glslFn,
   instanceIndex,
   int,
   ivec2,
@@ -24,9 +26,23 @@ import {
   reference,
   texture,
   textureSize,
-  vec4,
+  uint,
+  wgslFn,
 } from "three/tsl";
 import { pickMask, resolvePickTexture } from "./gpu-pick.js";
+
+const SPLIT_NODE_SYSTEM = "WebGPU loaded two copies of three's node system (three/webgpu and three/tsl). GPU picking is off; clicks use the CPU raycast.";
+
+// One Node class means one id counter. A second copy restarts that counter, and
+// the builder then treats our nodes as the camera uniforms that share those ids.
+// This must not throw: a throw during the dynamic import takes down the editor.
+export function rejectSplitNodeSystem(webgpuNode, tslNode) {
+  if (webgpuNode === tslNode) return false;
+  console.error(SPLIT_NODE_SYSTEM);
+  return true;
+}
+
+export const nodeSystemsDiffer = rejectSplitNodeSystem(Node, TslNode);
 
 function texelNode(tex) {
   const node = texture(tex).setSampler(false).setUpdateMatrix(false);
@@ -38,9 +54,9 @@ function sampleR(tex, index) {
   const base = tex.isTextureNode === true ? tex : texelNode(tex);
   const size = textureSize(base).x;
   const j = int(index);
-  const x = j.modInt(int(size));
+  const x = j.mod(int(size));
   const y = j.div(int(size));
-  const sampled = base.uv(ivec2(x, y));
+  const sampled = base.sample(ivec2(x, y));
   sampled.setSampler(false);
   sampled.setUpdateMatrix(false);
   return sampled.x;
@@ -65,6 +81,7 @@ function maskNode(material, hasUv) {
 }
 
 export function createNodePickMaterial({ uniforms, getActiveObject }) {
+  if (nodeSystemsDiffer) return null;
   const excludeNode = watchedTexel(() => resolvePickTexture(uniforms.forgeExclude.value));
   const material = new NodeMaterial();
   material.fragmentNode = Fn((builder) => {
@@ -93,7 +110,7 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
     selecting.and(id.lessThanEqual(float(0.5))).and(depthOnly.lessThan(float(0.5))).discard();
     const distance = positionWorld.sub(cameraPosition).length();
     const t = distance.div(far.max(float(0.001))).clamp(0, 1);
-    return selecting.select(pack24(id.add(0.5)), pack24(t.mul(16777215).add(0.5)));
+    return selecting.select(pack24(id.add(0.5), builder), pack24(t.mul(16777215).add(0.5), builder));
   })();
   material.customProgramCacheKey = () => {
     const object = getActiveObject ? getActiveObject() : null;
@@ -114,10 +131,36 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
   return material;
 }
 
-function pack24(n) {
-  const value = int(n);
-  const r = float(value.bitAnd(int(255))).div(255);
-  const g = float(value.shiftRight(int(8)).bitAnd(int(255))).div(255);
-  const b = float(value.shiftRight(int(16)).bitAnd(int(255))).div(255);
-  return vec4(r, g, b, float(1));
+// 24-bit little-endian unpack, as shader source rather than a TSL expression.
+// A Field render of the TSL form (shifts, then unsigned division) still wrote
+// the camera projection and view uniforms in place of two children of this
+// vec4. Those names are emitted only by the camera uniform nodes. The built
+// dist has one Node class, and a headless build of the same graph does not
+// swap them, so the substitution happens inside the browser's node build of
+// those children. A function body is text: the builder cannot
+// retarget an operand inside it. The WebGL backend of the node test parses GLSL.
+const PACK24_WGSL = `
+fn pack24(value: u32) -> vec4<f32> {
+	let r = f32(value & 255u) / 255.0;
+	let g = f32((value / 256u) & 255u) / 255.0;
+	let b = f32((value / 65536u) & 255u) / 255.0;
+	return vec4<f32>(r, g, b, 1.0);
+}
+`;
+const PACK24_GLSL = `
+vec4 pack24(uint value) {
+	float r = float(value & 255u) / 255.0;
+	float g = float((value / 256u) & 255u) / 255.0;
+	float b = float((value / 65536u) & 255u) / 255.0;
+	return vec4(r, g, b, 1.0);
+}
+`;
+const pack24Wgsl = wgslFn(PACK24_WGSL);
+const pack24Glsl = glslFn(PACK24_GLSL);
+
+function pack24(n, builder) {
+  const value = uint(n);
+  // WebGLBackend leaves this unset. Only an explicit WebGPU backend gets WGSL.
+  const webgpu = builder?.renderer?.backend?.isWebGPUBackend === true || builder?.renderer?.backend == null;
+  return (webgpu ? pack24Wgsl : pack24Glsl)({ value });
 }

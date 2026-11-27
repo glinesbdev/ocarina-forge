@@ -4,8 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { oneThreePlugin } from "./one-three.js";
-import { webgpuBptcPlugin } from "./webgpu-bptc-plugin.js";
-
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function forgeRevision() {
@@ -82,11 +80,24 @@ export default defineConfig(({ mode }) => ({
             if (source === "three/webgpu" || source === "three/tsl") return { id: source, external: true };
           },
         }]
-      : [oneThreePlugin(threeWebgpu), webgpuBptcPlugin()]),
+      : [oneThreePlugin(threeWebgpu)]),
     basisTranscoder(),
   ],
   build: {
     target: "es2022",
+    rollupOptions: {
+      output: {
+        // Keep each three build file in one chunk. Inlining three.tsl.js into
+        // both the viewport chunk and the gpu-pick chunk would be two Node
+        // classes and two id counters.
+        manualChunks(id) {
+          const file = id.split("?")[0];
+          if (file.endsWith("/three.tsl.js") || file.endsWith("\\three.tsl.js")) return "three.tsl";
+          if (file.endsWith("/three.webgpu.js") || file.endsWith("\\three.webgpu.js")) return "three.webgpu";
+          if (file.endsWith("/three.core.js") || file.endsWith("\\three.core.js")) return "three.core";
+        },
+      },
+    },
   },
   server: {
     host: "0.0.0.0",

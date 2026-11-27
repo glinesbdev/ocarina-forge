@@ -211,6 +211,48 @@ def test_the_glb_carries_the_mask_and_a_dark_emissive_overlay():
     assert "emissiveTexture" in material
 
 
+def test_a_flat_geometry_file_keeps_the_blend_mask_without_the_image():
+    """The editor loads ?flat=1. The overlay image arrives later.
+
+    Dropping extras and COLOR_0 because the png is absent left the viewer
+    sampling only the first albedo. A ground piece then draws that one
+    texture, which is the white sheet with black blotches when the bound
+    image is a mask or the base of a two-layer mix.
+    """
+    blend = {
+        "channel": "r",
+        "uv": "_u0",
+        "scale": [4, 4],
+        "translate": [0, 0],
+        "sampler": "_a1",
+        "texture": "Island_Grass_Alb",
+    }
+    part = Part(
+        "Island",
+        [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        [0, 1, 2],
+        [(0, 0), (1, 0), (0, 1)],
+        "",
+        "Mt_Land_LakeHrl_Island",
+        0,
+        colors=[(1, 1, 1, 1), (0, 1, 1, 1), (1, 1, 1, 1)],
+        overlay_texture="Island_Grass_Alb",
+        blend=blend,
+    )
+    model = Model("Land_LakeHrl_Island", parts=[part], images={})
+    blob, info = _assemble([model], {})
+    assert any(note.startswith("blend ") and "Island_Grass_Alb" in note for note in info["notes"])
+    document = _json(blob)
+    primitive = document["meshes"][0]["primitives"][0]
+    assert "COLOR_0" in primitive["attributes"]
+    material = document["materials"][primitive["material"]]
+    assert "baseColorTexture" not in material.get("pbrMetallicRoughness", {})
+    stored = material["extras"]["blend"]
+    assert stored["channel"] == "r"
+    assert stored["texture"] == "Island_Grass_Alb"
+    assert stored["scale"] == [4, 4]
+
+
 def test_a_const_colour_sits_under_the_rock_where_the_mask_is_low():
     """One albedo is the rock. The skin is the uniform. Alpha is the mask.
 
@@ -335,6 +377,42 @@ def test_a_flat_glb_keeps_each_untextured_material():
         Primitive(positions, indices, uvs, png=png, name="RockSmall_Body:4", double_sided=False),
     ]))
     assert len(shared["materials"]) == 1
+
+
+def test_bake0_plus_a_blend_layer_is_not_albedo():
+    """Lake Hyrule grass bound only bake0 and used the lightmap as the mix."""
+    from ocarina_forge.formats.bfres import rank_albedo
+
+    binds = [
+        ("bake0", "CmnTex_BakeDefault"),
+        ("bake1", "CmnTex_BakeLightDefault"),
+    ]
+    assert rank_albedo(binds) == []
+    assert rank_albedo([("_t0", "Mt_Skin")]) == [("_t0", "Mt_Skin")]
+    assert rank_albedo(
+        [
+            ("_a0", "UmeCliff_B_Near_Alb"),
+            ("bake0", "CmnTex_BakeDefault"),
+            ("_a1", "GerudoValley_gr_soil_A_Alb"),
+        ]
+    ) == [
+        ("_a0", "UmeCliff_B_Near_Alb"),
+        ("_a1", "GerudoValley_gr_soil_A_Alb"),
+    ]
+    forced = Material(
+        "Mt_Land_LakeHrl_Island_E_Grass",
+        binds=binds,
+        albedo=list(binds),
+    )
+    assert overlay_plan(forced) is None
+    ranked = Material(
+        "Mt_Land_LakeHrl_Island_E_Grass",
+        binds=binds,
+        albedo=rank_albedo(binds),
+        base_color=(0.31, 0.42, 0.18, 1.0),
+    )
+    assert overlay_plan(ranked) is None
+    assert ranked.base_color == (0.31, 0.42, 0.18, 1.0)
 
 
 def test_a_plain_emissive_map_still_glows():

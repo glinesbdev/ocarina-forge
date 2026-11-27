@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { chooseTexture, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
+import { chooseTexture, colorSpaceFor, createGpuTextureLoader, formatFor, gpuTexturesEnabled, minFilterFor, readKtx2, splitPacked, textureSupport,
+  adoptRendererTexture,
   releaseTextureCpu,
-  repairCompressedTexture, VK_FORMAT } from "./gpu-texture.js";
+  repairCompressedTexture, textureGpuReady, VK_FORMAT } from "./gpu-texture.js";
 
 function makePacked() {
   const ktx = new Uint8Array(104);
@@ -38,6 +39,9 @@ test("a packed texture keeps the KTX2 and the bitmap fallback", () => {
   assert.equal(info.levels.length, 1);
   assert.equal(info.levels[0].data.length, 16);
   assert.equal(formatFor(info.vkFormat, { bptc: true }), 36492);
+  assert.equal(formatFor(VK_FORMAT.bc7srgb, { bptc: true }), 36492);
+  assert.equal(colorSpaceFor(VK_FORMAT.bc7), "linear");
+  assert.equal(colorSpaceFor(VK_FORMAT.bc7srgb), "srgb");
   assert.equal(formatFor(info.vkFormat, {}), 0);
   assert.equal(formatFor(0, { bptc: true }), 0);
   assert.equal(formatFor(167, { astc: true }), 37813);
@@ -286,4 +290,84 @@ test("releaseTextureCpu leaves a size stub after closing an ImageBitmap so mipLe
   const levels = Math.floor(Math.log2(Math.max(texture.image.width, texture.image.height))) + 1;
   assert.equal(Number.isFinite(levels) && levels >= 1, true);
   assert.equal(levels, 7);
+});
+
+test("textureGpuReady waits for a real WebGPU image and ignores the default texture", () => {
+  const texture = { id: 1 };
+  const gpu = { texture: {} };
+  const backend = {
+    get(item) {
+      return item === texture ? gpu : null;
+    },
+  };
+  assert.equal(textureGpuReady(backend, texture), true);
+  gpu.isDefaultTexture = true;
+  assert.equal(textureGpuReady(backend, texture), false);
+  gpu.isDefaultTexture = false;
+  gpu.texture = null;
+  gpu.externalTexture = { id: "ext" };
+  assert.equal(textureGpuReady(backend, texture), true);
+  assert.equal(textureGpuReady(null, texture), false);
+  assert.equal(textureGpuReady({ get() { throw new Error("missing"); } }, texture), false);
+});
+
+test("the renderer and the addon three entry share compressed texture constructors", async () => {
+  const webgpu = await import("three/webgpu");
+  const classic = await import("three");
+  assert.equal(webgpu.Texture, classic.Texture);
+  assert.equal(webgpu.CompressedTexture, classic.CompressedTexture);
+  assert.equal(webgpu.CompressedArrayTexture, classic.CompressedArrayTexture);
+});
+
+test("adoptRendererTexture rebuilds a texture from a second three copy", () => {
+  const warns = [];
+  const original = console.warn;
+  console.warn = (message) => warns.push(String(message));
+  try {
+    class Texture {
+      constructor(image) {
+        this.isTexture = true;
+        this.image = image;
+        this.needsUpdate = false;
+      }
+    }
+    class CompressedTexture extends Texture {
+      constructor(mipmaps, width, height, format, type) {
+        super(null);
+        this.isCompressedTexture = true;
+        this.mipmaps = mipmaps;
+        this.image = { width, height };
+        this.format = format;
+        this.type = type;
+      }
+    }
+    const THREE = { Texture, CompressedTexture };
+    const foreign = {
+      isTexture: true,
+      isCompressedTexture: true,
+      mipmaps: [new Uint8Array(16)],
+      image: { width: 4, height: 4 },
+      format: 36492,
+      type: 1015,
+      colorSpace: "srgb",
+      wrapS: 1000,
+      wrapT: 1000,
+      magFilter: 1006,
+      minFilter: 1008,
+      anisotropy: 4,
+      userData: { forge: true },
+    };
+    const copy = adoptRendererTexture(THREE, foreign);
+    assert.equal(copy instanceof THREE.CompressedTexture, true);
+    assert.equal(copy.image.width, 4);
+    assert.equal(copy.format, 36492);
+    assert.equal(copy.colorSpace, "srgb");
+    assert.equal(copy.userData.forgeAdopted, true);
+    assert.equal(warns.length, 1);
+    const same = adoptRendererTexture(THREE, copy);
+    assert.equal(same, copy);
+    assert.equal(adoptRendererTexture(THREE, { isTexture: false }), null);
+  } finally {
+    console.warn = original;
+  }
 });

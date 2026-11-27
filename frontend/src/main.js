@@ -169,7 +169,14 @@ function geometryRequest() {
 viewport = await createViewport($("viewport"), {
   fetchModel: (gyaml, options) => api.model(gyaml, { ...(options || {}), ...geometryRequest() }),
   fetchModels: (names, prefetch, options) => api.models(names, prefetch, { ...geometryRequest(), signal: options && options.signal }),
-  fetchTextures: (gyaml, signal) => api.actorTextures(gyaml, { load: loadQuery(state.load || fullLoad()), signal }),
+  fetchTextures: (gyaml, signal) => {
+    const load = state.load || fullLoad();
+    return api.actorTextures(gyaml, {
+      load: loadQuery(load),
+      textures: load.textures ? "1" : "0",
+      signal,
+    });
+  },
   fetchTerrain: (banc, refine, signal) => api.terrain(banc, refine, { ...loadRequest(), signal }),
   fetchGround: (banc, x, z, exclude, signal) => api.ground(banc, x, z, exclude, { ...loadRequest(), signal }),
   fetchSurface: (banc) => api.groundSurface(banc, loadRequest()),
@@ -481,6 +488,7 @@ for (const [id, flag, fallback] of [
   ["show-shadows", "shadows", false],
   ["show-ao", "ao", true],
   ["show-effect-gizmos", "effectGizmos", true],
+  ["show-helpers", "helpers", false],
   ["show-editor-lighting", "editorDefaults", false],
 ]) {
   const box = $(id);
@@ -2503,6 +2511,34 @@ function renderDetails() {
   panel.append(title, modelBlock(actor));
   const materials = materialBlock(viewport.modelInfo(actor.id));
   if (materials) panel.append(materials);
+  const dump = viewport.textureDebugSelection && viewport.textureDebugSelection();
+  const copyRow = document.createElement("div");
+  copyRow.className = "model-note";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "ghost";
+  copy.textContent = "Copy debug";
+  copy.title = "Copy the forge texdebug actor block. With ?texdebug=1 the same block is also printed when this actor is selected.";
+  copy.addEventListener("click", async () => {
+    const text = (viewport.textureDebugSelection && viewport.textureDebugSelection()) || "forge texdebug actor\nno mesh";
+    try {
+      await navigator.clipboard.writeText(text);
+      copy.textContent = "Copied";
+    } catch {
+      copy.textContent = "Copy failed";
+    }
+    setTimeout(() => {
+      copy.textContent = "Copy debug";
+    }, 1500);
+  });
+  copyRow.append(copy);
+  panel.append(copyRow);
+  if (dump) {
+    const block = document.createElement("pre");
+    block.className = "material-dump";
+    block.textContent = dump;
+    panel.append(block);
+  }
 }
 
 function modelBlock(actor) {

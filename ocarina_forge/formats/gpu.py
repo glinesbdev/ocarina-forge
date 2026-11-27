@@ -18,8 +18,10 @@ from ocarina_forge.formats.gltf import encode_albedo
 KTX2_MAGIC = bytes((0xAB, 0x4B, 0x54, 0x58, 0x20, 0x32, 0x30, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A))
 # Vulkan block formats. three's own loader does not list the BC ones.
 VK_BC1 = 133  # BC1_RGBA_UNORM_BLOCK
+VK_BC1_SRGB = 134  # BC1_RGBA_SRGB_BLOCK
 VK_BC3 = 137  # BC3_UNORM_BLOCK
 VK_BC7 = 145  # BC7_UNORM_BLOCK
+VK_BC7_SRGB = 146  # BC7_SRGB_BLOCK
 VK_ASTC = {
     (4, 4): 157,
     (5, 4): 159,
@@ -145,8 +147,16 @@ def _mip_chain(image) -> tuple[int, int, int, list[bytes]] | None:
     if width <= 0 or height <= 0 or width % 4 or height % 4:
         return None
     native_vk, native_blocks = _native_base(image, width, height)
-    vk = native_vk or VK_BC7
-    encoder = encode_bc1 if vk == VK_BC1 else encode_bc7
+    # No kept blocks: BC3 and ASTC are re-encoded as BC7. An sRGB source
+    # (NVN low byte 0x06) still holds sRGB endpoints, so the new blocks are
+    # vkFormat 146. A UNORM source stays 145 and is sampled as linear.
+    if native_vk is not None:
+        vk = native_vk
+    elif _srgb_source(image):
+        vk = VK_BC7_SRGB
+    else:
+        vk = VK_BC7
+    encoder = encode_bc1 if vk in (VK_BC1, VK_BC1_SRGB) else encode_bc7
     if encoder is encode_bc7:
         rust_levels = _rust_bc7_chain(width, height, pixels)
         if rust_levels is not None and _chain_ok(width, height, rust_levels, 16):
@@ -188,16 +198,22 @@ def _native_base(image, width: int, height: int) -> tuple[int | None, bytes | No
         return None, None
     blocks = getattr(image, "blocks", b"") or b""
     codec = (getattr(image, "codec", "") or "").lower()
+    srgb = _srgb_source(image)
     if codec == "bc1":
-        vk, size = VK_BC1, 8
+        vk, size = (VK_BC1_SRGB if srgb else VK_BC1), 8
     elif codec == "bc7":
-        vk, size = VK_BC7, 16
+        vk, size = (VK_BC7_SRGB if srgb else VK_BC7), 16
     else:
         return None, None
     expect = _block_count(width, height) * size
     if len(blocks) < expect:
         return None, None
     return vk, blocks[:expect]
+
+
+def _srgb_source(image) -> bool:
+    """NVN channel type 0x06 is sRGB. 0x01 is UNORM. The block bits do not say which."""
+    return (int(getattr(image, "fmt", 0) or 0) & 0xFF) == 0x06
 
 
 def _downsample(width: int, height: int, rgba: bytes) -> tuple[int, int, bytes]:

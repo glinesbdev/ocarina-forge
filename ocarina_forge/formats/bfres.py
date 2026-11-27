@@ -206,9 +206,12 @@ class Part:
     stand_in: str = ""
     # 0 is the near mesh. A higher value is a farther BFRES LOD of the same shape.
     lod: int = 0
-    # Helper shapes (water volume, bake, fade, inner mesh, eye cards) are not drawn.
+    # Helper shapes (water volume, bake, inner mesh, eye cards) are not drawn.
     omit: bool = False
     omit_reason: str = ""
+    # fade, board, dark, or shadow. The mesh stays in the file. The view hides it
+    # until Helpers is on. BlackFade does not match the old "fadeblack" omit.
+    helper: str = ""
     # "repeat" writes a glTF sampler with wrap REPEAT. Terra UVs tile past 1.
     wrap: str = ""
     normal_texture: str = ""
@@ -2754,7 +2757,8 @@ _COLOR_SKIP = re.compile(r"(spec|emit|emiss|rim|shadow|fog|light)", re.I)
 _SAMPLER_SKIP = re.compile(
     r"^(n|n[0-7]|nrm[0-7]?|normal[0-7]?|s[0-7]|spc[0-7]?|spec[0-7]?|r[0-7]|rgh[0-7]?|rough[0-7]?|"
     r"m[0-7]|mtl[0-7]?|metal[0-7]?|e[0-7]|emm[0-7]?|emit[0-7]?|b[0-7]|blend[0-7]?|splat[0-7]?|"
-    r"ao[0-7]?|mask[0-7]?|orm[0-7]?|h[0-7]|height[0-7]?)$"
+    r"ao[0-7]?|mask[0-7]?|orm[0-7]?|h[0-7]|height[0-7]?|"
+    r"bake[0-7]?|lightmap[0-7]?)$"
 )
 _PRIMARY_SAMPLER = {
     "a0",
@@ -2812,8 +2816,30 @@ def _string_pool(data: bytes) -> list[str]:
     return found
 
 
+def _bake_texture(name: str) -> bool:
+    """True for a lightmap placeholder such as ``CmnTex_BakeDefault``.
+
+    The stem is one token (``bakedefault``, ``bakelightdefault``), so a
+    whole-word ``bake`` check does not see it. Those files are BC5 lightmaps.
+    """
+    stem = (name or "").lower().rsplit("/", 1)[-1]
+    if "cmntex_bake" in stem or "bakelight" in stem or "bake_light" in stem:
+        return True
+    tokens: list[str] = []
+    token: list[str] = []
+    for char in stem:
+        if char.isalnum():
+            token.append(char)
+        elif token:
+            tokens.append("".join(token))
+            token = []
+    if token:
+        tokens.append("".join(token))
+    return any(item == "bake" or item.startswith(("bakedefault", "bakelight", "lightmap")) for item in tokens)
+
+
 def texture_rank(name: str) -> int:
-    """0 albedo, 1 anything else, 2 a normal / mask / blend map."""
+    """0 albedo, 1 anything else, 2 a normal / mask / blend / bake map."""
     stem = (name or "").lower().rsplit("/", 1)[-1]
     tokens: list[str] = []
     token: list[str] = []
@@ -2826,7 +2852,7 @@ def texture_rank(name: str) -> int:
     if token:
         tokens.append("".join(token))
     bag = set(tokens)
-    if bag & _SKIP or any(item.startswith(("nrm", "normal")) for item in bag):
+    if _bake_texture(name) or bag & _SKIP or any(item.startswith(("nrm", "normal")) for item in bag):
         return 2
     # BarkFx never splits into a token, so the Alb check used to win on
     # TreeAlbFx. A separated _Fx / _Msk / _Ind is already in the bag above.
@@ -2872,7 +2898,9 @@ def rank_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
     were skipped because the texture is a normal or mask), a bound texture
     whose own name is albedo is still a candidate. Runtime ``tc`` / ``ta``
     slots and ``MaterialAlb`` / ``MaterialCmb`` stay out, and so do known
-    non-color slots such as ``_n0`` and ``s0``.
+    non-color slots such as ``_n0``, ``s0``, and ``bake0``. A lightmap
+    (``CmnTex_Bake*``, BC5) is not that fallback. A character slot such as
+    ``_t0`` still is, when the texture itself is not a normal or a bake.
     """
     if any(sampler for sampler, _texture in binds):
         return _rank_locked_samplers(binds)
@@ -2969,13 +2997,30 @@ def _rank_named_albedo(binds: list[tuple[str, str]]) -> list[tuple[str, str]]:
         named = _sampler_says_albedo(token)
         if trank == 0 or (named and trank < 2):
             found.append((0 if named else 1, trank, index, sampler, texture))
-        elif trank < 2 and _sampler_rank(sampler) is None and token:
+        elif trank < 2 and _sampler_rank(sampler) is None and token and not _bake_texture(texture):
             # The slot is not _a0 and it is not a known non-color slot.
             # A character sampler outside that table still names a colour
             # texture, and the texture's own name may omit _Alb.
+            # bake0 is not that slot. A missing _a* stays empty.
             found.append((2, trank, index, sampler, texture))
     found.sort()
     return [(sampler, texture) for _named, _trank, _index, sampler, texture in found]
+
+
+def is_colour_bind(sampler: str, texture: str) -> bool:
+    """False for a lightmap, a normal, a mask, or any other non-colour bind.
+
+    ``_a1`` may be named ``Blend`` and still be the second albedo. A file
+    named ``CmnTex_Bake*`` is not, on any slot.
+    """
+    if not texture or _bake_texture(texture):
+        return False
+    if _sampler_rank(sampler) == 9:
+        return False
+    token = "".join(char for char in (sampler or "").lower() if char.isalnum())
+    if token in _LOCKED_EXTRA:
+        return _overlay_albedo(texture)
+    return texture_rank(texture) < 2
 
 
 def base_color_name(names: list[str]) -> str:

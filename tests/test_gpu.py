@@ -1,7 +1,7 @@
 """BC7 blocks round-trip, and the container is not a Basis file."""
 
 from ocarina_forge.formats.bntx import _bgra_to_rgba
-from ocarina_forge.formats.gpu import VK_BC7, encode_bc7, gpu_image, ktx2, split_texture
+from ocarina_forge.formats.gpu import VK_BC7, VK_BC7_SRGB, encode_bc7, gpu_image, ktx2, split_texture
 
 
 class _Image:
@@ -33,6 +33,19 @@ def test_mode_6_keeps_a_flat_colour_and_is_not_basis():
     assert fallback[:2] == b"\xff\xd8"
     assert int.from_bytes(ktx[40:44], "little") >= 2
     assert int.from_bytes(ktx[80:88], "little") == 80 + 24 * int.from_bytes(ktx[40:44], "little")
+
+
+def test_srgb_bc7_is_vkformat_146_and_unorm_stays_145():
+    rgba = bytes([180, 40, 30, 255]) * 16
+    blocks = encode_bc7(4, 4, rgba)
+    srgb = _Image(rgba, codec="bc7", blocks=blocks)
+    srgb.fmt = 0x2006
+    linear = _Image(rgba, codec="bc7", blocks=blocks)
+    linear.fmt = 0x2001
+    srgb_ktx, _fallback = split_texture(gpu_image(srgb, "opaque"))
+    linear_ktx, _fallback = split_texture(gpu_image(linear, "opaque"))
+    assert int.from_bytes(srgb_ktx[12:16], "little") == VK_BC7_SRGB
+    assert int.from_bytes(linear_ktx[12:16], "little") == VK_BC7
 
 
 def test_a_size_the_gpu_would_reject_stays_a_bitmap():
