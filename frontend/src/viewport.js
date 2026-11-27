@@ -38,7 +38,7 @@ import { cancelGeometryDecodes, geometryDecoder } from "./geometry-decoder.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { acceleratedRaycast, computeBoundsTree, disposeBoundsTree, MeshBVH } from "three-mesh-bvh";
 
-import { boundsGap, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, transformSphere } from "./cull.js";
+import { boundsGap, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, shouldRecull, transformSphere } from "./cull.js";
 import { isMarker } from "./problems.js";
 import { canHoverFocus } from "./focus.js";
 import { guardPointerCapture } from "./pointer-capture.js";
@@ -67,6 +67,8 @@ import {
   ndcFromClient,
 } from "./gpu-pick.js";
 import { ensureGeometryCpu, geometryAttributeView, noteGeometryBatch, releaseGeometryCpu } from "./geometry-retain.js";
+import { createBatchFiller } from "./batch-fill.js";
+import { sameIdList, syncDirtyPickIds } from "./pick-sync.js";
 import { chooseSnap, GROUND_SNAP_RADIUS, isExplicitLift, isSameActor, isSnapSelfHit, nearestGroundSample, selectSnapHits, shouldApplyGroundReply, shouldSnapTranslate, snapExcludeId } from "./snap.js";
 import { basisFromQuaternion, defaultGridSettings, effectiveRotationSpace, gridSnapEngaged, normalizeGridSettings, snapGridLayout, snapRotation, snapScale, snapTranslation } from "./grid-snap.js";
 import { normalizeSpace, spaceForMode } from "./gizmo-space.js";
@@ -341,6 +343,11 @@ export async function createViewport(host, hooks) {
   const edgesGeometry = new THREE.EdgesGeometry(boxGeometry);
   const entries = new Map();
   const batches = [];
+  const batchFiller = createBatchFiller({
+    createMesh({ instances, vertices, indices, material }) {
+      return new THREE.BatchedMesh(instances, vertices, Math.max(indices, 1), material);
+    },
+  });
   const parsedTemplates = new Map();
   const templateOrder = [];
   const recentSceneTemplates = new Map();
@@ -942,6 +949,13 @@ let convertSlots = 8;
     }
     let changed = 0;
     for (const [mesh, parts] of partsByMesh) {
+      // A flat batch holds every model that has not received a map yet.
+      // Pointing that mesh at the first upload would paint the rest of them
+      // with one image. Those parts move to their own key instead.
+      const meshKey = mesh.userData && mesh.userData.forgeBatchKey;
+      const partKeys = new Set();
+      for (const part of parts) if (part && part.batchKey) partKeys.add(part.batchKey);
+      if (meshKey && (partKeys.size !== 1 || !partKeys.has(meshKey))) continue;
       const decision = materialToDraw(mesh, parts);
       if (!decision || decision.missingUv || !decision.material) continue;
       if (mesh.material !== decision.material) {
@@ -986,18 +1000,26 @@ let convertSlots = 8;
     }
     // Geometry glbs have no images, so the mesh was compiled against a flat
     // material. The manifest writes the BC7 onto that material afterwards.
-    // A new key, or a mesh that still has the pre-upload stamp, has to be
-    // built again so compileAsync sees the map. Rebind first so the mesh
-    // already on screen samples the map without waiting out that rebuild.
+    // A changed key moves only those actors onto the batch that already holds
+    // that key. Rebind stays for a mesh whose parts still share its key, so
+    // the map shows up without rebuilding every other batch.
     // The stand-in ripple is 16×16. A 0..1 chart stretches it into one flat
-    // cyan sheet, so those UVs are replaced before the batch is built again.
+    // cyan sheet, so those UVs are replaced before the batch is filled again.
     const retiled = retileWaterStandIns(parts);
     uvDirty = true;
-    const rebound = rebindDrawnMaps();
     // The albedo guard above clears a colour node that was sampling one map.
     // Install the mix after that, once both images and the vertex mask exist.
     refreshBlendMaps(parts);
-    if (retiled || rebound || refreshBatchKeys(parts, batchKeyFor) || batchMissesUpload(parts, batches)) queueRebuild();
+    const keysChanged = refreshBatchKeys(parts, batchKeyFor);
+    if (retiled) rewriteRetiledGeometry(parts);
+    const rebound = rebindDrawnMaps();
+    const misses = batchMissesUpload(parts, batches);
+    if (keysChanged) {
+      const affected = entriesForParts(parts);
+      if (affected.length) void rebuildBatches(affected);
+    } else if (rebound || misses || retiled) {
+      void recompileHeldMeshes(parts);
+    }
     noteTextureDebug();
     logSelectionTextureDebug();
   }
@@ -1262,6 +1284,7 @@ let convertSlots = 8;
     if (!options.keepBatches) clearBatches();
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
+    bumpCull();
   }
 
   function memoryNote() {
@@ -1345,6 +1368,8 @@ let convertSlots = 8;
     const actors = new Map(entries);
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
+    batchFiller.detachAll();
+    bumpCull();
     batches.length = 0;
     parsedTemplates.clear();
     templateOrder.length = 0;
@@ -1622,6 +1647,7 @@ let convertSlots = 8;
       bindPick(mesh);
     }
     entries.set(key, entry);
+    bumpCull();
     return entry;
   }
 
@@ -1656,6 +1682,10 @@ let convertSlots = 8;
     unloadAfter.clear();
     recentlyEvicted.clear();
     modelStage = { previous: batches.slice(), pending: new Map(), timer: 0, done: false, failed: false };
+    // The meshes still on screen belong to the previous map. New models fill
+    // a fresh key map and the stage drops the previous meshes once they draw.
+    batchFiller.detachAll();
+    bumpCull();
     const previewReady = options.previewUrl ? loadScenePreview(options.previewUrl, reloadTerrain) : null;
     loadModels(token, actors.filter((actor) => wantsMesh(actor)), previewReady);
     if (reloadTerrain) {
@@ -1988,7 +2018,7 @@ let convertSlots = 8;
     if (rows.some(([entry]) => fishingPondFish(entry.gyaml) || entry.gyaml === FISHING_POND_WATER)) refreshPondFish();
     prioritizeLoad();
     syncBatchVisibility();
-    syncPickIds();
+    markAllPickDirty();
     syncLabels();
     attach();
     requestRender();
@@ -2027,8 +2057,7 @@ let convertSlots = 8;
     entry.modelMeta = sibling.modelMeta;
     entry.volume = false;
     entry.mesh.visible = false;
-    if (modelStage) stageModel(entry);
-    else queueRebuild();
+    stageModel(entry);
     return true;
   }
 
@@ -2571,7 +2600,11 @@ let convertSlots = 8;
         modelStage.done = settled;
         modelStage.keepPreview = keepPreview;
       } else if (foregroundSettled) {
-        queueRebuild();
+        const pending = [];
+        for (const entry of entries.values()) {
+          if (entry.parts && entry.parts.length && (!entry.slots || !entry.slots.length)) pending.push(entry);
+        }
+        if (pending.length) void rebuildBatches(pending);
       }
     }
 
@@ -2908,6 +2941,7 @@ let convertSlots = 8;
   }
 
   function clearBatches() {
+    batchFiller.detachAll();
     for (const batch of batches) {
       batch.mesh.removeFromParent();
       disposePickTexture(batch.mesh);
@@ -2918,12 +2952,13 @@ let convertSlots = 8;
   }
 
   const tint = new THREE.Color();
+  const selectionTint = new THREE.Color(0xffe0a0);
 
   function instanceTint(entry, target) {
     if (entry.status === "recipe") target.setHex(0xc9b6f2);
     else if (entry.companion) target.setRGB(0.78, 0.8, 0.76);
     else target.setRGB(1, 1, 1);
-    if (entry.key === selected) target.lerp(new THREE.Color(0xffe0a0), 0.72);
+    if (entry.key === selected) target.lerp(selectionTint, 0.72);
     return target;
   }
 
@@ -2942,6 +2977,7 @@ let convertSlots = 8;
     // the write below must be this actor's 16 floats only.
     displayedActorMatrix(entry, actorMatrix);
     applyActorMatrix(entry.slots, entry.key, actorMatrix);
+    bumpCull();
   }
 
   function displayedActorMatrix(entry, target) {
@@ -3072,14 +3108,43 @@ let convertSlots = 8;
   const cullFrustum = new THREE.Frustum();
   const cullMatrix = new THREE.Matrix4();
   const cullSphere = new THREE.Sphere();
-
   const worldSphere = { center: [0, 0, 0], radius: 0 };
+  const cullWorld = new THREE.Matrix4();
+  const cullProjection = new THREE.Matrix4();
+  const cullProbes = [];
+  const cullClosest = new Map();
+  const cullWanted = new Map();
+  const cullLevels = new Map();
+  const probePool = [];
+  const levelPool = [];
+  let cullSelection;
+  let cullSerial = 0;
+  let appliedCullSerial = -1;
+  let cullReady = false;
+  let previewPickDirty = false;
+  let placeholderPickDirty = false;
+  let statPickUploads = 0;
 
-  function slotProbe(entry, slot, elements) {
+  function bumpCull() {
+    cullSerial += 1;
+  }
+
+  function batchKeyCount() {
+    const keys = new Set();
+    for (const batch of batches) {
+      const raw = batch && batch.key ? String(batch.key).split("\u0000")[0] : "";
+      if (raw) keys.add(raw);
+    }
+    return keys.size;
+  }
+
+  function slotProbe(entry, slot, elements, probe) {
     const scale = actorScale(entry);
     if (!slot.sphere) {
-      const pivotDistance = camera.position.distanceTo(entry.pivot.position);
-      return { inFrustum: true, distance: pivotDistance, radius: (slot.radius || 1) * scale };
+      probe.inFrustum = true;
+      probe.distance = camera.position.distanceTo(entry.pivot.position);
+      probe.radius = (slot.radius || 1) * scale;
+      return probe;
     }
     transformSphere(
       [slot.sphere.center.x, slot.sphere.center.y, slot.sphere.center.z],
@@ -3089,41 +3154,53 @@ let convertSlots = 8;
     );
     cullSphere.center.set(worldSphere.center[0], worldSphere.center[1], worldSphere.center[2]);
     cullSphere.radius = worldSphere.radius;
-    return {
-      inFrustum: cullFrustum.intersectsSphere(cullSphere),
-      distance: boundsGap(camera.position.distanceTo(cullSphere.center), cullSphere.radius),
-      radius: cullSphere.radius,
-    };
+    probe.inFrustum = cullFrustum.intersectsSphere(cullSphere);
+    probe.distance = boundsGap(camera.position.distanceTo(cullSphere.center), cullSphere.radius);
+    probe.radius = cullSphere.radius;
+    return probe;
   }
 
   function syncBatchVisibility() {
     camera.updateMatrixWorld();
-    let pickIdsDirty = false;
     // Flying out must not clip the field on a far plane framed for the village.
     const farNeed = Math.max(8000, camera.position.distanceTo(orbit.target) * 6);
     if (camera.far < farNeed) {
       camera.far = farNeed;
       camera.updateProjectionMatrix();
     }
+    if (cullReady && !shouldRecull({
+      world: cullWorld,
+      projection: cullProjection,
+      worldNow: camera.matrixWorld,
+      projectionNow: camera.projectionMatrix,
+      selection: cullSelection,
+      selectionNow: selected,
+      entrySerial: appliedCullSerial,
+      entrySerialNow: cullSerial,
+    })) return;
     cullMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     cullFrustum.setFromProjectionMatrix(cullMatrix, camera.coordinateSystem);
     let instances = 0;
     let visible = 0;
+    let probeUsed = 0;
+    let levelUsed = 0;
     for (const entry of entries.values()) {
       if (!entry.slots || !entry.slots.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
       const elements = displayedActorMatrix(entry, actorMatrix).elements;
-      const probes = [];
-      const closest = new Map();
+      cullProbes.length = 0;
+      cullClosest.clear();
       for (const slot of entry.slots) {
         instances += 1;
-        const probe = slotProbe(entry, slot, elements);
-        probes.push(probe);
-        const previous = closest.get(slot.family);
-        if (!previous || probe.distance < previous.distance) closest.set(slot.family, probe);
+        const probe = probePool[probeUsed] || (probePool[probeUsed] = { inFrustum: true, distance: 0, radius: 0 });
+        probeUsed += 1;
+        slotProbe(entry, slot, elements, probe);
+        cullProbes.push(probe);
+        const previous = cullClosest.get(slot.family);
+        if (!previous || probe.distance < previous.distance) cullClosest.set(slot.family, probe);
       }
-      const wanted = new Map();
-      for (const [family, probe] of closest) {
+      cullWanted.clear();
+      for (const [family, probe] of cullClosest) {
         const lod = entry.pivot.visible
           ? instanceLod({
               distance: probe.distance,
@@ -3135,32 +3212,42 @@ let convertSlots = 8;
               maxDistance: drawDistance,
             })
           : null;
-        wanted.set(family, lod);
+        cullWanted.set(family, lod);
       }
-      const levels = new Map();
+      cullLevels.clear();
       for (const slot of entry.slots) {
-        const list = levels.get(slot.family);
-        if (list) list.push(slot.lod);
-        else levels.set(slot.family, [slot.lod]);
+        let list = cullLevels.get(slot.family);
+        if (!list) {
+          list = levelPool[levelUsed] || (levelPool[levelUsed] = []);
+          list.length = 0;
+          levelUsed += 1;
+          cullLevels.set(slot.family, list);
+        }
+        list.push(slot.lod);
       }
       for (let i = 0; i < entry.slots.length; i += 1) {
         const slot = entry.slots[i];
-        const probe = probes[i];
-        const lod = resolveLod(wanted.get(slot.family), levels.get(slot.family));
+        const probe = cullProbes[i];
+        const lod = resolveLod(cullWanted.get(slot.family), cullLevels.get(slot.family));
         const show = probe.inFrustum && lod === slot.lod;
         if (slot.shown !== show) {
           const wasHidden = slot.shown === false;
           slot.shown = show;
           if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
           slot.mesh.setVisibleAt(slot.index, show);
-          pickIdsDirty = true;
+          const batch = slot.batchKey ? batchFiller.get(slot.batchKey) : null;
+          if (batch) batch.pickIdsDirty = true;
         }
         if (show) visible += 1;
       }
     }
     statInstances = instances;
     statCulled = instances - visible;
-    if (pickIdsDirty) syncPickIds();
+    cullWorld.copy(camera.matrixWorld);
+    cullProjection.copy(camera.projectionMatrix);
+    cullSelection = selected;
+    appliedCullSerial = cullSerial;
+    cullReady = true;
   }
 
   function looseParts() {
@@ -3177,6 +3264,224 @@ let convertSlots = 8;
     return loose;
   }
 
+  function unlinkBatchGeometries(mesh) {
+    const linked = (mesh && mesh.userData && mesh.userData.forgeLinkedGeometries) || [];
+    for (const geometry of linked) {
+      if (geometry.userData && geometry.userData.forgeBatch && geometry.userData.forgeBatch.mesh === mesh) {
+        geometry.userData.forgeBatch = null;
+      }
+    }
+  }
+
+  function disposeLiveBatch(batch) {
+    if (!batch || !batch.mesh) return;
+    const mesh = batch.mesh;
+    mesh.removeFromParent();
+    disposePickTexture(mesh);
+    unlinkBatchGeometries(mesh);
+    mesh.dispose();
+    const index = batches.indexOf(batch);
+    if (index >= 0) batches.splice(index, 1);
+  }
+
+  function releaseEntrySlots(entry) {
+    const slots = entry.slots || [];
+    entry.slots = [];
+    const emptied = [];
+    for (const slot of slots) {
+      if (!slot || !slot.mesh || slot.batchKey == null) continue;
+      const batch = batchFiller.get(slot.batchKey);
+      if (!batch || batch.mesh !== slot.mesh) continue;
+      try {
+        batchFiller.removeInstance(slot.batchKey, slot.index);
+      } catch (error) {
+        console.error(error);
+        continue;
+      }
+      const pick = slot.mesh.userData && slot.mesh.userData.pick;
+      if (pick && pick.ids) pick.ids[slot.index] = null;
+      const gone = batchFiller.dropIfEmpty(slot.batchKey);
+      if (gone) emptied.push(gone);
+    }
+    for (const batch of emptied) disposeLiveBatch(batch);
+  }
+
+  function entriesForParts(parts) {
+    const wanted = new Set(parts || []);
+    const found = [];
+    for (const entry of entries.values()) {
+      if (!entry.parts || !entry.parts.length) continue;
+      for (const part of entry.parts) {
+        if (!wanted.has(part)) continue;
+        found.push(entry);
+        break;
+      }
+    }
+    return found;
+  }
+
+  function rewriteRetiledGeometry(parts) {
+    const seen = new Set();
+    for (const part of parts || []) {
+      const geometry = part && part.geometry;
+      const material = part && part.material;
+      if (!geometry || !material || !material.userData || !material.userData.waterStandIn || seen.has(geometry)) continue;
+      seen.add(geometry);
+      const link = geometry.userData && geometry.userData.forgeBatch;
+      if (!link || !link.mesh || typeof link.mesh.setGeometryAt !== "function" || link.geometryId == null) continue;
+      try {
+        ensureGeometryCpu(geometry);
+        link.mesh.setGeometryAt(link.geometryId, geometry);
+      } catch (error) {
+        console.error(error);
+      }
+    }
+  }
+
+  function recompileHeldMeshes(parts) {
+    const materials = new Set();
+    for (const part of parts || []) if (part && part.material) materials.add(part.material);
+    const meshes = [];
+    for (const batch of batches) {
+      if (batch.mesh && materials.has(batch.mesh.material)) meshes.push(batch.mesh);
+    }
+    return Promise.all(meshes.map((mesh) => compileObjectPipeline(renderer, mesh, camera, scene)));
+  }
+
+  function decorateBatch(batch, material, label) {
+    const mesh = batch.mesh;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.frustumCulled = false;
+    // Instance matrices are world matrices. The batch object has to stay at
+    // the origin, or dragging one pivot would slide every copy parented to it.
+    mesh.matrixAutoUpdate = false;
+    mesh.matrix.identity();
+    mesh.matrixWorld.identity();
+    mesh.matrixWorldAutoUpdate = false;
+    // The view culls each instance from its own world sphere. The mesh-level
+    // sphere is the untransformed geometry and would hide the whole forest
+    // once the camera looks away from the origin.
+    mesh.perObjectFrustumCulled = false;
+    mesh.sortObjects = Boolean(material && material.transparent);
+    if (label) mesh.name = label;
+    const previousRender = mesh.onBeforeRender.bind(mesh);
+    const webgpuBatch = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
+    const albedo = material && material.map && material.map.isTexture === true ? material.map : null;
+    mesh.userData.forgeAlbedo = albedo;
+    mesh.userData.forgeBatchKey = batch.key;
+    mesh.onBeforeRender = function pickAndGroup(rendererArg, sceneArg, cameraArg, geometry, drawMaterial, ...rest) {
+      const picking = Boolean(sceneArg.overrideMaterial && sceneArg.overrideMaterial.userData && sceneArg.overrideMaterial.userData.forgePick);
+      if (picking) gpuPicker.prepareObject(mesh, mesh.material);
+      const shown = picking ? mesh.material : drawMaterial;
+      // r187 draws the merged ranges. Filling them after previousRender is
+      // too late for this frame, and the WebGPU onBeforeRender does not
+      // fill them at all.
+      if (webgpuBatch) scheduleMergedDraws(mesh, cameraArg, geometry, shown);
+      previousRender(rendererArg, sceneArg, cameraArg, geometry, shown, ...rest);
+    };
+    mesh.layers.enable(PICK_LAYER);
+    mesh.userData.forgePickKind = 1;
+    mesh.renderOrder = 1;
+    const tag = (material && material.userData && material.userData.banc) || (material && material.name) || "";
+    const water = tag === "water";
+    const helper = (material && material.userData && material.userData.helper)
+      || helperKind(label, material && material.name, material && material.userData && material.userData.name);
+    if (water) {
+      mesh.renderOrder = 2;
+      mesh.visible = showWater;
+    }
+    if (helper) mesh.visible = showHelpers;
+    batch.water = water;
+    batch.helper = Boolean(helper);
+    batch.pickIdsDirty = true;
+  }
+
+  function idsForBatch(batch) {
+    const mesh = batch.mesh;
+    const pick = mesh && mesh.userData && mesh.userData.pick;
+    const count = pick ? pick.count | 0 : 0;
+    const info = mesh && mesh._instanceInfo;
+    const numeric = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      const key = pick.ids[i];
+      const row = info && info[i];
+      if (!key || (row && row.active === false)) {
+        numeric[i] = 0;
+        continue;
+      }
+      const entry = entries.get(key);
+      const visible = row && typeof mesh.getVisibleAt === "function" ? mesh.getVisibleAt(i) : true;
+      numeric[i] = visible && entry && canPick({ shown: entry.pivot.visible, locked: entry.locked })
+        ? gpuPicker.idFor(key) : 0;
+    }
+    return numeric;
+  }
+
+  function flushPickIds(list) {
+    const result = syncDirtyPickIds(list, {
+      idsFor: idsForBatch,
+      write(mesh, ids) {
+        return gpuPicker.writeInstanceIds(mesh, ids);
+      },
+      previous(batch) {
+        return batch.lastPickIds;
+      },
+      remember(batch, ids) {
+        batch.lastPickIds = ids;
+        if (batch.mesh) batch.mesh.userData.forgeIndirect = batch.mesh._indirectTexture;
+      },
+    });
+    statPickUploads += result.uploads;
+    return result.uploads;
+  }
+
+  function flushPreviewPickIds() {
+    if (!scenePreview) return 0;
+    let uploads = 0;
+    for (const meshes of scenePreview.models.values()) {
+      for (const mesh of meshes) {
+        const keys = mesh.userData.previewIds || [];
+        const numeric = keys.map((key) => {
+          const entry = key ? entries.get(key) : null;
+          return entry && canPick({ shown: entry.pivot.visible, locked: entry.locked }) ? gpuPicker.idFor(key) : 0;
+        });
+        if (sameIdList(mesh.userData.forgeLastPickIds, numeric)) continue;
+        const wrote = gpuPicker.writeInstanceIds(mesh, numeric);
+        mesh.userData.forgeLastPickIds = numeric;
+        if (wrote !== false) uploads += 1;
+      }
+    }
+    statPickUploads += uploads;
+    return uploads;
+  }
+
+  function flushPlaceholderPickIds() {
+    for (const entry of entries.values()) {
+      const placeholder = !entry.volume && (!entry.parts || !entry.parts.length);
+      entry.mesh.userData.forgePickId = placeholder && canPick({ shown: entry.pivot.visible, locked: entry.locked })
+        ? gpuPicker.idFor(entry.key) : 0;
+    }
+  }
+
+  function markAllPickDirty() {
+    for (const batch of batches) batch.pickIdsDirty = true;
+    previewPickDirty = true;
+    placeholderPickDirty = true;
+  }
+
+  function prepareGpuPick() {
+    flushPickIds(batches);
+    if (previewPickDirty) {
+      flushPreviewPickIds();
+      previewPickDirty = false;
+    }
+    if (placeholderPickDirty) {
+      flushPlaceholderPickIds();
+      placeholderPickDirty = false;
+    }
+  }
+
   function rebuildBatches(stagedEntries = null) {
     const job = batchChain.then(
       () => rebuildBatchesNow(stagedEntries),
@@ -3189,142 +3494,83 @@ let convertSlots = 8;
   async function rebuildBatchesNow(stagedEntries = null) {
     const sceneToken = generation;
     uvDirty = true;
-    const previous = stagedEntries ? [] : batches.slice();
-    const nextBatches = [];
-    const pendingMeshes = [];
+    const replacing = !stagedEntries;
+    const previous = replacing ? batches.slice() : [];
+    if (replacing) batchFiller.detachAll();
     const actors = stagedEntries || [...entries.values()];
-    for (const entry of actors) entry.slots = [];
+    if (replacing) {
+      for (const entry of actors) entry.slots = [];
+    } else {
+      for (const entry of actors) {
+        for (const part of entry.parts || []) ensureGeometryCpu(part.geometry);
+        releaseEntrySlots(entry);
+      }
+    }
+    bumpCull();
     const groups = new Map();
     for (const entry of actors) {
       syncGhost(entry);
       if (!entry.parts || !entry.parts.length) continue;
       entry.pivot.updateWorldMatrix(true, false);
       for (const part of entry.parts) {
+        if (!part || !part.geometry || !part.batchKey) continue;
+        if (!ensureGeometryCpu(part.geometry)) {
+          console.warn("Skipped a mesh whose CPU copy could not be restored from its batch.");
+          continue;
+        }
+        const position = part.geometry.getAttribute && part.geometry.getAttribute("position");
+        if (!position || !position.count) continue;
         let group = groups.get(part.batchKey);
         if (!group) {
-          group = { material: part.material, records: [], geometries: new Map() };
+          group = { material: part.material, records: [] };
           groups.set(part.batchKey, group);
         }
-        group.records.push({ entry, part });
-        if (!group.geometries.has(part.geometry.uuid)) group.geometries.set(part.geometry.uuid, part.geometry);
+        group.records.push({ entry, part, geometry: part.geometry });
       }
     }
-    for (const group of groups.values()) {
-      const dropped = [];
-      for (const geometry of group.geometries.values()) {
-        if (!ensureGeometryCpu(geometry)) dropped.push(geometry.uuid);
-      }
-      for (const uuid of dropped) group.geometries.delete(uuid);
-      if (dropped.length) {
-        group.records = group.records.filter((record) => group.geometries.has(record.part.geometry.uuid));
-        console.warn("Skipped a mesh whose CPU copy could not be restored from its batch.");
-      }
-      let verts = 0;
-      let indices = 0;
-      for (const geometry of group.geometries.values()) {
-        const position = geometry.getAttribute("position");
-        verts += position ? position.count : 0;
-        indices += geometry.getIndex() ? geometry.getIndex().count : position ? position.count : 0;
-      }
-      if (!verts || !group.records.length) continue;
-      group.material = materialForBatch(group.records, group.material);
-      const sampleGeometry = group.geometries.values().next().value;
-      group.material = materialForGeometry(group.material, sampleGeometry);
-      let mesh;
-      try {
-        mesh = new THREE.BatchedMesh(group.records.length, verts, Math.max(indices, 1), group.material);
-      } catch (error) {
-        console.error(error);
-        continue;
-      }
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
-      mesh.frustumCulled = false;
-      // Instance matrices are world matrices. The batch object has to stay at
-      // the origin, or dragging one pivot would slide every copy parented to it.
-      mesh.matrixAutoUpdate = false;
-      mesh.matrix.identity();
-      mesh.matrixWorld.identity();
-      mesh.matrixWorldAutoUpdate = false;
-      // The view culls each instance from its own world sphere. The mesh-level
-      // sphere is the untransformed geometry and would hide the whole forest
-      // once the camera looks away from the origin.
-      mesh.perObjectFrustumCulled = false;
-      mesh.sortObjects = Boolean(group.material.transparent);
-      const label = group.records.map((record) => record.part.name).find(Boolean);
-      if (label) mesh.name = label;
-      const previousRender = mesh.onBeforeRender.bind(mesh);
-      const webgpuBatch = Boolean(renderer.backend && renderer.backend.isWebGPUBackend === true);
-      const albedo = group.material.map && group.material.map.isTexture === true ? group.material.map : null;
-      mesh.userData.forgeAlbedo = albedo;
-      mesh.onBeforeRender = function pickAndGroup(rendererArg, sceneArg, cameraArg, geometry, material, ...rest) {
-        const picking = Boolean(sceneArg.overrideMaterial && sceneArg.overrideMaterial.userData && sceneArg.overrideMaterial.userData.forgePick);
-        if (picking) gpuPicker.prepareObject(mesh, mesh.material);
-        const drawMaterial = picking ? mesh.material : material;
-        // r187 draws the merged ranges. Filling them after previousRender is
-        // too late for this frame, and the WebGPU onBeforeRender does not
-        // fill them at all.
-        if (webgpuBatch) scheduleMergedDraws(mesh, cameraArg, geometry, drawMaterial);
-        previousRender(rendererArg, sceneArg, cameraArg, geometry, drawMaterial, ...rest);
-      };
-      mesh.layers.enable(PICK_LAYER);
-      mesh.userData.forgePickKind = 1;
-      mesh.renderOrder = 1;
-      const tag = (group.material.userData && group.material.userData.banc) || group.material.name || "";
-      const water = tag === "water";
-      const helper = (group.material.userData && group.material.userData.helper)
-        || helperKind(label, group.material.name, group.material.userData && group.material.userData.name);
-      if (water) {
-        mesh.renderOrder = 2;
-        mesh.visible = showWater;
-      }
-      if (helper) mesh.visible = showHelpers;
-      const geomIds = new Map();
-      let built = true;
-      for (const [uuid, geometry] of group.geometries) {
-        try {
-          geomIds.set(uuid, mesh.addGeometry(geometry));
-        } catch (error) {
-          console.error(error);
-          built = false;
-          break;
-        }
-      }
-      if (!built) {
-        disposePickTexture(mesh);
-        mesh.dispose();
-        continue;
-      }
-      for (const [uuid, geometry] of group.geometries) {
-        const geometryId = geomIds.get(uuid);
-        if (geometryId !== undefined) {
-          noteGeometryBatch(geometry, mesh, geometryId);
-          const linked = mesh.userData.forgeLinkedGeometries || (mesh.userData.forgeLinkedGeometries = []);
-          if (!linked.includes(geometry)) linked.push(geometry);
-        }
-      }
-      const ids = [];
-      const geometries = [];
-      const spheres = [];
-      let count = 0;
+    const fresh = [];
+    const touched = [];
+    for (const [key, group] of groups) {
       group.records.sort((a, b) => {
-        const left = a.part.geometry.uuid;
-        const right = b.part.geometry.uuid;
+        const left = a.geometry.uuid;
+        const right = b.geometry.uuid;
         if (left < right) return -1;
         if (left > right) return 1;
         return 0;
       });
-      for (const record of group.records) {
-        const geometryId = geomIds.get(record.part.geometry.uuid);
-        if (geometryId === undefined) continue;
-        const instanceId = mesh.addInstance(geometryId);
+      let material = materialForBatch(group.records, group.material);
+      material = materialForGeometry(material, group.records[0].geometry);
+      let result;
+      try {
+        result = batchFiller.append(key, material, group.records);
+      } catch (error) {
+        console.error(error);
+        continue;
+      }
+      if (!result.batch) continue;
+      const mesh = result.batch.mesh;
+      if (result.fresh) {
+        const label = group.records.map((record) => record.part.name).find(Boolean);
+        decorateBatch(result.batch, material, label);
+        fresh.push(result.batch);
+      }
+      for (const link of result.linked || []) {
+        noteGeometryBatch(link.geometry, mesh, link.geometryId);
+        const linked = mesh.userData.forgeLinkedGeometries || (mesh.userData.forgeLinkedGeometries = []);
+        if (!linked.includes(link.geometry)) linked.push(link.geometry);
+      }
+      const pick = mesh.userData.pick || (mesh.userData.pick = { ids: [], geometries: [], spheres: [], count: 0 });
+      result.batch.ids = pick.ids;
+      for (const item of result.added) {
+        const record = item.record;
+        const instanceId = item.instanceId;
         const placed = displayedActorMatrix(record.entry, new THREE.Matrix4());
         mesh.setMatrixAt(instanceId, placed);
         mesh.setColorAt(instanceId, instanceTint(record.entry, tint));
-        ids[instanceId] = record.entry.key;
-        geometries[instanceId] = record.part.geometry;
-        spheres[instanceId] = record.part.sphere;
-        count = Math.max(count, instanceId + 1);
+        pick.ids[instanceId] = record.entry.key;
+        pick.geometries[instanceId] = record.part.geometry;
+        pick.spheres[instanceId] = record.part.sphere;
+        pick.count = Math.max(pick.count, instanceId + 1);
         record.entry.slots.push({
           actor: record.entry.key,
           mesh,
@@ -3335,93 +3581,66 @@ let convertSlots = 8;
           sphere: record.part.sphere,
           matrix: placed,
           shown: true,
+          batchKey: result.batch.key,
         });
       }
-      mesh.userData.pick = { ids, geometries, spheres, count };
       mesh.userData.forgeIndirect = mesh._indirectTexture;
-      mesh.computeBoundingSphere();
-      pendingMeshes.push({ mesh, ids, water, helper: Boolean(helper) });
+      if (result.added.length && typeof mesh.computeBoundingSphere === "function") mesh.computeBoundingSphere();
+      result.batch.pickIdsDirty = true;
+      touched.push(result.batch);
+      if (!batches.includes(result.batch)) batches.push(result.batch);
     }
     const compileStarted = performance.now();
     // compileObjectPipeline logs a compile failure once and still resolves.
     // Attaching is outside that call so a transparent batch cannot stall streaming.
-    await Promise.all(pendingMeshes.map(({ mesh }) => compileObjectPipeline(renderer, mesh, camera, scene)));
-    if (sceneStreamStats && pendingMeshes.length) {
+    await Promise.all(fresh.map((batch) => compileObjectPipeline(renderer, batch.mesh, camera, scene)));
+    if (sceneStreamStats && fresh.length) {
       const waited = performance.now() - compileStarted;
       sceneStreamStats.compileMs = (sceneStreamStats.compileMs || 0) + waited;
-      sceneStreamStats.compileBatches = (sceneStreamStats.compileBatches || 0) + pendingMeshes.length;
+      sceneStreamStats.compileBatches = (sceneStreamStats.compileBatches || 0) + fresh.length;
       const rounded = Math.round(waited * 10) / 10;
       if (rounded > (sceneStreamStats.maxCompileMs || 0)) sceneStreamStats.maxCompileMs = rounded;
     }
     if (sceneToken !== generation) {
-      for (const item of pendingMeshes) {
-        item.mesh.removeFromParent();
-        disposePickTexture(item.mesh);
-        item.mesh.dispose();
+      for (const batch of fresh) {
+        batchFiller.forget(batch.key);
+        batch.mesh.removeFromParent();
+        disposePickTexture(batch.mesh);
+        batch.mesh.dispose();
+        const index = batches.indexOf(batch);
+        if (index >= 0) batches.splice(index, 1);
       }
       return false;
     }
-    for (const item of pendingMeshes) {
-      const mesh = item.mesh;
+    for (const batch of fresh) {
+      const mesh = batch.mesh;
       if (mesh.parent) continue;
       scene.add(mesh);
-      nextBatches.push(item);
     }
-    if (stagedEntries) {
-      for (const batch of nextBatches) batches.push(batch);
-      syncPickIds();
+    if (!replacing) {
+      flushPickIds(touched);
       releaseUnselectedPartGeometry();
       return actors.every((entry) => !entry.parts?.length || entry.slots.length);
     }
     const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
-    if (!nextBatches.length && expectMeshes && previous.length) {
+    const live = batchFiller.list();
+    if (!live.length && expectMeshes && previous.length) {
       for (const entry of entries.values()) entry.slots = [];
       console.error("Actor batches failed to build; the meshes already on screen stay up.");
       return false;
     }
+    const liveSet = new Set(live);
+    const stale = batches.filter((batch) => !liveSet.has(batch));
     batches.length = 0;
-    for (const batch of nextBatches) batches.push(batch);
+    for (const batch of live) batches.push(batch);
     naiveDraws = looseParts();
-    disposeBatches(previous);
+    disposeBatches(stale);
     syncBatchVisibility();
-    syncPickIds();
+    flushPickIds(touched);
     releaseUnselectedPartGeometry();
     guardMissingUv();
     noteTextureDebug();
     return true;
-  }
-
-  function syncPickIds() {
-    for (const batch of batches) {
-      const pick = batch.mesh.userData.pick;
-      if (!pick) continue;
-      const numeric = new Array(pick.count);
-      for (let i = 0; i < pick.count; i += 1) {
-        const key = pick.ids[i];
-        const entry = key ? entries.get(key) : null;
-        const visible = typeof batch.mesh.getVisibleAt === "function" ? batch.mesh.getVisibleAt(i) : true;
-        numeric[i] = visible && entry && canPick({ shown: entry.pivot.visible, locked: entry.locked })
-          ? gpuPicker.idFor(key) : 0;
-      }
-      gpuPicker.writeInstanceIds(batch.mesh, numeric);
-      batch.mesh.userData.forgeIndirect = batch.mesh._indirectTexture;
-    }
-    if (scenePreview) {
-      for (const meshes of scenePreview.models.values()) {
-        for (const mesh of meshes) {
-          const keys = mesh.userData.previewIds || [];
-          gpuPicker.writeInstanceIds(mesh, keys.map((key) => {
-            const entry = key ? entries.get(key) : null;
-            return entry && canPick({ shown: entry.pivot.visible, locked: entry.locked }) ? gpuPicker.idFor(key) : 0;
-          }));
-        }
-      }
-    }
-    for (const entry of entries.values()) {
-      const placeholder = !entry.volume && (!entry.parts || !entry.parts.length);
-      entry.mesh.userData.forgePickId = placeholder && canPick({ shown: entry.pivot.visible, locked: entry.locked })
-        ? gpuPicker.idFor(entry.key) : 0;
-    }
   }
 
   function releaseUnselectedPartGeometry() {
@@ -3587,7 +3806,8 @@ let convertSlots = 8;
   }
 
   function stageModel(entry) {
-    if (modelStage && entry.parts.length) {
+    if (!entry.parts || !entry.parts.length) return;
+    if (modelStage) {
       let actors = modelStage.pending.get(entry.gyaml);
       if (!actors) {
         actors = new Set();
@@ -3595,7 +3815,9 @@ let convertSlots = 8;
       }
       actors.add(entry);
       scheduleModelStage();
+      return;
     }
+    void rebuildBatches([entry]);
   }
 
   const actorMatrix = new THREE.Matrix4();
@@ -4315,6 +4537,7 @@ uniform float terrainLayerMissing;`
     if (!useGpuPick) return;
     enqueuePick(async () => {
       try {
+        prepareGpuPick();
         const point = await gpuPicker.pickDistance({ ndcX: ndc.x, ndcY: ndc.y, terrain: true, preview: false });
         if (token !== orbitToken || !point) return;
         orbit.target.copy(point);
@@ -4621,8 +4844,9 @@ uniform float terrainLayerMissing;`
       syncPreviewPlacement(entry);
       syncGhost(entry);
     }
+    bumpCull();
     syncBatchVisibility();
-    syncPickIds();
+    markAllPickDirty();
     applyGround();
     applyWater();
     applyHelpers();
@@ -4933,7 +5157,9 @@ uniform float terrainLayerMissing;`
         // Compose after the snap writes Y. matrixWorld is stale until then,
         // and the batched instance is not a child of the pivot.
         entry.pivot.updateWorldMatrix(true, false);
-        return applyActorMatrix(entry.slots, entry.key, displayedActorMatrix(entry, actorMatrix));
+        const wrote = applyActorMatrix(entry.slots, entry.key, displayedActorMatrix(entry, actorMatrix));
+        bumpCull();
+        return wrote;
       },
     });
     // The instance write above is synchronous. A ground reply may still move Y
@@ -5038,7 +5264,7 @@ uniform float terrainLayerMissing;`
     const index = hit.batchId !== undefined ? hit.batchId : hit.instanceId;
     if (index !== undefined) {
       const batch = batches.find((item) => item.mesh === hit.object);
-      if (batch) return batch.ids[index] || null;
+      if (batch && batch.ids) return batch.ids[index] || null;
       return hit.object.userData.previewIds?.[index] || null;
     }
     return idOf(hit.object);
@@ -5089,6 +5315,7 @@ uniform float terrainLayerMissing;`
     const ndc = setPointer(event);
     if (!useGpuPick) return aimed(event, preview);
     try {
+      prepareGpuPick();
       const keys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview, peel });
       return groupsFromPick(keys, volumeRayHits(raycaster));
     } catch (error) {
@@ -5141,6 +5368,7 @@ uniform float terrainLayerMissing;`
       return;
     }
     try {
+      prepareGpuPick();
       const frontKeys = await gpuPicker.pickIds({ ndcX: ndc.x, ndcY: ndc.y, preview: true, peel: false });
       const front = frontKeys[0] || null;
       const repeat = Boolean(
@@ -5207,7 +5435,7 @@ uniform float terrainLayerMissing;`
       if (event.altKey && (dx !== 0 || dy !== 0)) orbitMoved = true;
       if (Math.hypot(dx, dy) > 4) lastPointer.moved = true;
     }
-    if (transform.dragging) return;
+    if (transform.dragging || orbitMoved || orbitGesture || orbitSettle > 0) return;
     scheduleHover(event);
   });
 
@@ -5442,22 +5670,25 @@ uniform float terrainLayerMissing;`
     }
   }
 
+  const flyForward = new THREE.Vector3();
+  const flyRight = new THREE.Vector3();
+  const flyMove = new THREE.Vector3();
+
   function updateFly(dt) {
     const speed = (keys.has("shift") || keys.has("x") ? 32 : 10) * dt;
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
-    const move = new THREE.Vector3();
-    if (keys.has("w")) move.add(forward);
-    if (keys.has("s")) move.sub(forward);
-    if (keys.has("d")) move.add(right);
-    if (keys.has("a")) move.sub(right);
-    if (keys.has("e")) move.y += 1;
-    if (keys.has("q")) move.y -= 1;
-    if (move.lengthSq() === 0) return false;
-    move.normalize().multiplyScalar(speed);
-    camera.position.add(move);
-    orbit.target.add(move);
+    camera.getWorldDirection(flyForward);
+    flyRight.setFromMatrixColumn(camera.matrixWorld, 0);
+    flyMove.set(0, 0, 0);
+    if (keys.has("w")) flyMove.add(flyForward);
+    if (keys.has("s")) flyMove.sub(flyForward);
+    if (keys.has("d")) flyMove.add(flyRight);
+    if (keys.has("a")) flyMove.sub(flyRight);
+    if (keys.has("e")) flyMove.y += 1;
+    if (keys.has("q")) flyMove.y -= 1;
+    if (flyMove.lengthSq() === 0) return false;
+    flyMove.normalize().multiplyScalar(speed);
+    camera.position.add(flyMove);
+    orbit.target.add(flyMove);
     return true;
   }
 
@@ -5788,11 +6019,13 @@ uniform float terrainLayerMissing;`
     };
   }
 
+  let paintedProfile = "";
+
   function paintProfile() {
     if (!showProfile) return;
     const snapshot = profileSnapshot();
     const latest = profileWindow.latest() || {};
-    profileText.textContent = formatProfileHud({
+    const text = formatProfileHud({
       backend: backendName,
       revision: buildStamp,
       mode: frameTimer.mode,
@@ -5802,6 +6035,9 @@ uniform float terrainLayerMissing;`
       recommendation: snapshot.recommendation,
       detail: profileDetail(),
     });
+    if (text === paintedProfile) return;
+    paintedProfile = text;
+    profileText.textContent = text;
   }
 
   function profileDetail() {
@@ -5826,6 +6062,8 @@ uniform float terrainLayerMissing;`
       warmTotal: statWarmTotal,
       sceneStream: sceneStreamStats,
       server: serverHead,
+      batchKeys: batchKeyCount(),
+      pickUploads: statPickUploads,
     };
   }
 
@@ -5881,8 +6119,12 @@ uniform float terrainLayerMissing;`
       meshes: residentMeshNames().size,
       textures: profileTextureCount(),
       heapBytes,
+      batchKeys: batchKeyCount(),
+      pickUploads: statPickUploads,
     });
   }
+
+  let paintedStatus = "";
 
   function paintFrame(rendering, record = true) {
     lastRendering = Boolean(rendering);
@@ -5904,7 +6146,7 @@ uniform float terrainLayerMissing;`
         : 0,
     );
     const background = (statDeferred || 0) + (statBackgroundLoading || 0);
-    statusEl.textContent = formatStatusLabel({
+    const nextStatus = formatStatusLabel({
       backend: backendName,
       build: buildStamp,
       draws,
@@ -5922,7 +6164,12 @@ uniform float terrainLayerMissing;`
         heapBytes: (typeof performance !== "undefined" && performance.memory && performance.memory.usedJSHeapSize) || null,
       },
     });
+    if (nextStatus !== paintedStatus) {
+      paintedStatus = nextStatus;
+      statusEl.textContent = nextStatus;
+    }
     if (showProfile) paintProfile();
+    if (record) statPickUploads = 0;
     if (hooks.onFrame) hooks.onFrame();
   }
 
@@ -6098,7 +6345,11 @@ uniform float terrainLayerMissing;`
         submitMs: lastCpu ? lastCpu.submitMs : null,
         gpuMs: frameTimer.latest(),
         objects: profileWindow.latest() ? profileWindow.latest().objects : null,
-        batchCount: profileWindow.latest() ? profileWindow.latest().batches : null,
+        batchCount: profileWindow.latest() ? profileWindow.latest().batches : batches.length,
+        batchKeys: batchKeyCount(),
+        pickUploads: profileWindow.latest() && profileWindow.latest().pickUploads != null
+          ? profileWindow.latest().pickUploads
+          : statPickUploads,
         subDraws: profileWindow.latest() ? profileWindow.latest().subDraws : null,
         profile: profileSnapshot(),
         wasmSurfaceMB: (() => {

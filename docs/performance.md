@@ -18,6 +18,54 @@ The batch object stays at the origin with its matrix frozen. Instance matrices a
 
 Check: two copies of one model count as two `inst` and do not add a second draw. Hide a category and those copies disappear and a click misses them. Lock the category and they stay visible, a click misses them, and the gizmo does not attach. Select one grass-topped block and drag it. That block moves, and the other copies around the pond stay where they are. Undo puts that one actor back. The field stays textured for the whole drag and after you release. Releasing posts the edit and refreshes the actor list. It does not fetch the terrain again, and it does not rebuild the batches: the moved copy's matrix is written in place, and the trees, rocks, and houses stay on the meshes already on screen. Undo of a move does the same for each actor whose pose changed. Adding or removing an actor builds the replacement first and then swaps, so the forest does not blink out.
 
+## Batch fill and per-frame cost
+
+A staged model used to build a new exact-fit `BatchedMesh` for every batch key in that arrival, even when a mesh for the same key was already on screen. The next copy of that key allocated another mesh. A texture landing on one material called `queueRebuild()`, which rebuilt every batch, and the pick-id texture for every batch was uploaded again. While the camera was still, the cull walked every instance anyway.
+
+The filler keeps one mesh per batch key. Geometry and instances append. Capacity starts at 8 instances and 64 vertices/indices and doubles when the next add would not fit (`frontend/src/batch-fill.js`). A second mesh for a key exists only when that grow throws. A texture that changes a key restages the actors that use those parts. The other meshes stay. Pick ids are written for the meshes that changed. A click or a hover uploads a batch only when its id list changed, and an orbit does not upload any: visibility marks the batch dirty and the upload waits for the pick. The cull returns before the instance loop when the camera world matrix, the projection matrix, the selection, and the entry serial are unchanged. Fly vectors, the selection tint, and the cull scratch lists are allocated once. The status label and the Profile HUD write text only when the string changes.
+
+**Profile** adds `keys` and `pick` on the draws line. `keys` is the number of distinct batch keys (`batches` should sit on that number, plus a small overflow). `pick` is how many id textures were uploaded since the previous sample. The stream line adds `compile` for the longest wall-clock wait while the meshes from one fill were compiled. That wait is `compileAsync`, one mesh at a time, and it is not inside the submit timer. `__forgeMemory().frame` includes `batchKeys` and `pickUploads`.
+
+### Before
+
+27 Nov 2026, Bradyn’s Windows machine, Hyrule Field Child, Static + Dynamic, mid-stream. This is the measured capture. This environment has no game dump, so it is not re-measured here.
+
+| | latest |
+| --- | --- |
+| cpu | 632.9 ms (avg 75.9, p95 104.9) |
+| update | 36.4 ms |
+| cull | 14.7 ms |
+| submit | 581.9 ms |
+| gpu | 4.0 ms |
+| frame | 75.1 ms |
+| obj / batches / sub / draws | 4634 / 2253 / 656 / 5920 |
+| tris / meshes / tex / heap | 1.9M / 128 / 595 / 1532 MB |
+| streaming | conv 31289 ms, dl 253151 ms, up 14245 ms |
+
+The 632.9 ms CPU sample includes the 581.9 ms submit spike. The average CPU is 75.9 ms and the p95 is 104.9 ms. `frame` is the gap between animation callbacks, not the CPU work. GPU time is 4 ms, so the spike is on the CPU inside `renderer.render`.
+
+### After
+
+No Field was loaded here. The numbers below are from `frontend/src/batch-fill.test.js` on this machine (Node, three r187, no GPU) and from the cull/pick predicates.
+
+| What | Before | After |
+| --- | --- | --- |
+| 400 arrivals, 2 keys each, 50 distinct keys | 800 `BatchedMesh` constructions | 50 |
+| 80 box instances of one key | 80 meshes, 4.0 ms | 1 mesh, 0.5 ms, grown 8 → 128 slots |
+| one more 40,000-vertex geometry on that mesh | a new mesh, or a full rebuild | same mesh, grown to 65,536 vertices (uint32 indices), no overflow |
+| cull, camera and selection unchanged | the instance loop | returns before the loop |
+| pick-id uploads while orbiting, no click | every dirty batch, every frame | 0 |
+
+On the Field capture, `batches` should move from 2253 toward `keys` once streaming settles. How far it falls depends on how many of those 2253 meshes shared a key. `keys` is the number to compare, not a guess from the 595 textures: the batch key also includes the mesh family, so two different meshes with the same image stay apart.
+
+### Submit spike
+
+`submit` is the CPU time around `renderer.render`, including each batch’s `onBeforeRender` (`scheduleMergedDraws` fills r187’s merged draw ranges; the WebGPU path does not fill them itself). `compileAsync` runs while a mesh is built, before `scene.add`, and it is awaited one at a time. `PIPELINE_COMPILE_LIMIT` stays 1: r187 keeps a single `_precompilationState`, and a second compile in that gap throws. That wait shows up as `compile` on the stream line and as time in the streaming frame gap, not as `submit`.
+
+The 581.9 ms spike lines up with thousands of batch objects and 5920 draws, against 4 ms of GPU time. Fewer meshes is the change that can move `submit`. A custom indirect buffer, or raising the compile limit, is out of scope. If `batches` is near `keys` and `submit` is still hundreds of milliseconds, the rest is per-object work inside three’s render, not another rebuild.
+
+Check: rebuild the frontend, restart the editor, hard-reload, open the same Field view with **Profile** on. On a still camera, `cull` should read about 0. While orbiting with no click, `pick` should stay 0. After streaming settles, `batches` should be close to `keys`. Compare `submit` (latest, avg, p95) with the table above, and read `compile` on the stream line if a hitch lands while models are still arriving. Textures, GPU picking, the gizmo, and selection should behave as before.
+
 ## Frustum and draw distance
 
 Each instance has its own world bounding sphere: the mesh sphere transformed by that actor’s matrix, not a sphere at the world origin and not the distance from the camera to the origin. The gap used for **Draw** and the size rules is the distance to the sphere surface, so a large mesh is not culled while its bounds are still inside the cap. A sphere outside the frustum is hidden. **Draw** can also drop anything past 200, 400, or 800 m. **Auto** leaves the size rules (small props with no far mesh fade by 56 / 96 / 180 m). The selection is not distance-culled. The field is not in this loop and its mesh is not frustum-culled, so flying back cannot drop the terrain on a bad sphere. The camera far plane grows as you fly, from at least 8000 m. `culled` in **Profile** is the hidden instances. The batch mesh itself is not frustum-culled; a sphere on the untransformed geometry used to hide every copy once the camera looked away from the origin.

@@ -348,6 +348,8 @@ export function collectMemoryReport(state = {}) {
       triangles: (info && info.triangles) || null,
       instances: stats.instances ?? null,
       culled: stats.culled ?? null,
+      batchKeys: stats.batchKeys ?? null,
+      pickUploads: stats.pickUploads ?? null,
     },
     profile: stats.profile ?? null,
     wasmSurfaceMB: stats.wasmSurfaceMB ?? null,

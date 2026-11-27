@@ -83,6 +83,8 @@ export function formatProfileDetail({
   warmTotal = null,
   sceneStream = null,
   server = "",
+  batchKeys = null,
+  pickUploads = null,
 } = {}) {
   const lines = [];
   lines.push(rendering ? (fps ? `${fps} fps` : "…") : "idle");
@@ -108,11 +110,18 @@ export function formatProfileDetail({
   if (downloadMs != null) times.push(`dl ${formatMs(downloadMs)} ms`);
   if (uploadMs != null) times.push(`up ${formatMs(uploadMs)} ms`);
   if (times.length) lines.push(times.join(" · "));
+  if (batchKeys != null || pickUploads != null) {
+    const extra = [];
+    if (batchKeys != null) extra.push(`keys ${batchKeys}`);
+    if (pickUploads != null) extra.push(`pick ${pickUploads}`);
+    lines.push(extra.join(" · "));
+  }
   if (warmTotal != null) lines.push(`warm ${warmDone || 0}/${warmTotal}`);
   if (sceneStream) {
     const note = [];
     if (sceneStream.firstDetail != null) note.push(`detail ${formatMs(sceneStream.firstDetail)} ms`);
     note.push(`${sceneStream.slowFrames} streaming frames >25 ms`);
+    if (sceneStream.maxCompileMs > 0) note.push(`compile ${formatMs(sceneStream.maxCompileMs)} ms`);
     if (sceneStream.editBytes != null) note.push(`first edit ${formatMs(sceneStream.editBytes / 1048576)} MiB`);
     lines.push(note.join(" · "));
   }

@@ -102,6 +102,15 @@ test("the profile detail keeps the counters that used to sit on the stats line",
     }),
     ["idle", "0 loading · 262 loaded · 207 capped"],
   );
+  assert.deepEqual(
+    formatProfileDetail({
+      rendering: false,
+      batchKeys: 50,
+      pickUploads: 0,
+      sceneStream: { slowFrames: 2, maxCompileMs: 12.4 },
+    }),
+    ["idle", "keys 50 · pick 0", "2 streaming frames >25 ms · compile 12.4 ms"],
+  );
 });
 
 test("a resident cap is named on the status label", () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { boundsGap, chooseLod, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, transformSphere } from "./cull.js";
+import { boundsGap, chooseLod, instanceLod, isForegroundModel, isTerrainProxy, modelLoadTier, modelLod, resolveLod, shouldRecull, transformSphere } from "./cull.js";
 
 test("a prominent preview can stream detail beyond the normal nearby range", () => {
   const foreground = { inFrustum: true, gap: 300, radius: 100, hasPreview: true };
@@ -96,6 +96,27 @@ test("distance and frustum use the instance sphere, not the world origin", () =>
   ]);
   assert.deepEqual(shifted.center, [1, 0, 0]);
   assert.notDeepEqual(shifted.center, [0, 0, 0]);
+});
+
+test("a static camera, the same selection, and the same entries skip the cull", () => {
+  const world = { elements: Array.from({ length: 16 }, (_, index) => index) };
+  const projection = { elements: Array.from({ length: 16 }, (_, index) => index + 20) };
+  const still = {
+    world,
+    projection,
+    worldNow: { elements: world.elements.slice() },
+    projectionNow: { elements: projection.elements.slice() },
+    selection: "actor-a",
+    selectionNow: "actor-a",
+    entrySerial: 4,
+    entrySerialNow: 4,
+  };
+  assert.equal(shouldRecull(still), false);
+  const orbit = still.worldNow.elements.slice();
+  orbit[12] = 99;
+  assert.equal(shouldRecull({ ...still, worldNow: { elements: orbit } }), true);
+  assert.equal(shouldRecull({ ...still, selectionNow: "actor-b" }), true);
+  assert.equal(shouldRecull({ ...still, selection: null, selectionNow: null, entrySerialNow: 5 }), true);
 });
 
 test("the terrain proxy is the untextured static map", () => {
