@@ -1019,8 +1019,7 @@ let convertSlots = 8;
     // A changed key moves only those actors onto the batch that already holds
     // that key. Rebind stays for a mesh whose parts still share its key, so
     // the map shows up without rebuilding every other batch.
-    // The stand-in ripple is 16×16. A 0..1 chart stretches it into one flat
-    // cyan sheet, so those UVs are replaced before the batch is filled again.
+    // waterStandIn is no longer set. A rejected sheet is untextured, so this does not retile it.
     const retiled = retileWaterStandIns(parts);
     uvDirty = true;
     // The albedo guard above clears a colour node that was sampling one map.
@@ -2863,8 +2862,7 @@ let convertSlots = 8;
       if (!source) return;
       let material = prepareMaterial(source);
       if ((material.userData && material.userData.banc) === "water" || material.name === "water") {
-        // The stand-in ripple is published after this geometry is batched.
-        // A water plane with no TEXCOORD would sample nothing and stay the flat cyan tint.
+        // A plane with no TEXCOORD still gets a chart. The faint sheet does not sample a ripple.
         const channel = material.map && Number.isInteger(material.map.channel) ? material.map.channel : 0;
         ensureWaterUv(geometry, channel);
       }

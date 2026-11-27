@@ -68,31 +68,36 @@ test("a failed image request warns once and leaves the material untextured", asy
   }
 });
 
-test("a water stand-in records the ripple and does not keep the cyan multiply", async () => {
+test("a rejected water sheet is translucent and is not the ripple stand-in", async () => {
   const mesh = material();
-  mesh.transparent = true;
-  await applyTextureManifest(
-    [{ materialKey: "Sheet:0", material: mesh }],
+  mesh.userData.waterStandIn = true;
+  mesh.map = texture("/api/model-textures/ripple.ktx2");
+  mesh.opacity = 1;
+  mesh.depthWrite = true;
+  const report = await applyTextureManifest(
+    [{ materialKey: "Surface:0", material: mesh }],
     {
       materials: {
-        "Sheet:0": {
-          map: "/api/model-textures/ripple.ktx2",
-          standIn: "water",
-          texture: "ocarina-forge-water",
-          sampler: "_a0",
-          format: "generated 16x16",
-          color: [1, 1, 1, 0.62],
+        "Surface:0": {
+          map: null,
           alpha: "blend",
+          color: [0.35, 0.55, 0.55, 0.2],
+          status: "ready",
         },
       },
     },
-    async () => texture("/api/model-textures/ripple.ktx2"),
+    async () => {
+      throw new Error("a faint water sheet has no texture");
+    },
   );
-  assert.equal(mesh.userData.waterStandIn, true);
-  assert.equal(mesh.userData.forgeAlbedoName, "ocarina-forge-water");
-  assert.equal(mesh.userData.forgeAlbedoSampler, "_a0");
-  assert.equal(mesh.userData.forgeAlbedoFormat, "generated 16x16");
-  assert.deepEqual(mesh.color.rgb, [1, 1, 1]);
+  assert.equal(report[0].status, "applied");
+  assert.equal(mesh.map, null);
+  assert.equal(mesh.transparent, true);
+  assert.equal(mesh.depthWrite, false);
+  assert.equal(mesh.opacity, 0.2);
+  assert.equal(mesh.userData.waterStandIn, false);
+  assert.equal(mesh.userData.forgeAlbedoName, undefined);
+  assert.deepEqual(mesh.color.rgb, [0.35, 0.55, 0.55]);
 });
 
 test("a blend manifest records the overlay when the geometry file had no extras", async () => {
