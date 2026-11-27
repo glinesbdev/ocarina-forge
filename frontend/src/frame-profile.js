@@ -5,6 +5,7 @@
  */
 
 import { formatProfileDetail, formatTris } from "./frame.js";
+import { arrayTexturesOf } from "./texture-array.js";
 
 export const PROFILE_WINDOW = 180;
 export const PROFILE_READY_FRAMES = 12;
@@ -188,21 +189,72 @@ function drawLine(latest) {
   return line;
 }
 
+function textureId(value) {
+  if (!value || value.isTexture !== true) return null;
+  return (value.source && value.source.uuid) || value.uuid || value.id || null;
+}
+
+/**
+ * Live draw textures. Packed source images listed on the material are not
+ * counted: the array that replaced them is the texture the batch samples.
+ * Non-enumerable array and layer fields are included.
+ */
 export function countTextures(materials) {
   const seen = new Set();
+  const add = (value) => {
+    const id = textureId(value);
+    if (id != null) seen.add(id);
+  };
   for (const material of materials || []) {
     if (!material) continue;
     const bags = [material, material.userData];
     for (const bag of bags) {
       if (!bag) continue;
-      for (const value of Object.values(bag)) {
-        if (!value || value.isTexture !== true) continue;
-        const id = (value.source && value.source.uuid) || value.uuid || value.id;
-        if (id != null) seen.add(id);
-      }
+      for (const value of Object.values(bag)) add(value);
     }
+    for (const value of arrayTexturesOf(material)) add(value);
   }
   return seen.size;
+}
+
+const KEY_REASON_ORDER = ["array", "image", "blend", "helper", "water", "terrain", "ground", "tint"];
+
+/** Why a batch key did not join another mesh. Overflow suffixes are ignored. */
+export function classifyBatchKey(key) {
+  const raw = String(key || "").split("\u0000")[0];
+  if (raw.includes("|h:")) return "helper";
+  if (raw.includes("|water")) return "water";
+  if (raw.includes("|terrain")) return "terrain";
+  if (raw.includes("|ground")) return "ground";
+  if (raw.includes("|moss:")) return "blend";
+  if (!raw.includes("arr:")) return "image";
+  const tint = raw.match(/\|c([0-9a-f]+)\|/i);
+  if (tint && tint[1].toLowerCase() !== "ffffff") return "tint";
+  return "array";
+}
+
+export function summarizeBatchKeys(keys) {
+  const counts = { array: 0, image: 0, blend: 0, helper: 0, water: 0, terrain: 0, ground: 0, tint: 0 };
+  const seen = new Set();
+  for (const key of keys || []) {
+    if (key == null || key === false) continue;
+    const raw = String(key).split("\u0000")[0];
+    if (!raw || seen.has(raw)) continue;
+    seen.add(raw);
+    const reason = classifyBatchKey(raw);
+    if (counts[reason] == null) counts[reason] = 0;
+    counts[reason] += 1;
+  }
+  return counts;
+}
+
+export function formatKeyReasons(counts) {
+  if (!counts || typeof counts !== "object") return "";
+  const parts = [];
+  for (const name of KEY_REASON_ORDER) {
+    if (counts[name]) parts.push(`${name} ${counts[name]}`);
+  }
+  return parts.join(" · ");
 }
 
 export function buildCapture({
@@ -212,6 +264,8 @@ export function buildCapture({
   gpuState = "unsupported",
   samples = [],
   server = null,
+  keyReasons = null,
+  imagePack = null,
   at = new Date().toISOString(),
 } = {}) {
   const frames = samples.map((sample) => ({ ...sample }));
@@ -227,5 +281,7 @@ export function buildCapture({
     summary,
     recommendation: recommendNext(summary, { gpuState }),
     server,
+    keyReasons,
+    imagePack,
   };
 }

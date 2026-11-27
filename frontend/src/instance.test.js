@@ -3,7 +3,8 @@ import test from "node:test";
 
 import * as THREE from "three";
 
-import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import { createBatchFiller } from "./batch-fill.js";
+import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, pinAuthoredMatrix, presentByDefault, refreshBatchKeys, scheduleMergedDraws, surfaceKind } from "./instance.js";
 
 test("the default bridge state shows the lowered model and Show hidden reveals the raised one", () => {
   const params = (flag, negate) => ["dict", { Presence: ["dict", {
@@ -170,6 +171,33 @@ test("r187 merged draws fold one geometry and keep a hidden instance's indirect 
   mesh.dispose();
 });
 
+test("a quiet opaque batch does not walk its instances again", () => {
+  const geom = new THREE.BoxGeometry(1, 1, 1);
+  const material = new THREE.MeshBasicMaterial();
+  const mesh = new THREE.BatchedMesh(4, 5000, 8000, material);
+  mesh.perObjectFrustumCulled = false;
+  mesh.sortObjects = false;
+  const geometryId = mesh.addGeometry(geom);
+  mesh.addInstance(geometryId);
+  mesh.addInstance(geometryId);
+  const camera = new THREE.PerspectiveCamera();
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 1);
+  let calls = 0;
+  const previous = mesh._updateDrawParameters.bind(mesh);
+  mesh._updateDrawParameters = (...args) => {
+    calls += 1;
+    return previous(...args);
+  };
+  mesh._visibilityChanged = false;
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 1);
+  assert.equal(calls, 0);
+  mesh._visibilityChanged = true;
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 1);
+  assert.equal(calls, 1);
+  geom.dispose();
+  mesh.dispose();
+});
+
 test("same-size compressed images do not share a batch identity, and a clone does", () => {
   const make = () => new THREE.CompressedTexture(
     [{ data: new Uint8Array(16), width: 8, height: 8 }],
@@ -183,7 +211,8 @@ test("same-size compressed images do not share a batch identity, and a clone doe
   assert.equal(imageIdentity(left), imageIdentity(left.clone()));
   const part = { material: {}, geometry: {}, materialKey: "Body:0", batchKey: "flat|Body:0" };
   assert.equal(refreshBatchKeys([part], () => imageIdentity(left)), true);
-  assert.equal(part.batchKey, `${imageIdentity(left)}|Body:0`);
+  assert.equal(part.batchKey, imageIdentity(left));
+  assert.equal(part.batchKey.includes("Body:0"), false);
   assert.equal(refreshBatchKeys([part], () => imageIdentity(left)), false);
 });
 
@@ -340,6 +369,41 @@ test("cloneMaterialPreservingTextures keeps userData maps and does not serialize
   assert.equal(copy.userData.note, "keep");
 });
 
+test("cloneMaterialPreservingTextures keeps a texture list and a hidden array texture", () => {
+  const moss = {
+    isTexture: true,
+    uuid: "moss",
+    toJSON() {
+      throw new Error("texture was serialized");
+    },
+  };
+  const hidden = {
+    isTexture: true,
+    isCompressedArrayTexture: true,
+    uuid: "array",
+    toJSON() {
+      throw new Error("array was serialized");
+    },
+  };
+  const material = {
+    userData: { list: [moss] },
+    clone() {
+      return { userData: JSON.parse(JSON.stringify(this.userData)), cloned: true };
+    },
+  };
+  Object.defineProperty(material.userData, "forgeArrayAlbedo", {
+    value: hidden,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  const copy = cloneMaterialPreservingTextures(material);
+  assert.equal(material.userData.list[0], moss);
+  assert.equal(copy.userData.list[0], moss);
+  assert.equal(copy.userData.forgeArrayAlbedo, hidden);
+  assert.equal(Object.keys(copy.userData).includes("forgeArrayAlbedo"), false);
+});
+
 test("materialToDraw returns the part material when the mesh is still flat", () => {
   const map = { isTexture: true, channel: 0 };
   const mapped = { map };
@@ -391,4 +455,60 @@ test("copies that share an albedo share a batch key", () => {
   const house = { image: "roof", alpha: "opaque", side: 0, tint: "ffffff", indexed: "idx", attributes: "position,uv" };
   assert.equal(batchKey(house), batchKey({ ...house }));
   assert.notEqual(batchKey(house), batchKey({ ...house, image: "wall" }));
+});
+
+test("terrain and ground never share a batch with another model, and the camera does not move them", () => {
+  const terrain = new THREE.MeshStandardMaterial();
+  terrain.userData.terrainShader = true;
+  const ground = new THREE.MeshStandardMaterial();
+  ground.userData.groundSurface = true;
+  const prop = new THREE.MeshStandardMaterial();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), 3));
+  assert.equal(surfaceKind(terrain, geo, "Field"), "terrain");
+  assert.equal(surfaceKind(ground, geo, "ground-surface"), "ground");
+  assert.equal(surfaceKind(prop, geo, "Pot"), "");
+  const keyFor = (material, name) => {
+    const kind = surfaceKind(material, geo, name);
+    return `img|opaque${kind ? `|${kind}` : ""}`;
+  };
+  const terrainKey = keyFor(terrain, "Field");
+  const groundKey = keyFor(ground, "ground-surface");
+  const propKey = keyFor(prop, "Pot");
+  assert.notEqual(terrainKey, propKey);
+  assert.notEqual(groundKey, propKey);
+  assert.notEqual(terrainKey, groundKey);
+  const filler = createBatchFiller({
+    createMesh() {
+      return new THREE.BatchedMesh(4, 64, 64, new THREE.MeshBasicMaterial());
+    },
+  });
+  filler.append(terrainKey, terrain, [{ geometry: geo, part: { name: "Field" } }]);
+  filler.append(groundKey, ground, [{ geometry: geo, part: { name: "ground-surface" } }]);
+  filler.append(propKey, prop, [{ geometry: geo, part: { name: "Pot" } }]);
+  assert.equal(filler.stats().batches, 3);
+  assert.equal(filler.get(terrainKey).mesh.isBatchedMesh, true);
+  assert.notEqual(filler.get(terrainKey).mesh, filler.get(propKey).mesh);
+  assert.notEqual(filler.get(groundKey).mesh, filler.get(propKey).mesh);
+
+  const field = new THREE.Mesh(geo, terrain);
+  field.position.set(4, 0, 8);
+  field.updateMatrix();
+  field.updateMatrixWorld(true);
+  const authored = field.matrixWorld.elements.slice();
+  const camera = new THREE.PerspectiveCamera();
+  camera.position.set(30, 12, -6);
+  camera.updateMatrixWorld(true);
+  field.matrixWorld.copy(camera.matrixWorld);
+  pinAuthoredMatrix(field);
+  for (let i = 0; i < 16; i += 1) assert.equal(field.matrixWorld.elements[i], authored[i]);
+  camera.position.set(-10, 40, 3);
+  camera.lookAt(0, 0, 0);
+  camera.updateMatrixWorld(true);
+  pinAuthoredMatrix(field);
+  for (let i = 0; i < 16; i += 1) assert.equal(field.matrixWorld.elements[i], authored[i]);
+  geo.dispose();
+  terrain.dispose();
+  ground.dispose();
+  prop.dispose();
 });

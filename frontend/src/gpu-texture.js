@@ -84,15 +84,35 @@ export function minFilterFor(uploaded, width, height) {
 
 export function repairCompressedTexture(texture) {
   if (!texture || !texture.isCompressedTexture) return;
-  // Do not mark the texture dirty after the CPU copies have been dropped.
-  if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) return;
+  // A resident array is filled by a GPU copy. needsUpdate would re-upload it.
+  if (texture.userData?.forgeGpuResident) return;
   const uploaded = (texture.mipmaps && texture.mipmaps.length) || 1;
   const width = (texture.image && texture.image.width) || 0;
   const height = (texture.image && texture.image.height) || 0;
   texture.generateMipmaps = false;
   texture.minFilter = minFilterFor(uploaded, width, height);
   texture.magFilter = 1006;
+  requestCompressedUpload(texture);
+}
+
+/**
+ * Bump the upload version only when every mip still has bytes.
+ * three writes `mip.data` as-is. A 0-length buffer is a validation error
+ * (`Required size ... exceeds the linear data size (0)`), and the version
+ * bump is what sends it there. An empty chain is sealed instead
+ * (`dataReady` false) so a later render does not retry the write.
+ */
+export function requestCompressedUpload(texture) {
+  if (!texture || texture.isCompressedTexture !== true) return false;
+  if (texture.userData?.forgeGpuResident) return false;
+  if (texture.userData?.forgeCpuReleased || texture.source?.userData?.forgeCpuReleased) return false;
+  const levels = texture.mipmaps;
+  if (Array.isArray(levels) && levels.some((level) => !level || !level.data || level.data.byteLength === 0)) {
+    if (texture.source) texture.source.dataReady = false;
+    return false;
+  }
   texture.needsUpdate = true;
+  return true;
 }
 
 let reportedForeignTexture = false;
@@ -177,16 +197,25 @@ export function textureGpuReady(backend, texture) {
   return Boolean(data.texture || data.externalTexture);
 }
 
-export function releaseTextureCpu(texture) {
+export function releaseTextureCpu(texture, options = {}) {
   if (!texture) return false;
   const source = texture.source;
   if (texture.userData?.forgeCpuReleased || source?.userData?.forgeCpuReleased) {
     if (texture.userData) texture.userData.forgeCpuReleased = true;
+    if (source) source.dataReady = false;
     return false;
   }
+  // The caller has to have seen the GPU texture. Zeroing first and clearing
+  // dataReady after still races a version that was already bumped: three
+  // writeTexture's the empty mip and the validation error lands in submit.
+  const uploaded = options.uploaded === true || texture.userData?.forgeGpuUploaded === true;
+  if (!uploaded) return false;
   // Read size first. close() on an ImageBitmap makes width/height 0, and
   // three's WebGPU path then does log2(0)+1 = -Infinity for mipLevelCount.
   const { width, height } = textureImageSize(texture);
+  // Seal the upload before the bytes disappear. dataReady false makes
+  // updateTexture skip writeTexture even if this texture is still bound.
+  if (source) source.dataReady = false;
   // Mutate in place. Do not set needsUpdate: that retriggers an empty upload.
   const mipmaps = texture.mipmaps;
   if (Array.isArray(mipmaps)) {
@@ -208,16 +237,13 @@ export function releaseTextureCpu(texture) {
     image.data = emptyTexelData(image.data);
   }
   texture.generateMipmaps = false;
-  // three uploads when source.dataReady is true. The CPU pixels are gone, so
-  // a later createTexture (scene switch dispose + rebuild) must not try to
-  // copyExternalImageToTexture from the size stub.
-  if (source) source.dataReady = false;
   texture.userData = texture.userData || {};
   texture.userData.forgeCpuReleased = true;
   texture.userData.forgeCpuSize = { width, height };
   if (source) {
     source.userData = source.userData || {};
     source.userData.forgeCpuReleased = true;
+    source.dataReady = false;
   }
   return true;
 }

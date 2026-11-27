@@ -95,7 +95,9 @@ test("releaseTextureCpu drops mip and image buffers in place and is idempotent",
     image,
     needsUpdate: false,
   };
-  assert.equal(releaseTextureCpu(texture), true);
+  assert.equal(releaseTextureCpu(texture), false);
+  assert.equal(texture.mipmaps[0].data.byteLength, 16);
+  assert.equal(releaseTextureCpu(texture, { uploaded: true }), true);
   assert.equal(texture.mipmaps, mipmaps);
   assert.equal(texture.mipmaps[0], level);
   assert.equal(texture.image, image);
@@ -279,7 +281,9 @@ test("releaseTextureCpu leaves a size stub after closing an ImageBitmap so mipLe
     version: 1,
     mipmaps: [],
   };
-  assert.equal(releaseTextureCpu(texture), true);
+  assert.equal(releaseTextureCpu(texture), false);
+  assert.equal(image.width, 64);
+  assert.equal(releaseTextureCpu(texture, { uploaded: true }), true);
   assert.equal(image.width, 0);
   assert.equal(texture.image.width, 64);
   assert.equal(texture.image.height, 32);
