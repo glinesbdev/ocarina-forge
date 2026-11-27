@@ -72,6 +72,12 @@ export function actorKeyFromFeature(featureId, keyFor) {
   return keyFor(id) || null;
 }
 
+/** A failed bake is not sent again until the checkbox or a save asks. */
+export function shouldRequestTileBake({ failed = false, reason = "settle" } = {}) {
+  if (reason === "toggle" || reason === "save") return true;
+  return !failed;
+}
+
 export function tileCounters({ enabled = false, loaded = 0, visible = 0, cachedBytes = 0, bakeMs = 0 } = {}) {
   return {
     tilesLoaded: enabled ? Number(loaded) || 0 : 0,

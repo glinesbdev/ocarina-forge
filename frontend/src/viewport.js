@@ -49,7 +49,7 @@ import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
 import { api } from "./api.js";
 import { createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
-import { actorKeyFromFeature, featureIdOnHit, tileCounters, tileEligible, tileHides } from "./scene-tiles.js";
+import { actorKeyFromFeature, featureIdOnHit, shouldRequestTileBake, tileCounters, tileEligible, tileHides } from "./scene-tiles.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
@@ -398,6 +398,8 @@ export async function createViewport(host, hooks) {
   let tileBakeToken = 0;
   let tileBakeTimer = 0;
   let tileSettleBake = false;
+  let tileBakeError = "";
+  let tileBakeFlight = null;
   let lastRendering = false;
   let serverHead = "";
   let serverLines = [];
@@ -6439,17 +6441,38 @@ uniform float terrainLayerMissing;`
     tileLayer = layer;
   }
 
-  async function ensureTiles() {
-    if (!tilesOn) return;
+  function noteTileBakeError(error) {
+    const message = error && error.message ? String(error.message) : String(error || "The tile bake failed.");
+    tileSettleBake = false;
+    if (tileBakeError === message) return;
+    tileBakeError = message;
+    console.error(message);
+  }
+
+  async function ensureTiles(reason) {
+    if (!tilesOn) return "off";
+    if (!shouldRequestTileBake({ failed: Boolean(tileBakeError), reason })) return "failed";
+    if (reason === "toggle" || reason === "save") tileBakeError = "";
+    if (tileBakeFlight && reason !== "toggle" && reason !== "save") return tileBakeFlight;
+    const flight = requestTileBake();
+    tileBakeFlight = flight;
+    try {
+      return await flight;
+    } finally {
+      if (tileBakeFlight === flight) tileBakeFlight = null;
+    }
+  }
+
+  async function requestTileBake() {
     const token = ++tileBakeToken;
     let result = null;
     try {
       result = await api.bakeSceneTiles({ actors: collectTileActors() });
     } catch (error) {
-      console.error(error);
-      return;
+      noteTileBakeError(error);
+      return "failed";
     }
-    if (token !== tileBakeToken || !tilesOn) return false;
+    if (token !== tileBakeToken || !tilesOn) return "stale";
     tileBakeMs = Number(result && result.bakeMs) || 0;
     if (!result || !result.url) {
       if (tileLayer) {
@@ -6460,19 +6483,19 @@ uniform float terrainLayerMissing;`
       tileActors.clear();
       releaseTileMeshes();
       bumpCull();
-      return true;
+      return "empty";
     }
     try {
       await mountTileLayer(result.url);
     } catch (error) {
-      console.error(error);
-      return false;
+      noteTileBakeError(error);
+      return "failed";
     }
-    if (token !== tileBakeToken || !tilesOn) return false;
+    if (token !== tileBakeToken || !tilesOn) return "stale";
     applyTileManifest(result);
     bumpCull();
     requestRender();
-    return true;
+    return "applied";
   }
 
   function scheduleTileBake() {
@@ -6480,7 +6503,7 @@ uniform float terrainLayerMissing;`
     if (tileBakeTimer) clearTimeout(tileBakeTimer);
     tileBakeTimer = setTimeout(() => {
       tileBakeTimer = 0;
-      ensureTiles();
+      ensureTiles("save");
     }, 400);
   }
 
@@ -6496,7 +6519,7 @@ uniform float terrainLayerMissing;`
       requestRender();
       return;
     }
-    ensureTiles();
+    ensureTiles("toggle");
   }
 
   function startFieldBenchmark() {
@@ -6583,8 +6606,8 @@ uniform float terrainLayerMissing;`
       if (!settled && run.waited < 60 * 90) return true;
       if (tilesOn && !run.tilesReady) {
         if (!run.tilesPromise) {
-          run.tilesPromise = ensureTiles().then((applied) => {
-            if (applied || !tilesOn) run.tilesReady = true;
+          run.tilesPromise = ensureTiles("benchmark").then((status) => {
+            if (status === "applied" || status === "empty" || status === "failed" || status === "off" || !tilesOn) run.tilesReady = true;
             else run.tilesPromise = null;
             requestRender();
           }, () => {
@@ -6685,12 +6708,12 @@ uniform float terrainLayerMissing;`
       transform.size = THREE.MathUtils.clamp(distance / 14, 0.55, 2.4);
     }
     const updateTail = performance.now() - tailStart;
-    if (tilesOn && tileSettleBake && !(benchmarkRun && benchmarkRun.tilesPromise)) {
+    if (tilesOn && tileSettleBake && !tileBakeError && !(benchmarkRun && benchmarkRun.tilesPromise)) {
       const tilesPending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
         || (modelStage && modelStage.pending && modelStage.pending.size > 0);
       if (!tilesPending) {
         tileSettleBake = false;
-        ensureTiles();
+        ensureTiles("settle");
       }
     }
     if (tilesOn && tileLayer) {

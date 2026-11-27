@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -27,6 +28,7 @@ _WATER = re.compile(r"water|lake|river|ocean|pond|waterfall", re.IGNORECASE)
 _KEY = re.compile(r"^[0-9a-f]{64}$")
 _FILE = re.compile(r"^(tileset\.json|cells/-?\d+_-?\d+\.glb|hlod/-?\d+_-?\d+\.glb)$")
 _LOCK = threading.Lock()
+_log = logging.getLogger("uvicorn.error")
 
 
 def tile_eligible(actor: dict) -> bool:
@@ -194,7 +196,31 @@ def _write_tileset(directory: Path, metas: list[dict]) -> dict[str, dict]:
 
 
 def _script() -> Path:
-    return Path(__file__).resolve().parents[1] / "frontend" / "src" / "bake-scene-tiles.mjs"
+    return Path(__file__).resolve().parents[1] / "frontend" / "tools" / "bake-scene-tiles.mjs"
+
+
+def _node_binary() -> str:
+    chosen = os.environ.get("OCARINA_FORGE_NODE")
+    if chosen:
+        return chosen
+    found = shutil.which("node")
+    return found or "node"
+
+
+def _bake_failure_text(stderr: str, stdout: str, code: int) -> str:
+    """The first 4 KB of the baker's output, plus the stack if the log is longer."""
+    err = (stderr or "").replace("\r\n", "\n").strip()
+    out = (stdout or "").replace("\r\n", "\n").strip()
+    text = err or out or f"exit {code}"
+    if len(text) <= 4096:
+        body = text
+    else:
+        stack = [
+            line for line in text.splitlines()
+            if line.lstrip().startswith("at ") or line.startswith("Error") or "Error:" in line[:120]
+        ]
+        body = text[:4096] + "\n…\n" + "\n".join(stack[-30:])
+    return f"The tile bake failed (exit {code}).\n{body}"
 
 
 def _run_node(job: dict) -> None:
@@ -205,21 +231,24 @@ def _run_node(job: dict) -> None:
     blob.mkdir(parents=True, exist_ok=True)
     path = blob / f"{_digest(job)[:16]}.json"
     path.write_text(json.dumps(job), encoding="utf-8")
-    node = os.environ.get("OCARINA_FORGE_NODE") or "node"
+    node = _node_binary()
+    # cwd is frontend so a package resolves from frontend/node_modules.
     try:
         run = subprocess.run(
             [node, str(script), str(path)],
-            cwd=script.parents[2],
+            cwd=script.parent.parent,
             check=False,
             capture_output=True,
-            text=True,
             timeout=600,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise BancError(f"The tile bake did not finish ({exc}).", "tiles") from exc
     if run.returncode != 0:
-        detail = (run.stderr or run.stdout or "bake failed").strip().splitlines()
-        raise BancError(detail[-1][:400] if detail else "The tile bake failed.", "tiles")
+        stderr = run.stderr.decode("utf-8", errors="replace")
+        stdout = run.stdout.decode("utf-8", errors="replace")
+        message = _bake_failure_text(stderr, stdout, run.returncode)
+        _log.error(message)
+        raise BancError(message, "tiles")
 
 
 def bake_scene_tiles(dump, actors: list) -> dict:

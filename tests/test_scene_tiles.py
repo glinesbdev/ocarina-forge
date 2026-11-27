@@ -6,6 +6,7 @@ import pytest
 
 from ocarina_forge.errors import BancError
 from ocarina_forge.scene_tiles import (
+    _bake_failure_text,
     _write_tileset,
     cell_id,
     tile_eligible,
@@ -32,6 +33,24 @@ def test_static_scenery_is_eligible_and_the_rest_stay_put():
     assert not tile_eligible({**TREE, "volume": True})
     assert cell_id(10, -10) == "0_-1"
     assert cell_id(256, 256) == "1_1"
+
+
+def test_a_baker_crash_keeps_the_stack_not_just_the_version_line():
+    stderr = "\n".join([
+        "Error: Could not load the \"sharp\" module using the win32-x64 runtime",
+        "    at sharp.mjs:171:9",
+        "    at ModuleJob.run (node:internal/modules/esm/module_job:569:25)",
+        "Node.js v26.13.1",
+    ])
+    message = _bake_failure_text(stderr, "", 1)
+    assert "Could not load the \"sharp\" module" in message
+    assert "at sharp.mjs:171:9" in message
+    assert "Node.js v26.13.1" in message
+    long = ("x" * 5000) + "\nError: boom\n    at bake (file.js:1:1)\nNode.js v26.13.1\n"
+    clipped = _bake_failure_text(long, "", 1)
+    assert clipped.startswith("The tile bake failed")
+    assert "Error: boom" in clipped
+    assert len(clipped) < 6000
 
 
 def test_tileset_uris_stay_under_the_directory(tmp_path, monkeypatch):

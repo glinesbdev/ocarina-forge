@@ -8,11 +8,15 @@ import { Document, NodeIO } from "@gltf-transform/core";
 import { EXTMeshGPUInstancing, EXTMeshoptCompression, KHRMaterialsUnlit } from "@gltf-transform/extensions";
 import { MeshoptDecoder } from "meshoptimizer/decoder";
 
-import { bakeJob, clearSourceCache } from "./bake-scene-tiles.mjs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+import { bakeJob, clearSourceCache, localBakePath } from "./bake-scene-tiles.mjs";
 import {
   actorKeyFromFeature,
   cellId,
   featureIdOnHit,
+  shouldRequestTileBake,
   tileCounters,
   tileEligible,
   tileHides,
@@ -73,6 +77,35 @@ test("a tile hides its batched copy until that actor is selected", () => {
   assert.equal(tileHides({ tilesOn: true, held: false, opened: false }), false);
   assert.equal(cellId(10, -10), "0_-1");
   assert.equal(cellId(256, 256), "1_1");
+});
+
+test("a failed bake is not requested again until the checkbox or a save", () => {
+  assert.equal(shouldRequestTileBake({ failed: true, reason: "settle" }), false);
+  assert.equal(shouldRequestTileBake({ failed: true, reason: "benchmark" }), false);
+  assert.equal(shouldRequestTileBake({ failed: true, reason: "toggle" }), true);
+  assert.equal(shouldRequestTileBake({ failed: true, reason: "save" }), true);
+  assert.equal(shouldRequestTileBake({ failed: false, reason: "settle" }), true);
+});
+
+test("a Windows drive path is not joined onto the cwd or turned into a file URL", () => {
+  const windows = localBakePath("C:\\Users\\gline\\src\\ocarina-forge-gh\\cache\\ab\\file.glb");
+  assert.equal(windows.startsWith("file:"), false);
+  assert.equal(windows.includes("/agent/"), false);
+  assert.match(windows, /^C:\\Users\\gline\\src\\ocarina-forge-gh\\cache\\ab\\file\.glb$/);
+});
+
+test("the baker selftest prints its own result", () => {
+  const script = fileURLToPath(new URL("../tools/bake-scene-tiles.mjs", import.meta.url));
+  const run = spawnSync(process.execPath, [script, "--selftest"], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    encoding: "utf8",
+    timeout: 60000,
+  });
+  assert.equal(run.status, 0, run.stderr || run.stdout);
+  const line = run.stdout.trim().split("\n").pop();
+  const report = JSON.parse(line);
+  assert.equal(report.ok, true);
+  assert.equal(report.featureId, 7);
 });
 
 test("a hit on _feature_id_0 resolves to that actor", () => {

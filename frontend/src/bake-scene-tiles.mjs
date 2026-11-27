@@ -6,18 +6,25 @@
  * correction (that correction is a +90° X rotation). Content URIs are
  * relative to the tileset's directory.
  *
- *   node frontend/src/bake-scene-tiles.mjs job.json
+ *   node frontend/tools/bake-scene-tiles.mjs job.json
+ *   node frontend/tools/bake-scene-tiles.mjs --selftest
+ *
+ * The tools entry stubs `sharp`. This file imports `@gltf-transform/functions`,
+ * and that package loads `sharp` at import time. The bake never resizes
+ * images. A missing Windows binary used to kill the process before `main`.
  */
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
-import { pathToFileURL } from "node:url";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { Document, NodeIO } from "@gltf-transform/core";
 import {
   EXTMeshGPUInstancing,
   EXTMeshoptCompression,
   KHRMaterialsUnlit,
+  KHRTextureBasisu,
 } from "@gltf-transform/extensions";
 import {
   copyToDocument,
@@ -41,7 +48,7 @@ await Promise.all([
 ]);
 
 const io = new NodeIO()
-  .registerExtensions([EXTMeshGPUInstancing, EXTMeshoptCompression, KHRMaterialsUnlit])
+  .registerExtensions([EXTMeshGPUInstancing, EXTMeshoptCompression, KHRMaterialsUnlit, KHRTextureBasisu])
   .registerDependencies({
     "meshopt.decoder": MeshoptDecoder,
     "meshopt.encoder": MeshoptEncoder,
@@ -50,9 +57,32 @@ const io = new NodeIO()
 
 const loaded = new Map();
 
-export async function readSource(path) {
-  const key = String(path);
-  if (!loaded.has(key)) loaded.set(key, io.read(key));
+/**
+ * A Windows path stays a Windows path. `path.resolve` on Linux would join
+ * `C:\\...` onto the cwd, and NodeIO treats `file://` as a network request.
+ */
+export function localBakePath(value) {
+  const text = String(value || "").trim();
+  if (!text) return text;
+  if (/^file:/i.test(text)) return fileURLToPath(text);
+  if (/^[a-zA-Z]:[\\/]/.test(text) || text.startsWith("\\\\") || text.startsWith("//")) {
+    return path.win32.normalize(text);
+  }
+  return path.normalize(text);
+}
+
+function parentDir(file) {
+  const local = localBakePath(file);
+  if (/^[a-zA-Z]:[\\/]/.test(local) || local.startsWith("\\\\")) return path.win32.dirname(local);
+  return path.dirname(local);
+}
+
+export async function readSource(file) {
+  const key = localBakePath(file);
+  if (!loaded.has(key)) {
+    const bytes = await readFile(key);
+    loaded.set(key, io.readBinary(bytes));
+  }
   return loaded.get(key);
 }
 
@@ -290,8 +320,7 @@ async function bakeCell(cell) {
   const bounds = boundsOf(doc);
   const plain = await io.writeBinary(doc);
   await doc.transform(unpartition(), meshopt({ encoder: MeshoptEncoder, level: "medium" }));
-  await mkdir(dirname(cell.leaf), { recursive: true });
-  await io.write(cell.leaf, doc);
+  await writeGlb(cell.leaf, await io.writeBinary(doc));
   let hlodTriangles = triangles;
   try {
     const hlod = await io.readBinary(plain);
@@ -301,11 +330,9 @@ async function bakeCell(cell) {
       meshopt({ encoder: MeshoptEncoder, level: "medium" }),
     );
     hlodTriangles = countTris(hlod);
-    await mkdir(dirname(cell.hlod), { recursive: true });
-    await io.write(cell.hlod, hlod);
+    await writeGlb(cell.hlod, await io.writeBinary(hlod));
   } catch {
-    await mkdir(dirname(cell.hlod), { recursive: true });
-    writeFileSync(cell.hlod, Buffer.from(plain));
+    await writeGlb(cell.hlod, plain);
   }
   const meta = {
     id: cell.id,
@@ -317,8 +344,16 @@ async function bakeCell(cell) {
     meshes: doc.getRoot().listMeshes().length,
     actors: actors.map((actor) => Number(actor.featureId)),
   };
-  writeFileSync(cell.meta, JSON.stringify(meta));
+  const metaPath = localBakePath(cell.meta);
+  await mkdir(parentDir(metaPath), { recursive: true });
+  writeFileSync(metaPath, JSON.stringify(meta));
   return meta;
+}
+
+async function writeGlb(file, bytes) {
+  const local = localBakePath(file);
+  await mkdir(parentDir(local), { recursive: true });
+  await writeFile(local, Buffer.from(bytes));
 }
 
 export async function bakeJob(job) {
@@ -331,15 +366,89 @@ export async function bakeJob(job) {
   };
 }
 
-async function main() {
-  const jobPath = process.argv[2];
+function launchedDirectly() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    const here = path.resolve(fileURLToPath(import.meta.url));
+    const given = path.resolve(entry);
+    if (process.platform === "win32") return here.toLowerCase() === given.toLowerCase();
+    return here === given;
+  } catch {
+    return false;
+  }
+}
+
+async function main(jobPath) {
   if (!jobPath) throw new Error("Pass the bake job JSON.");
-  const job = JSON.parse(readFileSync(jobPath, "utf8"));
+  const job = JSON.parse(readFileSync(localBakePath(jobPath), "utf8"));
   const report = await bakeJob(job);
-  if (job.report) writeFileSync(job.report, JSON.stringify(report));
+  if (job.report) writeFileSync(localBakePath(job.report), JSON.stringify(report));
   else console.log(JSON.stringify(report));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  await main();
+export async function selfTest() {
+  const root = await mkdtemp(path.join(tmpdir(), "forge-tiles-"));
+  try {
+    const glb = path.join(root, "tree.glb");
+    const doc = new Document();
+    const buffer = doc.createBuffer();
+    const prim = doc.createPrimitive()
+      .setAttribute("POSITION", doc.createAccessor().setType("VEC3").setArray(new Float32Array([
+        0, 0, 0, 1, 0, 0, 0, 1, 0,
+      ])).setBuffer(buffer))
+      .setIndices(doc.createAccessor().setType("SCALAR").setArray(new Uint32Array([0, 1, 2])).setBuffer(buffer));
+    const scene = doc.createScene();
+    scene.addChild(doc.createNode("lod0:Body:0").setMesh(doc.createMesh("Tree").addPrimitive(prim)));
+    doc.getRoot().setDefaultScene(scene);
+    await writeGlb(glb, await io.writeBinary(doc));
+    clearSourceCache();
+    const leaf = path.join(root, "leaf.glb");
+    const report = await bakeJob({
+      cells: [{
+        id: "0_0",
+        leaf,
+        hlod: path.join(root, "hlod.glb"),
+        meta: path.join(root, "meta.json"),
+        actors: [{
+          featureId: 7,
+          gyaml: "Obj_Tree",
+          glb,
+          translation: [0, 0, 0],
+          rotation: [0, 0, 0],
+          scale: [1, 1, 1],
+          parts: [{ family: "Body:0", image: "Tree_Alb", alpha: "opaque" }],
+        }],
+      }],
+    });
+    const windows = localBakePath("C:\\Users\\gline\\src\\ocarina-forge-gh\\__forge_tile_selftest_missing__.glb");
+    if (windows.startsWith("file:") || windows.includes("/agent/") || windows.includes("\\agent\\")) {
+      throw new Error(`A Windows path was rewritten: ${windows}`);
+    }
+    let missing = "";
+    try {
+      await readSource(windows);
+    } catch (error) {
+      missing = error && error.message ? error.message : String(error);
+    }
+    if (!missing || /network request blocked/i.test(missing)) {
+      throw new Error(missing || "A missing Windows path did not fail as a file read.");
+    }
+    return { ok: true, featureId: report.cells[0].actors[0], triangles: report.cells[0].triangles, windows, missing };
+  } finally {
+    clearSourceCache();
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+export async function runCli(argv = process.argv) {
+  if (argv[2] === "--selftest") {
+    console.log(JSON.stringify(await selfTest()));
+    return;
+  }
+  await main(argv[2]);
+}
+
+if (launchedDirectly()) {
+  await runCli();
 }

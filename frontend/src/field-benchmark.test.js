@@ -64,6 +64,9 @@ test("the benchmark stays off unless Profile or the query flag starts it", () =>
   assert.match(viewport, /import\("\.\/scene-tiles-runtime\.js"\)/);
   assert.doesNotMatch(viewport, /from "3d-tiles-renderer/);
   assert.match(viewport, /tileHides\(/);
+  assert.match(viewport, /tileBakeError/);
+  assert.match(viewport, /status === "failed"/);
+  assert.match(viewport, /shouldRequestTileBake/);
   const runtime = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");
   assert.match(runtime, /3d-tiles-renderer\/three/);
   assert.match(runtime, /setMeshoptDecoder/);
