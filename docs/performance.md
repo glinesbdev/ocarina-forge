@@ -114,15 +114,33 @@ The array is not assigned to `material.map`, `normalMap`, `roughnessMap`, `metal
 | obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 | 7271 / 148 / 148 / 7922 |
 | sub | | 403 |
 
+### Settled Field after the layer-index fix
+
+27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. Land has albedo. The console has no `texture_2d_array` sample error. `submit` 31.2 ms beats the per-image 44.5 ms. `keys` is 466, not the 148 from the broken capture: that run had only partly streamed (`dl` 85160 vs 285421, meshes 135 vs 275, tris 994.9k vs 2M). The layer-index fix did not change the batch key. What did cost memory is the packer keeping every source mip buffer and a spare-capacity copy of the array. `tex` 1692 counted both. Heap before this change was about 1075–1532 MB.
+
+| | before #70 (settled) | this capture |
+| --- | --- | --- |
+| cpu | 56.9 ms (avg 61.1, p95 70.4) | 42.4 ms (avg 57.3, p95 87.2) |
+| update | 12.4 ms | 11.2 ms |
+| submit | 44.5 ms | 31.2 ms |
+| gpu | 4.7 ms | 5.2 ms (avg 5.2, p95 5.8) |
+| frame | | 46.2 ms (avg 48.9, p95 65.0) |
+| obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 | 3970 / 466 / 466 / 5123 |
+| sub | | 466 |
+| tex / heap | 455–595 / 1075–1532 MB | 1692 / 3736.2 MB |
+| streaming | | conv 7107.3, dl 285421.3, up 3692.5, compile 530 ms, first edit 19.7 MiB |
+
+The packer now starts at one layer, frees the previous array's mip buffers when a class grows, and compacts back to the live layer count. Once those bytes are in the array, the per-image CPU buffer is released unless a drawn 2D material (blend, water, terrain, helper) still samples it. A full BC7 that replaced a low bitmap is rebatched onto that size class instead of leaving both copies resident. `tex` counts the textures the batches actually sample (the arrays, the layer lookups, and the images that stay 2D), not the packed-away sources.
+
+`Material.clone` JSON-serializes `userData`. The array batch was cloned with `forgeLit` still holding the compressed maps, which is the `Unable to serialize Texture.` flood. The clone pulls those textures out first. Array, layer, and pick textures are stored on non-enumerable fields, so a later serialize does not walk them.
+
+`keys` stays split by array class (size, mips, format, color space, wrap), and by helper, water, terrain, blend, tint, and images that cannot pack. Tint stays in the key. Dump JSON's `keyReasons` and the Profile detail line count those reasons (`array`, `image`, `blend`, `helper`, `water`, `terrain`, `tint`).
+
 ### Estimated on Field
 
-Not measured here. `submit` should move about with the render-object count: 44.5 ms × (new keys / 1004).
+Not re-measured here. `submit` should stay near the settled 31.2 ms while `keys` stays in the hundreds, and should fall further if Dump JSON shows most keys are `image` (the low bitmaps that now join a size class). It should not go back to 44.5 ms or 111.3 ms. Heap should come back to the pre-#70 range, about 1075–1532 MB or under, once the source buffers and the spare array layers are gone. `tex` should sit well under 1692. It will not match 455–595 exactly: each array batch also has a live layer texture. GPU time stays near 5 ms. The arrays stay on.
 
-Family merge alone, if most of the gap from the older ~595 textures up to 1004 keys was the family suffix, lands nearer that texture-set count: on the order of 600–800 keys, and submit on the order of 25–35 ms. WebGL stops there.
-
-WebGPU arrays collapse every packable image in one size class into one key per shader class (alpha, side, tint, vertex layout). If the field's compressed images sit in a handful of sizes, `keys` and `batches` can fall from 1004 into the tens, and they should still match. The sub-draws stay (5872 draws in the settled capture). At about a microsecond each that is roughly 6 ms, plus a couple of milliseconds for a few dozen objects, so submit is more likely 8–20 ms than 2 ms once the shader is valid. The 111.3 ms figure is the invalid command buffer, so it is not the estimate for the fixed path. GPU time stays near 4.7 ms. Blend, terrain, water, and any size class of its own remain extra batches. The arrays stay on: a valid layer sample should beat 44.5 ms, so they are not behind a flag. Confirm with the overlay after streaming settles: `keys` and `batches` equal and under 1004, land and water textured, `submit` latest / avg / p95 against 44.5 ms (and against 111.3 ms), `cull` still about 0.
-
-Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on and wait until streaming settles. The console should not report a `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo, and the water should not stay on the flat teal stand-in. Compare `keys` and `batches` with 1004 and with 148, and `submit` with 44.5 ms and with 111.3 ms. `cull` stays about 0 and `gpu` about 4.7 ms. Textures, GPU picking, the gizmo, and selection should behave as before. There is no new overlay counter.
+Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on and wait until streaming settles. The console should not report `Unable to serialize Texture.` and should not report a `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo, including up close after the full images replace the low bitmaps, and the water should not stay on the flat teal stand-in. Compare heap with 1075–1532 MB and `tex` with 1692. Compare `keys` and `batches` with 466 and with 1004, and read the key-reason line (or Dump JSON `keyReasons`). Compare `submit` with 31.2 ms and with 44.5 ms. `cull` stays about 0. Textures, GPU picking, the gizmo, and selection should behave as before.
 
 ## Frustum and draw distance
 

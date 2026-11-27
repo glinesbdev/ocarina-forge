@@ -11,6 +11,7 @@ import {
   compressedLayerBytes,
   createTextureArrayPacker,
   isArrayTexture,
+  releaseArraySlots,
   STOCK_TEXTURE_SLOTS,
   textureArrayGroupKey,
   writeLayerTexel,
@@ -168,10 +169,64 @@ test("WebGL never constructs the array packer", () => {
   const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
   assert.match(viewport, /const texturePacker = mapNodes \? createTextureArrayPacker\(\) : null/);
   assert.match(viewport, /WebGL keeps a per-image key/);
+  assert.match(viewport, /cloneMaterialPreservingTextures\(source\)/);
+  assert.match(viewport, /settlePackedArrays\(\)/);
+  assert.doesNotMatch(viewport, /material = source\.clone\(\)/);
   assert.doesNotMatch(viewport, /material\.map = albedo\.array/);
   assert.doesNotMatch(viewport, /material\.normalMap = placed/);
   assert.doesNotMatch(viewport, /material\.roughnessMap = placed/);
   assert.doesNotMatch(viewport, /material\.roughnessMap = userData\.forgeArrayRough/);
+});
+
+test("a single image allocates one layer and compact drops spare capacity", () => {
+  const packer = createTextureArrayPacker();
+  const only = bc7(8, 8, 9);
+  arrayMapToken(only, packer);
+  assert.equal(packer.layerOf(only).array.image.depth, 1);
+  const textures = [bc7(8, 8, 1), bc7(8, 8, 2), bc7(8, 8, 3)];
+  const grown = createTextureArrayPacker();
+  for (const texture of textures) arrayMapToken(texture, grown);
+  const fat = grown.layerOf(textures[0]).array;
+  assert.ok(fat.image.depth > 3);
+  const bytes = compressedLayerBytes(8, 8, THREE.RGBA_BPTC_Format);
+  grown.compact();
+  const slim = grown.layerOf(textures[0]).array;
+  assert.equal(slim.image.depth, 3);
+  assert.notEqual(slim, fat);
+  assert.equal(slim.mipmaps[0].data[0], 1);
+  assert.equal(slim.mipmaps[0].data[2 * bytes], 3);
+  assert.equal(fat.mipmaps[0].data.byteLength, 0);
+  assert.equal(grown.takeSwapped().get(fat), slim);
+});
+
+test("an array no batch samples is disposed with its mip buffers", () => {
+  const packer = createTextureArrayPacker();
+  const keep = bc7(8, 8, 1);
+  const drop = bc7(16, 16, 2);
+  arrayMapToken(keep, packer);
+  arrayMapToken(drop, packer);
+  const kept = packer.layerOf(keep).array;
+  const dropped = packer.layerOf(drop).array;
+  packer.retain(new Set([kept]));
+  assert.equal(packer.stats().arrays, 1);
+  assert.equal(dropped.mipmaps[0].data.byteLength, 0);
+  assert.equal(packer.sources().has(keep), true);
+});
+
+test("an array on userData is not enumerable and does not serialize", () => {
+  const array = {
+    isTexture: true,
+    isCompressedArrayTexture: true,
+    toJSON() {
+      throw new Error("texture was serialized");
+    },
+  };
+  const material = { map: array, userData: {} };
+  releaseArraySlots(material);
+  assert.equal(material.map, null);
+  assert.equal(material.userData.forgeArrayAlbedo, array);
+  assert.equal(Object.keys(material.userData).includes("forgeArrayAlbedo"), false);
+  assert.equal(JSON.stringify(material.userData).includes("forgeArrayAlbedo"), false);
 });
 
 test("the layer texel stores albedo, normal, and roughness", () => {

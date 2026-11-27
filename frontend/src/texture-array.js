@@ -8,7 +8,11 @@
  * WebGL never builds a packer: it cannot sample an array from the stock material.
  * An array is never left on a stock slot (`map`, `aoMap`, `normalMap`, …).
  * Those slots compile `textureSample(tex, sampler, uv)` with no layer index,
- * and one invalid pipeline drops the whole command buffer.
+ * and one invalid pipeline drops the whole command buffer. The array textures
+ * live on non-enumerable material fields so a clone does not JSON-serialize them.
+ * A grown array is a new texture: the previous one is disposed and its mip
+ * buffers are dropped. `compact` then shrinks spare capacity back to the
+ * layer count so a class does not keep a doubled copy.
  */
 import * as THREE from "three";
 import { repairCompressedTexture } from "./gpu-texture.js";
@@ -116,11 +120,65 @@ function identityOf(texture) {
   return (texture && texture.source) || texture;
 }
 
-export function createTextureArrayPacker({ initialDepth = 8, maxDepth = 256 } = {}) {
+function retireArray(texture) {
+  if (!texture) return;
+  const levels = texture.mipmaps;
+  if (Array.isArray(levels)) {
+    for (const level of levels) {
+      if (level && level.data && level.data.byteLength) level.data = new Uint8Array(0);
+    }
+  }
+  if (typeof texture.dispose === "function") texture.dispose();
+}
+
+function buildPackedArray(texture, capacity, previous, depth) {
+  const mips = texture.mipmaps;
+  const format = texture.format;
+  const packed = mips.map((mip) => {
+    const bytes = compressedLayerBytes(mip.width, mip.height, format);
+    return { width: mip.width, height: mip.height, data: new Uint8Array(bytes * capacity) };
+  });
+  if (previous && depth > 0) {
+    for (let level = 0; level < packed.length; level += 1) {
+      const mip = mips[level];
+      const bytes = compressedLayerBytes(mip.width, mip.height, format);
+      const prior = previous.mipmaps && previous.mipmaps[level];
+      const source = prior && prior.data;
+      if (!source || !source.byteLength || !bytes) continue;
+      packed[level].data.set(source.subarray(0, Math.min(source.byteLength, bytes * depth)));
+    }
+  }
+  const array = new THREE.CompressedArrayTexture(
+    packed,
+    mips[0].width,
+    mips[0].height,
+    capacity,
+    format,
+    texture.type,
+  );
+  array.colorSpace = texture.colorSpace || THREE.NoColorSpace;
+  array.wrapS = texture.wrapS;
+  array.wrapT = texture.wrapT;
+  array.wrapR = THREE.ClampToEdgeWrapping;
+  array.flipY = false;
+  array.generateMipmaps = false;
+  array.anisotropy = texture.anisotropy || 1;
+  if (texture.repeat) array.repeat.copy(texture.repeat);
+  if (texture.offset) array.offset.copy(texture.offset);
+  if (Number.isInteger(texture.channel)) array.channel = texture.channel;
+  repairCompressedTexture(array);
+  array.needsUpdate = true;
+  return array;
+}
+
+export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256 } = {}) {
   const groups = new Map();
+  // Textures whose bytes have been copied into an array. The caller drops
+  // their CPU buffers once no drawn 2D slot still samples them.
+  const packedTextures = new Set();
   // A deeper array is a new texture. The GPU texture's layer count is fixed,
-  // so the previous object is disposed and materials have to be pointed at the
-  // replacement. `takeSwapped` is the old → new chain since the last call.
+  // so the previous object is disposed and its JS buffers are dropped.
+  // `takeSwapped` is the old → new chain since the last call.
   const swapped = new Map();
 
   function ensure(group, needed, texture) {
@@ -130,41 +188,10 @@ export function createTextureArrayPacker({ initialDepth = 8, maxDepth = 256 } = 
     if (needed > capacity) return false;
     if (group.array && group.capacity >= needed) return true;
     const previous = group.array;
-    const mips = texture.mipmaps;
-    const format = texture.format;
-    const packed = mips.map((mip) => {
-      const bytes = compressedLayerBytes(mip.width, mip.height, format);
-      return { width: mip.width, height: mip.height, data: new Uint8Array(bytes * capacity) };
-    });
-    if (previous) {
-      for (let level = 0; level < packed.length; level += 1) {
-        const bytes = compressedLayerBytes(mips[level].width, mips[level].height, format);
-        const prior = previous.mipmaps[level];
-        if (prior && prior.data) packed[level].data.set(prior.data.subarray(0, bytes * group.depth));
-      }
-    }
-    const array = new THREE.CompressedArrayTexture(
-      packed,
-      mips[0].width,
-      mips[0].height,
-      capacity,
-      format,
-      texture.type,
-    );
-    array.colorSpace = texture.colorSpace || THREE.NoColorSpace;
-    array.wrapS = texture.wrapS;
-    array.wrapT = texture.wrapT;
-    array.wrapR = THREE.ClampToEdgeWrapping;
-    array.flipY = false;
-    array.generateMipmaps = false;
-    array.anisotropy = texture.anisotropy || 1;
-    if (texture.repeat) array.repeat.copy(texture.repeat);
-    if (texture.offset) array.offset.copy(texture.offset);
-    if (Number.isInteger(texture.channel)) array.channel = texture.channel;
-    repairCompressedTexture(array);
+    const array = buildPackedArray(texture, capacity, previous, group.depth);
     if (previous) {
       swapped.set(previous, array);
-      previous.dispose();
+      retireArray(previous);
     }
     group.array = array;
     group.capacity = capacity;
@@ -194,11 +221,37 @@ export function createTextureArrayPacker({ initialDepth = 8, maxDepth = 256 } = 
     }
     group.layers.set(id, layer);
     group.depth += 1;
+    packedTextures.add(texture);
     if (group.fullUpload) group.array.layerUpdates.clear();
     else group.array.addLayerUpdate(layer);
     group.array.needsUpdate = true;
     group.fullUpload = false;
     return { group, layer, array: group.array };
+  }
+
+  function compact() {
+    for (const group of groups.values()) {
+      if (!group.array || !group.depth || group.capacity === group.depth) continue;
+      const previous = group.array;
+      const array = buildPackedArray(previous, group.depth, previous, group.depth);
+      swapped.set(previous, array);
+      retireArray(previous);
+      group.array = array;
+      group.capacity = group.depth;
+    }
+  }
+
+  function retain(live) {
+    if (!live || typeof live.has !== "function") return;
+    for (const [key, group] of groups) {
+      if (group.array && live.has(group.array)) continue;
+      retireArray(group.array);
+      groups.delete(key);
+    }
+  }
+
+  function sources() {
+    return packedTextures;
   }
 
   function stats() {
@@ -219,14 +272,13 @@ export function createTextureArrayPacker({ initialDepth = 8, maxDepth = 256 } = 
   }
 
   function dispose() {
-    for (const group of groups.values()) {
-      if (group.array && typeof group.array.dispose === "function") group.array.dispose();
-    }
+    for (const group of groups.values()) retireArray(group.array);
     groups.clear();
     swapped.clear();
+    packedTextures.clear();
   }
 
-  return { groupKey: textureArrayGroupKey, layerOf, stats, takeSwapped, dispose };
+  return { groupKey: textureArrayGroupKey, layerOf, stats, takeSwapped, dispose, compact, retain, sources };
 }
 
 /** One RGBA float texel per instance: albedo, normal, roughness, extra layer. */
@@ -273,10 +325,42 @@ export function isArrayTexture(texture) {
   );
 }
 
+/** Sampled array and layer textures. Non-enumerable, so a clone's JSON skips them. */
+export const LIVE_ARRAY_FIELDS = [
+  "forgeArrayAlbedo", "forgeArrayNormal", "forgeArrayRough",
+  "forgeArrayAo", "forgeArrayEmissive", "forgeArrayAlpha",
+  "forgeLayerTexture", "forgePickMask",
+];
+
+export function holdTexture(object, key, texture) {
+  if (!object) return;
+  Object.defineProperty(object, key, {
+    value: texture ?? null,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
+export function arrayTexturesOf(material) {
+  const userData = material && material.userData;
+  if (!userData) return [];
+  const found = [];
+  const seen = new Set();
+  for (const key of LIVE_ARRAY_FIELDS) {
+    const value = userData[key];
+    if (!value || value.isTexture !== true || seen.has(value)) continue;
+    seen.add(value);
+    found.push(value);
+  }
+  return found;
+}
+
 /**
- * Move every array off a stock slot. The texture is kept on `userData` so a
- * node can sample it with `.depth(layer)`. A slot with no field is cleared:
- * a bump or light array is dropped rather than sampled without an index.
+ * Move every array off a stock slot. The texture is kept on a non-enumerable
+ * `userData` field so a node can sample it with `.depth(layer)` and
+ * `Material.clone` does not JSON-serialize it. A slot with no field is
+ * cleared: a bump or light array is dropped rather than sampled without an index.
  */
 export function releaseArraySlots(material) {
   if (!material) return false;
@@ -292,7 +376,7 @@ export function releaseArraySlots(material) {
     const texture = material[slot];
     if (!isArrayTexture(texture)) continue;
     const field = ARRAY_SLOT_FIELD[slot];
-    if (field && !isArrayTexture(userData[field])) userData[field] = texture;
+    if (field && !isArrayTexture(userData[field])) holdTexture(userData, field, texture);
     material[slot] = null;
     cleared = true;
   }

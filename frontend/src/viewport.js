@@ -47,7 +47,7 @@ import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewO
 import { compileObjectPipeline, createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
-import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
+import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext, summarizeBatchKeys } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
 import { applyTextureManifest, formatTextureReport, presentTextures, restoreShownMaps, separateSharedMaterials } from "./texture-apply.js";
@@ -58,9 +58,11 @@ import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload,
 import {
   arrayMapToken,
   arrayMaterialEligible,
+  arrayTexturesOf,
   canPackTexture,
   createLayerTexture,
   createTextureArrayPacker,
+  holdTexture,
   isArrayTexture,
   releaseArraySlots,
   writeLayerTexel,
@@ -401,6 +403,7 @@ export async function createViewport(host, hooks) {
   const textureDetailFailed = new Set();
   const textureDetailReady = new Map();
   const textureDetailPending = new Set();
+  const detailRepackTextures = new Set();
   const detailParses = [];
   let detailCandidates = new Map();
   let nextDetailScan = 0;
@@ -1036,6 +1039,9 @@ let convertSlots = 8;
     const keysChanged = refreshBatchKeys(parts, batchKeyFor);
     retargetArrayTextures();
     refreshArrayLayers(parts);
+    // A key change restages onto the array. Settling first would drop that
+    // array before a batch references it, and then drop the source bytes.
+    if (!keysChanged) settlePackedArrays();
     if (retiled) rewriteRetiledGeometry(parts);
     const rebound = rebindDrawnMaps();
     const misses = batchMissesUpload(parts, batches);
@@ -1389,6 +1395,7 @@ let convertSlots = 8;
     textureDetailReady.clear();
     textureDetailPending.clear();
     textureDetailFailed.clear();
+    detailRepackTextures.clear();
 
     const actors = new Map(entries);
     for (const entry of entries.values()) disposeEntry(entry);
@@ -3462,10 +3469,6 @@ let convertSlots = 8;
     batch.pickIdsDirty = true;
   }
 
-  function rememberSource(list, texture) {
-    if (texture && !list.includes(texture)) list.push(texture);
-  }
-
   function ensureLayerTexture(material, capacity) {
     const current = material.userData.forgeLayerTexture;
     const width = current && current.image ? current.image.width | 0 : 0;
@@ -3475,7 +3478,7 @@ let convertSlots = 8;
       next.image.data.set(current.image.data.subarray(0, Math.min(current.image.data.length, next.image.data.length)));
     }
     if (current && typeof current.dispose === "function") current.dispose();
-    material.userData.forgeLayerTexture = next;
+    holdTexture(material.userData, "forgeLayerTexture", next);
     return { texture: next, replaced: true };
   }
 
@@ -3487,13 +3490,13 @@ let convertSlots = 8;
     let material = mesh.userData.forgeArrayMaterial;
     if (!material) {
       const source = mesh.material;
-      material = source.clone();
-      const copied = { ...(source.userData || {}) };
-      copied.forgeArray = true;
-      copied.albedoNode = false;
-      copied.cutoutNode = false;
-      copied.forgeArraySources = [];
-      material.userData = copied;
+      // clone() JSON-serializes userData. forgeLit holds the compressed maps,
+      // and that is the "Unable to serialize Texture." flood.
+      material = cloneMaterialPreservingTextures(source);
+      material.userData = material.userData || {};
+      material.userData.forgeArray = true;
+      material.userData.albedoNode = false;
+      material.userData.cutoutNode = false;
       material.colorNode = null;
       material.alphaTestNode = null;
       material.normalNode = null;
@@ -3507,7 +3510,6 @@ let convertSlots = 8;
     for (const item of added) cap = Math.max(cap, (item.instanceId || 0) + 1);
     const layerSlot = ensureLayerTexture(material, cap);
     let rebuildNodes = layerSlot.replaced || material.colorNode == null;
-    const sources = material.userData.forgeArraySources || (material.userData.forgeArraySources = []);
     const place = (texture) => (texture && canPackTexture(texture) ? texturePacker.layerOf(texture) : null);
     for (const item of added) {
       const partMaterial = item.record && item.record.part && item.record.part.material;
@@ -3515,7 +3517,7 @@ let convertSlots = 8;
       const albedo = place(partMaterial.map);
       if (!albedo) continue;
       if (material.userData.forgeArrayAlbedo !== albedo.array) {
-        material.userData.forgeArrayAlbedo = albedo.array;
+        holdTexture(material.userData, "forgeArrayAlbedo", albedo.array);
         rebuildNodes = true;
       }
       if (Number.isInteger(partMaterial.map.channel)) albedo.array.channel = partMaterial.map.channel;
@@ -3526,24 +3528,22 @@ let convertSlots = 8;
       const placedNormal = place(normal);
       if (placedNormal) {
         if (material.userData.forgeArrayNormal !== placedNormal.array) {
-          material.userData.forgeArrayNormal = placedNormal.array;
+          holdTexture(material.userData, "forgeArrayNormal", placedNormal.array);
           rebuildNodes = true;
         }
         normalLayer = placedNormal.layer;
-        rememberSource(sources, normal);
       }
       const rough = partMaterial.roughnessMap;
       const placedRough = place(rough);
       if (placedRough) {
         const orm = partMaterial.metalnessMap === rough;
         if (material.userData.forgeArrayRough !== placedRough.array || material.userData.forgeArrayOrm !== orm) {
-          material.userData.forgeArrayRough = placedRough.array;
+          holdTexture(material.userData, "forgeArrayRough", placedRough.array);
           material.userData.forgeArrayOrm = orm;
           rebuildNodes = true;
         }
         roughLayer = placedRough.layer;
-        rememberSource(sources, rough);
-        if (partMaterial.aoMap === rough) material.userData.forgeArrayAo = placedRough.array;
+        if (partMaterial.aoMap === rough) holdTexture(material.userData, "forgeArrayAo", placedRough.array);
       }
       const ao = partMaterial.aoMap;
       const emissive = partMaterial.emissiveMap;
@@ -3553,13 +3553,11 @@ let convertSlots = 8;
       if (placedExtra) {
         const field = extraTexture === ao ? "forgeArrayAo" : extraTexture === emissive ? "forgeArrayEmissive" : "forgeArrayAlpha";
         if (material.userData[field] !== placedExtra.array) {
-          material.userData[field] = placedExtra.array;
+          holdTexture(material.userData, field, placedExtra.array);
           rebuildNodes = true;
         }
         extraLayer = placedExtra.layer;
-        rememberSource(sources, extraTexture);
       }
-      rememberSource(sources, partMaterial.map);
       writeLayerTexel(layerSlot.texture, item.instanceId, albedo.layer, normalLayer, roughLayer, extraLayer);
     }
     if (rebuildNodes && mapNodes.bindArrayMaterial) {
@@ -3603,12 +3601,12 @@ let convertSlots = 8;
       let changed = false;
       for (const field of ["forgeArrayAlbedo", "forgeArrayNormal", "forgeArrayRough", "forgeArrayAo", "forgeArrayEmissive", "forgeArrayAlpha"]) {
         if (userData[field] && swapped.has(userData[field])) {
-          userData[field] = latestArray(userData[field], swapped);
+          holdTexture(userData, field, latestArray(userData[field], swapped));
           changed = true;
         }
       }
       if (isArrayTexture(material.map) && swapped.has(material.map)) {
-        userData.forgeArrayAlbedo = latestArray(material.map, swapped);
+        holdTexture(userData, "forgeArrayAlbedo", latestArray(material.map, swapped));
         material.map = null;
         changed = true;
       }
@@ -3628,6 +3626,59 @@ let convertSlots = 8;
       releaseArraySlots(material);
       const albedoTexture = userData.forgeArrayAlbedo;
       batch.mesh.userData.forgeAlbedo = albedoTexture && albedoTexture.isTexture === true ? albedoTexture : null;
+    }
+  }
+
+  function liveCompressedArrays() {
+    const live = new Set();
+    for (const batch of batches) {
+      const material = batch.mesh && batch.mesh.material;
+      for (const texture of arrayTexturesOf(material)) {
+        if (texture && texture.isCompressedArrayTexture) live.add(texture);
+      }
+    }
+    return live;
+  }
+
+  function collectDrawnSources() {
+    const drawn = new Set();
+    const add = (texture) => {
+      if (!texture || texture.isTexture !== true || isArrayTexture(texture)) return;
+      drawn.add(texture.source || texture);
+    };
+    const visit = (material) => {
+      if (!material) return;
+      for (const key of TEXTURE_KEYS) add(material[key]);
+      const extra = material.userData || {};
+      for (const key of ["mossMap", "orm1Map", "normal1Map", "blendMap"]) add(extra[key]);
+    };
+    for (const batch of batches) visit(batch.mesh && batch.mesh.material);
+    if (terrainRoot) {
+      terrainRoot.traverse((child) => {
+        const materials = child.material
+          ? (Array.isArray(child.material) ? child.material : [child.material])
+          : [];
+        for (const material of materials) visit(material);
+      });
+    }
+    return drawn;
+  }
+
+  // Drop spare array layers, drop arrays no batch samples, and drop the CPU
+  // copy of a source whose bytes now live only in an array. A 2D draw (blend,
+  // water, terrain, helper) keeps its buffer until the GPU upload path releases it.
+  function settlePackedArrays() {
+    if (!texturePacker) return;
+    if (typeof texturePacker.compact === "function") texturePacker.compact();
+    retargetArrayTextures();
+    if (typeof texturePacker.retain === "function") texturePacker.retain(liveCompressedArrays());
+    if (typeof texturePacker.sources !== "function") return;
+    const drawn = collectDrawnSources();
+    for (const texture of texturePacker.sources()) {
+      if (!texture || texture.userData?.forgeFullTexture) continue;
+      const source = texture.source || texture;
+      if (drawn.has(source)) continue;
+      releaseTextureCpu(texture);
     }
   }
 
@@ -3870,6 +3921,7 @@ let convertSlots = 8;
     if (!replacing) {
       flushPickIds(touched);
       releaseUnselectedPartGeometry();
+      settlePackedArrays();
       return actors.every((entry) => !entry.parts?.length || entry.slots.length);
     }
     const expectMeshes = actors.some((entry) => entry.parts && entry.parts.length);
@@ -3890,6 +3942,7 @@ let convertSlots = 8;
     releaseUnselectedPartGeometry();
     guardMissingUv();
     noteTextureDebug();
+    settlePackedArrays();
     return true;
   }
 
@@ -5874,6 +5927,46 @@ uniform float terrainLayerMissing;`
     }
     delete texture.userData.forgeFullTexture;
     textureCpuReleaseDirty = true;
+    // The batch still samples the low bitmap. The full BC7 has to join its
+    // size class, or the field keeps both the bitmap and the compressed buffer.
+    if (texturePacker && mapNodes) detailRepackTextures.add(texture);
+  }
+
+  function partsUsingTexture(texture) {
+    const parts = [];
+    const source = texture && (texture.source || texture);
+    for (const entry of entries.values()) {
+      for (const part of entry.parts || []) {
+        const material = part && part.material;
+        if (!material) continue;
+        const slots = [
+          material.map, material.normalMap, material.roughnessMap, material.metalnessMap,
+          material.aoMap, material.emissiveMap, material.alphaMap,
+        ];
+        if (slots.some((slot) => slot && (slot === texture || (source && slot.source === source)))) parts.push(part);
+      }
+    }
+    return parts;
+  }
+
+  function repackDetailedTextures() {
+    if (!detailRepackTextures.size || !texturePacker) return;
+    const textures = [...detailRepackTextures];
+    detailRepackTextures.clear();
+    const parts = [];
+    const seen = new Set();
+    for (const texture of textures) {
+      for (const part of partsUsingTexture(texture)) {
+        if (seen.has(part)) continue;
+        seen.add(part);
+        parts.push(part);
+      }
+    }
+    if (!parts.length) return;
+    const keysChanged = refreshBatchKeys(parts, batchKeyFor);
+    if (!keysChanged) return;
+    const affected = entriesForParts(parts);
+    if (affected.length) void rebuildBatches(affected);
   }
 
   function updateTextureDetail(now, parsedDetail) {
@@ -6313,6 +6406,7 @@ uniform float terrainLayerMissing;`
       sceneStream: sceneStreamStats,
       server: serverHead,
       batchKeys: batchKeyCount(),
+      keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
       pickUploads: statPickUploads,
     };
   }
@@ -6325,6 +6419,7 @@ uniform float terrainLayerMissing;`
       gpuState: profileGpuState(),
       samples: profileWindow.samples(),
       server: serverHead ? { head: serverHead, lines: serverLines.slice() } : null,
+      keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
     });
   }
 
@@ -6473,6 +6568,7 @@ uniform float terrainLayerMissing;`
     if (parseDetail) parseDetail();
     if (detailParses.length) requestRender();
     updateTextureDetail(now, Boolean(parseDetail));
+    repackDetailedTextures();
     guardMissingUv();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
@@ -6597,6 +6693,7 @@ uniform float terrainLayerMissing;`
         objects: profileWindow.latest() ? profileWindow.latest().objects : null,
         batchCount: profileWindow.latest() ? profileWindow.latest().batches : batches.length,
         batchKeys: batchKeyCount(),
+        keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
         pickUploads: profileWindow.latest() && profileWindow.latest().pickUploads != null
           ? profileWindow.latest().pickUploads
           : statPickUploads,

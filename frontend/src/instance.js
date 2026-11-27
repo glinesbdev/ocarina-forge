@@ -9,7 +9,7 @@
  * that buffer is what made the drag throw after the first slot.
  */
 
-import { releaseArraySlots } from "./texture-array.js";
+import { holdTexture, LIVE_ARRAY_FIELDS, releaseArraySlots } from "./texture-array.js";
 
 // Verified initial state from the shipped GameDataList. Forge has no live save flags.
 const PRESENCE_DEFAULTS = new Map([["IsHyruleFieldBridgeClose", false]]);
@@ -205,6 +205,13 @@ function pullUserDataTextures(userData) {
       if (value && value.isTexture) {
         held.push({ path: path.concat(key), texture: value });
         delete object[key];
+      } else if (Array.isArray(value)) {
+        for (let index = 0; index < value.length; index += 1) {
+          const item = value[index];
+          if (!item || !item.isTexture) continue;
+          held.push({ path: path.concat(key, String(index)), texture: item });
+          value[index] = null;
+        }
       } else if (value && typeof value === "object" && value.constructor === Object) {
         walk(value, path.concat(key));
       }
@@ -216,15 +223,27 @@ function pullUserDataTextures(userData) {
 
 function restoreUserDataTextures(userData, held) {
   if (!userData) return;
-  for (const { path, texture } of held) {
+  for (const { path, texture, hidden } of held) {
     let object = userData;
     for (let i = 0; i < path.length - 1; i += 1) {
       const key = path[i];
       if (!object[key] || typeof object[key] !== "object") object[key] = {};
       object = object[key];
     }
-    object[path[path.length - 1]] = texture;
+    const key = path[path.length - 1];
+    if (hidden) holdTexture(object, key, texture);
+    else object[key] = texture;
   }
+}
+
+function hiddenUserDataTextures(userData) {
+  const held = [];
+  if (!userData) return held;
+  for (const key of LIVE_ARRAY_FIELDS) {
+    const value = userData[key];
+    if (value && value.isTexture) held.push({ path: [key], texture: value, hidden: true });
+  }
+  return held;
 }
 
 /**
@@ -236,10 +255,12 @@ function restoreUserDataTextures(userData, held) {
 export function cloneMaterialPreservingTextures(material) {
   if (!material || typeof material.clone !== "function") return material;
   const held = pullUserDataTextures(material.userData);
+  const hidden = hiddenUserDataTextures(material.userData);
   const copy = material.clone();
   restoreUserDataTextures(material.userData, held);
   copy.userData = copy.userData || {};
   restoreUserDataTextures(copy.userData, held);
+  restoreUserDataTextures(copy.userData, hidden);
   releaseArraySlots(copy);
   return copy;
 }

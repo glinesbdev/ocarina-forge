@@ -368,6 +368,41 @@ test("cloneMaterialPreservingTextures keeps userData maps and does not serialize
   assert.equal(copy.userData.note, "keep");
 });
 
+test("cloneMaterialPreservingTextures keeps a texture list and a hidden array texture", () => {
+  const moss = {
+    isTexture: true,
+    uuid: "moss",
+    toJSON() {
+      throw new Error("texture was serialized");
+    },
+  };
+  const hidden = {
+    isTexture: true,
+    isCompressedArrayTexture: true,
+    uuid: "array",
+    toJSON() {
+      throw new Error("array was serialized");
+    },
+  };
+  const material = {
+    userData: { list: [moss] },
+    clone() {
+      return { userData: JSON.parse(JSON.stringify(this.userData)), cloned: true };
+    },
+  };
+  Object.defineProperty(material.userData, "forgeArrayAlbedo", {
+    value: hidden,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  const copy = cloneMaterialPreservingTextures(material);
+  assert.equal(material.userData.list[0], moss);
+  assert.equal(copy.userData.list[0], moss);
+  assert.equal(copy.userData.forgeArrayAlbedo, hidden);
+  assert.equal(Object.keys(copy.userData).includes("forgeArrayAlbedo"), false);
+});
+
 test("materialToDraw returns the part material when the mesh is still flat", () => {
   const map = { isTexture: true, channel: 0 };
   const mapped = { map };

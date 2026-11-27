@@ -13,7 +13,7 @@
  * keeps the cursor pixel.
  */
 
-import { isArrayTexture } from "./texture-array.js";
+import { holdTexture, isArrayTexture } from "./texture-array.js";
 
 export const PICK_LAYER = 1;
 export const PREVIEW_PICK_LAYER = 2;
@@ -61,10 +61,10 @@ export function applyPickMask(material, mask, layerTexture) {
   material.alphaMap = isArrayTexture(alpha) ? null : (alpha || null);
   material.alphaTest = mask && mask.alphaTest ? mask.alphaTest : 0;
   material.userData = material.userData || {};
-  material.userData.forgePickMask = (mask && mask.map) || null;
+  holdTexture(material.userData, "forgePickMask", (mask && mask.map) || null);
   material.userData.forgePickMaskChannel = (mask && mask.channel) || "a";
   material.userData.forgePickArray = isArrayTexture(mask && mask.map);
-  if (layerTexture !== undefined) material.userData.forgeLayerTexture = layerTexture || null;
+  if (layerTexture !== undefined) holdTexture(material.userData, "forgeLayerTexture", layerTexture || null);
 }
 
 /** Readback width. WebGPU copies a whole aligned row; WebGL can read one pixel. */
