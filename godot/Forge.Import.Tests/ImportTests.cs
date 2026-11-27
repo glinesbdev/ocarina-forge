@@ -267,6 +267,73 @@ public class ImportTests
         Assert.NotNull(layers);
         Assert.Equal(9, layers![0]);
         Assert.Equal(3, layers[1]);
+        payload[0x40 + 2] = 0x7F;
+        var halfway = TerrainMesh.ReadMateGrid(payload, null);
+        Assert.NotNull(halfway);
+        Assert.Equal(3, halfway!.Chosen[0]);
+        Assert.Equal(9, halfway.Other[0]);
+        Assert.InRange(halfway.Weight[0], 0.49f, 0.51f);
+        Assert.Equal(200f / 255f, TerrainMesh.PairWeight(200, 0), 3);
+    }
+
+    [Fact]
+    public void HelpersAreSkippedAndPlantsStay()
+    {
+        Assert.Contains("marker", ActorList.SkipReason("LookAttentionActor_HidingHoleEntrance"));
+        Assert.Contains("marker", ActorList.SkipReason("ShowToCameraPoint"));
+        Assert.Contains("marker", ActorList.SkipReason("Obj_HorseJumpForbidHeight"));
+        Assert.Equal("", ActorList.SkipReason("Land_Graveyard_Plants_A_08"));
+        Assert.Equal("", ActorList.SkipReason("Land_kokiri_Plant_A_02_DropFixed_03"));
+        Assert.Contains("Land_kokiri_Plant_A_02", ModelLocator.PlacementStems("Land_kokiri_Plant_A_02_DropFixed_03"));
+        Assert.Contains("Land_Graveyard_Plants_A", ModelLocator.PlacementStems("Land_Graveyard_Plants_A_08"));
+        Assert.Contains("Land_LonLon_Plant_A", ModelLocator.PlacementStems("Land_LonLon_Plant_A_01"));
+    }
+
+    [Fact]
+    public void DropFixedPlantUsesTheUnsuffixedFile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "of-plant-" + Guid.NewGuid().ToString("N"));
+        string romfs = Path.Combine(root, "romfs");
+        Directory.CreateDirectory(Path.Combine(romfs, "Model"));
+        File.WriteAllBytes(Path.Combine(romfs, "Model", "Land_kokiri_Plant_A_02.Land_kokiri_Plant_A_02.bfres"), File.ReadAllBytes(Fixture("v10-tree.bfres")));
+        try
+        {
+            var found = ModelLocator.Find(DumpFolder.Open(root), "Land_kokiri_Plant_A_02_DropFixed_03", new List<string>());
+            Assert.NotNull(found);
+            Assert.EndsWith("Model/Land_kokiri_Plant_A_02.Land_kokiri_Plant_A_02.bfres", found!.Path.Replace('\\', '/'));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void BoundsBoxIsNotDrawn()
+    {
+        var box = new ImportedPart
+        {
+            Name = "bounds",
+            Positions = Enumerable.Range(0, 8).Select(i => new Vec3(i, 0, 0)).ToList(),
+        };
+        var wall = new ImportedPart
+        {
+            Name = "wall",
+            Positions = Enumerable.Range(0, 30).Select(i => new Vec3(i * 0.1, 1, 0)).ToList(),
+            Uvs = Enumerable.Range(0, 30).Select(_ => new Vec2(0, 0)).ToList(),
+        };
+        var parts = new List<ImportedPart> { box, wall };
+        ShapeFilter.Hide(parts);
+        Assert.Contains("bounds", box.OmitReason);
+        Assert.Equal("", wall.OmitReason);
+    }
+
+    [Fact]
+    public void Bc4AndBc5StayOneAndTwoChannels()
+    {
+        var bc4 = BntxReader.Read(BntxReader.WriteLinear("Gn", 8, 8, 0x1D01, new byte[8 * 8 / 2]));
+        Assert.Equal(GpuCodec.Bc4, bc4[0].Codec);
+        Assert.Equal(8, bc4[0].BytesPerBlock);
+        var bc5 = BntxReader.Read(BntxReader.WriteLinear("Nrm", 8, 8, 0x1E01, new byte[8 * 8]));
+        Assert.Equal(GpuCodec.Bc5, bc5[0].Codec);
+        Assert.Equal(16, bc5[0].BytesPerBlock);
     }
 
     static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };

@@ -136,10 +136,18 @@ public static class FieldScene
         }
         var indices = part.Indices.Select(index => index).ToArray();
         Vector2[]? uv2 = null;
+        Color[]? colors = null;
         if (part.MaterialLayers is { Count: > 0 } && part.MaterialLayers.Count == part.Positions.Count)
         {
             uv2 = new Vector2[part.MaterialLayers.Count];
-            for (int i = 0; i < uv2.Length; i++) uv2[i] = new Vector2(part.MaterialLayers[i], 0);
+            colors = new Color[part.MaterialLayers.Count];
+            for (int i = 0; i < uv2.Length; i++)
+            {
+                float other = part.MaterialLayerB is { Count: > 0 } && i < part.MaterialLayerB.Count ? part.MaterialLayerB[i] : -1;
+                float mix = part.MaterialBlend is { Count: > 0 } && i < part.MaterialBlend.Count ? part.MaterialBlend[i] : 0;
+                uv2[i] = new Vector2(part.MaterialLayers[i], other);
+                colors[i] = new Color(mix, 0, 0, 1);
+            }
         }
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
@@ -147,6 +155,7 @@ public static class FieldScene
         arrays[(int)Mesh.ArrayType.Index] = indices;
         if (uvs is not null) arrays[(int)Mesh.ArrayType.TexUV] = uvs;
         if (uv2 is not null) arrays[(int)Mesh.ArrayType.TexUV2] = uv2;
+        if (colors is not null) arrays[(int)Mesh.ArrayType.Color] = colors;
         if (normals is not null) arrays[(int)Mesh.ArrayType.Normal] = normals;
         var mesh = new ArrayMesh();
         mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
@@ -180,7 +189,11 @@ public static class FieldScene
             if (part.Texture.Length > 0 && textures.TryGetValue(part.Texture, out var image))
             {
                 var texture = Upload(image, uploaded, report);
-                if (texture is not null) material.AlbedoTexture = texture;
+                if (texture is not null)
+                {
+                    material.AlbedoTexture = texture;
+                    material.AlbedoTextureForceSrgb = image.Srgb;
+                }
             }
             if (material.AlbedoTexture is null)
             {
@@ -249,6 +262,8 @@ public static class FieldScene
         GpuCodec.Bc7 => Image.Format.BptcRgba,
         GpuCodec.Bc1 => Image.Format.Dxt1,
         GpuCodec.Bc3 => Image.Format.Dxt5,
+        GpuCodec.Bc4 => Image.Format.RgtcR,
+        GpuCodec.Bc5 => Image.Format.RgtcRg,
         GpuCodec.Rgba8 => Image.Format.Rgba8,
         GpuCodec.Astc when image.BlockW == 4 && image.BlockH == 4 => Image.Format.Astc4X4,
         GpuCodec.Astc when image.BlockW == 8 && image.BlockH == 8 => Image.Format.Astc8X8,
@@ -305,16 +320,18 @@ public static class FieldScene
         render_mode cull_disabled;
         uniform sampler2DArray albedo : source_color, repeat_enable, filter_linear_mipmap;
         uniform vec3 earth = vec3(0.45, 0.38, 0.22);
-        varying flat int layer;
+        varying flat int layer_a;
+        varying flat int layer_b;
+        varying float blend_w;
         void vertex() {
-            layer = int(UV2.x);
+            layer_a = int(UV2.x);
+            layer_b = int(UV2.y);
+            blend_w = COLOR.r;
         }
         void fragment() {
-            if (layer < 0) {
-                ALBEDO = earth;
-            } else {
-                ALBEDO = texture(albedo, vec3(UV, float(layer))).rgb;
-            }
+            vec3 primary = layer_a < 0 ? earth : texture(albedo, vec3(UV, float(layer_a))).rgb;
+            vec3 secondary = layer_b < 0 ? primary : texture(albedo, vec3(UV, float(layer_b))).rgb;
+            ALBEDO = mix(primary, secondary, blend_w);
             ROUGHNESS = 1.0;
         }
         """;

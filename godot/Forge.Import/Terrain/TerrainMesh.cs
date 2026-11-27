@@ -24,6 +24,10 @@ public static class TerrainMesh
         public float[] Heights { get; init; } = Array.Empty<float>();
         /// <summary>MaterialAlb index per height sample, or null. -1 is the flat earth colour.</summary>
         public int[]? Layers { get; init; }
+        /// <summary>The other material in the texel. -1 when the sample has one index.</summary>
+        public int[]? LayerB { get; init; }
+        /// <summary>Blend toward <see cref="LayerB"/>. 0 stays on <see cref="Layers"/>.</summary>
+        public float[]? Blend { get; init; }
     }
 
     public static (double Scale, double HeightScale, List<(double X, double Z, double Edge, string Name)> Tiles) ReadTscb(byte[] data)
@@ -78,13 +82,25 @@ public static class TerrainMesh
         return values;
     }
 
+    public const int MateLayerMax = 89;
+
+    public sealed class MateGrid
+    {
+        public int[] Chosen { get; init; } = Array.Empty<int>();
+        public int[] Other { get; init; } = Array.Empty<int>();
+        public float[] Weight { get; init; } = Array.Empty<float>();
+    }
+
     /// <summary>
-    /// One MaterialAlb index per sample. Retail <c>.mate</c> is the same TARB + zstd wrapper as
-    /// <c>.hght</c>. The image is 257×257 texels of material A, material B, blend, extra.
-    /// 255 and 127 are not layer indices. Blend at or above 128 selects material B; otherwise A.
-    /// A halfway 0x7f blend still uses A here. Returns null when the block is not that grid.
+    /// One MaterialAlb index per sample, plus the other index and the blend toward it.
+    /// Retail <c>.mate</c> is the same TARB + zstd wrapper as <c>.hght</c>. A texel is
+    /// material A, material B, then two blend bytes. (0, 0, 0, 0) is empty. An index above 89
+    /// is not a layer (255 and 127 fall in that). A blend byte other than 0 or 0x7f is that
+    /// byte over 255. 0x7f with no other weight is a halfway mix, and the chosen index stays
+    /// on A. A weight of 128 or more chooses B, which is the older diagnostic. Returns null
+    /// when the block is not that grid.
     /// </summary>
-    public static int[]? ReadMate(byte[] file, ZstdDictionaries? dictionaries)
+    public static MateGrid? ReadMateGrid(byte[] file, ZstdDictionaries? dictionaries)
     {
         byte[] payload;
         try { payload = UnpackHght(file, dictionaries); }
@@ -94,23 +110,54 @@ public static class TerrainMesh
         if (block is null) return null;
         var linear = MateBytes(block);
         if (linear is null) return null;
-        var layers = new int[Size * Size];
+        var chosen = new int[Size * Size];
+        var other = new int[Size * Size];
+        var weight = new float[Size * Size];
         int usable = 0;
-        for (int i = 0; i < layers.Length; i++)
+        for (int i = 0; i < chosen.Length; i++)
         {
-            int a = linear[i * 4];
-            int b = linear[i * 4 + 1];
-            int blend = linear[i * 4 + 2];
-            bool aOk = a is not 255 and not 127;
-            bool bOk = b is not 255 and not 127;
-            int layer = -1;
-            if (aOk && bOk) layer = blend >= 128 && blend != 255 ? b : a;
-            else if (aOk) layer = a;
-            else if (bOk) layer = b;
-            layers[i] = layer;
-            if (layer >= 0) usable++;
+            int b0 = linear[i * 4];
+            int b1 = linear[i * 4 + 1];
+            int b2 = linear[i * 4 + 2];
+            int b3 = linear[i * 4 + 3];
+            if (b0 == 0 && b1 == 0 && b2 == 0 && b3 == 0)
+            {
+                chosen[i] = other[i] = -1;
+                continue;
+            }
+            int first = b0 <= MateLayerMax ? b0 : -1;
+            int second = b1 <= MateLayerMax ? b1 : -1;
+            float mix = PairWeight(b2, b3);
+            int raw = RawWeight(b2, b3);
+            int pick;
+            if (first >= 0 && second >= 0 && raw >= 128) pick = second;
+            else if (first >= 0) pick = first;
+            else pick = second;
+            chosen[i] = pick;
+            other[i] = first >= 0 && second >= 0 ? (pick == first ? second : first) : -1;
+            weight[i] = first >= 0 && second >= 0 ? (pick == second ? 1f - mix : mix) : 0f;
+            if (pick >= 0) usable++;
         }
-        return usable * 2 >= layers.Length ? layers : null;
+        if (usable * 2 < chosen.Length) return null;
+        return new MateGrid { Chosen = chosen, Other = other, Weight = weight };
+    }
+
+    public static int[]? ReadMate(byte[] file, ZstdDictionaries? dictionaries) => ReadMateGrid(file, dictionaries)?.Chosen;
+
+    /// <summary>Blend toward material B. 0x7f alone is halfway. Both bytes 0 stays on A.</summary>
+    public static float PairWeight(int b2, int b3)
+    {
+        int raw = RawWeight(b2, b3);
+        if (raw >= 0) return raw / 255f;
+        if (b2 == 0x7F || b3 == 0x7F) return 0.5f;
+        return 0f;
+    }
+
+    static int RawWeight(int b2, int b3)
+    {
+        if (b2 is not 0 and not 0x7F) return b2;
+        if (b3 is not 0 and not 0x7F) return b3;
+        return -1;
     }
 
     static byte[]? MateBytes(byte[] block)
@@ -184,6 +231,8 @@ public static class TerrainMesh
         var indices = new List<int>();
         var uvs = new List<Vec2>();
         var layers = new List<int>();
+        var layerB = new List<int>();
+        var blends = new List<float>();
         foreach (var job in jobs)
         {
             if (job.Keep.Count == 0) continue;
@@ -203,12 +252,20 @@ public static class TerrainMesh
                 positions.Add(position);
                 uvs.Add(new Vec2(position.X / 8.0, position.Z / 8.0));
                 int layer = -1;
-                if (job.Tile.Layers is { Length: > 0 } grid)
-                {
-                    int sample = sz * Size + sx;
-                    if ((uint)sample < (uint)grid.Length) layer = grid[sample];
-                }
+                int sample = sz * Size + sx;
+                if (job.Tile.Layers is { Length: > 0 } grid && (uint)sample < (uint)grid.Length)
+                    layer = grid[sample];
                 layers.Add(layer);
+                int partner = -1;
+                float mix = 0;
+                if (job.Tile.LayerB is { Length: > 0 } partners && (uint)sample < (uint)partners.Length)
+                {
+                    partner = partners[sample];
+                    if (job.Tile.Blend is { Length: > 0 } weights && (uint)sample < (uint)weights.Length)
+                        mix = weights[sample];
+                }
+                layerB.Add(partner);
+                blends.Add(mix);
                 if (down == 0) used[(row, col)] = index;
                 return index;
             }
@@ -261,6 +318,8 @@ public static class TerrainMesh
             Uvs = uvs,
             Normals = MeshNormals.Generate(positions, indices),
             MaterialLayers = painted ? layers : null,
+            MaterialLayerB = painted ? layerB : null,
+            MaterialBlend = painted ? blends : null,
             Material = "terrain",
             Alpha = "opaque",
             DoubleSided = true,

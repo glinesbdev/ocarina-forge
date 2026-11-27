@@ -221,6 +221,7 @@ public static class BfresReader
             if (undecoded > 0 && parts.Count == 0) notes.Add("geometry format not decoded (FSHP flag 0x10)");
             else if (undecoded > 0) notes.Add($"{undecoded} shapes use FSHP flag 0x10 and were not decoded");
             else if (parts.Count == 0) notes.Add($"{(name.Length == 0 ? fallback : name)}: no drawable shape");
+            ShapeFilter.Hide(parts);
             return (new ImportedModel
             {
                 Name = name.Length == 0 ? fallback : name,

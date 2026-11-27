@@ -28,6 +28,7 @@ public partial class Main : Node3D
     {
         _camera = GetNode<Camera3D>("Camera");
         _stats = GetNode<Label>("Overlay/Stats");
+        MatchEditorLight();
         RenderingServer.ViewportSetMeasureRenderTime(GetViewport().GetViewportRid(), true);
         var args = Parse(OS.GetCmdlineUserArgs());
         _benchmark = args.ContainsKey("benchmark");
@@ -224,7 +225,11 @@ public partial class Main : Node3D
                 ["actorsSkipped"] = _field.Report.ActorsSkipped,
                 ["texturesOk"] = _field.Report.TexturesOk,
                 ["texturesFailed"] = _field.Report.TexturesFailed,
+                ["texturesMissing"] = _field.Report.TexturesMissing,
+                ["materialsUnbound"] = _field.Report.MaterialsUnbound,
                 ["shapesFailed"] = _field.Report.ShapesFailed,
+                ["missingTextures"] = _field.Report.MissingTextures.OrderByDescending(item => item.Value).Take(8)
+                    .Select(item => new Dictionary<string, object> { ["name"] = item.Key, ["count"] = item.Value }).ToList(),
                 ["missing"] = _field.Report.Missing.OrderByDescending(item => item.Value).Take(8)
                     .Select(item => new Dictionary<string, object> { ["name"] = item.Key, ["count"] = item.Value }).ToList(),
                 ["reasons"] = _field.Report.Reasons.OrderByDescending(item => item.Value).Take(8)
@@ -256,6 +261,28 @@ public partial class Main : Node3D
             $"vram {vram / (1024.0 * 1024):0} MB   textures {textures / (1024.0 * 1024):0} MB\n" +
             $"geometry {(_field?.GeometryBytes ?? 0) / (1024.0 * 1024):0.0} MB   bc7 {(_field?.Bc7Bytes ?? 0) / (1024.0 * 1024):0.0} MB\n" +
             "Right mouse look, WASD fly, Q/E vertical, Shift faster, Esc release mouse";
+    }
+
+    void MatchEditorLight()
+    {
+        // The browser editor's three.js rig (viewport.js), not a measured in-game sun.
+        // Longshot's lighting capture still leaves sun and ambient null.
+        var environment = new Godot.Environment
+        {
+            BackgroundMode = Godot.Environment.BGMode.Color,
+            BackgroundColor = new Color(0.078f, 0.106f, 0.086f),
+            AmbientLightSource = Godot.Environment.AmbientSource.Color,
+            AmbientLightColor = new Color(0.557f, 0.627f, 0.565f),
+            AmbientLightEnergy = 0.55f,
+            TonemapMode = Godot.Environment.ToneMapper.Aces,
+            TonemapExposure = 1.05f,
+        };
+        AddChild(new WorldEnvironment { Environment = environment });
+        var sun = GetNode<DirectionalLight3D>("Sun");
+        sun.LightColor = new Color(1f, 0.949f, 0.839f);
+        sun.LightEnergy = 2.6f;
+        sun.ShadowEnabled = false;
+        sun.LookAtFromPosition(new Vector3(18, 36, 14), Vector3.Zero, Vector3.Up);
     }
 
     static Dictionary<string, string> Parse(string[] args)

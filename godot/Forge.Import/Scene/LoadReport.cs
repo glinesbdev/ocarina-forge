@@ -8,14 +8,23 @@ public sealed class LoadReport
     public int ActorsSkipped { get; set; }
     public int TexturesOk { get; set; }
     public int TexturesFailed { get; set; }
+    public int TexturesMissing { get; set; }
+    public int MaterialsUnbound { get; set; }
     public int ShapesFailed { get; set; }
     public Dictionary<string, int> Missing { get; set; } = new(StringComparer.Ordinal);
+    public Dictionary<string, int> MissingTextures { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, int> Reasons { get; set; } = new(StringComparer.Ordinal);
 
     public void Miss(string name)
     {
         ActorsMissing++;
         Missing[name] = Missing.GetValueOrDefault(name) + 1;
+    }
+
+    public void MissTexture(string name)
+    {
+        TexturesMissing++;
+        MissingTextures[name] = MissingTextures.GetValueOrDefault(name) + 1;
     }
 
     public void AddReason(string reason)
@@ -29,11 +38,14 @@ public sealed class LoadReport
         var lines = new List<string>
         {
             $"load actors loaded {ActorsLoaded}, missing {ActorsMissing}, skipped {ActorsSkipped}",
-            $"load textures ok {TexturesOk}, failed {TexturesFailed}",
+            $"load textures ok {TexturesOk}, failed {TexturesFailed}, missing {TexturesMissing}",
+            $"load materials unbound {MaterialsUnbound}",
             $"load shapes failed {ShapesFailed}",
         };
         foreach (var (name, count) in Missing.OrderByDescending(item => item.Value).ThenBy(item => item.Key, StringComparer.Ordinal).Take(8))
             lines.Add($"load missing {name} x{count}");
+        foreach (var (name, count) in MissingTextures.OrderByDescending(item => item.Value).ThenBy(item => item.Key, StringComparer.Ordinal).Take(8))
+            lines.Add($"load missing texture {name} x{count}");
         foreach (var (reason, count) in Reasons.OrderByDescending(item => item.Value).ThenBy(item => item.Key, StringComparer.Ordinal).Take(8))
             lines.Add($"load reason {reason} x{count}");
         return string.Join('\n', lines);

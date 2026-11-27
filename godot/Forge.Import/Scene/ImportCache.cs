@@ -12,7 +12,7 @@ public static class ImportCache
 {
     public const string Magic = "OFM1";
     public const int Version = 1;
-    public const string ImporterVersion = "godot-spike-2";
+    public const string ImporterVersion = "godot-spike-3";
 
     public static string DefaultDirectory()
     {
@@ -194,6 +194,12 @@ public static class ImportCache
         writer.Write(part.MaterialLayers?.Count ?? 0);
         if (part.MaterialLayers is not null)
             foreach (int layer in part.MaterialLayers) writer.Write(layer);
+        writer.Write(part.MaterialLayerB?.Count ?? 0);
+        if (part.MaterialLayerB is not null)
+            foreach (int layer in part.MaterialLayerB) writer.Write(layer);
+        writer.Write(part.MaterialBlend?.Count ?? 0);
+        if (part.MaterialBlend is not null)
+            foreach (float weight in part.MaterialBlend) writer.Write(weight);
         int id = blobs.Count;
         blobs.Add(stream.ToArray());
         return new CachePart
@@ -236,10 +242,24 @@ public static class ImportCache
             layers = new List<int>(layerCount);
             for (int i = 0; i < layerCount; i++) layers.Add(reader.ReadInt32());
         }
+        int layerBCount = reader.ReadInt32();
+        List<int>? layerB = null;
+        if (layerBCount > 0)
+        {
+            layerB = new List<int>(layerBCount);
+            for (int i = 0; i < layerBCount; i++) layerB.Add(reader.ReadInt32());
+        }
+        int blendCount = reader.ReadInt32();
+        List<float>? blend = null;
+        if (blendCount > 0)
+        {
+            blend = new List<float>(blendCount);
+            for (int i = 0; i < blendCount; i++) blend.Add(reader.ReadSingle());
+        }
         return new ImportedPart
         {
             Name = part.Name, Lod = part.Lod, Positions = positions, Indices = indices, Uvs = uvs,
-            Normals = normals, MaterialLayers = layers,
+            Normals = normals, MaterialLayers = layers, MaterialLayerB = layerB, MaterialBlend = blend,
             Material = part.Material, Texture = part.Texture, AlbedoSampler = part.Sampler,
             Alpha = part.Alpha, DoubleSided = part.DoubleSided, OmitReason = part.Omit, Water = part.Water,
         };

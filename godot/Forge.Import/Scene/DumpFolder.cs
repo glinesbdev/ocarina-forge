@@ -134,6 +134,9 @@ public static class ActorList
 
     static bool IsMarker(string gyaml)
     {
+        if (gyaml.Contains("LookAttention", StringComparison.Ordinal)) return true;
+        if (gyaml.StartsWith("ShowToCamera", StringComparison.Ordinal)) return true;
+        if (gyaml.Contains("HorseJumpForbid", StringComparison.Ordinal)) return true;
         if (gyaml.Contains("airwall", StringComparison.OrdinalIgnoreCase)) return true;
         if (gyaml.Contains("Anchor", StringComparison.OrdinalIgnoreCase)) return true;
         if (gyaml.EndsWith("Actor", StringComparison.Ordinal)) return true;

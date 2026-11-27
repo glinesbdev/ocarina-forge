@@ -22,7 +22,11 @@ public sealed class ImportedPart
     public double Cutoff { get; init; } = 0.5;
     public bool DoubleSided { get; init; } = true;
     public List<(string Sampler, string Texture)> Binds { get; init; } = new();
-    public string OmitReason { get; init; } = "";
+    public string OmitReason { get; set; } = "";
+    /// <summary>Second MaterialAlb index. -1 means there is no blend partner.</summary>
+    public List<int>? MaterialLayerB { get; set; }
+    /// <summary>Blend toward <see cref="MaterialLayerB"/>, 0 on material A.</summary>
+    public List<float>? MaterialBlend { get; set; }
     public string Helper { get; init; } = "";
     public bool Water { get; init; }
 }
@@ -40,7 +44,7 @@ public static class ShapeFilter
 {
     static readonly (string Token, string Kind)[] Helpers =
     {
-        ("blackfade", "fade"), ("fadeboard", "fade"), ("blackborad", "board"), ("blackboard", "board"),
+        ("blackfade", "fade"), ("fadeblack", "fade"), ("blackborad", "board"), ("blackboard", "board"),
         ("darkplane", "dark"), ("shadowboard", "shadow"),
     };
 
@@ -76,6 +80,55 @@ public static class ShapeFilter
             if (compact.Contains(word, StringComparison.Ordinal)) return reason;
         }
         return "";
+    }
+
+    /// <summary>
+    /// The same hides as <c>models.py</c>: helper planes, the back water sheet when a front
+    /// sheet exists, and a coarse untextured box under a smaller mesh that has UVs.
+    /// </summary>
+    public static void Hide(List<ImportedPart> parts)
+    {
+        bool front = parts.Any(part =>
+        {
+            string low = $"{part.Name} {part.Material}".ToLowerInvariant();
+            return low.Contains("front", StringComparison.Ordinal) && (low.Contains("water", StringComparison.Ordinal) || low.Contains("flow", StringComparison.Ordinal));
+        });
+        foreach (var part in parts)
+        {
+            if (part.OmitReason.Length > 0) continue;
+            if (part.Helper.Length > 0)
+            {
+                part.OmitReason = $"{part.Helper} helper is not drawn";
+                continue;
+            }
+            string low = $"{part.Name} {part.Material}".ToLowerInvariant();
+            if (front && low.Contains("back", StringComparison.Ordinal) && (low.Contains("water", StringComparison.Ordinal) || low.Contains("flow", StringComparison.Ordinal)))
+            {
+                part.OmitReason = "back water layer is not drawn";
+                continue;
+            }
+            if (BoundsBox(part, parts))
+                part.OmitReason = "untextured bounds box is not drawn";
+        }
+    }
+
+    static bool BoundsBox(ImportedPart part, List<ImportedPart> parts)
+    {
+        if (part.Uvs is { Count: > 0 } || part.Positions.Count > 24 || Span(part) < 4) return false;
+        return parts.Any(other => !ReferenceEquals(other, part) && other.Uvs is { Count: > 0 } && other.Positions.Count > part.Positions.Count);
+    }
+
+    static double Span(ImportedPart part)
+    {
+        if (part.Positions.Count == 0) return 0;
+        double minX = part.Positions[0].X, maxX = minX, minY = part.Positions[0].Y, maxY = minY, minZ = part.Positions[0].Z, maxZ = minZ;
+        foreach (var point in part.Positions)
+        {
+            minX = Math.Min(minX, point.X); maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y); maxY = Math.Max(maxY, point.Y);
+            minZ = Math.Min(minZ, point.Z); maxZ = Math.Max(maxZ, point.Z);
+        }
+        return Math.Max(maxX - minX, Math.Max(maxY - minY, maxZ - minZ));
     }
 
     public static bool IsWater(string shape, string material)

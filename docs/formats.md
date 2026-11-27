@@ -541,7 +541,9 @@ The lighting-capture mod's manifest is checked against this table when it is ins
 
 ## Godot spike
 
-The native viewer in `godot/` does not add a format. It ports the readers already described above (BYML, SARC, zstd dictionaries, BFRES 10 / FMAT `0xB0`, meshlets, BNTX block-linear, TSCB / `.hght`). Longshot was not re-read for a new layout: `content.model` is in `has()`, `gfx.textures` is not, and both are in-game APIs. The spike never launches the game. See [godot-spike.md](godot-spike.md).
+The native viewer in `godot/` does not add a format. It ports the readers already described above (BYML, SARC, zstd dictionaries, BFRES 10 / FMAT `0xB0`, meshlets, BNTX block-linear, TSCB / `.hght`). Longshot was checked again before the texture search changed: `content.model` is in `has()`, `gfx.textures` is not, and both are in-game APIs. `docs/modding/assets.md` still says the material's texture name is a file under `Tex/`. The viewer also opens `Model/<prefix>.Tex.bfres`, which that page does not describe and which the browser already searches. The spike never launches the game. See [godot-spike.md](godot-spike.md).
+
+BC4 (`0x1D01`, 8 bytes a block) and BC5 (`0x1E01`, 16 bytes a block) upload as RGTC. They are still not albedo. A `.mate` blend byte other than 0 or 0x7f is that byte over 255, and 0x7f alone is halfway; the chosen index stays on material A unless the weight is 128 or more. A gyaml ending in `_DropFixed_<digits>` or `_<digits>` is also looked up without that suffix. That suffix rule was not counted in a retail `Model/` directory.
 
 One behaviour is worth stating next to the version-10 material notes. `sample_v10_bfres` stores the sampler count at FMAT `+0xA2` and the texture count at `+0xA3`. Longshot `host/bfres_edit.c` reads the texture-name count from `+0xA2`. The C# reader, like the Python reader, takes the longest real name list among `+0xA2`, `+0xA3`, and the sampler dictionary. That is the rule the synthetic v10 fixture passes. It is not a new retail measurement.
 
@@ -557,7 +559,7 @@ Godot 4.7 sizes a compressed mip chain through 1×1, and each level is at least 
 
 Packed meshlets are BFRES `0x000A0400` with FSHP flag `0x10`. The bit layout is the one NupExplorer published and `meshlet.py` implements. Skin count other than 0 is not decoded.
 
-BNTX BC7 is `0x2001` (UNORM) or `0x2006` (sRGB). The blocks are the same; the sampler's colour space is not. 16-byte blocks on Switch 2 use a different GOB order from Tegra X1: bit 5 is y1 and bit 6 is x0. BC1, BC4, and 4-byte height samples stay on Tegra X1. A desktop upload should keep BC7 compressed.
+BNTX BC7 is `0x2001` (UNORM) or `0x2006` (sRGB). The blocks are the same; the sampler's colour space is not. 16-byte blocks on Switch 2 use a different GOB order from Tegra X1: bit 5 is y1 and bit 6 is x0. BC1, BC4, and 4-byte height samples stay on Tegra X1. A desktop upload should keep BC7 compressed. BC4 is `0x1D01` (8 bytes a block, one channel) and BC5 is `0x1E01` (16 bytes, two channels). Neither is an albedo.
 
 TSCB: world scale is the float at `+0x10`, height scale at `+0x14`, tile count at `+0x38`, and `+0x78` is a relative u32 to the tile table. A tile stores centre x, centre z, and edge, and the name at `+0x60` (relative). `.hght` starts with `TARB` when wrapped; the u16 at file `+10` is the header size and the rest is zstd. Unpacked, `+0x2C` is a relative offset to the height block and `+0x30` is its size. The grid is 257×257 float32, row along z. A block whose size is exactly `257*257*4` is linear. Otherwise it is block-linear, log2 4. Column 256's odd rows are 4 bytes after the even row of the previous GOB; the ordinary address reads padding 0. An exact 0 that survives that repair is a hole, not ground at the origin.
 

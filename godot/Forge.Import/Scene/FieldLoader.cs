@@ -44,6 +44,8 @@ public static class FieldLoader
         if (!dynamic.Equals(relative, StringComparison.Ordinal) && dump.Exists(dynamic))
             placements.AddRange(ActorList.Read(dump.ReadByml(dynamic), "dynamic"));
         var cache = new Dictionary<string, (string Path, ImportedModel Model)>(StringComparer.Ordinal);
+        var texturesByModel = new Dictionary<string, Dictionary<string, CompressedTexture>>(StringComparer.Ordinal);
+        var library = new TextureLibrary(dump);
         foreach (var placement in placements)
         {
             if (!placement.Draw)
@@ -69,14 +71,25 @@ public static class FieldLoader
                 resolved = (found.Path, found.Model);
                 cache[placement.Gyaml] = resolved;
             }
-            var textures = new Dictionary<string, CompressedTexture>(StringComparer.OrdinalIgnoreCase);
-            foreach (var part in resolved.Model.Parts)
+            if (!texturesByModel.TryGetValue(placement.Gyaml, out var textures))
             {
-                if (part.OmitReason.Length > 0 || part.Helper.Length > 0 || part.Lod != 0 && part.Lod != 1) continue;
-                if (part.Texture.Length == 0) continue;
-                if (textures.ContainsKey(part.Texture)) continue;
-                var image = ModelLocator.FindTexture(dump, resolved.Model, part.Texture, $"Pack/Actor/{placement.Gyaml}.pack.zs");
-                if (image is not null) textures[part.Texture] = image;
+                library.AttachCompanions(resolved.Model, resolved.Path, placement.Gyaml);
+                textures = new Dictionary<string, CompressedTexture>(StringComparer.OrdinalIgnoreCase);
+                var hints = TextureLibrary.Hints(placement.Gyaml, resolved.Path, resolved.Model.Name);
+                foreach (var part in resolved.Model.Parts)
+                {
+                    if (part.OmitReason.Length > 0 || part.Helper.Length > 0 || part.Lod != 0 && part.Lod != 1) continue;
+                    if (part.Texture.Length == 0)
+                    {
+                        field.Report.MaterialsUnbound++;
+                        continue;
+                    }
+                    if (textures.ContainsKey(part.Texture)) continue;
+                    var image = library.Find(resolved.Model, part.Texture, hints);
+                    if (image is null) field.Report.MissTexture(part.Texture);
+                    else textures[part.Texture] = image;
+                }
+                texturesByModel[placement.Gyaml] = textures;
             }
             field.Report.ActorsLoaded++;
             field.Actors.Add(new FieldActor
@@ -165,7 +178,7 @@ public static class FieldLoader
             try
             {
                 var payload = TerrainMesh.UnpackHght(dump.Read(path), dump.Dictionaries);
-                int[]? mate = null;
+                TerrainMesh.MateGrid? mate = null;
                 foreach (string matePath in new[]
                 {
                     $"{folder}/{sceneDir}/{tile.Name}.mate.zs",
@@ -175,7 +188,7 @@ public static class FieldLoader
                 })
                 {
                     if (!dump.Exists(matePath)) continue;
-                    try { mate = TerrainMesh.ReadMate(dump.Read(matePath), dump.Dictionaries); }
+                    try { mate = TerrainMesh.ReadMateGrid(dump.Read(matePath), dump.Dictionaries); }
                     catch (ImportException) { mate = null; }
                     break;
                 }
@@ -187,7 +200,9 @@ public static class FieldLoader
                     CenterZ = tile.Z,
                     Edge = tile.Edge,
                     Heights = TerrainMesh.DecodeHeights(payload),
-                    Layers = mate,
+                    Layers = mate?.Chosen,
+                    LayerB = mate?.Other,
+                    Blend = mate?.Weight,
                 });
             }
             catch (ImportException exc)
@@ -214,8 +229,14 @@ public static class FieldLoader
             return;
         }
         var used = new List<int>();
-        foreach (int layer in part.MaterialLayers)
-            if (layer >= 0 && !used.Contains(layer)) used.Add(layer);
+        void Collect(List<int>? source)
+        {
+            if (source is null) return;
+            foreach (int layer in source)
+                if (layer >= 0 && !used.Contains(layer)) used.Add(layer);
+        }
+        Collect(part.MaterialLayers);
+        Collect(part.MaterialLayerB);
         string path = dump.Exists("Tex/MaterialAlb.bntx.zs") ? "Tex/MaterialAlb.bntx.zs"
             : dump.Exists("Tex/MaterialAlb.bntx") ? "Tex/MaterialAlb.bntx" : "";
         if (path.Length == 0)
@@ -243,11 +264,17 @@ public static class FieldLoader
             map[index] = chosen.Count;
             chosen.Add(image);
         }
-        for (int i = 0; i < part.MaterialLayers.Count; i++)
+        void Remap(List<int>? source)
         {
-            int layer = part.MaterialLayers[i];
-            part.MaterialLayers[i] = layer >= 0 && map.TryGetValue(layer, out int compact) ? compact : -1;
+            if (source is null) return;
+            for (int i = 0; i < source.Count; i++)
+            {
+                int layer = source[i];
+                source[i] = layer >= 0 && map.TryGetValue(layer, out int compact) ? compact : -1;
+            }
         }
+        Remap(part.MaterialLayers);
+        Remap(part.MaterialLayerB);
         field.TerrainAlbedo = chosen;
         if (chosen.Count == 0)
             field.Report.AddReason("MaterialAlb had none of the layers the material grid asked for");

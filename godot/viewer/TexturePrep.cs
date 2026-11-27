@@ -55,14 +55,17 @@ public static class TexturePrep
                 remap[i] = next.Count;
                 next.Add(done);
             }
-            if (field.Terrain is { MaterialLayers: { } layers })
+            void Remap(List<int>? layers)
             {
+                if (layers is null) return;
                 for (int v = 0; v < layers.Count; v++)
                 {
                     int layer = layers[v];
                     layers[v] = layer >= 0 && layer < remap.Length ? remap[layer] : -1;
                 }
             }
+            Remap(field.Terrain?.MaterialLayers);
+            Remap(field.Terrain?.MaterialLayerB);
             field.TerrainAlbedo = next;
             changed = true;
             if (next.Count == 0)
