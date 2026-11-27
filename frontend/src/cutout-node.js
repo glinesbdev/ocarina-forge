@@ -5,9 +5,24 @@
  * solid sheet. The colour node keeps the texel alpha. The alpha test then
  * discards the cutout. WebGL never imports this file and keeps alphaToCoverage.
  */
-import { Fn, float, materialReference, texture, uv, vec4 } from "three/tsl";
+import { Fn, batchIndirectIndex, float, int, ivec2, materialReference, normalMap, texture, textureLoad, uv, vec4 } from "three/tsl";
 
 const reported = new Set();
+
+/** Layer index for one slot of the per-instance float texture. Values are stored as floats, not normalized bytes. */
+function layerIndex(layerTexture, channel) {
+  const texel = textureLoad(layerTexture, ivec2(int(batchIndirectIndex), int(0)));
+  const component = channel === 1 ? texel.g : channel === 2 ? texel.b : channel === 3 ? texel.a : texel.r;
+  return int(component);
+}
+
+function sampleMap(material, map, uvNode, channel) {
+  const layers = material.userData && material.userData.forgeLayerTexture;
+  if (map && map.isCompressedArrayTexture === true && layers) {
+    return texture(map, uvNode).depth(layerIndex(layers, channel));
+  }
+  return texture(map, uvNode);
+}
 
 export function attachCutout(material) {
   if (!material || material.colorNode || !(material.alphaTest > 0) || !material.map || material.map.isTexture !== true) return material;
@@ -31,7 +46,7 @@ export function attachCutout(material) {
       }
       return vec4(tint, 1);
     }
-    const sampled = texture(map, uv());
+    const sampled = sampleMap(material, map, uv(), 0);
     sampled.a.lessThanEqual(float(cutoff)).discard();
     return vec4(sampled.rgb.mul(tint), sampled.a);
   })();
@@ -75,11 +90,44 @@ export function attachAlbedo(material) {
     // Do not construct `uv()` on this branch. The node is cached with the
     // material, and a batch whose geometry has no TEXCOORD still draws it.
     if (!hasUv) return vec4(tint, 1);
-    const sampled = texture(map, uv(channel));
+    const sampled = sampleMap(material, map, uv(channel), 0);
     return vec4(sampled.rgb.mul(tint), opaque ? float(1) : sampled.a);
   })();
   material.userData = userData || {};
   material.userData.albedoNode = true;
   material.needsUpdate = true;
+  return material;
+}
+
+/**
+ * Normal and roughness stay on the array when the albedo batch is shared.
+ * The built-in slots sample a 2D texture, so those maps move onto nodes and
+ * the layer comes from the same texel as the albedo (green = normal, blue =
+ * roughness). Metalness is the ORM blue channel only when the part said so.
+ */
+export function attachArraySurface(material) {
+  const layers = material && material.userData && material.userData.forgeLayerTexture;
+  if (!layers) return material;
+  const normal = material.normalMap && material.normalMap.isCompressedArrayTexture === true
+    ? material.normalMap
+    : material.userData.forgeArrayNormal;
+  if (normal && normal.isCompressedArrayTexture === true) {
+    const channel = Number.isInteger(normal.channel) ? normal.channel : 0;
+    material.normalNode = normalMap(sampleMap(material, normal, uv(channel), 1));
+    material.userData.forgeArrayNormal = normal;
+    material.normalMap = null;
+  }
+  const rough = material.roughnessMap && material.roughnessMap.isCompressedArrayTexture === true
+    ? material.roughnessMap
+    : material.userData.forgeArrayRough;
+  if (rough && rough.isCompressedArrayTexture === true) {
+    const channel = Number.isInteger(rough.channel) ? rough.channel : 0;
+    const sampled = sampleMap(material, rough, uv(channel), 2);
+    material.roughnessNode = sampled.g;
+    if (material.userData.forgeArrayOrm === true) material.metalnessNode = sampled.b;
+    material.userData.forgeArrayRough = rough;
+    material.roughnessMap = null;
+    if (material.userData.forgeArrayOrm === true) material.metalnessMap = null;
+  }
   return material;
 }

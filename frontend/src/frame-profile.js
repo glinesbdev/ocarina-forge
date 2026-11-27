@@ -196,6 +196,14 @@ export function countTextures(materials) {
     for (const bag of bags) {
       if (!bag) continue;
       for (const value of Object.values(bag)) {
+        if (value && value.isTexture === true) {
+          const id = (value.source && value.source.uuid) || value.uuid || value.id;
+          if (id != null) seen.add(id);
+        }
+      }
+      const sources = bag.forgeArraySources;
+      if (!Array.isArray(sources)) continue;
+      for (const value of sources) {
         if (!value || value.isTexture !== true) continue;
         const id = (value.source && value.source.uuid) || value.uuid || value.id;
         if (id != null) seen.add(id);

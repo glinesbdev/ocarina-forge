@@ -71,7 +71,10 @@ export function refreshBatchKeys(parts, keyFor) {
   if (typeof keyFor !== "function") return false;
   for (const part of parts || []) {
     if (!part || !part.material || !part.geometry) continue;
-    const next = `${keyFor(part.material, part.geometry)}|${part.materialKey || ""}`;
+    // The mesh family is not a shader difference. Parts that share the key
+    // from `keyFor` share one mesh. `materialKey` stays on the part for the
+    // texture manifest.
+    const next = keyFor(part.material, part.geometry);
     if (part.batchKey !== next) {
       part.batchKey = next;
       changed = true;
@@ -144,9 +147,19 @@ export function batchMissesUpload(parts, batches) {
       if (now) return true;
     } else if (stamped !== now) return true;
   }
-  for (const material of materials) {
-    const map = material.map && material.map.isTexture === true ? material.map : null;
-    if (map && !held.has(material)) return true;
+  const coveredKeys = new Set();
+  for (const batch of batches || []) {
+    const mesh = batch && (batch.mesh || batch);
+    if (mesh && mesh.userData && mesh.userData.forgeArray && batch.key) coveredKeys.add(batch.key);
+  }
+  for (const part of parts || []) {
+    const material = part && part.material;
+    const map = material && material.map && material.map.isTexture === true ? material.map : null;
+    if (!map || held.has(material)) continue;
+    // An array batch draws a clone. The part material is not that clone, and
+    // the layer texel is what selects the image.
+    if (part.batchKey && coveredKeys.has(part.batchKey)) continue;
+    return true;
   }
   return false;
 }
@@ -156,12 +169,18 @@ export function batchMissesUpload(parts, batches) {
  * advances `firstInstance` by each run. The batch shader indexes
  * `_indirectTexture` with that instance index. `_updateDrawParameters` fills
  * both arrays, but `BatchedMesh.onBeforeRender` never calls it with
- * `'merged'` on WebGPU, so a mesh would draw nothing. Calling it every frame
- * is safe: it returns immediately when visibility, frustum, and sort are quiet.
+ * `'merged'` on WebGPU, so a mesh would draw nothing. A quiet opaque mesh
+ * (visibility stable, frustum and sort off, counts already filled) skips the
+ * call. The first frame and any visibility change still fill the ranges.
  * Returns the merged draw count.
  */
 export function scheduleMergedDraws(mesh, camera, geometry, material) {
   if (!mesh || typeof mesh._updateDrawParameters !== "function") return 0;
+  const quiet = mesh._visibilityChanged !== true
+    && mesh.perObjectFrustumCulled !== true
+    && mesh.sortObjects !== true
+    && mesh._mergedDrawCount > 0;
+  if (quiet) return mesh._mergedDrawCount;
   mesh._updateDrawParameters(camera, geometry, material, "merged");
   return mesh._mergedDrawCount || 0;
 }

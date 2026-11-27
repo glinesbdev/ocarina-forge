@@ -55,6 +55,14 @@ import { helperKind } from "./scene-helper.js";
 import { formatActorTextureDebug, formatTextureDebug, noteTexturePipelineError, textureDebugEnabled, texturePipelineError } from "./texture-debug.js";
 import { createTextureQueue, textureSlotLimit } from "./texture-stream.js";
 import { actorLocked, actorShown, applyActorMatrix, batchKey, batchMissesUpload, batchSubDrawCount, canGizmo, canPick, cloneMaterialPreservingTextures, dropMapWithoutUv, imageIdentity, materialForBatch, materialForGeometry, materialToDraw, presentByDefault, refreshBatchKeys, scheduleMergedDraws } from "./instance.js";
+import {
+  arrayMapToken,
+  arrayMaterialEligible,
+  canPackTexture,
+  createLayerTexture,
+  createTextureArrayPacker,
+  writeLayerTexel,
+} from "./texture-array.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
@@ -139,6 +147,9 @@ export async function createViewport(host, hooks) {
     }
   }
   const useGpuPick = !created.nodes || (Boolean(pickNodes) && pickNodes.nodeSystemsDiffer !== true);
+  // WebGL keeps a per-image key. The array packer exists only when the node
+  // materials that sample `texture().depth(layer)` are loaded.
+  const texturePacker = mapNodes ? createTextureArrayPacker() : null;
   const shaderDiagnostics = observeWgsl(renderer.backend);
   const gpuProfile = renderer.backend && renderer.backend.isWebGPUBackend === true ? createGpuProfile(renderer) : null;
   const frameTimer = createFrameTimer(renderer);
@@ -186,6 +197,8 @@ export async function createViewport(host, hooks) {
     const texture = mesh && mesh.userData && mesh.userData.forgePickTexture;
     if (texture && typeof texture.dispose === "function") texture.dispose();
     if (mesh && mesh.userData) mesh.userData.forgePickTexture = null;
+    const layer = mesh && mesh.material && mesh.material.userData && mesh.material.userData.forgeLayerTexture;
+    if (layer && typeof layer.dispose === "function") layer.dispose();
   }
 
   function bindPick(object) {
@@ -956,6 +969,9 @@ let convertSlots = 8;
       const partKeys = new Set();
       for (const part of parts) if (part && part.batchKey) partKeys.add(part.batchKey);
       if (meshKey && (partKeys.size !== 1 || !partKeys.has(meshKey))) continue;
+      // An array batch samples a layer, not the first part's image. Replacing
+      // the material here would paint every instance with that one map.
+      if (mesh.userData && mesh.userData.forgeArray) continue;
       const decision = materialToDraw(mesh, parts);
       if (!decision || decision.missingUv || !decision.material) continue;
       if (mesh.material !== decision.material) {
@@ -1011,6 +1027,8 @@ let convertSlots = 8;
     // Install the mix after that, once both images and the vertex mask exist.
     refreshBlendMaps(parts);
     const keysChanged = refreshBatchKeys(parts, batchKeyFor);
+    retargetArrayTextures();
+    refreshArrayLayers(parts);
     if (retiled) rewriteRetiledGeometry(parts);
     const rebound = rebindDrawnMaps();
     const misses = batchMissesUpload(parts, batches);
@@ -1369,6 +1387,11 @@ let convertSlots = 8;
     for (const entry of entries.values()) disposeEntry(entry);
     entries.clear();
     batchFiller.detachAll();
+    for (const mesh of meshes) {
+      const layer = mesh.material && mesh.material.userData && mesh.material.userData.forgeLayerTexture;
+      if (layer) textures.push(layer);
+    }
+    if (texturePacker) texturePacker.dispose();
     bumpCull();
     batches.length = 0;
     parsedTemplates.clear();
@@ -2889,12 +2912,23 @@ let convertSlots = 8;
       });
       index += 1;
     });
-    // A stale flat glb can still share one material across shape keys. Split
-    // that object before the batch key is recorded, and keep the key on the
-    // shape so those batches do not fold back onto the first material.
+    // A stale flat glb can still share one material object across shape keys.
+    // Split that object before the key is recorded so a later texture write
+    // does not paint every shape. The family is not part of the key: two
+    // shapes that sample the same shader share a mesh.
     separateSharedMaterials(parts);
     for (const part of parts) {
-      part.batchKey = `${batchKeyFor(part.material, part.geometry)}|${part.materialKey}`;
+      const kind = helperKind(
+        part.name,
+        part.materialKey,
+        part.material && part.material.name,
+        part.material && part.material.userData && part.material.userData.name,
+      );
+      if (kind && part.material) {
+        part.material.userData = part.material.userData || {};
+        if (!part.material.userData.helper) part.material.userData.helper = kind;
+      }
+      part.batchKey = batchKeyFor(part.material, part.geometry);
     }
     return { parts, farNames: new Set(parts.filter((part) => part.lod > 0).map((part) => part.family)) };
   }
@@ -3065,9 +3099,29 @@ let convertSlots = 8;
     return key;
   }
 
+  function attributeSignature(geometry) {
+    const attributes = geometry && geometry.attributes;
+    if (!attributes) return "";
+    return Object.keys(attributes).sort().map((name) => {
+      const attr = attributes[name];
+      const size = attr && Number.isFinite(attr.itemSize) ? attr.itemSize : 0;
+      const norm = attr && attr.normalized ? "n" : "u";
+      return `${name}:${size}${norm}`;
+    }).join(",");
+  }
+
+  function mapToken(material, texture) {
+    if (!texture) return "flat";
+    if (texturePacker && arrayMaterialEligible(material)) {
+      const token = arrayMapToken(texture, texturePacker);
+      if (token) return token;
+    }
+    return texture.image ? imageSignature(texture.image, texture) : "flat";
+  }
+
   function batchKeyFor(material, geometry) {
-    const image = material.map && material.map.image
-      ? imageSignature(material.map.image, material.map)
+    const image = material.map
+      ? mapToken(material, material.map)
       : `flat:${material.color ? material.color.getHexString() : "fff"}:${material.opacity}`;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
     const blend = material.userData && material.userData.blend;
@@ -3078,20 +3132,24 @@ let convertSlots = 8;
     const normalMap = material.normalMap;
     const orm1Map = material.userData && material.userData.orm1Map;
     const normal1Map = material.userData && material.userData.normal1Map;
-    const roughImage = roughMap && roughMap.image;
-    const normalImage = normalMap && normalMap.image;
-    const orm1Image = orm1Map && orm1Map.image;
-    const normal1Image = normal1Map && normal1Map.image;
-    const surfaceKey = (roughImage || normalImage || orm1Image || normal1Image)
-      ? `|orm:${roughImage ? imageSignature(roughImage, roughMap) : "flat"}|n:${normalImage ? imageSignature(normalImage, normalMap) : "flat"}|orm1:${orm1Image ? imageSignature(orm1Image, orm1Map) : "flat"}|n1:${normal1Image ? imageSignature(normal1Image, normal1Map) : "flat"}`
+    const surfaceKey = (roughMap || normalMap || orm1Map || normal1Map)
+      ? `|orm:${roughMap ? mapToken(material, roughMap) : "flat"}|n:${normalMap ? mapToken(material, normalMap) : "flat"}|orm1:${orm1Map && orm1Map.image ? imageSignature(orm1Map.image, orm1Map) : "flat"}|n1:${normal1Map && normal1Map.image ? imageSignature(normal1Map.image, normal1Map) : "flat"}${material.metalnessMap && material.metalnessMap === roughMap ? "|metal:orm" : ""}`
       : "";
+    const userData = material.userData || {};
+    const role = userData.helper
+      ? `|h:${userData.helper}`
+      : (userData.waterStandIn || userData.banc === "water")
+        ? "|water"
+        : (userData.terrainNode || userData.terrainShader || userData.banc === "terrain")
+          ? "|terrain"
+          : "";
     return batchKey({
-      image: image + blendKey + surfaceKey,
+      image: image + blendKey + surfaceKey + role,
       alpha,
       side: material.side,
       tint: material.color ? material.color.getHexString() : "fff",
       indexed: geometry.getIndex() ? "idx" : "no",
-      attributes: Object.keys(geometry.attributes).sort().join(","),
+      attributes: attributeSignature(geometry),
     });
   }
 
@@ -3397,6 +3455,176 @@ let convertSlots = 8;
     batch.pickIdsDirty = true;
   }
 
+  function rememberSource(list, texture) {
+    if (texture && !list.includes(texture)) list.push(texture);
+  }
+
+  function ensureLayerTexture(material, capacity) {
+    const current = material.userData.forgeLayerTexture;
+    const width = current && current.image ? current.image.width | 0 : 0;
+    if (current && width >= capacity) return { texture: current, replaced: false };
+    const next = createLayerTexture(Math.max(capacity, 8));
+    if (current && current.image && current.image.data) {
+      next.image.data.set(current.image.data.subarray(0, Math.min(current.image.data.length, next.image.data.length)));
+    }
+    if (current && typeof current.dispose === "function") current.dispose();
+    material.userData.forgeLayerTexture = next;
+    return { texture: next, replaced: true };
+  }
+
+  function installArrayBatch(batch, added) {
+    if (!texturePacker || !mapNodes || !batch || !added || !added.length) return;
+    if (!batch.key || !batch.key.startsWith("arr:")) return;
+    const mesh = batch.mesh;
+    if (!mesh || !mesh.material || typeof mesh.material.clone !== "function") return;
+    let material = mesh.userData.forgeArrayMaterial;
+    if (!material) {
+      const source = mesh.material;
+      material = source.clone();
+      const copied = { ...(source.userData || {}) };
+      copied.forgeArray = true;
+      copied.albedoNode = false;
+      copied.cutoutNode = false;
+      copied.forgeArraySources = [];
+      material.userData = copied;
+      material.colorNode = null;
+      material.alphaTestNode = null;
+      material.normalNode = null;
+      material.roughnessNode = null;
+      material.metalnessNode = null;
+      mesh.userData.forgeArrayMaterial = material;
+      mesh.userData.forgeArray = true;
+      mesh.material = material;
+    }
+    let cap = mesh.maxInstanceCount || 0;
+    for (const item of added) cap = Math.max(cap, (item.instanceId || 0) + 1);
+    const layerSlot = ensureLayerTexture(material, cap);
+    let rebuildNodes = layerSlot.replaced || material.colorNode == null;
+    const sources = material.userData.forgeArraySources || (material.userData.forgeArraySources = []);
+    for (const item of added) {
+      const partMaterial = item.record && item.record.part && item.record.part.material;
+      if (!partMaterial || !partMaterial.map) continue;
+      const albedo = texturePacker.layerOf(partMaterial.map);
+      if (!albedo) continue;
+      if (material.map !== albedo.array) {
+        material.map = albedo.array;
+        rebuildNodes = true;
+      }
+      if (Number.isInteger(partMaterial.map.channel)) material.map.channel = partMaterial.map.channel;
+      let normalLayer = 0;
+      let roughLayer = 0;
+      const normal = partMaterial.normalMap;
+      if (normal && canPackTexture(normal)) {
+        const placed = texturePacker.layerOf(normal);
+        if (placed) {
+          if (material.userData.forgeArrayNormal !== placed.array) {
+            material.userData.forgeArrayNormal = placed.array;
+            material.normalMap = placed.array;
+            rebuildNodes = true;
+          }
+          normalLayer = placed.layer;
+          rememberSource(sources, normal);
+        }
+      }
+      const rough = partMaterial.roughnessMap;
+      if (rough && canPackTexture(rough)) {
+        const placed = texturePacker.layerOf(rough);
+        if (placed) {
+          const orm = partMaterial.metalnessMap === rough;
+          if (material.userData.forgeArrayRough !== placed.array || material.userData.forgeArrayOrm !== orm) {
+            material.userData.forgeArrayRough = placed.array;
+            material.userData.forgeArrayOrm = orm;
+            material.roughnessMap = placed.array;
+            if (orm) material.metalnessMap = placed.array;
+            rebuildNodes = true;
+          }
+          roughLayer = placed.layer;
+          rememberSource(sources, rough);
+        }
+      }
+      rememberSource(sources, partMaterial.map);
+      writeLayerTexel(layerSlot.texture, item.instanceId, albedo.layer, normalLayer, roughLayer, 0);
+    }
+    if (rebuildNodes) {
+      material.colorNode = null;
+      material.alphaTestNode = null;
+      material.userData.albedoNode = false;
+      material.userData.cutoutNode = false;
+      material.normalNode = null;
+      material.roughnessNode = null;
+      material.metalnessNode = null;
+      if (material.alphaTest > 0) mapNodes.attachCutout(material);
+      else mapNodes.attachAlbedo(material);
+      if (mapNodes.attachArraySurface) mapNodes.attachArraySurface(material);
+      material.needsUpdate = true;
+    }
+    if (material.map && material.map.isTexture === true) mesh.userData.forgeAlbedo = material.map;
+  }
+
+  function latestArray(texture, swapped) {
+    let current = texture;
+    const seen = new Set();
+    while (current && swapped.has(current) && !seen.has(current)) {
+      seen.add(current);
+      current = swapped.get(current);
+    }
+    return current;
+  }
+
+  function retargetArrayTextures() {
+    if (!texturePacker || !mapNodes) return;
+    const swapped = texturePacker.takeSwapped();
+    if (!swapped) return;
+    for (const batch of batches) {
+      const material = batch.mesh && batch.mesh.material;
+      const userData = material && material.userData;
+      if (!userData || !userData.forgeArray) continue;
+      let changed = false;
+      if (swapped.has(material.map)) {
+        material.map = latestArray(material.map, swapped);
+        changed = true;
+      }
+      if (userData.forgeArrayNormal && swapped.has(userData.forgeArrayNormal)) {
+        userData.forgeArrayNormal = latestArray(userData.forgeArrayNormal, swapped);
+        material.normalMap = userData.forgeArrayNormal;
+        changed = true;
+      }
+      if (userData.forgeArrayRough && swapped.has(userData.forgeArrayRough)) {
+        userData.forgeArrayRough = latestArray(userData.forgeArrayRough, swapped);
+        material.roughnessMap = userData.forgeArrayRough;
+        if (userData.forgeArrayOrm === true) material.metalnessMap = userData.forgeArrayRough;
+        changed = true;
+      }
+      if (!changed) continue;
+      material.colorNode = null;
+      material.alphaTestNode = null;
+      userData.albedoNode = false;
+      userData.cutoutNode = false;
+      material.normalNode = null;
+      material.roughnessNode = null;
+      material.metalnessNode = null;
+      if (material.alphaTest > 0) mapNodes.attachCutout(material);
+      else mapNodes.attachAlbedo(material);
+      if (mapNodes.attachArraySurface) mapNodes.attachArraySurface(material);
+      material.needsUpdate = true;
+      if (material.map && material.map.isTexture === true) batch.mesh.userData.forgeAlbedo = material.map;
+    }
+  }
+
+  function refreshArrayLayers(parts) {
+    if (!texturePacker || !parts || !parts.length) return;
+    const wanted = new Set(parts);
+    for (const entry of entries.values()) {
+      for (const slot of entry.slots || []) {
+        const part = (entry.parts || []).find((item) => item && item.family === slot.family && item.lod === slot.lod);
+        if (!part || !wanted.has(part) || !slot.mesh || !slot.mesh.userData || !slot.mesh.userData.forgeArray) continue;
+        const live = batches.find((item) => item.mesh === slot.mesh);
+        if (!live) continue;
+        installArrayBatch(live, [{ instanceId: slot.index, record: { part, entry } }]);
+      }
+    }
+  }
+
   function idsForBatch(batch) {
     const mesh = batch.mesh;
     const pick = mesh && mesh.userData && mesh.userData.pick;
@@ -3584,6 +3812,8 @@ let convertSlots = 8;
           batchKey: result.batch.key,
         });
       }
+      if (result.added.length) installArrayBatch(result.batch, result.added);
+      retargetArrayTextures();
       mesh.userData.forgeIndirect = mesh._indirectTexture;
       if (result.added.length && typeof mesh.computeBoundingSphere === "function") mesh.computeBoundingSphere();
       result.batch.pickIdsDirty = true;

@@ -56,7 +56,7 @@ No Field was loaded here. The numbers below are from `frontend/src/batch-fill.te
 | cull, camera and selection unchanged | the instance loop | returns before the loop |
 | pick-id uploads while orbiting, no click | every dirty batch, every frame | 0 |
 
-On the Field capture, `batches` should move from 2253 toward `keys` once streaming settles. How far it falls depends on how many of those 2253 meshes shared a key. `keys` is the number to compare, not a guess from the 595 textures: the batch key also includes the mesh family, so two different meshes with the same image stay apart.
+On the Field capture, `batches` should move from 2253 toward `keys` once streaming settles. How far it falls depends on how many of those 2253 meshes shared a key. `keys` is the number to compare, not a guess from the 595 textures: the batch key also includes the mesh family, so two different meshes with the same image stay apart. The next section removes that family suffix and, on WebGPU, packs same-size compressed images into one array.
 
 ### Submit spike
 
@@ -65,6 +65,48 @@ On the Field capture, `batches` should move from 2253 toward `keys` once streami
 The 581.9 ms spike lines up with thousands of batch objects and 5920 draws, against 4 ms of GPU time. Fewer meshes is the change that can move `submit`. A custom indirect buffer, or raising the compile limit, is out of scope. If `batches` is near `keys` and `submit` is still hundreds of milliseconds, the rest is per-object work inside three’s render, not another rebuild.
 
 Check: rebuild the frontend, restart the editor, hard-reload, open the same Field view with **Profile** on. On a still camera, `cull` should read about 0. While orbiting with no click, `pick` should stay 0. After streaming settles, `batches` should be close to `keys`. Compare `submit` (latest, avg, p95) with the table above, and read `compile` on the stream line if a hitch lands while models are still arriving. Textures, GPU picking, the gizmo, and selection should behave as before.
+
+## Fewer batch keys
+
+After streaming settled, Field Child was one mesh per key: `batches` and `keys` were both 1004. The 3086 batches figure was mid-stream, while arrivals were still appending, and it is not the steady state. `submit` was 44.5 ms against 4.7 ms of GPU time and 0 ms of cull. That submit time is the CPU cost of about a thousand render objects inside `renderer.render` (a node material, its bindings, and a pipeline). Per-object frustum culling and opaque sorting are already off, so the instance walk is not the 44.5 ms. A quiet opaque mesh now skips the redundant merged-draw fill; that does not by itself turn 44 ms into a few milliseconds. Fewer meshes does, because the cost scales with the object count.
+
+The mesh family is no longer part of the batch key. `materialKey` stays on the part for the texture manifest. Two shapes that sample the same images, alpha, side, tint, and vertex layout share one mesh. The vertex layout includes each attribute's item size, so a geometry that cannot share a `BatchedMesh` stays on its own key instead of being dropped.
+
+On WebGPU, a compressed image (BC1, BC3, BC7, ASTC) joins an array with every other image of the same width, height, mip count, format, color space, wrap, repeat, offset, and uv channel. The batch key names that group, not the image. Each instance writes its layer into a float texture, and the colour node samples `texture(array, uv).depth(layer)`. Normal and roughness maps that pack the same way use the green and blue channels of that texel. A group holds at most 256 layers; the next image keeps its own key. Growing the array allocates a new texture and points the batches at it, because the GPU layer count is fixed. Blend, terrain, water, and helpers stay on the per-image key. WebGL does not build arrays. Material tint stays in the key: `setColorAt` is the selection tint, and a shared white material painted models a flat cream once before.
+
+### Before
+
+27 Nov 2026, Bradyn’s Windows machine, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. The 3086 batches number from the same session was mid-stream. This environment has no game dump, so the Field column is not re-measured here.
+
+| | settled |
+| --- | --- |
+| cpu | 56.9 ms (avg 61.1, p95 70.4) |
+| update | 12.4 ms |
+| cull | 0.0 ms |
+| submit | 44.5 ms |
+| gpu | 4.7 ms |
+| obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 |
+
+### Measured here
+
+`frontend/src/texture-array.test.js`, Node, three r187, no GPU:
+
+| What | Before this change | After |
+| --- | --- | --- |
+| 8 mesh families, one shader key | 8 keys (the family was appended) | 1 key, 1 `BatchedMesh`, 8 instances |
+| 40 distinct BC7 images, one size class (8×8, sRGB) | 40 keys | 1 array, 40 layers, 1 key |
+| the same images split across 8×8 and 16×16, or sRGB and linear | 40 keys | 2 or 3 arrays, one key each |
+| a group already at its layer cap | the next image joins the array | that image keeps its own key |
+
+### Estimated on Field
+
+Not measured here. `submit` should move about with the render-object count: 44.5 ms × (new keys / 1004).
+
+Family merge alone, if most of the gap from the older ~595 textures up to 1004 keys was the family suffix, lands nearer that texture-set count: on the order of 600–800 keys, and submit on the order of 25–35 ms. WebGL stops there.
+
+WebGPU arrays collapse every packable image in one size class into one key per shader class (alpha, side, tint, vertex layout). If the field's compressed images sit in a handful of sizes, `keys` and `batches` can fall from 1004 into the tens, and they should still match. The sub-draws stay (5872 draws in the settled capture). At about a microsecond each that is roughly 6 ms, plus a couple of milliseconds for a few dozen objects, so submit is more likely 8–20 ms than 2 ms. GPU time stays near 4.7 ms. Blend, terrain, water, and any size class of its own remain extra batches. Confirm with the overlay after streaming settles: `keys` and `batches` equal and under 1004, `submit` latest / avg / p95 against 44.5 ms, `cull` still about 0.
+
+Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on and wait until streaming settles. Compare `keys` and `batches` with 1004, and `submit` with 44.5 ms. Textures, GPU picking, the gizmo, and selection should behave as before. There is no new overlay counter.
 
 ## Frustum and draw distance
 

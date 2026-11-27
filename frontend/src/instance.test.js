@@ -170,6 +170,33 @@ test("r187 merged draws fold one geometry and keep a hidden instance's indirect 
   mesh.dispose();
 });
 
+test("a quiet opaque batch does not walk its instances again", () => {
+  const geom = new THREE.BoxGeometry(1, 1, 1);
+  const material = new THREE.MeshBasicMaterial();
+  const mesh = new THREE.BatchedMesh(4, 5000, 8000, material);
+  mesh.perObjectFrustumCulled = false;
+  mesh.sortObjects = false;
+  const geometryId = mesh.addGeometry(geom);
+  mesh.addInstance(geometryId);
+  mesh.addInstance(geometryId);
+  const camera = new THREE.PerspectiveCamera();
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 1);
+  let calls = 0;
+  const previous = mesh._updateDrawParameters.bind(mesh);
+  mesh._updateDrawParameters = (...args) => {
+    calls += 1;
+    return previous(...args);
+  };
+  mesh._visibilityChanged = false;
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 1);
+  assert.equal(calls, 0);
+  mesh._visibilityChanged = true;
+  assert.equal(scheduleMergedDraws(mesh, camera, mesh.geometry, material), 1);
+  assert.equal(calls, 1);
+  geom.dispose();
+  mesh.dispose();
+});
+
 test("same-size compressed images do not share a batch identity, and a clone does", () => {
   const make = () => new THREE.CompressedTexture(
     [{ data: new Uint8Array(16), width: 8, height: 8 }],
@@ -183,7 +210,8 @@ test("same-size compressed images do not share a batch identity, and a clone doe
   assert.equal(imageIdentity(left), imageIdentity(left.clone()));
   const part = { material: {}, geometry: {}, materialKey: "Body:0", batchKey: "flat|Body:0" };
   assert.equal(refreshBatchKeys([part], () => imageIdentity(left)), true);
-  assert.equal(part.batchKey, `${imageIdentity(left)}|Body:0`);
+  assert.equal(part.batchKey, imageIdentity(left));
+  assert.equal(part.batchKey.includes("Body:0"), false);
   assert.equal(refreshBatchKeys([part], () => imageIdentity(left)), false);
 });
 
