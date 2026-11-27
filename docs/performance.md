@@ -2,6 +2,25 @@
 
 Baseline on Bradyn’s PC, Kokiri Forest child Static+Dynamic, before this pass: about 55–65 fps, 200–275 draws, 10553 model draws if each copy was its own draw, and 1.4–1.8M triangles. The viewport status label is the draw counter. **Profile** adds the frame rate, instance count, and cull count.
 
+## Rolled back on `render-known-good`
+
+This branch is current `main` with pull request #70 reverted (`git revert -m 1 06cf8cd`) and the Field benchmark from #74 left in place. The renderer is the path at `bea2fb6`, the merge of #69.
+
+That commit is the last known-good. After #69 settled, Hyrule Field Child, Static + Dynamic, was one mesh per key: `batches` and `keys` were both 1004, `submit` was 44.5 ms, and textures were still one image per material. Pull request #70 says the wrong textures and the terrain that slides with the camera did not happen before that PR. The 44.5 ms figure is the slower correct baseline. #69 stays, because that settled capture is the result of #69. #57 (three 0.187.0) and #55 (the byte budget and compile-before-attach) stay too: that same Field was already on them. #74 stays: it only records the fly.
+
+#70 (`06cf8cd`, tip `e65af37`) is the suspect merge. Its commits, in order, and what Bradyn reported:
+
+| Commit | What it did | What the Field capture showed |
+| --- | --- | --- |
+| `b45754d` | Drop the mesh family from the batch key and pack same-size compressed images into `CompressedArrayTexture`. | The array was left on `material.map`. `textureSample` had no `array_index`, the command buffer was dropped, land went flat, and water stayed on the teal stand-in. `submit` 111.3 ms, `keys` 148 on a partial stream. |
+| `23c3763` | Sample the array with a layer index, off the stock map slots. | Land had albedo. No `texture_2d_array` sample error. `submit` 31.2 ms, `keys` 466. This is the only visual confirmation inside #70, and the later commits in the same merge shipped with it. |
+| `137ef86` | Release the packed CPU copies and stop serializing them. | 874 empty `writeTexture` calls. Land looked missing or flat while streaming. After it settled, `submit` was 44.3 ms, no better than the per-image 44.5 ms. |
+| `a351efc` | Upload a mip only after the GPU has the bytes, and copy a grow on the GPU. | The empty writes were gone. 1265 `copyTextureToTexture` errors remained: tail mips of 768 and 512 images had a width of 6, 3, or 1. `submit` 41.6 ms, heap 1927 MB. |
+| `3b7eb52` | Round those copies to the BC 4×4 block. | No WebGPU validation errors. Textures sat on the wrong models and then popped. The terrain slid as the camera moved. Bradyn wrote that this did not happen before #70. Heap 3348 MB. |
+| `e65af37` | Keep layer indices stable and pin the terrain matrix. | The attempted fix for the wrong textures and the slide. No later capture says terrain, textures, and water are correct. On current `main` they are still wrong, and water has regressed as well. |
+
+The Field benchmark on this branch uses the same JSON names as #74 (`submit`, `update`, `priority`, `labels`, `cull`, `writeTex`, `indirectFills`, `lodFlips`, heap avg/final, `capped`, `draws`, `batches`). A run here is the correct-rendering baseline to compare with `main`, not another pass of the array packer.
+
 ## Render on change
 
 `renderer.render` runs only from the animation frame requested by `requestRender`. Nothing calls `setAnimationLoop`. A frame schedules the next one only while the camera is moving (orbit damping, fly keys, or right-button look), the gizmo is dragging, or a model or terrain load is still in flight. Water does not animate, so it does not keep the loop. When that stops, **Profile** reads `idle` and the last draw count stays on the status label.
@@ -388,7 +407,7 @@ Use the viewport status label to confirm the backend. A WebGPU run starts with `
 
 ## Field camera-path benchmark
 
-The Profile panel has a **Field benchmark** button. It is hidden until Profile is on. Nothing in the fly runs while that panel is closed and the page was not opened with `?benchmark=1`. Profile itself stays off unless the checkbox or `?profile=1` is set. The benchmark does not remember itself in local storage.
+On `render-known-good` this fly runs on the pre-#70 renderer, so the JSON is a correct-rendering baseline. The Profile panel has a **Field benchmark** button. It is hidden until Profile is on. Nothing in the fly runs while that panel is closed and the page was not opened with `?benchmark=1`. Profile itself stays off unless the checkbox or `?profile=1` is set. The benchmark does not remember itself in local storage.
 
 The path is the closed loop from the `perf-render-bundles` branch (`field-loop-160m`). Eight sides are 160 m on world XZ. The last segment returns to the origin on the diagonal. The eye is at y = 190, looking 48 m ahead at y = 150, at 90 m/s. The camera steps 1/60 s per frame, so the same machine takes the same number of samples. Orbit is restored when the loop ends.
 
