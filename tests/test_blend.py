@@ -379,6 +379,42 @@ def test_a_flat_glb_keeps_each_untextured_material():
     assert len(shared["materials"]) == 1
 
 
+def test_bake0_plus_a_blend_layer_is_not_albedo():
+    """Lake Hyrule grass bound only bake0 and used the lightmap as the mix."""
+    from ocarina_forge.formats.bfres import rank_albedo
+
+    binds = [
+        ("bake0", "CmnTex_BakeDefault"),
+        ("bake1", "CmnTex_BakeLightDefault"),
+    ]
+    assert rank_albedo(binds) == []
+    assert rank_albedo([("_t0", "Mt_Skin")]) == [("_t0", "Mt_Skin")]
+    assert rank_albedo(
+        [
+            ("_a0", "UmeCliff_B_Near_Alb"),
+            ("bake0", "CmnTex_BakeDefault"),
+            ("_a1", "GerudoValley_gr_soil_A_Alb"),
+        ]
+    ) == [
+        ("_a0", "UmeCliff_B_Near_Alb"),
+        ("_a1", "GerudoValley_gr_soil_A_Alb"),
+    ]
+    forced = Material(
+        "Mt_Land_LakeHrl_Island_E_Grass",
+        binds=binds,
+        albedo=list(binds),
+    )
+    assert overlay_plan(forced) is None
+    ranked = Material(
+        "Mt_Land_LakeHrl_Island_E_Grass",
+        binds=binds,
+        albedo=rank_albedo(binds),
+        base_color=(0.31, 0.42, 0.18, 1.0),
+    )
+    assert overlay_plan(ranked) is None
+    assert ranked.base_color == (0.31, 0.42, 0.18, 1.0)
+
+
 def test_a_plain_emissive_map_still_glows():
     png = to_glb(
         [

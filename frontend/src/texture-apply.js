@@ -140,11 +140,21 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
   const report = [];
   const jobs = [];
   const seen = new Set();
+  const painted = new Map();
   for (const part of parts || []) {
     const key = materialKey(part);
-    if (seen.has(key)) continue;
-    seen.add(key);
     const slot = materials[key];
+    if (seen.has(key)) {
+      // A blend mask clones the material, so LOD1 is a second object with the
+      // same key. The first assign does not reach it. Paint that clone too.
+      if (slot && hasSlotImage(slot) && part.material && painted.get(key) !== part.material) {
+        jobs.push(assignSlot(part.material, slot, loadTexture).then(() => {}));
+        painted.set(key, part.material);
+      }
+      continue;
+    }
+    seen.add(key);
+    painted.set(key, part.material);
     if (!part.material) {
       report.push({ key, status: "not-applied", error: "not applied. This mesh has no material.", found: "" });
       continue;

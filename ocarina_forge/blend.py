@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import re
 
+from ocarina_forge.formats.bfres import is_colour_bind
+
 _COMPONENT = {"r": "r", "g": "g", "b": "b", "a": "a", "red": "r", "green": "g", "blue": "b", "alpha": "a"}
 _NAMED = re.compile(
     r"(?:color0|vtxcolor|vtx_color|vertex_color|vertexcolor|_c0|\bc0)[._ ]?(r|g|b|a|red|green|blue|alpha)\b",
@@ -99,6 +101,10 @@ def overlay_plan(material, span: list[tuple[float, float]] | None = None) -> dic
         return None
     slot, texture = albedo[1]
     if not texture:
+        return None
+    # A lightmap or a 2-channel map is not the second albedo. Grass and soil
+    # on Lake Hyrule bound CmnTex_BakeLightDefault here and drew it as the mix.
+    if not is_colour_bind(slot, texture):
         return None
     if not _has_c0(material):
         return None

@@ -51,7 +51,7 @@ from ocarina_forge.cache_prune import (
     write_version_sidecar,
 )
 from ocarina_forge.streamlog import ConvertClock, bind_clock, current_clock, reset_clock
-from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, parse, rank_albedo, texture_rank
+from ocarina_forge.formats.bfres import FresError, base_color_name, bind_role, is_colour_bind, parse, rank_albedo, texture_rank
 from ocarina_forge.blend import color_span, overlay_plan, sampler_indices, skin_overlay_plan, span_from_colors
 from ocarina_forge.surface import collect, emissive_image, pack_layer, surface_role
 from ocarina_forge.materialdebug import name_hints, projection_options, sampler_lines
@@ -78,7 +78,7 @@ _KEYS = {"ModelProjectName", "ModelName", "Model", "BFRES", "ModelFile", "FmdbNa
 # the converter sources (see _converter_files), so a forgotten bump still
 # misses old glbs. tests/test_models.py pins the stamp to this version and
 # fails until both move together.
-_CACHE_VERSION = b"models-66\0"
+_CACHE_VERSION = b"models-67\0"
 _BNTX_VERSION = b"bntx-6\0"
 _NEUTRAL = (0.62, 0.58, 0.5, 1.0)
 # Untextured static-map stand-in. The real ground is TerrainArc, not this bfres.
@@ -1777,6 +1777,7 @@ def _resolve_materials(dump, models, hint: str, terrain: bool) -> tuple[dict, li
                 _apply_stand_in(part, choice, external)
                 if choice.get("image") is not None and choice["wanted"]:
                     external[choice["wanted"]] = choice["image"]
+    _share_lod_colour(models)
     return external, log, raws
 
 
@@ -2013,13 +2014,104 @@ def _skin_swatch(color) -> object:
     return Texture("skin", 1, 1, rgba, 0, "skin tint")
 
 
+def _two_channel_reason(image) -> str:
+    """BC4 and BC5 are not albedo. ``0x1E01`` is BC5 UNORM and draws white and black."""
+    if image is None:
+        return ""
+    codec = (getattr(image, "codec", "") or "").lower()
+    try:
+        fmt = int(getattr(image, "fmt", 0) or 0)
+    except (TypeError, ValueError):
+        fmt = 0
+    family = fmt & 0xFF00
+    if codec.startswith("bc5") or family == 0x1E00:
+        return "BC5 is a two-channel map and is not a colour"
+    if codec.startswith("bc4") or family == 0x1D00:
+        return "BC4 is a single channel and is not a colour"
+    return ""
+
+
+def _colour_image(found: dict) -> dict:
+    """Drop a decoded lightmap or normal so it cannot become the albedo."""
+    if not isinstance(found, dict):
+        return found
+    reason = _two_channel_reason(found.get("image"))
+    if not reason:
+        return found
+    copied = dict(found)
+    copied["image"] = None
+    copied["error"] = reason
+    return copied
+
+
+def _share_lod_colour(models) -> None:
+    """A far LOD uses the near LOD's albedo when they share the material name.
+
+    Lake Hyrule's grass and soil far meshes arrived with an empty sampler.
+    The near mesh had already resolved the material. The far mesh keeps that
+    result instead of a second lookup that can only see bake0.
+    """
+    for model in models:
+        donor: dict[str, object] = {}
+        for part in model.parts:
+            if part.lod:
+                continue
+            key = (part.material or "").strip()
+            if not key:
+                continue
+            current = donor.get(key)
+            if current is None or (_usable_albedo(part) and not _usable_albedo(current)):
+                donor[key] = part
+        for part in model.parts:
+            if not part.lod:
+                continue
+            source = donor.get((part.material or "").strip())
+            if source is None or source is part or _usable_albedo(part):
+                continue
+            if _usable_albedo(source):
+                _copy_colour(part, source)
+            elif getattr(source, "base_color", None) and not part.base_color:
+                part.base_color = source.base_color
+
+
+def _usable_albedo(part) -> bool:
+    return is_colour_bind(getattr(part, "albedo_sampler", "") or "", getattr(part, "texture", "") or "")
+
+
+def _copy_colour(part, donor) -> None:
+    part.texture = donor.texture
+    part.albedo_sampler = donor.albedo_sampler
+    part.texture_found = donor.texture_found
+    part.texture_pending = donor.texture_pending
+    part.texture_failure = donor.texture_failure
+    part.texture_error = donor.texture_error
+    part.overlay_texture = donor.overlay_texture
+    part.blend = donor.blend
+    part.normal_texture = donor.normal_texture
+    part.emission_texture = donor.emission_texture
+    part.normal1_texture = donor.normal1_texture
+    part.orm_image = donor.orm_image
+    part.orm1_image = donor.orm1_image
+    part.surface_note = donor.surface_note
+    part.emission_image = donor.emission_image
+    part.emission_note = donor.emission_note
+    part.alpha = donor.alpha
+    part.cutoff = donor.cutoff
+    if getattr(donor, "wrap", ""):
+        part.wrap = donor.wrap
+    if donor.base_color:
+        part.base_color = donor.base_color
+
+
 def _overlay_choice(dump, model, material, hints, external, raws) -> dict:
     """The second albedo, or a skin tint under the one albedo, when a mask exists."""
     span = _span_for_material(model, material)
     plan = overlay_plan(material, span) or skin_overlay_plan(material, span)
     if not plan:
         return {}
-    found = _load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws)
+    if not is_colour_bind(plan.get("sampler") or "", plan.get("texture") or ""):
+        return {}
+    found = _colour_image(_load_named(dump, model, plan["texture"], hints, "opaque", material.cutoff, external, raws))
     image = found.get("image")
     located = found.get("found") or ""
     if image is None or not (located == "embedded" or _stem(located).lower() == _stem(plan["texture"]).lower()):
@@ -2072,6 +2164,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             layer=layer,
             flatten_alpha=True,
         )
+        found = _colour_image(found)
         last = found
         for path in found.get("tried") or []:
             if path not in tried:
@@ -2095,7 +2188,7 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
             misses.append(f"{name}: eyebrow does not use the face texture")
             flat_color = _BROW
             continue
-        found = _load_named(dump, model, name, hints, material.alpha, material.cutoff, external, raws)
+        found = _colour_image(_load_named(dump, model, name, hints, material.alpha, material.cutoff, external, raws))
         last = found
         for path in found.get("tried") or []:
             if path not in tried:
@@ -2111,7 +2204,9 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         hinted = _hint_alb_path(dump, hints)
         if hinted:
             stem = _stem(hinted)
-            found = _load_named(dump, model, stem, hints, material.alpha, material.cutoff, external, raws, forced=hinted)
+            found = _colour_image(
+                _load_named(dump, model, stem, hints, material.alpha, material.cutoff, external, raws, forced=hinted)
+            )
             last = found
             for path in found.get("tried") or []:
                 if path not in tried:
@@ -2125,13 +2220,22 @@ def _choose_material(dump, model, material, hints, terrain, external, raws) -> d
         borrowed = _borrow_sibling(dump, model, sources, hints, material, external, raws)
         if borrowed is not None:
             sampler, sibling, found, missing = borrowed
-            winner = (sampler, sibling, found)
+            found = _colour_image(found)
             last = found
             for path in found.get("tried") or []:
                 if path not in tried:
                     tried.append(path)
-            note = f"borrowed {sibling} because {missing} is missing"
-            found["error"] = f"{note}. {found.get('error') or ''}".strip(". ")
+            if found.get("image") is None:
+                misses.append(f"{sibling}: {found.get('error') or 'not a colour'}")
+            else:
+                note = f"borrowed {sibling} because {missing} is missing"
+                found = dict(found)
+                found["error"] = f"{note}. {found.get('error') or ''}".strip(". ")
+                winner = (sampler, sibling, found)
+                last = found
+    if winner is None and flat_color is None and getattr(material, "base_color", None):
+        flat_color = material.base_color
+        misses.append("no albedo sampler; flat colour from the shader")
     if winner is None and flat_color is None:
         label = " ".join(name for _sampler, name in sources) or material.name
         category = _category_color(label)
@@ -2920,9 +3024,11 @@ def _albedo_sources(material) -> list[tuple[str, str]]:
     """
     unused = _unused_sampler_names(material)
     if not unused:
-        return list(material.albedo)
-    binds = [(slot, tex) for slot, tex in material.binds if slot not in unused]
-    return rank_albedo(binds)
+        ranked = list(material.albedo)
+    else:
+        binds = [(slot, tex) for slot, tex in material.binds if slot not in unused]
+        ranked = rank_albedo(binds)
+    return [(slot, tex) for slot, tex in ranked if is_colour_bind(slot, tex)]
 
 
 def _unused_sampler_names(material) -> set[str]:

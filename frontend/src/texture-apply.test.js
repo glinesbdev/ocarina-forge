@@ -275,6 +275,32 @@ test("a shared material is cloned once per shape key", async () => {
   assert.doesNotMatch(note, /Body_low:5: applied CmnTex_Chara_Mt_Rock/);
 });
 
+test("a blend lod clone receives the same albedo as lod0", async () => {
+  const near = material();
+  const far = material();
+  const parts = [
+    { name: "lod0Cliff0", materialKey: "Cliff:2", material: near },
+    { name: "lod1Cliff0", materialKey: "Cliff:2", material: far },
+  ];
+  await applyTextureManifest(parts, {
+    materials: {
+      "Cliff:2": {
+        map: "/api/model-textures/cliff.ktx2",
+        sampler: "_a0",
+        texture: "UmeCliff_B_Near_Alb",
+        color: [1, 1, 1, 1],
+        status: "ready",
+        found: "UmeCliff_B_Near_Alb",
+      },
+    },
+  }, async (url) => texture(url));
+  assert.notEqual(near, far);
+  assert.equal(near.map.url, "/api/model-textures/cliff.ktx2");
+  assert.equal(far.map.url, "/api/model-textures/cliff.ktx2");
+  assert.equal(far.userData.forgeAlbedoSampler, "_a0");
+  assert.equal(far.userData.forgeAlbedoName, "UmeCliff_B_Near_Alb");
+});
+
 test("a skin tint is named and a tiling albedo repeats", async () => {
   const mesh = material();
   const parts = [{ name: "lod0Body_low0", materialKey: "Body_low:5", material: mesh }];
