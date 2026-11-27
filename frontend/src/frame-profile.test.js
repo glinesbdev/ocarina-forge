@@ -110,6 +110,33 @@ test("the hud prints n/a when timestamps are unsupported", () => {
   assert.match(text, /unavailable/);
 });
 
+test("gpu and split counters stay off the hud until a sample has them", () => {
+  const plain = formatProfileHud({
+    backend: "WebGPU",
+    mode: "none",
+    gpuState: "unsupported",
+    latest: { objects: 1, batches: 1, subDraws: 1, draws: 1, triangles: 1, meshes: 1, textures: 1, heapBytes: 1 },
+    summary: { frames: 1 },
+  });
+  assert.doesNotMatch(plain, /writeTex/);
+  assert.doesNotMatch(plain, /priority/);
+  const counted = formatProfileHud({
+    backend: "WebGPU",
+    mode: "webgpu",
+    gpuState: "ready",
+    latest: {
+      objects: 1, batches: 2, subDraws: 3, draws: 4, triangles: 5, meshes: 1, textures: 1, heapBytes: 1048576,
+      writeTex: 6, pipelines: 0, versions: 1, binds: 2,
+      priorityMs: 0.4, labelsMs: 0.2, lodFlips: 3, indirectFills: 4,
+      geomBytes: 2 * 1048576, bc7Bytes: 3 * 1048576,
+    },
+    summary: { frames: 1 },
+  });
+  assert.match(counted, /writeTex 6 · pipelines 0 · versions 1 · binds 2/);
+  assert.match(counted, /priority 0\.4 · labels 0\.2 · lod 3 · indirect 4/);
+  assert.match(counted, /geom 2\.0 MB · bc7 3\.0 MB/);
+});
+
 test("keys and pick uploads stay off the draws line until a sample has them", () => {
   const summary = summarize([]);
   const withCounts = formatProfileHud({

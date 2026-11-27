@@ -19,6 +19,9 @@ const FIELDS = [
   "objects", "batches", "subDraws", "draws", "triangles",
   "meshes", "textures", "heapBytes",
   "batchKeys", "pickUploads",
+  "writeTex", "pipelines", "versions", "binds",
+  "priorityMs", "labelsMs", "indirectFills", "lodFlips",
+  "geomBytes", "bc7Bytes",
 ];
 
 export function average(values) {
@@ -173,10 +176,33 @@ export function formatProfileHud({
     lineMs("frame", latest.frameMs, stats.frameMs),
     drawLine(latest),
     `tris ${formatTris(latest.triangles)} · meshes ${fmtInt(latest.meshes)} · tex ${fmtInt(latest.textures)} · heap ${fmtHeap(latest.heapBytes)}`,
+    gpuCounterLine(latest),
+    splitLine(latest),
+    memorySplitLine(latest),
   );
   if (detail) lines.push(...formatProfileDetail(detail));
   if (recommendation) lines.push(recommendation);
-  return lines.join("\n");
+  return lines.filter((line) => line).join("\n");
+}
+
+function gpuCounterLine(latest) {
+  if (latest.writeTex == null && latest.pipelines == null && latest.binds == null) return "";
+  return [
+    `writeTex ${fmtInt(latest.writeTex)}`,
+    `pipelines ${fmtInt(latest.pipelines)}`,
+    `versions ${fmtInt(latest.versions)}`,
+    `binds ${fmtInt(latest.binds)}`,
+  ].join(" · ");
+}
+
+function splitLine(latest) {
+  if (latest.priorityMs == null && latest.labelsMs == null && latest.lodFlips == null && latest.indirectFills == null) return "";
+  return `priority ${fmtMs(latest.priorityMs)} · labels ${fmtMs(latest.labelsMs)} · lod ${fmtInt(latest.lodFlips)} · indirect ${fmtInt(latest.indirectFills)}`;
+}
+
+function memorySplitLine(latest) {
+  if (latest.geomBytes == null && latest.bc7Bytes == null) return "";
+  return `geom ${fmtHeap(latest.geomBytes)} · bc7 ${fmtHeap(latest.bc7Bytes)}`;
 }
 
 function drawLine(latest) {

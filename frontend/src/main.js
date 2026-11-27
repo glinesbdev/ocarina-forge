@@ -452,6 +452,14 @@ if (profileBox) {
     }
   });
 }
+const benchQuery = new URLSearchParams(window.location.search).get("benchmark") === "1";
+if (benchQuery && viewport.startFieldBenchmark) {
+  if (profileBox) {
+    profileBox.checked = true;
+    viewport.setShowProfile(true);
+  }
+  viewport.startFieldBenchmark();
+}
 $("draw-distance").addEventListener("change", (event) => {
   viewport.setFlags({ distance: Number(event.target.value) || 0 });
 });

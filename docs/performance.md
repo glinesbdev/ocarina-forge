@@ -528,6 +528,41 @@ What that r170 trial could not do, and what is still unresolved. The renderer is
 
 Use the viewport status label to confirm the backend. A WebGPU run starts with `WebGPU`. A fallback names the reason, for example `WebGL (WebGPU unavailable: adapter is null)`. Plain `WebGL` means this session asked for WebGL, or the page is a build from before that label. The short revision on the label is the page; `/api/health` is the server. When they disagree, restart and hard-reload before comparing frames. See [troubleshooting.md](troubleshooting.md). For renderer comparisons, keep the scene, camera, and texture settings the same across both runs.
 
+## Field camera-path benchmark
+
+The Profile panel has a **Field benchmark** button. It is hidden until Profile is on. Nothing in the fly runs while that panel is closed and the page was not opened with `?benchmark=1`. Profile itself stays off unless the checkbox or `?profile=1` is set. The benchmark does not remember itself in local storage.
+
+The path is the closed loop from the `perf-render-bundles` branch (`field-loop-160m`). Eight sides are 160 m on world XZ. The last segment returns to the origin on the diagonal. The eye is at y = 190, looking 48 m ahead at y = 150, at 90 m/s. The camera steps 1/60 s per frame, so the same machine takes the same number of samples. Orbit is restored when the loop ends.
+
+On Windows, from the repo:
+
+1. `npm run build --prefix frontend`
+2. Restart the editor server.
+3. Hard-reload the page.
+4. Open Hyrule Field Child, Static + Dynamic. Leave the view alone until streaming settles. The benchmark waits for that, up to about 90 seconds, and records `settled` either way.
+5. Turn **Profile** on and click **Field benchmark**. Or open the editor with `?benchmark=1` on the URL, which turns Profile on and starts the fly.
+
+The JSON is printed in the DevTools console and copied to the clipboard. After the fly, `__forgeBenchmark()` in the console returns the same object. `summary` holds avg and p95. Null GPU timestamps are left out of `summary.gpuMs`.
+
+| Field | Meaning |
+| --- | --- |
+| `summary.submitMs` | CPU time around `renderer.render` |
+| `summary.updateMs` | CPU time in the frame before and after that, including the tail |
+| `summary.priorityMs` | Time in the load-priority pass when the camera moved enough to run it |
+| `summary.labelsMs` | Time in the label render |
+| `summary.cullMs` | Time in `syncBatchVisibility` |
+| `summary.writeTex` | `queue.writeTexture` calls that frame. The counter is installed only while Profile or the benchmark is on |
+| `summary.indirectFills` | WebGPU frames where a batch refilled its merged draws |
+| `summary.lodFlips` | Instance visibility changes that frame |
+| `summary.draws` / `summary.batches` | Draw calls and batch objects |
+| `heap.avg` / `heap.final` | JS heap during the fly, and the last sample |
+| `capped` | Resident cap count when the fly ended |
+| `geomBytes` / `bc7Bytes` | Geometry and BC7 bytes from the resident budget at the end |
+
+The HUD, while Profile is on, adds `writeTex`, `pipelines`, `versions`, `binds`, `priority`, `labels`, `lod`, `indirect`, `geom`, and `bc7`. Those lines are absent when a sample has no counters. With Profile off, `writeTexture` and `createBindGroup` are not wrapped.
+
+`node tools/measure-field-benchmark.mjs` checks the path geometry and the JSON field names. It does not load a scene and it is not a Field timing.
+
 ## Field-scale memory and further GPU techniques
 
 Compressed WebGPU textures, draw/frame measurements, static-batching notes, and the remaining technique list live in `docs/rendering-performance.md`.

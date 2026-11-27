@@ -4,9 +4,28 @@
  * load is the number to trust. Later pipeline or version changes are logged
  * a few times, not on every frame.
  */
+function wrapCount(object, name, state, field) {
+  if (!object || typeof object[name] !== "function" || object[name].__forgeCount) return;
+  const original = object[name].bind(object);
+  const wrapped = (...args) => {
+    state[field] += 1;
+    return original(...args);
+  };
+  wrapped.__forgeCount = true;
+  object[name] = wrapped;
+}
+
 export function createGpuProfile(renderer) {
   const device = renderer && renderer.backend && renderer.backend.device;
-  const state = { made: 0, frames: 0, quiet: 0, logged: 0, versions: new WeakMap() };
+  const state = {
+    made: 0,
+    frames: 0,
+    quiet: 0,
+    logged: 0,
+    versions: new WeakMap(),
+    device: device || null,
+    armed: false,
+  };
   if (!device) return state;
   if (typeof device.createRenderPipeline === "function") {
     const original = device.createRenderPipeline.bind(device);
@@ -25,6 +44,23 @@ export function createGpuProfile(renderer) {
   return state;
 }
 
+/**
+ * Count writeTexture and createBindGroup. Called when Profile or the Field
+ * benchmark turns on. Until then those methods are the originals.
+ */
+export function armFrameCounters(state) {
+  if (!state || state.armed) return state;
+  state.armed = true;
+  state.writeTex = 0;
+  state.binds = 0;
+  state.last = { pipelines: 0, versions: 0, writeTex: 0, binds: 0 };
+  const device = state.device;
+  if (!device) return state;
+  wrapCount(device.queue, "writeTexture", state, "writeTex");
+  wrapCount(device, "createBindGroup", state, "binds");
+  return state;
+}
+
 export function sampleGpuFrame(state, { calls = 0, materials = [], loading = false } = {}) {
   if (!state) return "";
   state.frames += 1;
@@ -40,6 +76,16 @@ export function sampleGpuFrame(state, { calls = 0, materials = [], loading = fal
       churn += 1;
       state.versions.set(material, version);
     }
+  }
+  if (state.armed) {
+    state.last = {
+      pipelines: made,
+      versions: churn,
+      writeTex: state.writeTex || 0,
+      binds: state.binds || 0,
+    };
+    state.writeTex = 0;
+    state.binds = 0;
   }
   if (loading) {
     state.quiet = 0;

@@ -47,6 +47,7 @@ import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewO
 import { compileObjectPipeline, createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
+import { createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext, summarizeBatchKeys } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
@@ -69,7 +70,7 @@ import {
   replaceLayerTexture,
   writeLayerTexel,
 } from "./texture-array.js";
-import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
+import { armFrameCounters, createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 import { observeWgsl } from "./wgsl-diagnostics.js";
 import { chooseHit } from "./pick.js";
 import {
@@ -386,14 +387,29 @@ export async function createViewport(host, hooks) {
   profileDump.className = "ghost";
   profileDump.textContent = "Dump JSON";
   profileDump.title = "Copy a JSON capture of the recent frames and print it in the console";
-  profileEl.append(profileText, profileDump);
+  const profileBench = document.createElement("button");
+  profileBench.type = "button";
+  profileBench.className = "ghost";
+  profileBench.textContent = "Field benchmark";
+  profileBench.title = "Fly a fixed 160 m loop over Hyrule Field Child after streaming settles, then copy avg/p95 JSON";
+  profileEl.append(profileText, profileDump, profileBench);
   host.appendChild(profileEl);
   profileDump.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     publishProfile();
   });
+  profileBench.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    startFieldBenchmark();
+  });
   let showProfile = false;
+  let profileCounting = false;
+  let statIndirectFills = 0;
+  let statLodFlips = 0;
+  let benchmarkRun = null;
+  let benchmarkResult = null;
   let lastRendering = false;
   let serverHead = "";
   let serverLines = [];
@@ -3333,6 +3349,7 @@ let convertSlots = 8;
         if (slot.shown !== show) {
           const wasHidden = slot.shown === false;
           slot.shown = show;
+          if (profileCounting) statLodFlips += 1;
           if (show && wasHidden && slot.matrix) slot.mesh.setMatrixAt(slot.index, slot.matrix);
           slot.mesh.setVisibleAt(slot.index, show);
           const batch = slot.batchKey ? batchFiller.get(slot.batchKey) : null;
@@ -3477,7 +3494,16 @@ let convertSlots = 8;
       // r187 draws the merged ranges. Filling them after previousRender is
       // too late for this frame, and the WebGPU onBeforeRender does not
       // fill them at all.
-      if (webgpuBatch) scheduleMergedDraws(mesh, cameraArg, geometry, shown);
+      if (webgpuBatch) {
+        if (profileCounting) {
+          const fills = mesh._visibilityChanged === true
+            || mesh.perObjectFrustumCulled === true
+            || mesh.sortObjects === true
+            || !(mesh._mergedDrawCount > 0);
+          if (fills) statIndirectFills += 1;
+        }
+        scheduleMergedDraws(mesh, cameraArg, geometry, shown);
+      }
       previousRender(rendererArg, sceneArg, cameraArg, geometry, shown, ...rest);
     };
     mesh.layers.enable(PICK_LAYER);
@@ -6658,6 +6684,14 @@ uniform float terrainLayerMissing;`
         break;
       }
     }
+    if (benchmarkRun && benchmarkRun.recording && benchmarkRun.samples) {
+      for (let index = benchmarkRun.samples.length - 1; index >= 0; index -= 1) {
+        if (benchmarkRun.samples[index].gpuMs == null) {
+          benchmarkRun.samples[index].gpuMs = ms;
+          break;
+        }
+      }
+    }
     if (showProfile) paintFrame(false, false);
   });
 
@@ -6682,7 +6716,22 @@ uniform float terrainLayerMissing;`
       heapBytes,
       batchKeys: batchKeyCount(),
       pickUploads: statPickUploads,
+      writeTex: gpuProfile && gpuProfile.last ? gpuProfile.last.writeTex : 0,
+      pipelines: gpuProfile && gpuProfile.last ? gpuProfile.last.pipelines : 0,
+      versions: gpuProfile && gpuProfile.last ? gpuProfile.last.versions : 0,
+      binds: gpuProfile && gpuProfile.last ? gpuProfile.last.binds : 0,
+      priorityMs: lastCpu.priorityMs,
+      labelsMs: lastCpu.labelsMs,
+      indirectFills: lastCpu.indirectFills,
+      lodFlips: lastCpu.lodFlips,
+      flyMs: lastCpu.flyMs,
+      textureMs: lastCpu.textureMs,
+      geomBytes: assetBudgetCache ? assetBudgetCache.geometry : null,
+      bc7Bytes: assetBudgetCache ? assetBudgetCache.bc7 : null,
     });
+    if (benchmarkRun && benchmarkRun.recording && profileWindow.latest()) {
+      benchmarkRun.samples.push({ ...profileWindow.latest() });
+    }
   }
 
   let paintedStatus = "";
@@ -6734,16 +6783,126 @@ uniform float terrainLayerMissing;`
     if (hooks.onFrame) hooks.onFrame();
   }
 
+  function syncProfileCounting() {
+    const on = showProfile || benchmarkRun != null;
+    profileCounting = on;
+    if (on && gpuProfile) armFrameCounters(gpuProfile);
+  }
+
+  function startFieldBenchmark() {
+    if (benchmarkRun) return benchmarkResult;
+    if (!showProfile) {
+      showProfile = true;
+      frameTimer.setEnabled(true);
+      profileEl.hidden = false;
+      profileWindow.clear();
+    }
+    syncProfileCounting();
+    benchmarkRun = { waited: 0, samples: [], recording: false, flight: null, complete: false };
+    requestRender();
+    return null;
+  }
+
+  function finishBenchmark() {
+    const run = benchmarkRun;
+    benchmarkRun = null;
+    syncProfileCounting();
+    if (!run) return null;
+    if (run.saved) {
+      camera.position.copy(run.saved.position);
+      orbit.target.copy(run.saved.target);
+      orbit.enabled = run.saved.orbit !== false;
+      camera.up.set(0, 1, 0);
+      camera.lookAt(orbit.target);
+      camera.updateMatrixWorld(true);
+    }
+    const samples = (run.samples || []).filter(Boolean);
+    let budget = assetBudgetCache;
+    try {
+      budget = currentAssetBudget();
+    } catch (error) {
+      console.error(error);
+    }
+    const summary = summarizeBenchmark(samples);
+    const finalHeap = samples.length ? samples[samples.length - 1].heapBytes : null;
+    benchmarkResult = {
+      version: 1,
+      scene: "hyrule-field-child",
+      path: "field-loop-160m",
+      settled: Boolean(run.settled),
+      waitFrames: run.waitFrames || 0,
+      frames: samples.length,
+      summary,
+      heap: { avg: summary.heapBytes ? summary.heapBytes.avg : null, final: finalHeap },
+      heapBytes: finalHeap,
+      geomBytes: budget ? budget.geometry : null,
+      bc7Bytes: budget ? budget.bc7 : null,
+      capped: statCapped,
+      note: "avg and p95 are the fly after streaming settles or the wait ends. submit, update, priority, labels, and cull are CPU milliseconds. writeTex counts queue.writeTexture while Profile is on. indirectFills counts WebGPU merged-draw fills. lodFlips counts instance visibility changes. heap.avg is the fly; heap.final is the last sample. capped is the resident cap count at the end. draws and batches are in summary.",
+    };
+    const json = JSON.stringify(benchmarkResult, null, 2);
+    console.info(json);
+    const clipboard = globalThis.navigator && navigator.clipboard;
+    if (clipboard && typeof clipboard.writeText === "function") {
+      clipboard.writeText(json).catch(() => {});
+    }
+    requestRender();
+    return benchmarkResult;
+  }
+
+  function stepBenchmark() {
+    if (!benchmarkRun || benchmarkRun.complete) return Boolean(benchmarkRun);
+    const run = benchmarkRun;
+    if (!run.flight) {
+      const pending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
+        || (modelStage && modelStage.pending && modelStage.pending.size > 0);
+      const settled = streamSettled({
+        queued: statQueued,
+        loading: statLoading,
+        background: (statDeferred || 0) + (statBackgroundLoading || 0),
+        pending: pending ? 1 : 0,
+      });
+      run.waited += 1;
+      if (!settled && run.waited < 60 * 90) return true;
+      run.settled = settled;
+      run.waitFrames = run.waited;
+      run.flight = createFlight();
+      run.recording = true;
+      run.samples = [];
+      run.saved = {
+        position: camera.position.clone(),
+        target: orbit.target.clone(),
+        orbit: orbit.enabled,
+      };
+      orbit.enabled = false;
+      profileWindow.clear();
+    }
+    const pose = run.flight.sample(1 / 60);
+    camera.position.set(pose.x, pose.y, pose.z);
+    orbit.target.set(pose.lookX, pose.lookY, pose.lookZ);
+    camera.up.set(0, 1, 0);
+    camera.lookAt(orbit.target);
+    camera.updateMatrixWorld(true);
+    if (pose.done) run.complete = true;
+    return true;
+  }
+
   function tick() {
     frameHandle = 0;
     if (!running) return;
+    if (profileCounting) {
+      statIndirectFills = 0;
+      statLodFlips = 0;
+    }
     const tickAt = performance.now();
     const gap = lastTickAt ? tickAt - lastTickAt : 0;
     lastTickAt = tickAt;
     timer.update(tickAt);
     const dt = Math.min(timer.getDelta(), 0.05);
-    const flying = updateFly(dt);
-    const damped = !looking && ((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false;
+    const benchmarkFlying = benchmarkRun ? stepBenchmark(dt) : false;
+    const flying = benchmarkFlying ? false : updateFly(dt);
+    const damped = (benchmarkFlying || looking) ? false : (((orbitGesture && orbitMoved) || orbitSettle > 0) ? orbit.update() : false);
+    const flyMs = profileCounting ? performance.now() - tickAt : 0;
     if (!orbitGesture && orbitSettle > 0) orbitSettle -= 1;
     const now = performance.now();
     const wasInteractive = streamInteractive;
@@ -6766,6 +6925,7 @@ uniform float terrainLayerMissing;`
       lastLoadDirection.copy(loadForward);
       syncLabels();
     }
+    let priorityMs = 0;
     if (!priorityAnchored || cameraNeedsPriorityUpdate(
       { position: priorityPos, direction: priorityDir },
       { position: camera.position, direction: loadForward },
@@ -6773,7 +6933,9 @@ uniform float terrainLayerMissing;`
       priorityPos.copy(camera.position);
       priorityDir.copy(loadForward);
       priorityAnchored = true;
+      const priorityStart = profileCounting ? performance.now() : 0;
       prioritizeLoad();
+      if (profileCounting) priorityMs = performance.now() - priorityStart;
     }
     const updateMs = performance.now() - tickAt;
     const cullStart = performance.now();
@@ -6783,8 +6945,10 @@ uniform float terrainLayerMissing;`
     const parseDetail = detailParses.shift();
     if (parseDetail) parseDetail();
     if (detailParses.length) requestRender();
+    const textureStart = profileCounting ? performance.now() : 0;
     updateTextureDetail(now, Boolean(parseDetail));
     repackDetailedTextures();
+    const textureMs = profileCounting ? performance.now() - textureStart : 0;
     guardMissingUv();
     const entry = selected ? entries.get(selected) : null;
     if (entry) {
@@ -6806,6 +6970,7 @@ uniform float terrainLayerMissing;`
     }
     const afterStart = performance.now();
     flushTextureCpuRelease();
+    const gpuSampleStart = profileCounting ? performance.now() : 0;
     if (gpuProfile) {
       const materials = [];
       for (const batch of batches) materials.push(batch.mesh.material);
@@ -6822,7 +6987,10 @@ uniform float terrainLayerMissing;`
         loading: pendingLoads > 0,
       });
     }
+    const gpuSampleMs = profileCounting ? performance.now() - gpuSampleStart : 0;
+    const labelsStart = profileCounting ? performance.now() : 0;
     labels.render(scene, camera);
+    const labelsMs = profileCounting ? performance.now() - labelsStart : 0;
     const extra = performance.now() - afterStart;
     const roundMs = (value) => Math.max(0, Math.round(value * 100) / 100);
     lastCpu = {
@@ -6830,8 +6998,15 @@ uniform float terrainLayerMissing;`
       cullMs: roundMs(cullMs),
       submitMs: roundMs(submitMs),
       cpuMs: roundMs(updateMs + updateTail + cullMs + submitMs + extra),
+      priorityMs: roundMs(priorityMs),
+      labelsMs: roundMs(labelsMs),
+      indirectFills: statIndirectFills,
+      lodFlips: statLodFlips,
+      flyMs: roundMs(flyMs),
+      textureMs: roundMs(textureMs),
+      gpuSampleMs: roundMs(gpuSampleMs),
     };
-    const again = keepRendering({
+    const again = benchmarkRun != null || keepRendering({
       flying,
       damped,
       looking,
@@ -6839,6 +7014,7 @@ uniform float terrainLayerMissing;`
     });
     if (again && gap > 0 && gap < 250) frameMs = Math.round(gap * 10) / 10;
     paintFrame(again);
+    if (benchmarkRun && benchmarkRun.complete) finishBenchmark();
     if (again) requestRender();
     else if (showProfile && frameTimer.mode === "webgl" && frameTimer.latest() == null) scheduleGpuPoll();
   }
@@ -6963,6 +7139,7 @@ uniform float terrainLayerMissing;`
   }
 
   globalThis.__forgeProfile = dumpProfile;
+  globalThis.__forgeBenchmark = () => benchmarkResult;
   if (import.meta.env && import.meta.env.DEV) {
     globalThis.__forgeSnapDrag = (axis, y, x) => {
       const entry = selected ? entries.get(selected) : null;
@@ -7114,6 +7291,7 @@ uniform float terrainLayerMissing;`
       requestRender();
     },
     getMemoryReport,
+    startFieldBenchmark,
     unloadScene,
     setServerStatus(status) {
       serverHead = status && status.head ? String(status.head) : "";
@@ -7124,6 +7302,7 @@ uniform float terrainLayerMissing;`
       const next = Boolean(on);
       if (next && !showProfile) profileWindow.clear();
       showProfile = next;
+      syncProfileCounting();
       frameTimer.setEnabled(next);
       profileEl.hidden = !next;
       if (!next && gpuPoll) {
@@ -7166,6 +7345,7 @@ uniform float terrainLayerMissing;`
       labels.domElement.remove();
       if (globalThis.__forgeMemory === getMemoryReport) delete globalThis.__forgeMemory;
       if (globalThis.__forgeProfile === dumpProfile) delete globalThis.__forgeProfile;
+      if (globalThis.__forgeBenchmark) delete globalThis.__forgeBenchmark;
     },
   };
 }

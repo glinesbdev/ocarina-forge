@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
+import { armFrameCounters, createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
 
 test("pipeline creations and material version changes are counted per frame", () => {
   const created = [];
@@ -42,4 +42,37 @@ test("pipeline creations and material version changes are counted per frame", ()
     console.info = info;
   }
   assert.equal(created.length, 3);
+});
+
+test("writeTexture and bind-group counters stay unwired until Profile arms them", () => {
+  let writes = 0;
+  let binds = 0;
+  const device = {
+    queue: {
+      writeTexture() {
+        writes += 1;
+      },
+    },
+    createBindGroup() {
+      binds += 1;
+      return { id: binds };
+    },
+    createRenderPipeline() {
+      return {};
+    },
+  };
+  const state = createGpuProfile({ backend: { device } });
+  device.queue.writeTexture();
+  device.createBindGroup();
+  sampleGpuFrame(state, { calls: 1, materials: [], loading: false });
+  assert.equal(state.last, undefined);
+  armFrameCounters(state);
+  device.queue.writeTexture();
+  device.queue.writeTexture();
+  device.createBindGroup();
+  sampleGpuFrame(state, { calls: 1, materials: [], loading: true });
+  assert.equal(state.last.writeTex, 2);
+  assert.equal(state.last.binds, 1);
+  assert.equal(writes, 3);
+  assert.equal(binds, 2);
 });
