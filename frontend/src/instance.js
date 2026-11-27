@@ -9,6 +9,8 @@
  * that buffer is what made the drag throw after the first slot.
  */
 
+import { releaseArraySlots } from "./texture-array.js";
+
 // Verified initial state from the shipped GameDataList. Forge has no live save flags.
 const PRESENCE_DEFAULTS = new Map([["IsHyruleFieldBridgeClose", false]]);
 
@@ -238,6 +240,7 @@ export function cloneMaterialPreservingTextures(material) {
   restoreUserDataTextures(material.userData, held);
   copy.userData = copy.userData || {};
   restoreUserDataTextures(copy.userData, held);
+  releaseArraySlots(copy);
   return copy;
 }
 
@@ -273,6 +276,7 @@ export function materialForGeometry(material, geometry) {
   if (!material || !geometry) return material;
   const userData = material.userData || {};
   if (userData.terrainNode || userData.blendNode || userData.terrainShader || userData.banc === "terrain") return material;
+  releaseArraySlots(material);
   const missing = [];
   for (const slot of SAMPLED_SLOTS) {
     const texture = material[slot];
@@ -312,6 +316,7 @@ export function dropMapWithoutUv(root) {
         // colour nodes still reference `uv`, and a program built for a mesh
         // that has it is reused on a batch that does not.
         const guarded = Boolean(userData.terrainNode || userData.blendNode || userData.terrainShader || userData.banc === "terrain");
+        releaseArraySlots(material);
         const drop = [];
         for (const slot of SAMPLED_SLOTS) {
           if (slot === "map" && guarded) continue;

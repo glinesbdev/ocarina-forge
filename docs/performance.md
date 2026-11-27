@@ -72,7 +72,9 @@ After streaming settled, Field Child was one mesh per key: `batches` and `keys` 
 
 The mesh family is no longer part of the batch key. `materialKey` stays on the part for the texture manifest. Two shapes that sample the same images, alpha, side, tint, and vertex layout share one mesh. The vertex layout includes each attribute's item size, so a geometry that cannot share a `BatchedMesh` stays on its own key instead of being dropped.
 
-On WebGPU, a compressed image (BC1, BC3, BC7, ASTC) joins an array with every other image of the same width, height, mip count, format, color space, wrap, repeat, offset, and uv channel. The batch key names that group, not the image. Each instance writes its layer into a float texture, and the colour node samples `texture(array, uv).depth(layer)`. Normal and roughness maps that pack the same way use the green and blue channels of that texel. A group holds at most 256 layers; the next image keeps its own key. Growing the array allocates a new texture and points the batches at it, because the GPU layer count is fixed. Blend, terrain, water, and helpers stay on the per-image key. WebGL does not build arrays. Material tint stays in the key: `setColorAt` is the selection tint, and a shared white material painted models a flat cream once before.
+On WebGPU, a compressed image (BC1, BC3, BC7, ASTC) joins an array with every other image of the same width, height, mip count, format, color space, wrap, repeat, offset, and uv channel. The batch key names that group, not the image. Each instance writes its layer into a float texture, and the colour node samples `texture(array, uv).depth(layer)`. Normal and roughness maps that pack the same way use the green and blue channels of that texel. Occlusion that shares the roughness image is the red channel of that same sample. A group holds at most 256 layers; the next image keeps its own key. Growing the array allocates a new texture and points the batches at it, because the GPU layer count is fixed. Blend, terrain, water, and helpers stay on the per-image key. WebGL does not build arrays. Material tint stays in the key: `setColorAt` is the selection tint, and a shared white material painted models a flat cream once before.
+
+The array is not assigned to `material.map`, `normalMap`, `roughnessMap`, `metalnessMap`, `aoMap`, `emissiveMap`, `alphaMap`, or the other stock slots. Those slots compile `textureSample(texture, sampler, uv)`. A `texture_2d_array` needs the layer as a fourth argument (`array_index`). `CompressedArrayTexture` is not `isArrayTexture`, so three does not insert that index on its own. One invalid fragment pipeline makes the command buffer invalid, and every later draw in the frame is dropped. That is why a Field view with the array left on `map` (and on `aoMap`, when the occlusion map was the same image) drew flat land and left the water on its unshaded colour. The colour, normal, roughness, occlusion, emissive, and alpha nodes sample `userData` with `.depth(layer)`. The id-buffer mask does the same when the cutout is an array. A clone, including the no-uv clone, clears those slots. WebGL never creates the packer, so its stock samplers only see 2D images.
 
 ### Before
 
@@ -98,15 +100,29 @@ On WebGPU, a compressed image (BC1, BC3, BC7, ASTC) joins an array with every ot
 | the same images split across 8×8 and 16×16, or sRGB and linear | 40 keys | 2 or 3 arrays, one key each |
 | a group already at its layer cap | the next image joins the array | that image keeps its own key |
 
+### Windows capture with the array on `map`
+
+27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on. The family merge worked (`keys` and `batches` both 148). The fragment shader did not: `textureSample` of a `texture_2d_array` had no `array_index`, the pipeline was invalid, and the command buffer was dropped. `submit` at 111.3 ms is that failure, not the cost of 148 batches and not the 7922 draw counter. `sub` was 403, which is lower than the settled 5872 draws from before. GPU time stayed near 5 ms, which is what a frame that never ran the draws looks like. `compile` 1710 ms is the streaming total, including the rejected shaders.
+
+| | before (settled, per image) | this capture (array on `map`) |
+| --- | --- | --- |
+| cpu | 56.9 ms (avg 61.1, p95 70.4) | 148.2 ms (avg 153.7, p95 220.5) |
+| update | 12.4 ms | 37.0 ms |
+| submit | 44.5 ms | 111.3 ms |
+| gpu | 4.7 ms | 5.7 ms (avg 5.2, p95 6.0) |
+| frame | | 183.2 ms |
+| obj / batches / keys / draws | 9886 / 1004 / 1004 / 5872 | 7271 / 148 / 148 / 7922 |
+| sub | | 403 |
+
 ### Estimated on Field
 
 Not measured here. `submit` should move about with the render-object count: 44.5 ms × (new keys / 1004).
 
 Family merge alone, if most of the gap from the older ~595 textures up to 1004 keys was the family suffix, lands nearer that texture-set count: on the order of 600–800 keys, and submit on the order of 25–35 ms. WebGL stops there.
 
-WebGPU arrays collapse every packable image in one size class into one key per shader class (alpha, side, tint, vertex layout). If the field's compressed images sit in a handful of sizes, `keys` and `batches` can fall from 1004 into the tens, and they should still match. The sub-draws stay (5872 draws in the settled capture). At about a microsecond each that is roughly 6 ms, plus a couple of milliseconds for a few dozen objects, so submit is more likely 8–20 ms than 2 ms. GPU time stays near 4.7 ms. Blend, terrain, water, and any size class of its own remain extra batches. Confirm with the overlay after streaming settles: `keys` and `batches` equal and under 1004, `submit` latest / avg / p95 against 44.5 ms, `cull` still about 0.
+WebGPU arrays collapse every packable image in one size class into one key per shader class (alpha, side, tint, vertex layout). If the field's compressed images sit in a handful of sizes, `keys` and `batches` can fall from 1004 into the tens, and they should still match. The sub-draws stay (5872 draws in the settled capture). At about a microsecond each that is roughly 6 ms, plus a couple of milliseconds for a few dozen objects, so submit is more likely 8–20 ms than 2 ms once the shader is valid. The 111.3 ms figure is the invalid command buffer, so it is not the estimate for the fixed path. GPU time stays near 4.7 ms. Blend, terrain, water, and any size class of its own remain extra batches. The arrays stay on: a valid layer sample should beat 44.5 ms, so they are not behind a flag. Confirm with the overlay after streaming settles: `keys` and `batches` equal and under 1004, land and water textured, `submit` latest / avg / p95 against 44.5 ms (and against 111.3 ms), `cull` still about 0.
 
-Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on and wait until streaming settles. Compare `keys` and `batches` with 1004, and `submit` with 44.5 ms. Textures, GPU picking, the gizmo, and selection should behave as before. There is no new overlay counter.
+Check: `npm run build --prefix frontend` (dependencies are unchanged, three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on and wait until streaming settles. The console should not report a `textureSample` of `texture_2d_array` with no `array_index`. Land should show albedo, and the water should not stay on the flat teal stand-in. Compare `keys` and `batches` with 1004 and with 148, and `submit` with 44.5 ms and with 111.3 ms. `cull` stays about 0 and `gpu` about 4.7 ms. Textures, GPU picking, the gizmo, and selection should behave as before. There is no new overlay counter.
 
 ## Frustum and draw distance
 

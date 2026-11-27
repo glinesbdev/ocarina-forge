@@ -3,11 +3,15 @@ import test from "node:test";
 import * as THREE from "three";
 import { createBatchFiller } from "./batch-fill.js";
 import { refreshBatchKeys } from "./instance.js";
+import { readFileSync } from "node:fs";
+import { cloneMaterialPreservingTextures, materialForGeometry } from "./instance.js";
 import {
   arrayMapToken,
   canPackTexture,
   compressedLayerBytes,
   createTextureArrayPacker,
+  isArrayTexture,
+  STOCK_TEXTURE_SLOTS,
   textureArrayGroupKey,
   writeLayerTexel,
   createLayerTexture,
@@ -121,6 +125,53 @@ test("families that share a shader key build one mesh", () => {
   assert.equal(filler.stats().batches, 1);
   assert.equal(filler.stats().constructed, 1);
   geometry.dispose();
+});
+
+test("without a packer an image keeps its own key", () => {
+  const texture = bc7(8, 8, 1);
+  assert.equal(arrayMapToken(texture, null), "");
+  assert.equal(arrayMapToken(texture, undefined), "");
+});
+
+test("a clone and a no-uv material do not keep an array on a stock slot", () => {
+  const array = new THREE.CompressedArrayTexture(
+    [{ data: new Uint8Array(64), width: 8, height: 8 }],
+    8, 8, 2,
+    THREE.RGBA_BPTC_Format,
+  );
+  const material = new THREE.MeshStandardMaterial();
+  material.map = array;
+  material.aoMap = array;
+  material.normalMap = array;
+  material.emissiveMap = array;
+  material.alphaMap = array;
+  const copy = cloneMaterialPreservingTextures(material);
+  for (const slot of STOCK_TEXTURE_SLOTS) {
+    assert.equal(isArrayTexture(copy[slot]), false, slot);
+  }
+  assert.equal(copy.userData.forgeArrayAlbedo, array);
+  assert.equal(copy.userData.forgeArrayAo, array);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(9), 3));
+  const bare = new THREE.MeshStandardMaterial();
+  bare.map = array;
+  bare.roughnessMap = array;
+  const drawn = materialForGeometry(bare, geometry);
+  assert.equal(isArrayTexture(drawn.map), false);
+  assert.equal(isArrayTexture(drawn.roughnessMap), false);
+  assert.equal(drawn.userData.forgeArrayAlbedo, array);
+  geometry.dispose();
+  array.dispose();
+});
+
+test("WebGL never constructs the array packer", () => {
+  const viewport = readFileSync(new URL("./viewport.js", import.meta.url), "utf8");
+  assert.match(viewport, /const texturePacker = mapNodes \? createTextureArrayPacker\(\) : null/);
+  assert.match(viewport, /WebGL keeps a per-image key/);
+  assert.doesNotMatch(viewport, /material\.map = albedo\.array/);
+  assert.doesNotMatch(viewport, /material\.normalMap = placed/);
+  assert.doesNotMatch(viewport, /material\.roughnessMap = placed/);
+  assert.doesNotMatch(viewport, /material\.roughnessMap = userData\.forgeArrayRough/);
 });
 
 test("the layer texel stores albedo, normal, and roughness", () => {

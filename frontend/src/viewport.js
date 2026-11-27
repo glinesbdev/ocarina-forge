@@ -61,6 +61,8 @@ import {
   canPackTexture,
   createLayerTexture,
   createTextureArrayPacker,
+  isArrayTexture,
+  releaseArraySlots,
   writeLayerTexel,
 } from "./texture-array.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -892,6 +894,11 @@ let convertSlots = 8;
   function refreshTextureMaterial(material) {
     if (!material) return;
     let map = material.map && material.map.isTexture === true ? material.map : null;
+    if (map && isArrayTexture(map)) {
+      if (mapNodes && mapNodes.bindArrayMaterial) mapNodes.bindArrayMaterial(material);
+      material.needsUpdate = true;
+      return;
+    }
     if (material.map && !map) material.map = null;
     if (map) {
       const adopted = adoptMap(map);
@@ -3501,64 +3508,78 @@ let convertSlots = 8;
     const layerSlot = ensureLayerTexture(material, cap);
     let rebuildNodes = layerSlot.replaced || material.colorNode == null;
     const sources = material.userData.forgeArraySources || (material.userData.forgeArraySources = []);
+    const place = (texture) => (texture && canPackTexture(texture) ? texturePacker.layerOf(texture) : null);
     for (const item of added) {
       const partMaterial = item.record && item.record.part && item.record.part.material;
       if (!partMaterial || !partMaterial.map) continue;
-      const albedo = texturePacker.layerOf(partMaterial.map);
+      const albedo = place(partMaterial.map);
       if (!albedo) continue;
-      if (material.map !== albedo.array) {
-        material.map = albedo.array;
+      if (material.userData.forgeArrayAlbedo !== albedo.array) {
+        material.userData.forgeArrayAlbedo = albedo.array;
         rebuildNodes = true;
       }
-      if (Number.isInteger(partMaterial.map.channel)) material.map.channel = partMaterial.map.channel;
+      if (Number.isInteger(partMaterial.map.channel)) albedo.array.channel = partMaterial.map.channel;
       let normalLayer = 0;
       let roughLayer = 0;
+      let extraLayer = 0;
       const normal = partMaterial.normalMap;
-      if (normal && canPackTexture(normal)) {
-        const placed = texturePacker.layerOf(normal);
-        if (placed) {
-          if (material.userData.forgeArrayNormal !== placed.array) {
-            material.userData.forgeArrayNormal = placed.array;
-            material.normalMap = placed.array;
-            rebuildNodes = true;
-          }
-          normalLayer = placed.layer;
-          rememberSource(sources, normal);
+      const placedNormal = place(normal);
+      if (placedNormal) {
+        if (material.userData.forgeArrayNormal !== placedNormal.array) {
+          material.userData.forgeArrayNormal = placedNormal.array;
+          rebuildNodes = true;
         }
+        normalLayer = placedNormal.layer;
+        rememberSource(sources, normal);
       }
       const rough = partMaterial.roughnessMap;
-      if (rough && canPackTexture(rough)) {
-        const placed = texturePacker.layerOf(rough);
-        if (placed) {
-          const orm = partMaterial.metalnessMap === rough;
-          if (material.userData.forgeArrayRough !== placed.array || material.userData.forgeArrayOrm !== orm) {
-            material.userData.forgeArrayRough = placed.array;
-            material.userData.forgeArrayOrm = orm;
-            material.roughnessMap = placed.array;
-            if (orm) material.metalnessMap = placed.array;
-            rebuildNodes = true;
-          }
-          roughLayer = placed.layer;
-          rememberSource(sources, rough);
+      const placedRough = place(rough);
+      if (placedRough) {
+        const orm = partMaterial.metalnessMap === rough;
+        if (material.userData.forgeArrayRough !== placedRough.array || material.userData.forgeArrayOrm !== orm) {
+          material.userData.forgeArrayRough = placedRough.array;
+          material.userData.forgeArrayOrm = orm;
+          rebuildNodes = true;
         }
+        roughLayer = placedRough.layer;
+        rememberSource(sources, rough);
+        if (partMaterial.aoMap === rough) material.userData.forgeArrayAo = placedRough.array;
+      }
+      const ao = partMaterial.aoMap;
+      const emissive = partMaterial.emissiveMap;
+      const alpha = partMaterial.alphaMap;
+      const extraTexture = ao && ao !== rough ? ao : emissive || alpha;
+      const placedExtra = extraTexture && extraTexture !== rough ? place(extraTexture) : null;
+      if (placedExtra) {
+        const field = extraTexture === ao ? "forgeArrayAo" : extraTexture === emissive ? "forgeArrayEmissive" : "forgeArrayAlpha";
+        if (material.userData[field] !== placedExtra.array) {
+          material.userData[field] = placedExtra.array;
+          rebuildNodes = true;
+        }
+        extraLayer = placedExtra.layer;
+        rememberSource(sources, extraTexture);
       }
       rememberSource(sources, partMaterial.map);
-      writeLayerTexel(layerSlot.texture, item.instanceId, albedo.layer, normalLayer, roughLayer, 0);
+      writeLayerTexel(layerSlot.texture, item.instanceId, albedo.layer, normalLayer, roughLayer, extraLayer);
     }
-    if (rebuildNodes) {
+    if (rebuildNodes && mapNodes.bindArrayMaterial) {
       material.colorNode = null;
       material.alphaTestNode = null;
-      material.userData.albedoNode = false;
-      material.userData.cutoutNode = false;
       material.normalNode = null;
       material.roughnessNode = null;
       material.metalnessNode = null;
-      if (material.alphaTest > 0) mapNodes.attachCutout(material);
-      else mapNodes.attachAlbedo(material);
-      if (mapNodes.attachArraySurface) mapNodes.attachArraySurface(material);
-      material.needsUpdate = true;
+      material.aoNode = null;
+      material.emissiveNode = null;
+      material.opacityNode = null;
+      material.userData.albedoNode = false;
+      material.userData.cutoutNode = false;
+      mapNodes.bindArrayMaterial(material);
     }
-    if (material.map && material.map.isTexture === true) mesh.userData.forgeAlbedo = material.map;
+    releaseArraySlots(material);
+    const albedoTexture = material.userData.forgeArrayAlbedo;
+    mesh.userData.forgeAlbedo = albedoTexture && albedoTexture.isTexture === true
+      ? albedoTexture
+      : (material.map && material.map.isTexture === true ? material.map : null);
   }
 
   function latestArray(texture, swapped) {
@@ -3580,21 +3601,18 @@ let convertSlots = 8;
       const userData = material && material.userData;
       if (!userData || !userData.forgeArray) continue;
       let changed = false;
-      if (swapped.has(material.map)) {
-        material.map = latestArray(material.map, swapped);
+      for (const field of ["forgeArrayAlbedo", "forgeArrayNormal", "forgeArrayRough", "forgeArrayAo", "forgeArrayEmissive", "forgeArrayAlpha"]) {
+        if (userData[field] && swapped.has(userData[field])) {
+          userData[field] = latestArray(userData[field], swapped);
+          changed = true;
+        }
+      }
+      if (isArrayTexture(material.map) && swapped.has(material.map)) {
+        userData.forgeArrayAlbedo = latestArray(material.map, swapped);
+        material.map = null;
         changed = true;
       }
-      if (userData.forgeArrayNormal && swapped.has(userData.forgeArrayNormal)) {
-        userData.forgeArrayNormal = latestArray(userData.forgeArrayNormal, swapped);
-        material.normalMap = userData.forgeArrayNormal;
-        changed = true;
-      }
-      if (userData.forgeArrayRough && swapped.has(userData.forgeArrayRough)) {
-        userData.forgeArrayRough = latestArray(userData.forgeArrayRough, swapped);
-        material.roughnessMap = userData.forgeArrayRough;
-        if (userData.forgeArrayOrm === true) material.metalnessMap = userData.forgeArrayRough;
-        changed = true;
-      }
+      if (releaseArraySlots(material)) changed = true;
       if (!changed) continue;
       material.colorNode = null;
       material.alphaTestNode = null;
@@ -3603,11 +3621,13 @@ let convertSlots = 8;
       material.normalNode = null;
       material.roughnessNode = null;
       material.metalnessNode = null;
-      if (material.alphaTest > 0) mapNodes.attachCutout(material);
-      else mapNodes.attachAlbedo(material);
-      if (mapNodes.attachArraySurface) mapNodes.attachArraySurface(material);
-      material.needsUpdate = true;
-      if (material.map && material.map.isTexture === true) batch.mesh.userData.forgeAlbedo = material.map;
+      material.aoNode = null;
+      material.emissiveNode = null;
+      material.opacityNode = null;
+      if (mapNodes.bindArrayMaterial) mapNodes.bindArrayMaterial(material);
+      releaseArraySlots(material);
+      const albedoTexture = userData.forgeArrayAlbedo;
+      batch.mesh.userData.forgeAlbedo = albedoTexture && albedoTexture.isTexture === true ? albedoTexture : null;
     }
   }
 

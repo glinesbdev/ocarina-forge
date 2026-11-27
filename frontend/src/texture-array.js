@@ -6,6 +6,9 @@
  * image. Each instance stores its layer in a float texture indexed by
  * `batchIndirectIndex`. Blend, terrain, and water stay on the per-image key.
  * WebGL never builds a packer: it cannot sample an array from the stock material.
+ * An array is never left on a stock slot (`map`, `aoMap`, `normalMap`, …).
+ * Those slots compile `textureSample(tex, sampler, uv)` with no layer index,
+ * and one invalid pipeline drops the whole command buffer.
  */
 import * as THREE from "three";
 import { repairCompressedTexture } from "./gpu-texture.js";
@@ -226,7 +229,7 @@ export function createTextureArrayPacker({ initialDepth = 8, maxDepth = 256 } = 
   return { groupKey: textureArrayGroupKey, layerOf, stats, takeSwapped, dispose };
 }
 
-/** One RGBA float texel per instance: albedo, normal, roughness, unused. */
+/** One RGBA float texel per instance: albedo, normal, roughness, extra layer. */
 export function createLayerTexture(capacity) {
   const width = Math.max(1, capacity | 0);
   const data = new Float32Array(width * 4);
@@ -238,6 +241,62 @@ export function createLayerTexture(capacity) {
   texture.flipY = false;
   texture.needsUpdate = true;
   return texture;
+}
+
+/** Stock samplers. An array here becomes `texture_2d_array` with no `array_index`. */
+export const STOCK_TEXTURE_SLOTS = [
+  "map", "alphaMap", "aoMap", "bumpMap", "displacementMap", "emissiveMap",
+  "envMap", "lightMap", "metalnessMap", "normalMap", "roughnessMap", "specularMap",
+  "specularIntensityMap", "specularColorMap", "clearcoatMap", "clearcoatNormalMap",
+  "clearcoatRoughnessMap", "sheenColorMap", "sheenRoughnessMap", "transmissionMap",
+  "thicknessMap", "iridescenceMap", "iridescenceThicknessMap", "anisotropyMap",
+];
+
+const ARRAY_SLOT_FIELD = {
+  map: "forgeArrayAlbedo",
+  normalMap: "forgeArrayNormal",
+  roughnessMap: "forgeArrayRough",
+  metalnessMap: "forgeArrayRough",
+  aoMap: "forgeArrayAo",
+  emissiveMap: "forgeArrayEmissive",
+  alphaMap: "forgeArrayAlpha",
+};
+
+export function isArrayTexture(texture) {
+  return Boolean(
+    texture
+    && (
+      texture.isCompressedArrayTexture === true
+      || texture.isDataArrayTexture === true
+      || texture.isArrayTexture === true
+    ),
+  );
+}
+
+/**
+ * Move every array off a stock slot. The texture is kept on `userData` so a
+ * node can sample it with `.depth(layer)`. A slot with no field is cleared:
+ * a bump or light array is dropped rather than sampled without an index.
+ */
+export function releaseArraySlots(material) {
+  if (!material) return false;
+  const userData = material.userData || (material.userData = {});
+  if (isArrayTexture(material.metalnessMap) && (
+    material.metalnessMap === material.roughnessMap
+    || material.metalnessMap === userData.forgeArrayRough
+  )) {
+    userData.forgeArrayOrm = true;
+  }
+  let cleared = false;
+  for (const slot of STOCK_TEXTURE_SLOTS) {
+    const texture = material[slot];
+    if (!isArrayTexture(texture)) continue;
+    const field = ARRAY_SLOT_FIELD[slot];
+    if (field && !isArrayTexture(userData[field])) userData[field] = texture;
+    material[slot] = null;
+    cleared = true;
+  }
+  return cleared;
 }
 
 export function writeLayerTexel(texture, instanceId, albedo, normal, rough, extra = 0) {
