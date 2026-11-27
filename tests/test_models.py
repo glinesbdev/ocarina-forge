@@ -673,7 +673,7 @@ def test_converter_output_is_pinned_to_the_cache_version():
     version = _CACHE_VERSION.split(b"\0", 1)[0].decode()
     stamp = _converter_stamp().hex()
     assert _cache_prefix() == _CACHE_VERSION + bytes.fromhex(stamp)
-    pinned = ("models-67", "c735c685f06389dd5b2cbdafa8836ba5b7413f3145f1ed72be65c2d39841e2dd")
+    pinned = ("models-68", "9ef9bbfdd7cd844c3e3a2889ee0ed05e4a02aa24556f6c2c16b94dbe45213788")
     assert (version, stamp) == pinned, (
         "Converter output changed without a cache bump. Bump _CACHE_VERSION and "
         "replace this pin with the new version and stamp. Do not keep the previous version."
@@ -2783,18 +2783,20 @@ def test_water_uses_a_real_albedo_or_a_teal_stand_in(tmp_path, monkeypatch):
 
     for gyaml in ("Fld_WaterSheet", "Fld_WaterNorm", "Fld_WaterBlue"):
         info = describe_actor(dump, gyaml)
-        assert info["textures"] == 1, gyaml
+        assert info["textures"] == 0, gyaml
         assert "water stand-in" in (info["reason"] or ""), gyaml
         assert info["textureLog"][0].get("standIn") == "water"
         doc = _document((tmp_path / "cache" / info["digest"][:2] / f"{info['digest']}.glb").read_bytes())
         mat = doc["materials"][0]
         factor = mat["pbrMetallicRoughness"]["baseColorFactor"]
         assert mat["alphaMode"] == "BLEND"
-        assert "baseColorTexture" in mat["pbrMetallicRoughness"]
-        assert factor[1] > factor[0]
-        assert factor[2] > factor[0]
-        assert factor[3] < 0.8
-        assert doc["extensionsUsed"] == ["KHR_materials_unlit", "KHR_texture_basisu"]
+        assert "baseColorTexture" not in mat["pbrMetallicRoughness"]
+        assert not any("ocarina-forge-water" in (image.get("name") or "") for image in doc.get("images") or [])
+        assert abs(factor[0] - 0.35) < 0.02
+        assert abs(factor[1] - 0.55) < 0.02
+        assert abs(factor[2] - 0.55) < 0.02
+        assert abs(factor[3] - 0.2) < 0.02
+        assert doc["extensionsUsed"] == ["KHR_materials_unlit"]
 
     npc = describe_actor(dump, "Npc_River_A")
     assert "water" not in (npc["reason"] or "")
@@ -3093,11 +3095,12 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
     assert any("Front" in name for name in names)
     assert not any("Back" in name for name in names)
     factor = doc["materials"][0]["pbrMetallicRoughness"]["baseColorFactor"]
-    assert abs(factor[0] - 0.18) < 0.02
-    assert abs(factor[1] - 0.42) < 0.02
-    assert abs(factor[2] - 0.48) < 0.02
-    assert abs(factor[3] - 0.62) < 0.02
-    assert "baseColorTexture" in doc["materials"][0]["pbrMetallicRoughness"]
+    assert abs(factor[0] - 0.35) < 0.02
+    assert abs(factor[1] - 0.55) < 0.02
+    assert abs(factor[2] - 0.55) < 0.02
+    assert abs(factor[3] - 0.2) < 0.02
+    assert "baseColorTexture" not in doc["materials"][0]["pbrMetallicRoughness"]
+    assert not any("ocarina-forge-water" in (image.get("name") or "") for image in doc.get("images") or [])
     assert doc["materials"][0]["alphaMode"] == "BLEND"
     assert doc["materials"][0]["extras"]["banc"] == "water"
     from ocarina_forge.models import describe_actor_textures
@@ -3109,10 +3112,12 @@ def test_water_keeps_only_the_front_sheet(tmp_path, monkeypatch):
     assert "baseColorTexture" not in flat_mat["pbrMetallicRoughness"]
     manifest = describe_actor_textures(dump, "Tm_Pond")
     slot = next(iter(manifest["materials"].values()))
-    assert slot["standIn"] == "water"
-    assert slot["texture"] == "ocarina-forge-water"
-    assert slot["color"][0] == 1.0
-    assert slot["color"][3] == 0.62
+    assert "standIn" not in slot
+    assert slot.get("texture") != "ocarina-forge-water"
+    assert slot.get("map") is None
+    assert slot["alpha"] == "blend"
+    assert slot["color"][0] == 0.35
+    assert slot["color"][3] == 0.2
 
 
 def test_missing_albedo_borrows_a_sibling_or_a_category_colour(tmp_path, monkeypatch):

@@ -81,6 +81,11 @@ function hasSlotImage(slot) {
   return [slot.map, slot.normalMap, slot.orm, slot.emissiveMap, slot.moss].some(Boolean);
 }
 
+/** A rejected water sheet carries the faint factor and no image. */
+function blendColorSlot(slot) {
+  return Boolean(slot && slot.alpha === "blend" && Array.isArray(slot.color) && slot.color.length >= 4 && !hasSlotImage(slot));
+}
+
 /**
  * One row per material key. `missing` is file not found, `decode` is a file
  * that opened and did not yield an image, `not-applied` is a response the
@@ -147,7 +152,8 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
     if (seen.has(key)) {
       // A blend mask clones the material, so LOD1 is a second object with the
       // same key. The first assign does not reach it. Paint that clone too.
-      if (slot && hasSlotImage(slot) && part.material && painted.get(key) !== part.material) {
+      const paint = slot && (hasSlotImage(slot) || blendColorSlot(slot));
+      if (paint && part.material && painted.get(key) !== part.material) {
         jobs.push(assignSlot(part.material, slot, loadTexture).then(() => {}));
         painted.set(key, part.material);
       }
@@ -164,6 +170,12 @@ export async function applyTextureManifest(parts, manifest, loadTexture) {
       continue;
     }
     if (!hasSlotImage(slot)) {
+      if (blendColorSlot(slot)) {
+        jobs.push(assignSlot(part.material, slot, loadTexture).then(() => {
+          report.push({ key, status: "applied", error: "", found: slot.found || "" });
+        }));
+        continue;
+      }
       const status = slot.status === "decode" ? "decode" : "missing";
       const error = slot.error || (status === "decode" ? "decode error" : "file not found");
       report.push({ key, status, error, found: slot.found || "" });
@@ -273,7 +285,6 @@ async function assignSlot(material, slot, loadTexture) {
     const color = slot.color;
     material.color.setRGB(Number(color[0]) || 0, Number(color[1]) || 0, Number(color[2]) || 0);
   }
-  if (slot.standIn === "water") userData.waterStandIn = true;
   if (slot.texture) userData.forgeAlbedoName = String(slot.texture);
   if (slot.sampler) userData.forgeAlbedoSampler = String(slot.sampler);
   if (slot.format) userData.forgeAlbedoFormat = String(slot.format);
@@ -293,6 +304,9 @@ async function assignSlot(material, slot, loadTexture) {
   } else if (slot.alpha === "blend") {
     material.transparent = true;
     material.depthWrite = false;
+    userData.waterStandIn = false;
+    const alpha = Array.isArray(slot.color) ? Number(slot.color[3]) : NaN;
+    if (Number.isFinite(alpha)) material.opacity = alpha;
   }
   userData.forgeMapUrl = slot.map || "";
   const lit = MAP_KEYS.some((key) => asTexture(material[key])) || asTexture(userData.blendMap);
