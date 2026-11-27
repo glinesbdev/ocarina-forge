@@ -7,6 +7,7 @@
  */
 import { Fn, batchIndirectIndex, float, int, ivec2, materialReference, normalMap, texture, textureLoad, uv, vec4 } from "three/tsl";
 import { isArrayTexture, releaseArraySlots } from "./texture-array.js";
+import { attachBlend } from "./blend-node.js";
 
 const reported = new Set();
 
@@ -210,11 +211,25 @@ export function bindArrayMaterial(material) {
     material.userData.albedoNode = false;
     material.userData.cutoutNode = false;
   }
-  if (arrayAlbedo || (material.map && material.map.isTexture === true && !isArrayTexture(material.map))) {
-    if (material.alphaTest > 0) attachCutout(material);
-    else attachAlbedo(material);
+  if (material.userData.blend) {
+    // The blend mix samples a0/a1 from the lookup. The plain surface nodes
+    // read those same channels as normal and roughness, so they must not run.
+    material.userData.blendNode = false;
+    material.colorNode = null;
+    material.normalNode = null;
+    material.roughnessNode = null;
+    material.metalnessNode = null;
+    material.aoNode = null;
+    material.emissiveNode = null;
+    material.opacityNode = null;
+    attachBlend(material);
+  } else {
+    if (arrayAlbedo || (material.map && material.map.isTexture === true && !isArrayTexture(material.map))) {
+      if (material.alphaTest > 0) attachCutout(material);
+      else attachAlbedo(material);
+    }
+    attachArraySurface(material);
   }
-  attachArraySurface(material);
   releaseArraySlots(material);
   clearReplacedSlots(material);
   material.needsUpdate = true;

@@ -4,7 +4,9 @@
  * A compressed image joins a group of the same size, mip count, format,
  * color space, and sampler state. The batch key names that group, not the
  * image. Each instance stores its layer in a float texture indexed by
- * `batchIndirectIndex`. Blend, terrain, and water stay on the per-image key.
+ * `batchIndirectIndex`. A blend material uses the same packer: row 0 of the
+ * lookup is a0, a1, the `_c0` vertex-mask component, and the base ORM.
+ * Terrain, water, and helpers stay on the per-image key.
  * WebGL never builds a packer: it cannot sample an array from the stock material.
  * An array is never left on a stock slot (`map`, `aoMap`, `normalMap`, …).
  * Those slots compile `textureSample(tex, sampler, uv)` with no layer index,
@@ -145,6 +147,9 @@ export function packBlocker(texture) {
   const width = mips[0].width || (texture.image && texture.image.width) || 0;
   const height = mips[0].height || (texture.image && texture.image.height) || 0;
   if (!width || !height) return "size";
+  // A tail mip shorter than one block cannot be copied. Pad it. The base mip
+  // stays a hard reject: padding that would invent the image people see.
+  padShortTailMips(texture);
   for (let level = 0; level < mips.length; level += 1) {
     const mip = mips[level];
     const bytes = compressedLayerBytes(mip && mip.width, mip && mip.height, format);
@@ -183,11 +188,15 @@ export function canPackTexture(texture) {
   return textureArrayGroupKey(texture) !== "";
 }
 
-/** Blend, terrain, water, and helpers keep a per-image batch key. */
+/**
+ * Terrain, water, and helpers keep a per-image batch key. Blend joins an
+ * array class when its images pack. An image that cannot pack is recorded
+ * by the packer and the batch key keeps that image's own signature.
+ */
 export function arrayMaterialEligible(material) {
   if (!material || !material.map || !canPackTexture(material.map)) return false;
   const data = material.userData || {};
-  if (data.blend || data.blendNode || data.terrainNode || data.terrainShader || data.waterStandIn || data.helper) return false;
+  if (data.terrainNode || data.terrainShader || data.waterStandIn || data.helper) return false;
   if (data.banc === "terrain" || data.banc === "water" || data.banc === "ground" || data.groundSurface) return false;
   if (data.forgeSurface === "terrain" || data.forgeSurface === "ground") return false;
   return true;
@@ -567,11 +576,64 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
   };
 }
 
-/** One RGBA float texel per instance: albedo, normal, roughness, extra layer. */
-export function createLayerTexture(capacity) {
+/**
+ * Blend lookup rows. Row 0 is the albedo mix. Row 1 is the surface maps.
+ * Row 2 is the overlay UV scale (rg) and translate (ba), per instance, so
+ * those uniforms do not split the batch key.
+ */
+export const BLEND_ROW = { albedo: 0, surface: 1, place: 2 };
+/** Row 0 channels: a0, a1, the `_c0` vertex component, base ORM. */
+export const BLEND_LAYER_MAP = { a0: 0, a1: 1, c0: 2, orm: 3 };
+/** Row 1 channels: base normal, overlay normal, overlay ORM, extra AO. */
+export const BLEND_SURFACE_MAP = { normal: 0, normal1: 1, orm1: 2, ao: 3 };
+export const BLEND_LAYER_ROWS = 3;
+
+/** `_c0` component stored in the lookup. `r` is 0. */
+export function blendChannelIndex(channel) {
+  const name = String(channel || "r").toLowerCase();
+  if (name === "g" || name === "1") return 1;
+  if (name === "b" || name === "2") return 2;
+  if (name === "a" || name === "3") return 3;
+  return 0;
+}
+
+/**
+ * A mip chain whose base is a full layer can still pack when a tail mip was
+ * stored short. The tail is padded with zeros out to the block size. A short
+ * base mip is left alone.
+ */
+function padShortTailMips(texture) {
+  if (!texture || texture.isCompressedTexture !== true || texture.isCompressedArrayTexture === true) return false;
+  if (texture.userData && texture.userData.forgeCpuReleased) return false;
+  const mips = texture.mipmaps;
+  if (!Array.isArray(mips) || mips.length < 2) return false;
+  const format = texture.format;
+  if (!blockFor(format)) return false;
+  const base = mips[0];
+  const baseNeed = compressedLayerBytes(base && base.width, base && base.height, format);
+  const baseGot = base && base.data ? base.data.byteLength : 0;
+  if (!baseNeed || baseGot < baseNeed) return false;
+  let changed = false;
+  for (let level = 1; level < mips.length; level += 1) {
+    const mip = mips[level];
+    const bytes = compressedLayerBytes(mip && mip.width, mip && mip.height, format);
+    const got = mip && mip.data ? mip.data.byteLength : 0;
+    if (!bytes || got >= bytes) continue;
+    const next = new Uint8Array(bytes);
+    if (got > 0 && mip.data) next.set(mip.data.subarray(0, Math.min(got, bytes)));
+    mip.data = next;
+    changed = true;
+  }
+  if (changed) texture.needsUpdate = true;
+  return changed;
+}
+
+/** One RGBA float texel per instance. `rows` is 1 for a plain array, 3 for a blend. */
+export function createLayerTexture(capacity, rows = 1) {
   const width = Math.max(1, capacity | 0);
-  const data = new Float32Array(width * 4);
-  const texture = new THREE.DataTexture(data, width, 1, THREE.RGBAFormat, THREE.FloatType);
+  const height = Math.max(1, rows | 0);
+  const data = new Float32Array(width * height * 4);
+  const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.FloatType);
   texture.colorSpace = THREE.NoColorSpace;
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
@@ -582,11 +644,20 @@ export function createLayerTexture(capacity) {
 }
 
 /** A wider lookup. Existing instance texels are copied in order and not renumbered. */
-export function replaceLayerTexture(current, capacity) {
-  const next = createLayerTexture(capacity);
+export function replaceLayerTexture(current, capacity, rows = 1) {
   const previous = current && current.image && current.image.data;
-  if (previous && next.image && next.image.data) {
-    next.image.data.set(previous.subarray(0, Math.min(previous.length, next.image.data.length)));
+  const prevW = current && current.image ? current.image.width | 0 : 0;
+  const prevH = current && current.image ? current.image.height | 0 : 0;
+  const next = createLayerTexture(capacity, Math.max(rows | 0, prevH, 1));
+  const nextData = next.image && next.image.data;
+  if (previous && nextData && prevW > 0 && prevH > 0) {
+    const nextW = next.image.width | 0;
+    const copyW = Math.min(prevW, nextW);
+    const copyH = Math.min(prevH, next.image.height | 0);
+    for (let row = 0; row < copyH; row += 1) {
+      const from = row * prevW * 4;
+      nextData.set(previous.subarray(from, from + copyW * 4), row * nextW * 4);
+    }
   }
   return next;
 }
@@ -625,6 +696,7 @@ export function isArrayTexture(texture) {
 export const LIVE_ARRAY_FIELDS = [
   "forgeArrayAlbedo", "forgeArrayNormal", "forgeArrayRough",
   "forgeArrayAo", "forgeArrayEmissive", "forgeArrayAlpha",
+  "forgeArrayMoss", "forgeArrayOrm1", "forgeArrayNormal1",
   "forgeLayerTexture", "forgePickMask",
 ];
 
@@ -679,14 +751,37 @@ export function releaseArraySlots(material) {
   return cleared;
 }
 
-export function writeLayerTexel(texture, instanceId, albedo, normal, rough, extra = 0) {
-  const data = texture && texture.image && texture.image.data;
-  if (!data || instanceId < 0 || instanceId * 4 + 3 >= data.length) return false;
-  const at = instanceId * 4;
-  data[at] = albedo;
-  data[at + 1] = normal;
-  data[at + 2] = rough;
-  data[at + 3] = extra;
+export function writeLayerRow(texture, instanceId, row, r, g, b, a = 0) {
+  const image = texture && texture.image;
+  const data = image && image.data;
+  const width = image ? image.width | 0 : 0;
+  const height = image ? image.height | 0 : 0;
+  if (!data || width <= 0 || instanceId < 0 || instanceId >= width || row < 0 || row >= height) return false;
+  const at = (row * width + instanceId) * 4;
+  data[at] = r;
+  data[at + 1] = g;
+  data[at + 2] = b;
+  data[at + 3] = a;
   texture.needsUpdate = true;
   return true;
+}
+
+/** Row 0 of a plain array batch: albedo, normal, roughness, extra layer. */
+export function writeLayerTexel(texture, instanceId, albedo, normal, rough, extra = 0) {
+  return writeLayerRow(texture, instanceId, 0, albedo, normal, rough, extra);
+}
+
+/** Row 0 of a blend batch: a0 layer, a1 layer, `_c0` component, base ORM layer. */
+export function writeBlendLayerTexel(texture, instanceId, a0, a1, c0, orm = 0) {
+  return writeLayerRow(texture, instanceId, BLEND_ROW.albedo, a0, a1, c0, orm);
+}
+
+/** Row 1: base normal, overlay normal, overlay ORM, extra AO. */
+export function writeBlendSurfaceTexel(texture, instanceId, normal, normal1, orm1, ao = 0) {
+  return writeLayerRow(texture, instanceId, BLEND_ROW.surface, normal, normal1, orm1, ao);
+}
+
+/** Row 2: overlay UV scale (xy) and translate (zw). */
+export function writeBlendPlacementTexel(texture, instanceId, scaleX, scaleY, translateX, translateY) {
+  return writeLayerRow(texture, instanceId, BLEND_ROW.place, scaleX, scaleY, translateX, translateY);
 }

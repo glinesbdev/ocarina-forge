@@ -162,6 +162,12 @@ test("a capture is json and counts resident textures once per source", () => {
   assert.equal(classifyBatchKey("arr:8x8|opaque|s2|cffffff|idx|uv"), "array");
   assert.equal(classifyBatchKey("arr:8x8|opaque|s2|cffeeaa|idx|uv"), "tint");
   assert.equal(classifyBatchKey("img|moss:r:1|opaque|s2|cffffff|idx|uv"), "blend");
+  assert.equal(classifyBatchKey("arr:8x8|moss:arr:4x4|uv:u0|opaque|s2|cffffff|idx|uv"), "blend");
+  assert.deepEqual(summarizeBatchKeys([
+    "arr:8x8|moss:arr:4x4|uv:u0|opaque",
+    "arr:8x8|moss:arr:4x4|uv:u0|opaque",
+    "arr:8x8|moss:arr:8x8|uv:u1|opaque",
+  ]), { array: 0, image: 0, blend: 2, helper: 0, water: 0, terrain: 0, ground: 0, tint: 0 });
   assert.equal(classifyBatchKey("img|h:box|opaque"), "helper");
   assert.equal(classifyBatchKey("img|water|opaque"), "water");
   assert.equal(classifyBatchKey("img|terrain|opaque"), "terrain");

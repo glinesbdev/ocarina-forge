@@ -19,9 +19,15 @@ import {
   STOCK_TEXTURE_SLOTS,
   textureArrayGroupKey,
   writeLayerTexel,
+  writeBlendLayerTexel,
+  writeBlendPlacementTexel,
+  writeBlendSurfaceTexel,
   createLayerTexture,
   packBlocker,
   replaceLayerTexture,
+  arrayMaterialEligible,
+  BLEND_LAYER_MAP,
+  blendChannelIndex,
 } from "./texture-array.js";
 
 function bc7(width, height, seed, { colorSpace = THREE.SRGBColorSpace, mips = 1 } = {}) {
@@ -189,6 +195,8 @@ test("WebGL never constructs the array packer", () => {
   assert.match(viewport, /pinAuthoredMatrix\(mesh\)/);
   assert.match(viewport, /pinSurfaceMeshes\(\)/);
   assert.match(viewport, /imagePack: imagePackDump\(\)/);
+  assert.match(viewport, /writeBlendLayerTexel\(/);
+  assert.match(viewport, /\|moss:\$\{overlay\}/);
   assert.doesNotMatch(viewport, /material = source\.clone\(\)/);
   assert.doesNotMatch(viewport, /material\.map = albedo\.array/);
   assert.doesNotMatch(viewport, /material\.normalMap = placed/);
@@ -430,4 +438,60 @@ test("a padded mip still packs and a short one is logged per image", () => {
   assert.equal(report.images.length, 1);
   assert.equal(report.images[0].reason, reason);
   assert.equal(report.images[0].width, 4);
+});
+
+test("blend materials join an array class and terrain, water, and helpers do not", () => {
+  const map = bc7(8, 8, 3);
+  assert.equal(arrayMaterialEligible({ map, userData: { blend: { channel: "r" }, blendNode: true } }), true);
+  assert.equal(arrayMaterialEligible({ map, userData: { terrainNode: true } }), false);
+  assert.equal(arrayMaterialEligible({ map, userData: { waterStandIn: true } }), false);
+  assert.equal(arrayMaterialEligible({ map, userData: { helper: "box" } }), false);
+  assert.equal(arrayMaterialEligible({ map, userData: { banc: "ground" } }), false);
+  map.dispose();
+});
+
+test("a short tail mip is padded and a short base mip stays rejected", () => {
+  const texture = bc7(8, 8, 2, { mips: 3 });
+  const tail = texture.mipmaps[2];
+  const need = compressedLayerBytes(tail.width, tail.height, THREE.RGBA_BPTC_Format);
+  tail.data = new Uint8Array([7, 8, 9, 10]);
+  assert.equal(packBlocker(texture), "");
+  assert.equal(texture.mipmaps[2].data.byteLength, need);
+  assert.equal(texture.mipmaps[2].data[0], 7);
+  assert.equal(texture.mipmaps[0].data.byteLength, compressedLayerBytes(8, 8, THREE.RGBA_BPTC_Format));
+  const baseShort = bc7(8, 8, 1);
+  baseShort.mipmaps[0].data = new Uint8Array(4);
+  assert.match(packBlocker(baseShort), /^mip-bytes:0:4\//);
+  texture.dispose();
+  baseShort.dispose();
+});
+
+test("blend layer lookup maps a0, a1, and c0 without renumbering on grow", () => {
+  assert.equal(blendChannelIndex("r"), 0);
+  assert.equal(blendChannelIndex("g"), 1);
+  assert.equal(blendChannelIndex("a"), 3);
+  assert.deepEqual(BLEND_LAYER_MAP, { a0: 0, a1: 1, c0: 2, orm: 3 });
+  const lookup = createLayerTexture(2, 3);
+  assert.equal(writeBlendLayerTexel(lookup, 1, 5, 9, BLEND_LAYER_MAP.c0 === 2 ? 1 : -1, 4), true);
+  assert.equal(writeBlendSurfaceTexel(lookup, 1, 6, 7, 8, 0), true);
+  assert.equal(writeBlendPlacementTexel(lookup, 1, 4, 2, 0.25, 0), true);
+  const row0 = (0 * lookup.image.width + 1) * 4;
+  assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.a0], 5);
+  assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.a1], 9);
+  assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.c0], 1);
+  assert.equal(lookup.image.data[row0 + BLEND_LAYER_MAP.orm], 4);
+  const row1 = (1 * lookup.image.width + 1) * 4;
+  assert.equal(lookup.image.data[row1], 6);
+  assert.equal(lookup.image.data[row1 + 1], 7);
+  assert.equal(lookup.image.data[row1 + 2], 8);
+  const wider = replaceLayerTexture(lookup, 4, 3);
+  const moved = (0 * wider.image.width + 1) * 4;
+  assert.equal(wider.image.data[moved + BLEND_LAYER_MAP.a0], 5);
+  assert.equal(wider.image.data[moved + BLEND_LAYER_MAP.a1], 9);
+  assert.equal(wider.image.data[moved + BLEND_LAYER_MAP.c0], 1);
+  const movedSurface = (1 * wider.image.width + 1) * 4;
+  assert.equal(wider.image.data[movedSurface + 2], 8);
+  assert.equal(writeLayerTexel(lookup, 4, 1, 0, 0, 0), false);
+  lookup.dispose();
+  wider.dispose();
 });

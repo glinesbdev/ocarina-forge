@@ -65,8 +65,13 @@ import {
   holdTexture,
   isArrayTexture,
   layerWritePlan,
+  blendChannelIndex,
+  BLEND_LAYER_ROWS,
   releaseArraySlots,
   replaceLayerTexture,
+  writeBlendLayerTexel,
+  writeBlendPlacementTexel,
+  writeBlendSurfaceTexel,
   writeLayerTexel,
 } from "./texture-array.js";
 import { createGpuProfile, sampleGpuFrame } from "./gpu-profile.js";
@@ -3148,13 +3153,35 @@ let convertSlots = 8;
     }).join(",");
   }
 
+  function isBakeName(name) {
+    return /bake|dummy/i.test(String(name || ""));
+  }
+
+  function refusesArray(material, texture) {
+    const data = (material && material.userData) || {};
+    const own = texture && (texture.name || (texture.userData && texture.userData.sampler) || "");
+    if (isBakeName(own)) return true;
+    if (texture && texture === material.map && isBakeName(data.forgeAlbedoSampler)) return true;
+    if (texture && data.blendMap && texture === data.blendMap && isBakeName(data.blend && data.blend.sampler)) return true;
+    return false;
+  }
+
   function mapToken(material, texture, allowArray = true) {
     if (!texture) return "flat";
-    if (allowArray && texturePacker && arrayMaterialEligible(material)) {
+    const signature = texture.image ? imageSignature(texture.image, texture) : "flat";
+    if (allowArray && texturePacker && arrayMaterialEligible(material) && !refusesArray(material, texture)) {
       const token = arrayMapToken(texture, texturePacker);
       if (token) return token;
     }
-    return texture.image ? imageSignature(texture.image, texture) : "flat";
+    return signature;
+  }
+
+  function skinKey(color) {
+    const channels = Array.isArray(color) ? color : [1, 1, 1];
+    return [0, 1, 2].map((index) => {
+      const value = Math.max(0, Math.min(255, Math.round(Number(channels[index] ?? 1) * 255)));
+      return value.toString(16).padStart(2, "0");
+    }).join("");
   }
 
   function batchKeyFor(material, geometry) {
@@ -3166,14 +3193,19 @@ let convertSlots = 8;
     const alpha = material.transparent ? `blend:${material.opacity}` : material.alphaTest > 0 ? `mask:${material.alphaTest}` : "opaque";
     const blend = material.userData && material.userData.blend;
     const blendMap = material.userData && material.userData.blendMap;
-    const blendImage = blendMap && blendMap.image;
-    const blendKey = blend ? `|moss:${blend.channel || "r"}:${blendImage ? imageSignature(blendImage, blendMap) : "flat"}` : "";
+    let blendKey = "";
+    if (blend) {
+      const overlay = blendMap ? mapToken(material, blendMap, allowArray) : "flat";
+      const uvName = blend.uv === "_u1" || blend.uv === "u1" ? "u1" : "u0";
+      const skin = blend.skin ? `|skin:${blend.skinVertex ? "v" : "c"}:${skinKey(blend.skinColor)}` : "";
+      blendKey = `|moss:${overlay}|uv:${uvName}${skin}`;
+    }
     const roughMap = material.roughnessMap;
     const normalMap = material.normalMap;
     const orm1Map = material.userData && material.userData.orm1Map;
     const normal1Map = material.userData && material.userData.normal1Map;
     const surfaceKey = (roughMap || normalMap || orm1Map || normal1Map)
-      ? `|orm:${roughMap ? mapToken(material, roughMap, allowArray) : "flat"}|n:${normalMap ? mapToken(material, normalMap, allowArray) : "flat"}|orm1:${orm1Map && orm1Map.image ? imageSignature(orm1Map.image, orm1Map) : "flat"}|n1:${normal1Map && normal1Map.image ? imageSignature(normal1Map.image, normal1Map) : "flat"}${material.metalnessMap && material.metalnessMap === roughMap ? "|metal:orm" : ""}`
+      ? `|orm:${roughMap ? mapToken(material, roughMap, allowArray) : "flat"}|n:${normalMap ? mapToken(material, normalMap, allowArray) : "flat"}|orm1:${orm1Map ? mapToken(material, orm1Map, allowArray) : "flat"}|n1:${normal1Map ? mapToken(material, normal1Map, allowArray) : "flat"}${material.metalnessMap && material.metalnessMap === roughMap ? "|metal:orm" : ""}`
       : "";
     const userData = material.userData || {};
     const role = userData.helper
@@ -3497,13 +3529,14 @@ let convertSlots = 8;
     batch.pickIdsDirty = true;
   }
 
-  function ensureLayerTexture(material, capacity) {
+  function ensureLayerTexture(material, capacity, rows = 1) {
     const current = material.userData.forgeLayerTexture;
     const width = current && current.image ? current.image.width | 0 : 0;
-    if (current && width >= capacity) return { texture: current, replaced: false, previous: null };
+    const height = current && current.image ? current.image.height | 0 : 0;
+    if (current && width >= capacity && height >= rows) return { texture: current, replaced: false, previous: null };
     // Keep the previous lookup bound until the copy is uploaded. A zero texture
     // sampled for one frame paints every instance with layer 0.
-    const next = replaceLayerTexture(current, Math.max(capacity, width, 8));
+    const next = replaceLayerTexture(current, Math.max(capacity, width, 8), rows);
     return { texture: next, replaced: true, previous: current || null };
   }
 
@@ -3548,9 +3581,17 @@ let convertSlots = 8;
     }
     let cap = mesh.maxInstanceCount || 0;
     for (const item of added) cap = Math.max(cap, (item.instanceId || 0) + 1);
-    const layerSlot = ensureLayerTexture(material, cap);
+    const blendBatch = String(batch.key).includes("|moss:");
+    const layerSlot = ensureLayerTexture(material, cap, blendBatch ? BLEND_LAYER_ROWS : 1);
     let rebuildNodes = layerSlot.replaced || material.colorNode == null;
     const place = (texture) => (texture && canPackTexture(texture) ? texturePacker.layerOf(texture) : null);
+    const holdPlaced = (field, placed) => {
+      if (!placed) return;
+      if (material.userData[field] !== placed.array) {
+        holdTexture(material.userData, field, placed.array);
+        rebuildNodes = true;
+      }
+    };
     let wrote = false;
     for (const item of added) {
       const partMaterial = item.record && item.record.part && item.record.part.material;
@@ -3567,6 +3608,70 @@ let convertSlots = 8;
         rebuildNodes = true;
       }
       if (Number.isInteger(partMaterial.map.channel)) albedo.array.channel = partMaterial.map.channel;
+      const partBlend = partMaterial.userData && partMaterial.userData.blend;
+      if (partBlend) {
+        const mossTex = partMaterial.userData.blendMap;
+        const moss = place(mossTex);
+        if (!mossTex || (canPackTexture(mossTex) && !moss)) {
+          if (typeof mesh.setVisibleAt === "function") mesh.setVisibleAt(item.instanceId, false);
+          continue;
+        }
+        if (moss) {
+          holdPlaced("forgeArrayMoss", moss);
+          if (Number.isInteger(mossTex.channel)) moss.array.channel = mossTex.channel;
+        }
+        const normal = partMaterial.normalMap;
+        const normal1 = partMaterial.userData.normal1Map;
+        const rough = partMaterial.roughnessMap;
+        const orm1 = partMaterial.userData.orm1Map;
+        const ao = partMaterial.aoMap;
+        const placedNormal = place(normal);
+        const placedNormal1 = normal1 && normal1 !== normal ? place(normal1) : null;
+        const placedRough = place(rough);
+        const placedOrm1 = orm1 && orm1 !== rough ? place(orm1) : null;
+        const placedAo = ao && ao !== rough ? place(ao) : null;
+        material.userData.forgeDistinctNormal1 = Boolean(normal1 && normal1 !== normal);
+        material.userData.forgeDistinctOrm1 = Boolean(orm1 && orm1 !== rough);
+        material.userData.forgeDistinctAo = Boolean(ao && ao !== rough);
+        holdPlaced("forgeArrayNormal", placedNormal);
+        holdPlaced("forgeArrayNormal1", placedNormal1);
+        if (placedRough) {
+          holdPlaced("forgeArrayRough", placedRough);
+          if (partMaterial.metalnessMap === rough) material.userData.forgeArrayOrm = true;
+          if (ao === rough) holdTexture(material.userData, "forgeArrayAo", placedRough.array);
+        }
+        holdPlaced("forgeArrayOrm1", placedOrm1);
+        if (placedAo) holdPlaced("forgeArrayAo", placedAo);
+        if (placedNormal && Number.isInteger(normal.channel)) placedNormal.array.channel = normal.channel;
+        const scale = Array.isArray(partBlend.scale) ? partBlend.scale : [1, 1];
+        const translate = Array.isArray(partBlend.translate) ? partBlend.translate : [0, 0];
+        writeBlendLayerTexel(
+          layerSlot.texture,
+          item.instanceId,
+          albedo.layer,
+          moss ? moss.layer : 0,
+          blendChannelIndex(partBlend.channel),
+          placedRough ? placedRough.layer : 0,
+        );
+        writeBlendSurfaceTexel(
+          layerSlot.texture,
+          item.instanceId,
+          placedNormal ? placedNormal.layer : 0,
+          placedNormal1 ? placedNormal1.layer : 0,
+          placedOrm1 ? placedOrm1.layer : 0,
+          placedAo ? placedAo.layer : 0,
+        );
+        writeBlendPlacementTexel(
+          layerSlot.texture,
+          item.instanceId,
+          Number(scale[0] ?? 1),
+          Number(scale[1] ?? 1),
+          Number(translate[0] ?? 0),
+          Number(translate[1] ?? 0),
+        );
+        wrote = true;
+        continue;
+      }
       let normalLayer = 0;
       let roughLayer = 0;
       let extraLayer = 0;
@@ -3656,7 +3761,7 @@ let convertSlots = 8;
       const userData = material && material.userData;
       if (!userData || !userData.forgeArray) continue;
       let changed = false;
-      for (const field of ["forgeArrayAlbedo", "forgeArrayNormal", "forgeArrayRough", "forgeArrayAo", "forgeArrayEmissive", "forgeArrayAlpha"]) {
+      for (const field of ["forgeArrayAlbedo", "forgeArrayNormal", "forgeArrayRough", "forgeArrayAo", "forgeArrayEmissive", "forgeArrayAlpha", "forgeArrayMoss", "forgeArrayOrm1", "forgeArrayNormal1"]) {
         if (userData[field] && swapped.has(userData[field])) {
           holdTexture(userData, field, latestArray(userData[field], swapped));
           changed = true;

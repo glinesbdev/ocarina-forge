@@ -208,6 +208,32 @@ The terrain slide is the shared `modelWorldMatrix` node. It is one uniform for e
 
 Check: same build and hard-reload as above. While the field streams, each model should show its own texture, not another model's, and it should not pop later. Pan and fly: the terrain stays put. No WebGPU validation errors. After it settles, `submit` should be in the 31 ms range and clearly under 44.5 ms, heap at or under about 1.5 GB. Dump JSON `imagePack.images` lists any image that stayed on its own key and why. `keys` and `batches` stay equal. Gizmos, panning, picking, and selection stay as they are.
 
+### Field after stable layers (`e65af37`)
+
+27 Nov 2026, same machine, WebGPU, AMD, three 0.187.0, Hyrule Field Child, Static + Dynamic, Profile on, after streaming settled. No WebGPU validation errors. Textures and the terrain look normal.
+
+| | `3b7eb52` settled | `e65af37` settled |
+| --- | --- | --- |
+| cpu | 49.5 ms (avg 61.9, p95 86.5) | 41.3 ms (avg 58.2, p95 69.5) |
+| update | 12.9 ms | 11.6 ms |
+| cull | 0.0 ms | 0.0 ms |
+| submit | 36.6 ms | 29.7 ms |
+| gpu | 6.5 ms | 5.5 ms |
+| obj / batches / sub / draws / keys | 5349 / 481 / 480 / 6638 / 481 | 4282 / 391 / 699 / 5372 / 391 |
+| tris / meshes | 2M / 248 | 1.5M / 284 |
+| tex / heap | 1278 / 3348.7 MB | 1048 / 902.4 MB |
+| keys | array 52, image 216, blend 201, helper 6, water 6 | array 60, image 176, blend 142, helper 5, water 8 |
+
+Heap is under 1 GB. `submit` is under 31 ms. `blend` is still one key per moss image: 142 of the 391 keys. The images that stayed out of an array are listed on Dump JSON `imagePack.images` with a reason.
+
+### Blend on the same arrays
+
+A blend batch samples `_a1` over `_a0`, masked by the `_c0` vertex colour, on two UV sets. `_c0` is that vertex mask, not a third albedo. Bake samplers stay out of the arrays. Grass, soil, and seal with no `_a*` slot are not blend materials, so they keep the neutral tan.
+
+When the base and the overlay pack, the batch key names the array class (`arr:<group>|moss:arr:<group>|uv:…`) instead of each image. The per-instance lookup is three rows: a0, a1, the `_c0` component, and the base ORM; the normals and the overlay ORM; then the overlay scale and translate. ORM and normal maps join the same way when they pack. An image that cannot pack keeps its own key, and Dump JSON `imagePack` records why. A tail mip that is shorter than one block is padded so that image can join. A short base mip cannot. WebGL still builds no packer and keeps the GLSL blend.
+
+Check: `npm run build --prefix frontend` (three stays 0.187.0), restart the editor, hard-reload. Open the same Field view with **Profile** on. While it streams and after it settles, the console should have no WebGPU validation error, no 0-byte `writeTexture`, and no `textureSample` of `texture_2d_array` missing its layer index. Moss and grass layering should match the build before this change. The terrain stays put. After it settles, `blend` should drop sharply from 142, `submit` should be under 29.7 ms, and heap at or under about 1 GB. `keys` and `batches` stay equal. Dump JSON `imagePack.images` lists any image still on its own key. Picking, the gizmo, and selection stay as they are. WebGL is the same GLSL blend.
+
 ## Frustum and draw distance
 
 Each instance has its own world bounding sphere: the mesh sphere transformed by that actor’s matrix, not a sphere at the world origin and not the distance from the camera to the origin. The gap used for **Draw** and the size rules is the distance to the sphere surface, so a large mesh is not culled while its bounds are still inside the cap. A sphere outside the frustum is hidden. **Draw** can also drop anything past 200, 400, or 800 m. **Auto** leaves the size rules (small props with no far mesh fade by 56 / 96 / 180 m). The selection is not distance-culled. The field is not in this loop and its mesh is not frustum-culled, so flying back cannot drop the terrain on a bad sphere. The camera far plane grows as you fly, from at least 8000 m. `culled` in **Profile** is the hidden instances. The batch mesh itself is not frustum-culled; a sphere on the untransformed geometry used to hide every copy once the camera looked away from the origin.
