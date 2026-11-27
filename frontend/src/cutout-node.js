@@ -6,7 +6,7 @@
  * discards the cutout. WebGL never imports this file and keeps alphaToCoverage.
  */
 import { Fn, batchIndirectIndex, float, int, ivec2, materialReference, normalMap, texture, textureLoad, uv, vec4 } from "three/tsl";
-import { isArrayTexture, releaseArraySlots } from "./texture-array.js";
+import { isArrayTexture, releaseArraySlots, releaseSupersededMaps } from "./texture-array.js";
 import { attachBlend } from "./blend-node.js";
 
 const reported = new Set();
@@ -191,6 +191,7 @@ function clearReplacedSlots(material) {
   if (isArrayTexture(userData.forgeArrayAo)) material.aoMap = null;
   if (isArrayTexture(userData.forgeArrayEmissive)) material.emissiveMap = null;
   if (isArrayTexture(userData.forgeArrayAlpha)) material.alphaMap = null;
+  releaseSupersededMaps(material);
 }
 
 export function bindArrayMaterial(material) {

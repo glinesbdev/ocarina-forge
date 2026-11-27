@@ -17,7 +17,8 @@ export function attachBlend(material) {
   const userData = material.userData || {};
   const blend = userData.blend;
   const baseMap = isArrayTexture(userData.forgeArrayAlbedo) ? userData.forgeArrayAlbedo : material.map;
-  const mossMap = isArrayTexture(userData.forgeArrayMoss) ? userData.forgeArrayMoss : userData.blendMap;
+  const mossPacked = !userData.forgeBlendMossFallback && isArrayTexture(userData.forgeArrayMoss);
+  const mossMap = mossPacked ? userData.forgeArrayMoss : userData.blendMap;
   if (!blend || !mossMap || !baseMap || userData.blendNode) return material;
   const arrayBlend = isArrayTexture(baseMap) || isArrayTexture(mossMap)
     || isArrayTexture(userData.forgeArrayRough) || isArrayTexture(userData.forgeArrayOrm1)

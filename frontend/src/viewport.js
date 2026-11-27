@@ -66,6 +66,7 @@ import {
   isArrayTexture,
   layerWritePlan,
   blendChannelIndex,
+  blendOverlayPlan,
   BLEND_LAYER_ROWS,
   releaseArraySlots,
   replaceLayerTexture,
@@ -3612,11 +3613,13 @@ let convertSlots = 8;
       if (partBlend) {
         const mossTex = partMaterial.userData.blendMap;
         const moss = place(mossTex);
-        if (!mossTex || (canPackTexture(mossTex) && !moss)) {
+        const overlay = blendOverlayPlan(mossTex, moss);
+        if (overlay === "hide") {
           if (typeof mesh.setVisibleAt === "function") mesh.setVisibleAt(item.instanceId, false);
           continue;
         }
-        if (moss) {
+        if (overlay === "flat") material.userData.forgeBlendMossFallback = true;
+        else if (!material.userData.forgeBlendMossFallback) {
           holdPlaced("forgeArrayMoss", moss);
           if (Number.isInteger(mossTex.channel)) moss.array.channel = mossTex.channel;
         }
@@ -3645,11 +3648,12 @@ let convertSlots = 8;
         if (placedNormal && Number.isInteger(normal.channel)) placedNormal.array.channel = normal.channel;
         const scale = Array.isArray(partBlend.scale) ? partBlend.scale : [1, 1];
         const translate = Array.isArray(partBlend.translate) ? partBlend.translate : [0, 0];
+        const mossLayer = overlay === "array" && !material.userData.forgeBlendMossFallback && moss ? moss.layer : 0;
         writeBlendLayerTexel(
           layerSlot.texture,
           item.instanceId,
           albedo.layer,
-          moss ? moss.layer : 0,
+          mossLayer,
           blendChannelIndex(partBlend.channel),
           placedRough ? placedRough.layer : 0,
         );
@@ -3809,6 +3813,9 @@ let convertSlots = 8;
     const drawn = new Set();
     const add = (texture) => {
       if (!texture || texture.isTexture !== true || isArrayTexture(texture)) return;
+      // Packed pixels live in the array. A 2D slot that is still sampled,
+      // including a blend overlay that fell back, stays in this set.
+      if (texture.userData?.forgeInArray && texture.userData?.forgePackedHold) return;
       drawn.add(texture.source || texture);
     };
     const visit = (material) => {

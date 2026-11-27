@@ -28,6 +28,8 @@ import {
   arrayMaterialEligible,
   BLEND_LAYER_MAP,
   blendChannelIndex,
+  blendOverlayPlan,
+  releaseSupersededMaps,
   layerTextureWidth,
   LAYER_TEXEL_BYTES,
 } from "./texture-array.js";
@@ -511,4 +513,33 @@ test("blend layer lookup maps a0, a1, and c0 without renumbering on grow", () =>
   assert.equal(writeLayerTexel(lookup, lookup.image.width, 1, 0, 0, 0), false);
   lookup.dispose();
   wider.dispose();
+});
+
+test("a blend overlay that cannot take a layer stays on its 2D map", () => {
+  assert.equal(blendOverlayPlan(null, null), "hide");
+  assert.equal(blendOverlayPlan({ isTexture: true }, null), "flat");
+  assert.equal(blendOverlayPlan({ isTexture: true }, { layer: 3, array: {} }), "array");
+  const moss = { isTexture: true };
+  const array = { isTexture: true, isCompressedArrayTexture: true };
+  const material = {
+    userData: { forgeArrayMoss: array, blendMap: moss, mossMap: moss },
+  };
+  assert.equal(releaseSupersededMaps(material), true);
+  assert.equal(material.userData.blendMap, null);
+  assert.equal(material.userData.mossMap, null);
+  const fallback = {
+    userData: { forgeArrayMoss: array, blendMap: moss, forgeBlendMossFallback: true },
+  };
+  assert.equal(releaseSupersededMaps(fallback), false);
+  assert.equal(fallback.userData.blendMap, moss);
+});
+
+test("a packed image is marked so the 2D copy can leave the budget", () => {
+  const packer = createTextureArrayPacker();
+  const texture = bc7(8, 8, 7);
+  const placed = packer.layerOf(texture);
+  assert.equal(placed.layer, 0);
+  assert.equal(texture.userData.forgeInArray, true);
+  assert.equal(packer.layerOf(texture).layer, 0);
+  assert.equal(texture.userData.forgeInArray, true);
 });

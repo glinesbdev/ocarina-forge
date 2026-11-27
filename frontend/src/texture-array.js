@@ -416,7 +416,10 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     }
     const id = identityOf(texture);
     const existing = group.layers.get(id);
-    if (existing != null) return { group, layer: existing, array: group.array };
+    if (existing != null) {
+      markInArray(texture);
+      return { group, layer: existing, array: group.array };
+    }
     if (group.depth >= maxDepth) {
       noteReject(texture, "depth-cap");
       return null;
@@ -468,6 +471,7 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     group.layers.set(id, layer);
     group.depth += 1;
     packedTextures.add(texture);
+    markInArray(texture);
     if (!gpu) {
       if (group.fullUpload) group.array.layerUpdates.clear();
       else group.array.addLayerUpdate(layer);
@@ -738,6 +742,48 @@ export function arrayTexturesOf(material) {
     found.push(value);
   }
   return found;
+}
+
+function markInArray(texture) {
+  if (!texture) return;
+  texture.userData = texture.userData || {};
+  texture.userData.forgeInArray = true;
+}
+
+/**
+ * What to do with one blend overlay while the batch is installed.
+ * No overlay image: hide, so layer 0 is not painted on as moss.
+ * A placed layer: sample the array. Anything else, including a packable
+ * image the group could not take, stays on the 2D map. Hiding that
+ * instance opens a hole onto the lake stand-in.
+ */
+export function blendOverlayPlan(mossTex, placed) {
+  if (!mossTex) return "hide";
+  if (placed) return "array";
+  return "flat";
+}
+
+/**
+ * Drop 2D overlay slots once the batch samples the array instead.
+ * The part material keeps its own maps so a later layer lookup still
+ * finds the image. A fallback batch still samples the 2D overlay.
+ */
+export function releaseSupersededMaps(material) {
+  const data = material && material.userData;
+  if (!data || data.forgeBlendMossFallback) return false;
+  let cleared = false;
+  const drop = (field, slot) => {
+    if (!isArrayTexture(data[field])) return;
+    const current = data[slot];
+    if (!current || current.isTexture !== true || isArrayTexture(current)) return;
+    data[slot] = null;
+    cleared = true;
+  };
+  drop("forgeArrayMoss", "blendMap");
+  drop("forgeArrayMoss", "mossMap");
+  drop("forgeArrayNormal1", "normal1Map");
+  drop("forgeArrayOrm1", "orm1Map");
+  return cleared;
 }
 
 /**

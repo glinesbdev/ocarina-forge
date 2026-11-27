@@ -1,6 +1,6 @@
 /** CPU/GPU memory accounting for the viewport: textures, geometries, batches, actors. */
 
-import { arrayTexturesOf } from "./texture-array.js";
+import { arrayTexturesOf, isArrayTexture } from "./texture-array.js";
 
 const TEXTURE_KEYS = [
   "map", "normalMap", "roughnessMap", "metalnessMap", "aoMap", "emissiveMap", "alphaMap",
@@ -38,8 +38,21 @@ export function geometryBudgetBytes(geometry) {
   return total;
 }
 
+function arrayLayers(texture) {
+  if (!isArrayTexture(texture)) return 1;
+  const depth = texture.image && texture.image.depth;
+  return Math.max(1, depth | 0);
+}
+
+/** A 2D image whose pixels have been copied into an array. The array is the resident copy. */
+export function supersededArraySource(texture) {
+  if (!texture || isArrayTexture(texture) || !texture.userData) return false;
+  return texture.userData.forgeInArray === true || texture.userData.forgePackedHold === true;
+}
+
 export function bc7GpuBytes(texture) {
   if (!texture || !texture.isCompressedTexture || texture.format !== 36492) return 0;
+  if (supersededArraySource(texture)) return 0;
   return gpuTextureBytes(texture);
 }
 
@@ -123,8 +136,9 @@ function gpuTextureBytes(texture) {
   let h = height;
   let total = 0;
   const bytesPerPixel = texture.isCompressedTexture ? (texture.format === 33777 ? 0.5 : 1) : 4;
+  const layers = arrayLayers(texture);
   for (let i = 0; i < levels; i += 1) {
-    total += Math.max(16, Math.ceil(w / 4) * Math.ceil(h / 4) * (bytesPerPixel * 16));
+    total += Math.max(16, Math.ceil(w / 4) * Math.ceil(h / 4) * (bytesPerPixel * 16)) * layers;
     w = Math.max(1, w >> 1);
     h = Math.max(1, h >> 1);
   }
@@ -253,7 +267,7 @@ export function collectMemoryReport(state = {}) {
   for (const texture of textures) {
     const kind = formatName(texture);
     const cpu = mipCpuBytes(texture);
-    const gpu = gpuTextureBytes(texture);
+    const gpu = supersededArraySource(texture) ? 0 : gpuTextureBytes(texture);
     const { width, height } = textureExtent(texture);
     const sourceId = (texture.source && texture.source.uuid) || texture.uuid || texture.id;
     const first = !seenSources.has(sourceId);

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { budgetAssetBytes, collectMemoryReport, residentModelBytes } from "./memory-report.js";
+import { budgetAssetBytes, bc7GpuBytes, collectMemoryReport, residentModelBytes } from "./memory-report.js";
 
 test("the memory report counts actors, instanced slots, and compressed textures", () => {
   const geometry = {
@@ -68,4 +68,32 @@ test("the memory report counts actors, instanced slots, and compressed textures"
   ]));
   assert.equal(perModel.size, 1);
   assert.ok(perModel.get("Tree") > 0);
+});
+
+test("a packed 2D image is not counted beside its array, and the array counts every layer", () => {
+  const source = {
+    isCompressedTexture: true,
+    format: 36492,
+    mipmaps: [{ width: 4, height: 4, data: new Uint8Array(16) }],
+    uuid: "src",
+    userData: { forgeInArray: true },
+  };
+  const array = {
+    isTexture: true,
+    isCompressedTexture: true,
+    isCompressedArrayTexture: true,
+    format: 36492,
+    mipmaps: [{ width: 4, height: 4, data: new Uint8Array(64) }],
+    image: { width: 4, height: 4, depth: 4 },
+    uuid: "arr",
+  };
+  assert.equal(bc7GpuBytes(source), 0);
+  assert.equal(bc7GpuBytes(array), 64);
+  const report = collectMemoryReport({
+    entries: new Map([
+      ["a", { gyaml: "Grass", parts: [{ material: { map: source, userData: { blendMap: source } } }] }],
+    ]),
+    batches: [{ mesh: { material: { userData: { forgeArrayAlbedo: array } } } }],
+  });
+  assert.equal(report.textures.byFormat.BC7.gpu, 64);
 });
