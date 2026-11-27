@@ -37,9 +37,13 @@ export function cellId(x, z, cell = TILE_CELL_METRES) {
   return `${cx}_${cz}`;
 }
 
-/** Hide the batched copy while tiles draw it. The open selection stays editable. */
-export function tileHides({ tilesOn = false, held = false, opened = false } = {}) {
-  return Boolean(tilesOn) && Boolean(held) && !opened;
+/**
+ * Hide the batched copy only after that actor's tile has loaded.
+ * `live` stays false until a model for this actor is on screen, so a loader
+ * error leaves the current batches visible.
+ */
+export function tileHides({ tilesOn = false, held = false, opened = false, live = false } = {}) {
+  return Boolean(tilesOn) && Boolean(live) && Boolean(held) && !opened;
 }
 
 /**

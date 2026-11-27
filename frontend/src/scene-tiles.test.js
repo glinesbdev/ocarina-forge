@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,13 +71,59 @@ test("static scenery is eligible and water, dynamic, and terrain are not", () =>
   assert.equal(tilesEnabled({ setting: true }), true);
 });
 
-test("a tile hides its batched copy until that actor is selected", () => {
-  assert.equal(tileHides({ tilesOn: false, held: true, opened: false }), false);
-  assert.equal(tileHides({ tilesOn: true, held: true, opened: false }), true);
-  assert.equal(tileHides({ tilesOn: true, held: true, opened: true }), false);
-  assert.equal(tileHides({ tilesOn: true, held: false, opened: false }), false);
+test("a tile hides its batched copy only after that tile has loaded", () => {
+  assert.equal(tileHides({ tilesOn: true, held: true, opened: false, live: false }), false);
+  assert.equal(tileHides({ tilesOn: false, held: true, opened: false, live: true }), false);
+  assert.equal(tileHides({ tilesOn: true, held: true, opened: false, live: true }), true);
+  assert.equal(tileHides({ tilesOn: true, held: true, opened: true, live: true }), false);
+  assert.equal(tileHides({ tilesOn: true, held: false, opened: false, live: true }), false);
   assert.equal(cellId(10, -10), "0_-1");
   assert.equal(cellId(256, 256), "1_1");
+});
+
+function unboundConstructions(source) {
+  const bound = new Set();
+  for (const match of source.matchAll(/import\s*\{([^}]+)\}/g)) {
+    for (const part of match[1].split(",")) {
+      const name = part.split(/\s+as\s+/).pop().trim();
+      if (name) bound.add(name);
+    }
+  }
+  for (const match of source.matchAll(/(?:const|let|var)\s*\{([^}]+)\}/g)) {
+    for (const part of match[1].split(",")) {
+      const name = part.split(/\s*:\s*/).pop().trim();
+      if (/^[A-Za-z_$][\w$]*$/.test(name)) bound.add(name);
+    }
+  }
+  const missing = [];
+  for (const match of source.matchAll(/\bnew\s+([A-Z][A-Za-z0-9_]*)/g)) {
+    if (!bound.has(match[1])) missing.push(match[1]);
+  }
+  return missing;
+}
+
+test("the tile runtime has no unbound constructor names", () => {
+  const source = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");
+  assert.deepEqual(unboundConstructions(source), []);
+});
+
+test("the tile runtime constructs GLTFLoader from its own imports", async () => {
+  const { installTileLoaders } = await import("./scene-tiles-runtime.js");
+  const { LoadingManager } = await import("three");
+  const { MeshoptDecoder } = await import("meshoptimizer/decoder");
+  await MeshoptDecoder.ready;
+  const manager = new LoadingManager();
+  let added = null;
+  const original = manager.addHandler.bind(manager);
+  manager.addHandler = (pattern, loader) => {
+    added = loader;
+    return original(pattern, loader);
+  };
+  const release = installTileLoaders({ manager }, null);
+  assert.equal(typeof release, "function");
+  assert.equal(added && added.constructor && added.constructor.name, "GLTFLoader");
+  release();
+  assert.equal(manager.getHandler("cell.glb"), null);
 });
 
 test("a failed bake is not requested again until the checkbox or a save", () => {

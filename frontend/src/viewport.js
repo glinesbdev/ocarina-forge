@@ -394,6 +394,7 @@ export async function createViewport(host, hooks) {
   let tileLayer = null;
   let tileHeld = new Set();
   let tileActors = new Map();
+  const tileLoaded = new Set();
   let tileBakeMs = 0;
   let tileBakeToken = 0;
   let tileBakeTimer = 0;
@@ -1690,6 +1691,7 @@ let convertSlots = 8;
       }
       tileHeld.clear();
       tileActors.clear();
+      tileLoaded.clear();
       tileSettleBake = true;
     }
     const reloadTerrain = shouldReloadTerrain(terrainBanc, options.banc);
@@ -3272,6 +3274,7 @@ let convertSlots = 8;
           tilesOn,
           held: tileHeld.has(entry.key),
           opened: tileOpened(entry),
+          live: tileLoaded.has(entry.key),
         }) && probe.inFrustum && lod === slot.lod;
         if (tilesOn && tileHeld.has(entry.key) && slot.mesh) slot.mesh.userData.forgeTileMesh = true;
         if (slot.shown !== show) {
@@ -6308,10 +6311,40 @@ uniform float terrainLayerMissing;`
     tileBakeTimer = 0;
     tileHeld.clear();
     tileActors.clear();
+    tileLoaded.clear();
     if (tileLayer) {
       tileLayer.dispose();
       tileLayer = null;
     }
+  }
+
+  function fallBackToBatches() {
+    tileHeld.clear();
+    tileActors.clear();
+    tileLoaded.clear();
+    if (tileLayer) {
+      tileLayer.dispose();
+      tileLayer = null;
+    }
+    releaseTileMeshes();
+    bumpCull();
+    requestRender();
+  }
+
+  function noteTileModel(url) {
+    const file = String(url || "");
+    if (!file) return;
+    let changed = false;
+    for (const [key, uris] of tileActors) {
+      if (!uris || tileLoaded.has(key)) continue;
+      const leaf = uris.leaf || "";
+      const hlod = uris.hlod || "";
+      if ((leaf && file.endsWith(leaf)) || (hlod && file.endsWith(hlod))) {
+        tileLoaded.add(key);
+        changed = true;
+      }
+    }
+    if (changed) bumpCull();
   }
 
   function releaseTileMeshes() {
@@ -6432,6 +6465,7 @@ uniform float terrainLayerMissing;`
       renderer,
       pickLayer: PICK_LAYER,
       prepare: prepareTileMaterial,
+      onModel: noteTileModel,
     });
     if (!tilesOn) {
       layer.dispose();
@@ -6476,29 +6510,24 @@ uniform float terrainLayerMissing;`
       result = await api.bakeSceneTiles({ actors: collectTileActors() });
     } catch (error) {
       noteTileBakeError(error);
+      fallBackToBatches();
       return "failed";
     }
     if (token !== tileBakeToken || !tilesOn) return "stale";
     tileBakeMs = Number(result && result.bakeMs) || 0;
     if (!result || !result.url) {
-      if (tileLayer) {
-        tileLayer.dispose();
-        tileLayer = null;
-      }
-      tileHeld.clear();
-      tileActors.clear();
-      releaseTileMeshes();
-      bumpCull();
+      fallBackToBatches();
       return "empty";
     }
+    applyTileManifest(result);
     try {
       await mountTileLayer(result.url);
     } catch (error) {
       noteTileBakeError(error);
+      fallBackToBatches();
       return "failed";
     }
     if (token !== tileBakeToken || !tilesOn) return "stale";
-    applyTileManifest(result);
     bumpCull();
     requestRender();
     return "applied";
@@ -6547,21 +6576,6 @@ uniform float terrainLayerMissing;`
     benchmarkRun = null;
     syncProfileCounting();
     if (!run) return null;
-    if (run.failed) {
-      benchmarkResult = {
-        version: 1,
-        scene: "hyrule-field-child",
-        path: "field-loop-160m",
-        settled: false,
-        frames: 0,
-        error: tileBakeError,
-        tiles: { enabled: tilesOn, loaded: 0, visible: 0, cachedBytes: 0, bakeMs: tileBakeMs },
-        note: "The tile bake failed, so the fly did not start. The message was shown once.",
-      };
-      console.info(JSON.stringify(benchmarkResult, null, 2));
-      requestRender();
-      return benchmarkResult;
-    }
     if (run.saved) {
       camera.position.copy(run.saved.position);
       orbit.target.copy(run.saved.target);
@@ -6599,7 +6613,10 @@ uniform float terrainLayerMissing;`
         cachedBytes: samples.length ? samples[samples.length - 1].tilesBytes || 0 : 0,
         bakeMs: tileBakeMs,
       },
-      note: "avg and p95 are the fly after streaming settles or the wait ends. submit, update, priority, labels, and cull are CPU milliseconds. writeTex counts queue.writeTexture while Profile is on. indirectFills counts WebGPU merged-draw fills. lodFlips counts instance visibility changes. heap.avg is the fly; heap.final is the last sample. capped is the resident cap count at the end. draws and batches are in summary. tiles counts the experimental tileset; with the toggle off those counts stay 0.",
+      ...(tileBakeError ? { error: tileBakeError } : {}),
+      note: tileBakeError
+        ? "The tile path failed. The fly kept the current batches, and tiles.bakeMs is the bake that did finish. The error was shown once."
+        : "avg and p95 are the fly after streaming settles or the wait ends. submit, update, priority, labels, and cull are CPU milliseconds. writeTex counts queue.writeTexture while Profile is on. indirectFills counts WebGPU merged-draw fills. lodFlips counts instance visibility changes. heap.avg is the fly; heap.final is the last sample. capped is the resident cap count at the end. draws and batches are in summary. tiles counts the experimental tileset; with the toggle off those counts stay 0.",
     };
     const json = JSON.stringify(benchmarkResult, null, 2);
     console.info(json);
@@ -6628,18 +6645,13 @@ uniform float terrainLayerMissing;`
       if (tilesOn && !run.tilesReady) {
         if (!run.tilesPromise) {
           run.tilesPromise = ensureTiles("benchmark").then((status) => {
-            if (status === "failed") {
-              run.failed = true;
-              run.tilesReady = true;
-              run.complete = true;
-            } else if (status === "applied" || status === "empty" || status === "off" || !tilesOn) {
+            if (status === "failed" || status === "applied" || status === "empty" || status === "off" || !tilesOn) {
               run.tilesReady = true;
             } else run.tilesPromise = null;
             requestRender();
           }, () => {
-            run.failed = true;
+            fallBackToBatches();
             run.tilesReady = true;
-            run.complete = true;
             requestRender();
           });
         }
@@ -6745,8 +6757,13 @@ uniform float terrainLayerMissing;`
       }
     }
     if (tilesOn && tileLayer) {
-      tileLayer.update(camera, renderer);
-      tileLayer.hide(openedTileUris());
+      try {
+        tileLayer.update(camera, renderer);
+        tileLayer.hide(openedTileUris());
+      } catch (error) {
+        noteTileBakeError(error);
+        fallBackToBatches();
+      }
     }
     if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
     const profiling = showProfile;

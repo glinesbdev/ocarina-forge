@@ -66,12 +66,17 @@ test("the benchmark stays off unless Profile or the query flag starts it", () =>
   assert.match(viewport, /tileHides\(/);
   assert.match(viewport, /tileBakeError/);
   assert.match(viewport, /status === "failed"/);
-  assert.match(viewport, /run\.failed = true/);
+  assert.match(viewport, /fallBackToBatches/);
+  assert.match(viewport, /tileLoaded/);
   assert.match(viewport, /onTileBakeError/);
+  assert.match(viewport, /bakeMs: tileBakeMs/);
   assert.match(main, /onTileBakeError/);
   assert.match(viewport, /shouldRequestTileBake/);
   const runtime = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");
   assert.match(runtime, /3d-tiles-renderer\/three/);
+  assert.match(runtime, /import \{ GLTFLoader \} from "three\/addons\/loaders\/GLTFLoader.js"/);
+  assert.match(runtime, /import \{ KTX2Loader \} from "three\/addons\/loaders\/KTX2Loader.js"/);
+  assert.match(runtime, /import \{ MeshoptDecoder \} from "meshoptimizer\/decoder"/);
   assert.match(runtime, /setMeshoptDecoder/);
   assert.match(runtime, /KTX2Loader/);
   assert.match(runtime, /addHandler/);
