@@ -6,7 +6,17 @@
  */
 export function createGpuProfile(renderer) {
   const device = renderer && renderer.backend && renderer.backend.device;
-  const state = { made: 0, frames: 0, quiet: 0, logged: 0, versions: new WeakMap() };
+  const state = {
+    made: 0,
+    writeTexture: 0,
+    writeBytes: 0,
+    bindGroup: 0,
+    frames: 0,
+    quiet: 0,
+    logged: 0,
+    versions: new WeakMap(),
+    last: null,
+  };
   if (!device) return state;
   if (typeof device.createRenderPipeline === "function") {
     const original = device.createRenderPipeline.bind(device);
@@ -22,14 +32,36 @@ export function createGpuProfile(renderer) {
       return original(descriptor);
     };
   }
+  const queue = device.queue;
+  if (queue && typeof queue.writeTexture === "function") {
+    const original = queue.writeTexture.bind(queue);
+    queue.writeTexture = (destination, data, layout, size) => {
+      state.writeTexture += 1;
+      state.writeBytes += data && data.byteLength ? data.byteLength : 0;
+      return original(destination, data, layout, size);
+    };
+  }
+  if (typeof device.createBindGroup === "function") {
+    const original = device.createBindGroup.bind(device);
+    device.createBindGroup = (descriptor) => {
+      state.bindGroup += 1;
+      return original(descriptor);
+    };
+  }
   return state;
 }
 
-export function sampleGpuFrame(state, { calls = 0, materials = [], loading = false } = {}) {
+export function sampleGpuFrame(state, { calls = 0, drawCalls = 0, materials = [], loading = false } = {}) {
   if (!state) return "";
   state.frames += 1;
   const made = state.made;
+  const writeTexture = state.writeTexture || 0;
+  const writeBytes = state.writeBytes || 0;
+  const bindGroup = state.bindGroup || 0;
   state.made = 0;
+  state.writeTexture = 0;
+  state.writeBytes = 0;
+  state.bindGroup = 0;
   let churn = 0;
   for (const material of materials) {
     if (!material) continue;
@@ -41,6 +73,14 @@ export function sampleGpuFrame(state, { calls = 0, materials = [], loading = fal
       state.versions.set(material, version);
     }
   }
+  state.last = {
+    drawCalls: Number(drawCalls) || 0,
+    pipelines: made,
+    versions: churn,
+    writeTexture,
+    writeBytes,
+    bindGroups: bindGroup,
+  };
   if (loading) {
     state.quiet = 0;
     return "";

@@ -86,6 +86,8 @@ export function formatProfileDetail({
   batchKeys = null,
   pickUploads = null,
   keyReasons = null,
+  gpuFrame = null,
+  bytes = null,
 } = {}) {
   const lines = [];
   lines.push(rendering ? (fps ? `${fps} fps` : "…") : "idle");
@@ -132,6 +134,16 @@ export function formatProfileDetail({
     if (sceneStream.maxCompileMs > 0) note.push(`compile ${formatMs(sceneStream.maxCompileMs)} ms`);
     if (sceneStream.editBytes != null) note.push(`first edit ${formatMs(sceneStream.editBytes / 1048576)} MiB`);
     lines.push(note.join(" · "));
+  }
+  if (gpuFrame) {
+    lines.push(
+      `gpu draws ${gpuFrame.drawCalls} · writeTex ${gpuFrame.writeTexture} · pipelines ${gpuFrame.pipelines} · versions ${gpuFrame.versions} · binds ${gpuFrame.bindGroups}`,
+    );
+  }
+  if (bytes) {
+    lines.push(
+      `geom ${bytes.geometryMB} MB · bc7 ${bytes.bc7MB} MB · cpu array ${bytes.cpuArrayMB} MB · cpu 2d ${bytes.cpu2dMB} MB · cpu packed ${bytes.cpuPackedMB} MB · layers ${bytes.usedLayers}/${bytes.allocLayers}`,
+    );
   }
   if (server) lines.push(server);
   return lines;

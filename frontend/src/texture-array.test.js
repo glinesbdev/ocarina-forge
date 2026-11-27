@@ -542,4 +542,12 @@ test("a packed image is marked so the 2D copy can leave the budget", () => {
   assert.equal(texture.userData.forgeInArray, true);
   assert.equal(packer.layerOf(texture).layer, 0);
   assert.equal(texture.userData.forgeInArray, true);
+  packer.layerOf(bc7(8, 8, 8));
+  const third = packer.layerOf(bc7(8, 8, 9));
+  assert.equal(third.array.image.depth, 4);
+  assert.equal(third.array.userData.forgeUsedLayers, 3);
+  packer.compact();
+  const tight = packer.arrayFor(texture);
+  assert.equal(tight.image.depth, 3);
+  assert.equal(tight.userData.forgeUsedLayers, 3);
 });

@@ -89,6 +89,13 @@ test("a packed 2D image is not counted beside its array, and the array counts ev
   };
   assert.equal(bc7GpuBytes(source), 0);
   assert.equal(bc7GpuBytes(array), 64);
+  const spare = {
+    ...array,
+    uuid: "spare",
+    userData: { forgeUsedLayers: 2 },
+    image: { width: 4, height: 4, depth: 4 },
+  };
+  assert.equal(bc7GpuBytes(spare), 32);
   const report = collectMemoryReport({
     entries: new Map([
       ["a", { gyaml: "Grass", parts: [{ material: { map: source, userData: { blendMap: source } } }] }],

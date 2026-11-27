@@ -42,4 +42,40 @@ test("pipeline creations and material version changes are counted per frame", ()
     console.info = info;
   }
   assert.equal(created.length, 3);
+  assert.equal(state.last.writeTexture, 0);
+  assert.equal(state.last.bindGroups, 0);
+  assert.equal(state.last.pipelines, 1);
+});
+
+test("writeTexture and bind group calls are counted on the settled frame", () => {
+  const renderer = {
+    backend: {
+      device: {
+        queue: {
+          writeTexture() {},
+        },
+        createBindGroup() {
+          return {};
+        },
+        createRenderPipeline() {
+          return {};
+        },
+      },
+    },
+  };
+  const state = createGpuProfile(renderer);
+  renderer.backend.device.queue.writeTexture({}, new Uint8Array(32), {}, {});
+  renderer.backend.device.createBindGroup({});
+  const info = console.info;
+  console.info = () => {};
+  try {
+    sampleGpuFrame(state, { calls: 1, drawCalls: 12, materials: [{ version: 1 }], loading: true });
+  } finally {
+    console.info = info;
+  }
+  assert.equal(state.last.drawCalls, 12);
+  assert.equal(state.last.writeTexture, 1);
+  assert.equal(state.last.writeBytes, 32);
+  assert.equal(state.last.bindGroups, 1);
+  assert.equal(state.last.pipelines, 0);
 });

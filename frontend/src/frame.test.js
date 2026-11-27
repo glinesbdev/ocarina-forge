@@ -119,6 +119,29 @@ test("the profile detail keeps the counters that used to sit on the stats line",
   );
 });
 
+test("the profile names gpu draws and the resident byte split", () => {
+  assert.deepEqual(
+    formatProfileDetail({
+      rendering: false,
+      gpuFrame: { drawCalls: 7463, writeTexture: 0, pipelines: 0, versions: 2, bindGroups: 1 },
+      bytes: {
+        geometryMB: 18.2,
+        bc7MB: 640.5,
+        cpuArrayMB: 700,
+        cpu2dMB: 40,
+        cpuPackedMB: 512,
+        usedLayers: 400,
+        allocLayers: 640,
+      },
+    }),
+    [
+      "idle",
+      "gpu draws 7463 · writeTex 0 · pipelines 0 · versions 2 · binds 1",
+      "geom 18.2 MB · bc7 640.5 MB · cpu array 700 MB · cpu 2d 40 MB · cpu packed 512 MB · layers 400/640",
+    ],
+  );
+});
+
 test("a resident cap is named on the status label", () => {
   assert.equal(
     formatStatusLabel({ backend: "WebGPU", draws: 773, capped: 207 }),

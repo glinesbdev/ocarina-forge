@@ -38,10 +38,20 @@ export function geometryBudgetBytes(geometry) {
   return total;
 }
 
+/** Allocated array depth, and the layer count the packer actually filled. */
+export function arrayLayerCounts(texture) {
+  if (!isArrayTexture(texture)) return null;
+  const alloc = Math.max(1, (texture.image && texture.image.depth) | 0);
+  const used = texture.userData && Number(texture.userData.forgeUsedLayers);
+  return {
+    used: Number.isInteger(used) && used > 0 ? used : alloc,
+    alloc,
+  };
+}
+
 function arrayLayers(texture) {
-  if (!isArrayTexture(texture)) return 1;
-  const depth = texture.image && texture.image.depth;
-  return Math.max(1, depth | 0);
+  const counts = arrayLayerCounts(texture);
+  return counts ? counts.used : 1;
 }
 
 /** A 2D image whose pixels have been copied into an array. The array is the resident copy. */
@@ -262,6 +272,11 @@ export function collectMemoryReport(state = {}) {
   let uniqueSources = 0;
   let uniqueCpu = 0;
   let uniqueGpu = 0;
+  let cpuArray = 0;
+  let cpu2d = 0;
+  let cpuPacked = 0;
+  let usedLayers = 0;
+  let allocLayers = 0;
   const seenSources = new Set();
   const byFormat = {};
   for (const texture of textures) {
@@ -276,6 +291,16 @@ export function collectMemoryReport(state = {}) {
       uniqueSources += 1;
       uniqueCpu += cpu;
       uniqueGpu += gpu;
+      const layers = arrayLayerCounts(texture);
+      if (layers) {
+        cpuArray += cpu;
+        usedLayers += layers.used;
+        allocLayers += layers.alloc;
+      } else if (supersededArraySource(texture)) {
+        cpuPacked += cpu;
+      } else {
+        cpu2d += cpu;
+      }
     }
     texCpu += cpu;
     texGpu += gpu;
@@ -329,6 +354,11 @@ export function collectMemoryReport(state = {}) {
       gpuBytes: texGpu,
       cpuMB: mb(texCpu),
       gpuMB: mb(texGpu),
+      cpuArrayBytes: cpuArray,
+      cpu2dBytes: cpu2d,
+      cpuPackedBytes: cpuPacked,
+      usedLayers,
+      allocLayers,
       byFormat: Object.fromEntries(Object.entries(byFormat).map(([k, v]) => [k, { ...v, cpuMB: mb(v.cpu), gpuMB: mb(v.gpu) }])),
       top: textureRows.slice(0, 20).map((row) => ({ ...row, cpuMB: mb(row.cpu), gpuMB: mb(row.gpu) })),
     },

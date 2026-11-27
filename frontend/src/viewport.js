@@ -638,6 +638,8 @@ let convertSlots = 8;
 
   let textureCpuReleaseDirty = true;
   let textureCpuReleaseInFlight = false;
+  let textureReleaseSpins = 0;
+  let textureReleaseGaveUp = false;
   const textureCpuReleaseFrames = new Map();
 
   function collectLiveTextures() {
@@ -659,8 +661,23 @@ let convertSlots = 8;
     return (texture.source && (texture.source.uuid || texture.source.id)) || texture.uuid || texture.id;
   }
 
+  function arrayCpuLive() {
+    for (const texture of liveCompressedArrays()) {
+      if (!texture || texture.userData?.forgeCpuReleased) continue;
+      const levels = texture.mipmaps;
+      if (Array.isArray(levels) && levels.some((level) => level && level.data && level.data.byteLength > 0)) return true;
+    }
+    return false;
+  }
+
   function flushTextureCpuRelease() {
-    if (!textureCpuReleaseDirty || textureCpuReleaseInFlight) return;
+    if (textureCpuReleaseInFlight) return;
+    // The array's own upload does not set forgeGpuUploaded. That flag was
+    // only written inside this function, and this function returned before
+    // writing it unless some other texture was already waiting. Once streaming
+    // drained, the array CPU (the full capacity copy) stayed for the session.
+    noteUploadedArrays();
+    if (!textureCpuReleaseDirty && !arrayCpuLive()) return;
     const live = [...collectLiveTextures()];
     const groups = new Map();
     for (const texture of live) {
@@ -703,8 +720,19 @@ let convertSlots = 8;
       // A held source whose array is not on the GPU yet waits for the next
       // real frame. Requesting one here would spin once streaming stops.
       if ([...textureCpuReleaseFrames.values()].some((frames) => frames > 0 && frames < 3)) requestRender();
+      else if (!textureReleaseGaveUp && arrayCpuLive()) {
+        textureReleaseSpins += 1;
+        if (textureReleaseSpins <= 30) {
+          textureCpuReleaseDirty = true;
+          requestRender();
+        } else {
+          textureReleaseGaveUp = true;
+        }
+      }
       return;
     }
+    textureReleaseSpins = 0;
+    textureReleaseGaveUp = false;
     textureCpuReleaseInFlight = true;
     const device = renderer.backend && renderer.backend.device;
     const wait = device && device.queue && typeof device.queue.onSubmittedWorkDone === "function"
@@ -729,6 +757,7 @@ let convertSlots = 8;
         && !texture.userData?.forgeCpuReleased
         && !texture.source?.userData?.forgeCpuReleased
       )) || packedSourcesReady().length > 0 || packedArraysReady().length > 0;
+      invalidateAssetBudget();
       if (textureCpuReleaseDirty) requestRender();
     });
   }
@@ -2299,7 +2328,16 @@ let convertSlots = 8;
     if (assetBudgetCache) return assetBudgetCache;
     const report = collectMemoryReport({ entries, batches, parsedTemplates, terrainRoot });
     const parts = budgetAssetBytes(report);
-    assetBudgetCache = { ...parts, byModel: residentModelBytes(entries) };
+    const textures = report.textures || {};
+    assetBudgetCache = {
+      ...parts,
+      byModel: residentModelBytes(entries),
+      cpuArrayBytes: textures.cpuArrayBytes || 0,
+      cpu2dBytes: textures.cpu2dBytes || 0,
+      cpuPackedBytes: textures.cpuPackedBytes || 0,
+      usedLayers: textures.usedLayers || 0,
+      allocLayers: textures.allocLayers || 0,
+    };
     return assetBudgetCache;
   }
 
@@ -3969,6 +4007,9 @@ let convertSlots = 8;
       if (texture.source) texture.source.dataReady = false;
     }
     textureCpuReleaseDirty = true;
+    textureReleaseGaveUp = false;
+    textureReleaseSpins = 0;
+    invalidateAssetBudget();
     requestRender();
   }
 
@@ -6706,6 +6747,9 @@ uniform float terrainLayerMissing;`
 
   function profileDetail() {
     const backgroundLoading = statBackgroundLoading;
+    const budget = currentAssetBudget();
+    const lastGpu = gpuProfile && gpuProfile.last;
+    const mb1 = (bytes) => Math.round(((Number(bytes) || 0) / 1048576) * 10) / 10;
     return {
       rendering: lastRendering,
       fps,
@@ -6730,6 +6774,22 @@ uniform float terrainLayerMissing;`
       keyReasons: summarizeBatchKeys(batches.map((batch) => batch && batch.key)),
       imagePack: imagePackDump(),
       pickUploads: statPickUploads,
+      gpuFrame: lastGpu ? {
+        drawCalls: lastGpu.drawCalls,
+        writeTexture: lastGpu.writeTexture,
+        pipelines: lastGpu.pipelines,
+        versions: lastGpu.versions,
+        bindGroups: lastGpu.bindGroups,
+      } : null,
+      bytes: {
+        geometryMB: mb1(budget.geometry),
+        bc7MB: mb1(budget.bc7),
+        cpuArrayMB: mb1(budget.cpuArrayBytes),
+        cpu2dMB: mb1(budget.cpu2dBytes),
+        cpuPackedMB: mb1(budget.cpuPackedBytes),
+        usedLayers: budget.usedLayers || 0,
+        allocLayers: budget.allocLayers || 0,
+      },
     };
   }
 
@@ -6930,6 +6990,7 @@ uniform float terrainLayerMissing;`
       const info = renderer.info && renderer.info.render;
       sampleGpuFrame(gpuProfile, {
         calls: info ? info.calls : 0,
+        drawCalls: info ? info.drawCalls : 0,
         materials,
         loading: pendingLoads > 0,
       });

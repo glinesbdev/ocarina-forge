@@ -388,6 +388,15 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     return { array, previous, capacity };
   }
 
+  function stampUsedLayers(group) {
+    const array = group && group.array;
+    if (!array || !(group.depth > 0)) return;
+    array.userData = array.userData || {};
+    // `image.depth` is the allocated capacity, which doubles as images arrive.
+    // The budget has to bill the images that are actually stored.
+    array.userData.forgeUsedLayers = group.depth | 0;
+  }
+
   function publish(group, staged, gpu) {
     if (staged.array === group.array) return;
     if (staged.previous) {
@@ -397,6 +406,7 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     group.array = staged.array;
     group.capacity = staged.capacity;
     group.fullUpload = !gpu && Boolean(staged.previous);
+    stampUsedLayers(group);
   }
 
   function dropStaged(group, staged) {
@@ -418,6 +428,7 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     const existing = group.layers.get(id);
     if (existing != null) {
       markInArray(texture);
+      stampUsedLayers(group);
       return { group, layer: existing, array: group.array };
     }
     if (group.depth >= maxDepth) {
@@ -479,6 +490,7 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
     }
     group.fullUpload = false;
     notePacked(texture);
+    stampUsedLayers(group);
     return { group, layer, array: group.array };
   }
 
@@ -501,6 +513,7 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
         queueDispose(previous);
         group.array = array;
         group.capacity = group.depth;
+        stampUsedLayers(group);
         continue;
       }
       const array = buildPackedArray(previous, group.depth, previous, group.depth);
@@ -512,6 +525,7 @@ export function createTextureArrayPacker({ initialDepth = 1, maxDepth = 256, cop
       queueDispose(previous);
       group.array = array;
       group.capacity = group.depth;
+      stampUsedLayers(group);
     }
   }
 
