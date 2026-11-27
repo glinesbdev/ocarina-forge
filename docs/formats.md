@@ -553,7 +553,7 @@ BFRES here is little-endian Switch, version word major 10 (`0x000Axxxx`). Versio
 
 Vertex attributes carry a big-endian ushort format id at `+8` (`_F32_3` is `0x0518`, `_F32_2` is `0x0517`, `_SN10` is `0x020E`, `_UN10` is `0x000B`). Snorm8 divides by 127. SN10's sign bit is `0x200` and the scale is 511. UN10 divides by 1023. `_i0` is a palette slot. U8, U8_2, U8_4, and S8_4 use the first byte as that slot, not a 0–1 colour.
 
-A BNTX mip chain runs to 1×1. Each level is at least one compressed block, including 2×2 and 1×1. Godot 4.7 counts `floor(log2(max(width, height)))` extra levels: 341×341 BC7 is 158416 bytes, 512×512 DXT1 is 174776, 171×171 DXT1 is 20040. A chain that stops on the first level that fits in one block is 8 or 16 bytes short of that.
+Godot 4.7 sizes a compressed mip chain through 1×1, and each level is at least one block, including 2×2 and 1×1. It counts `floor(log2(max(width, height)))` extra levels: 341×341 BC7 is 158416 bytes, 512×512 DXT1 is 174776, 171×171 DXT1 is 20040. A chain that stops on the first level that fits in one block is 8 or 16 bytes short of that. Those lengths come from Godot's error text, not from counting offsets in a retail BNTX.
 
 Packed meshlets are BFRES `0x000A0400` with FSHP flag `0x10`. The bit layout is the one NupExplorer published and `meshlet.py` implements. Skin count other than 0 is not decoded.
 
