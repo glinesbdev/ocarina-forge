@@ -1,0 +1,6 @@
+---
+description: Standing rules for every coding agent in this repository
+alwaysApply: true
+---
+
+Read and follow `AGENTS.md` at the repository root before making any change. It is the standing rules for every coding agent in this repo. Those rules cover git, research, assets, and testing.

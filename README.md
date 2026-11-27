@@ -153,7 +153,7 @@ MIT. See [LICENSE](LICENSE).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributors and agents should read [AGENTS.md](AGENTS.md).
 
 ## Credits
 
