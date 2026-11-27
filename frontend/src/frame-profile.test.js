@@ -108,6 +108,30 @@ test("the hud prints n/a when timestamps are unsupported", () => {
   assert.match(text, /unavailable/);
 });
 
+test("keys and pick uploads stay off the draws line until a sample has them", () => {
+  const summary = summarize([]);
+  const withCounts = formatProfileHud({
+    backend: "WebGPU",
+    mode: "none",
+    gpuState: "unsupported",
+    latest: {
+      objects: 40, batches: 12, subDraws: 100, draws: 140,
+      batchKeys: 9, pickUploads: 0,
+    },
+    summary,
+  });
+  assert.match(withCounts, /obj 40 · batches 12 · sub 100 · draws 140 · keys 9 · pick 0/);
+  const plain = formatProfileHud({
+    backend: "WebGPU",
+    mode: "none",
+    gpuState: "unsupported",
+    latest: { objects: 40, batches: 12, subDraws: 100, draws: 140 },
+    summary,
+  });
+  assert.match(plain, /obj 40 · batches 12 · sub 100 · draws 140$/m);
+  assert.doesNotMatch(plain, /keys /);
+});
+
 test("a capture is json and counts resident textures once per source", () => {
   const capture = buildCapture({
     backend: "WebGL",

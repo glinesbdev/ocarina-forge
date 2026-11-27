@@ -109,6 +109,39 @@ export function transformSphere(center, radius, matrix, target = { center: [0, 0
   return target;
 }
 
+/** Exact matrix match. A static camera keeps the same 16 floats. */
+export function sameMatrix(a, b) {
+  const ae = a && (a.elements || a);
+  const be = b && (b.elements || b);
+  if (!ae || !be || ae.length < 16 || be.length < 16) return false;
+  for (let i = 0; i < 16; i += 1) {
+    if (ae[i] !== be[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * The instance loop can be skipped when the camera, the entry set, and the
+ * selection are the same objects of state as the last cull. `entrySerial`
+ * bumps when slots, visibility, or a moved actor change the result.
+ */
+export function shouldRecull({
+  world = null,
+  projection = null,
+  worldNow = null,
+  projectionNow = null,
+  selection = null,
+  selectionNow = null,
+  entrySerial = 0,
+  entrySerialNow = 0,
+} = {}) {
+  if (selection !== selectionNow) return true;
+  if (entrySerial !== entrySerialNow) return true;
+  if (!sameMatrix(world, worldNow)) return true;
+  if (!sameMatrix(projection, projectionNow)) return true;
+  return false;
+}
+
 /** Retail KokiriForest_01 is an untextured stand-in. The reason string is the marker. */
 export function isTerrainProxy(meta) {
   return Boolean(meta && typeof meta.reason === "string" && /terrain proxy/i.test(meta.reason));

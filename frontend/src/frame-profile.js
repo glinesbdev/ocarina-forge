@@ -17,6 +17,7 @@ const FIELDS = [
   "cpuMs", "updateMs", "cullMs", "submitMs", "gpuMs", "frameMs",
   "objects", "batches", "subDraws", "draws", "triangles",
   "meshes", "textures", "heapBytes",
+  "batchKeys", "pickUploads",
 ];
 
 export function average(values) {
@@ -169,12 +170,22 @@ export function formatProfileHud({
     `update ${fmtMs(latest.updateMs)} · cull ${fmtMs(latest.cullMs)} · submit ${fmtMs(latest.submitMs)}`,
     gpuLine(gpuState, latest.gpuMs, stats.gpuMs),
     lineMs("frame", latest.frameMs, stats.frameMs),
-    `obj ${fmtInt(latest.objects)} · batches ${fmtInt(latest.batches)} · sub ${fmtInt(latest.subDraws)} · draws ${fmtInt(latest.draws)}`,
+    drawLine(latest),
     `tris ${formatTris(latest.triangles)} · meshes ${fmtInt(latest.meshes)} · tex ${fmtInt(latest.textures)} · heap ${fmtHeap(latest.heapBytes)}`,
   );
   if (detail) lines.push(...formatProfileDetail(detail));
   if (recommendation) lines.push(recommendation);
   return lines.join("\n");
+}
+
+function drawLine(latest) {
+  let line = `obj ${fmtInt(latest.objects)} · batches ${fmtInt(latest.batches)} · sub ${fmtInt(latest.subDraws)} · draws ${fmtInt(latest.draws)}`;
+  if (latest.batchKeys == null && latest.pickUploads == null) return line;
+  const extra = [];
+  if (latest.batchKeys != null) extra.push(`keys ${fmtInt(latest.batchKeys)}`);
+  if (latest.pickUploads != null) extra.push(`pick ${fmtInt(latest.pickUploads)}`);
+  if (extra.length) line += ` · ${extra.join(" · ")}`;
+  return line;
 }
 
 export function countTextures(materials) {

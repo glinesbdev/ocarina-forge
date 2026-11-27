@@ -306,12 +306,29 @@ function ensureIdTexture(THREE, texture, count) {
   return next;
 }
 
+function pickIdsUnchanged(texture, ids) {
+  const data = texture.userData && texture.userData.forgePickIds;
+  const size = texture.userData && texture.userData.forgePickSize;
+  if (!data || !size) return false;
+  const stored = texture.userData.forgePickCount | 0;
+  const count = ids.length;
+  const limit = Math.min(size * size, Math.max(stored, count));
+  for (let i = 0; i < limit; i += 1) {
+    const want = i < count ? (ids[i] || 0) : 0;
+    if (readPickTexel(data, size, i) !== want) return false;
+  }
+  return stored === count;
+}
+
 function fillIdTexture(texture, ids) {
+  if (pickIdsUnchanged(texture, ids)) return false;
   const data = texture.userData.forgePickIds;
   const size = texture.userData.forgePickSize;
   data.fill(0);
   for (let i = 0; i < ids.length; i += 1) writePickTexel(data, size, i, ids[i] || 0);
+  texture.userData.forgePickCount = ids.length;
   texture.needsUpdate = true;
+  return true;
 }
 
 /**
@@ -448,11 +465,12 @@ export function createGpuPicker({ THREE, renderer, scene, getCamera, createNodeM
   }
 
   function writeInstanceIds(mesh, ids) {
-    if (!mesh) return;
+    if (!mesh) return false;
     const texture = ensureIdTexture(THREE, mesh.userData.forgePickTexture, Math.max(ids.length, 1));
     mesh.userData.forgePickTexture = texture;
-    fillIdTexture(texture, ids);
+    const wrote = fillIdTexture(texture, ids);
     if (mesh.isBatchedMesh && mesh._indirectTexture) mesh.userData.forgeIndirect = mesh._indirectTexture;
+    return wrote;
   }
 
   function prepareObject(object, sourceMaterial) {

@@ -53,6 +53,8 @@ test("the memory report counts actors, instanced slots, and compressed textures"
   assert.equal(report.frame.objects, 2);
   assert.equal(report.frame.batches, 1);
   assert.equal(report.frame.subDraws, 4);
+  assert.equal(report.frame.batchKeys, null);
+  assert.equal(report.frame.pickUploads, null);
   assert.equal(report.profile.gpuTiming, "webgpu");
   assert.ok(report.textures.gpuBytes > 0);
   assert.deepEqual(report.gpu, { geometries: 4, textures: 2 });
