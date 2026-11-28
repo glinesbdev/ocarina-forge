@@ -23,15 +23,15 @@ tools/wasm-bench/pkg/
 tools/wasm-bench/data/*.bin
 tools/wasm-bench/data/*.json
 
-# Godot spike and project generator. Imported output stays on the machine that owns the dump.
+# Godot. Imported output, build trees, and logs stay on the machine that owns the dump.
 **/.godot/
 **/.ocarina/
-godot/**/bin/
-godot/**/obj/
+**/bin/
+**/obj/
 godot/**/*.user
 godot-cache/
 godot/out/
+*.log
 
 # local run output
-godot-run.log.txt
 godot/viewer/field-loop-*.json

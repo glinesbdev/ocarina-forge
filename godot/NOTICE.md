@@ -1,6 +1,6 @@
 # Notices for the Godot spike
 
-The readers in `Forge.Import` are a port of this repo's Python (`ocarina_forge/formats/`, `ocarina_forge/models.py`, `ocarina_forge/actors.py`). They are not a copy of another project's source.
+The readers in `Forge.Import` started as a port of the Python in the web editor (`ocarina_forge/formats/`, `ocarina_forge/models.py`, `ocarina_forge/actors.py`). That tree is the tag `web-editor-final`. They are not a copy of another project's source.
 
 People and libraries this work depends on or follows:
 

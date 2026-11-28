@@ -1,5 +1,7 @@
 # Roadmap
 
+The list below is the archived web editor. That tree is the tag `web-editor-final`. The current project is the Godot generator in [docs/godot-project.md](docs/godot-project.md) and [docs/asset-pipeline.md](docs/asset-pipeline.md).
+
 This is the contributor plan for Ocarina Forge. It is a plan, not a promise: order and scope can change as we learn more. To pick something up, start with the open issues labeled [`roadmap`](https://github.com/glinesbdev/ocarina-forge/issues?q=is%3Aissue+is%3Aopen+label%3Aroadmap).
 
 The design note for how the editor maps onto a Longshot mod is [docs/design/mod-editor.md](docs/design/mod-editor.md). Measured viewer numbers are in [docs/rendering-performance.md](docs/rendering-performance.md).

@@ -110,6 +110,8 @@ The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport 
 
 ## Commands
 
+`./build.sh` and `build.ps1` restore, build, and test. `./build.sh --dump <dump> --out <project>` and `build.ps1 -Dump <dump> -Out <project>` generate. The dump is the folder that contains `romfs/`, or the `romfs` folder itself. `GODOT_BIN` or `--godot` / `-Godot` selects the editor. Details and the download links the script prints are in [README.md](../README.md).
+
 Godot is **4.7.2 stable .NET**. The Windows editor is typically `Godot_v4.7.2-stable_mono_win64.exe`. Set `GODOT` or pass `--godot`. The first generate transcodes ASTC albedos and MaterialAlb and walks texture archives. The second generate skips outputs whose sources have not changed.
 
 Linux, from the repo:

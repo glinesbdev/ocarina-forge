@@ -1,5 +1,7 @@
 # Actor models
 
+The browser path this page describes is the tag `web-editor-final`. The Godot path is [asset-pipeline.md](asset-pipeline.md).
+
 The 3D view loads a mesh from the dump you point Ocarina Forge at. Converted glTF is cached on your machine, outside this repo. The sample dump has a few synthetic meshes so the path can be tested with no Nintendo files. A real dump is still required for real actors; the checklist is [testing-on-real-dump.md](testing-on-real-dump.md).
 
 ## Check scene meshes

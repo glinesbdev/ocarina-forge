@@ -1,4 +1,4 @@
-
+﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Import", "Forge.Import\Forge.Import.csproj", "{A7B1C0D2-4E5F-6789-ABCD-EF0123456789}"
@@ -6,6 +6,12 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Import.Tests", "Forge.Import.Tests\Forge.Import.Tests.csproj", "{B7B1C0D2-4E5F-6789-ABCD-EF0123456789}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OcarinaForge.Viewer", "viewer\OcarinaForge.Viewer.csproj", "{C7B1C0D2-4E5F-6789-ABCD-EF0123456789}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Project", "Forge.Project\Forge.Project.csproj", "{92709B25-1062-4D32-BA01-234AC0ADC659}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Cli", "Forge.Cli\Forge.Cli.csproj", "{EF13F4E4-CFEE-438C-99F9-CEAACA7D4A9D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Forge.Project.Tests", "Forge.Project.Tests\Forge.Project.Tests.csproj", "{B9B753A4-C043-4C54-A71A-7BE6F45FBA17}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -25,5 +31,17 @@ Global
 		{C7B1C0D2-4E5F-6789-ABCD-EF0123456789}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C7B1C0D2-4E5F-6789-ABCD-EF0123456789}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C7B1C0D2-4E5F-6789-ABCD-EF0123456789}.Release|Any CPU.Build.0 = Release|Any CPU
+		{92709B25-1062-4D32-BA01-234AC0ADC659}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{92709B25-1062-4D32-BA01-234AC0ADC659}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{92709B25-1062-4D32-BA01-234AC0ADC659}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{92709B25-1062-4D32-BA01-234AC0ADC659}.Release|Any CPU.Build.0 = Release|Any CPU
+		{EF13F4E4-CFEE-438C-99F9-CEAACA7D4A9D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EF13F4E4-CFEE-438C-99F9-CEAACA7D4A9D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EF13F4E4-CFEE-438C-99F9-CEAACA7D4A9D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EF13F4E4-CFEE-438C-99F9-CEAACA7D4A9D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B9B753A4-C043-4C54-A71A-7BE6F45FBA17}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B9B753A4-C043-4C54-A71A-7BE6F45FBA17}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B9B753A4-C043-4C54-A71A-7BE6F45FBA17}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B9B753A4-C043-4C54-A71A-7BE6F45FBA17}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
