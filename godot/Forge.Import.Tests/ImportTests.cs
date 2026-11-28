@@ -286,7 +286,12 @@ public class ImportTests
         Assert.Equal("", ActorList.SkipReason("Land_kokiri_Plant_A_02_DropFixed_03"));
         Assert.Contains("Land_kokiri_Plant_A_02", ModelLocator.PlacementStems("Land_kokiri_Plant_A_02_DropFixed_03"));
         Assert.Contains("Land_Graveyard_Plants_A", ModelLocator.PlacementStems("Land_Graveyard_Plants_A_08"));
+        Assert.Contains("Land_Graveyard_Plants", ModelLocator.PlacementStems("Land_Graveyard_Plants_A_08"));
         Assert.Contains("Land_LonLon_Plant_A", ModelLocator.PlacementStems("Land_LonLon_Plant_A_01"));
+        Assert.Contains("Land_LonLon_Plant", ModelLocator.PlacementStems("Land_LonLon_Plant_A_01"));
+        Assert.Contains("marker", ActorList.SkipReason("FairySpirit_AppearPoint_SunSong"));
+        Assert.Contains("marker", ActorList.SkipReason("MiniGame_Supporter"));
+        Assert.Contains("marker", ActorList.SkipReason("HrlField_Note_15"));
     }
 
     [Fact]
@@ -323,6 +328,134 @@ public class ImportTests
         ShapeFilter.Hide(parts);
         Assert.Contains("bounds", box.OmitReason);
         Assert.Equal("", wall.OmitReason);
+        var slab = new ImportedPart
+        {
+            Name = "pPlane1",
+            Material = "Mt_FieldSlab",
+            Positions = Enumerable.Range(0, 40).Select(i => new Vec3(i * 0.5, 0, (i % 2) * 0.02)).ToList(),
+        };
+        var kept = new ImportedPart
+        {
+            Name = "cliff",
+            Positions = Enumerable.Range(0, 12).Select(i => new Vec3(i, i, 1)).ToList(),
+            Uvs = Enumerable.Range(0, 12).Select(_ => new Vec2(0, 0)).ToList(),
+        };
+        var field = new List<ImportedPart> { slab, kept };
+        ShapeFilter.Hide(field);
+        Assert.Contains("slab", slab.OmitReason);
+        Assert.Contains("pPlane1", slab.OmitReason);
+        Assert.Equal("", kept.OmitReason);
+    }
+
+    [Fact]
+    public void SharedCliffAlbedoIsFoundInsideAShorterBntx()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "of-tex-" + Guid.NewGuid().ToString("N"));
+        string romfs = Path.Combine(root, "romfs", "Tex");
+        Directory.CreateDirectory(romfs);
+        File.WriteAllBytes(
+            Path.Combine(romfs, "CmnTex_Rock.bntx"),
+            BntxReader.WriteLinear("CmnTex_Rock_HrlField_UmeCliff_Near_A_Alb", 8, 8, 0x2006, new byte[64]));
+        try
+        {
+            var library = new TextureLibrary(DumpFolder.Open(root));
+            var image = library.Find(new ImportedModel(), "CmnTex_Rock_HrlField_UmeCliff_Near_A_Alb", Array.Empty<string>());
+            Assert.NotNull(image);
+            Assert.Contains("CmnTex_Rock.bntx", library.LastSource.Replace('\\', '/'));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void GraveyardPlantUsesTheProjectFile()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "of-grave-" + Guid.NewGuid().ToString("N"));
+        string romfs = Path.Combine(root, "romfs");
+        Directory.CreateDirectory(Path.Combine(romfs, "Model"));
+        Directory.CreateDirectory(Path.Combine(romfs, "Pack", "Actor"));
+        File.WriteAllBytes(Path.Combine(romfs, "Model", "Land_Graveyard_Plants.Land_Graveyard_Plants.bfres"), File.ReadAllBytes(Fixture("v10-tree.bfres")));
+        var pack = SarcArchive.Pack(new Dictionary<string, byte[]>
+        {
+            ["note.txt"] = System.Text.Encoding.ASCII.GetBytes("Model/Land_LonLon_Plant.Land_LonLon_Plant.bfres"),
+        });
+        File.WriteAllBytes(Path.Combine(romfs, "Pack", "Actor", "Land_LonLon_Plant.pack"), pack);
+        File.WriteAllBytes(Path.Combine(romfs, "Model", "Land_LonLon_Plant.Land_LonLon_Plant.bfres"), File.ReadAllBytes(Fixture("v10-tree.bfres")));
+        try
+        {
+            var grave = ModelLocator.Find(DumpFolder.Open(root), "Land_Graveyard_Plants_A_08", new List<string>());
+            Assert.NotNull(grave);
+            Assert.EndsWith("Model/Land_Graveyard_Plants.Land_Graveyard_Plants.bfres", grave!.Path.Replace('\\', '/'));
+            var lon = ModelLocator.Find(DumpFolder.Open(root), "Land_LonLon_Plant_A_01", new List<string>());
+            Assert.NotNull(lon);
+            Assert.EndsWith("Model/Land_LonLon_Plant.Land_LonLon_Plant.bfres", lon!.Path.Replace('\\', '/'));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void LinearFskaSamplesTheTranslation()
+    {
+        var clips = FskaReader.Read(LinearClip(), 10);
+        Assert.Single(clips);
+        Assert.Equal("Walk", clips[0].Name);
+        Assert.Equal(10, clips[0].FrameCount);
+        Assert.False(clips[0].Euler);
+        var bone = Assert.Single(clips[0].Bones);
+        Assert.Equal("Root", bone.Bone);
+        Assert.Equal(0, bone.Index);
+        var start = bone.Keys.First(key => key.Frame == 0);
+        var end = bone.Keys.First(key => key.Frame == 10);
+        Assert.InRange(start.Px, -1e-4f, 1e-4f);
+        Assert.InRange(end.Px, 10 - 1e-3f, 10 + 1e-3f);
+        var mid = bone.Keys.FirstOrDefault(key => Math.Abs(key.Frame - 5) < 0.01f);
+        if (mid is not null) Assert.InRange(mid.Px, 5 - 0.05f, 5 + 0.05f);
+    }
+
+    static byte[] LinearClip()
+    {
+        var data = new byte[0x400];
+        void U64(int at, ulong value) => System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(data.AsSpan(at), value);
+        void U32(int at, uint value) => System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(at), value);
+        void U16(int at, ushort value) => System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(at), value);
+        void F32(int at, float value) => System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(data.AsSpan(at), value);
+        int StringAt(int at, string text)
+        {
+            var raw = System.Text.Encoding.UTF8.GetBytes(text);
+            U16(at, (ushort)raw.Length);
+            raw.CopyTo(data.AsSpan(at + 2));
+            return at;
+        }
+        int walk = StringAt(0x360, "Walk");
+        int root = StringAt(0x370, "Root");
+        U64(0x58, 0x100);
+        U64(0x60, 0x180);
+        U32(0x184, 1);
+        U64(0x1A0, (ulong)walk);
+        data[0x100] = (byte)'F'; data[0x101] = (byte)'S'; data[0x102] = (byte)'K'; data[0x103] = (byte)'A';
+        U64(0x108, (ulong)walk);
+        U64(0x120, 0x340);
+        U64(0x128, 0x200);
+        U32(0x140, 10);
+        U32(0x144, 1);
+        U16(0x14C, 1);
+        U64(0x200, (ulong)root);
+        U64(0x208, 0x280);
+        data[0x200 + 46] = 1;
+        U16(0x340, 0);
+        U64(0x280, 0x300);
+        U64(0x288, 0x320);
+        U16(0x290, 1 << 4);
+        U16(0x292, 2);
+        U32(0x294, 0x10);
+        F32(0x2A0, 1);
+        F32(0x2A8, 10);
+        F32(0x300, 0);
+        F32(0x304, 10);
+        F32(0x320, 0);
+        F32(0x324, 10);
+        F32(0x328, 10);
+        F32(0x32C, 0);
+        return data;
     }
 
     [Fact]

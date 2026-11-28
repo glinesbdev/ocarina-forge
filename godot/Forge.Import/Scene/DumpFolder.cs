@@ -137,6 +137,9 @@ public static class ActorList
         if (gyaml.Contains("LookAttention", StringComparison.Ordinal)) return true;
         if (gyaml.StartsWith("ShowToCamera", StringComparison.Ordinal)) return true;
         if (gyaml.Contains("HorseJumpForbid", StringComparison.Ordinal)) return true;
+        if (gyaml.Contains("AppearPoint", StringComparison.Ordinal)) return true;
+        if (gyaml.Contains("MiniGame_Supporter", StringComparison.Ordinal)) return true;
+        if (gyaml.Contains("_Note_", StringComparison.Ordinal)) return true;
         if (gyaml.Contains("airwall", StringComparison.OrdinalIgnoreCase)) return true;
         if (gyaml.Contains("Anchor", StringComparison.OrdinalIgnoreCase)) return true;
         if (gyaml.EndsWith("Actor", StringComparison.Ordinal)) return true;

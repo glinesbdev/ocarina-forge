@@ -8,14 +8,15 @@ This builds on the viewer in [godot-spike.md](godot-spike.md) (PR #78). The view
 
 Verified on Linux, with the synthetic dump only (no retail assets, no GPU):
 
-- `dotnet test godot/Forge.Import.Tests/Forge.Import.Tests.csproj` — the 20 importer tests.
+- `dotnet test godot/Forge.Import.Tests/Forge.Import.Tests.csproj` — the importer tests, including a hand-built linear FSKA clip, a `CmnTex` albedo stored under a shorter `.bntx` stem, a graveyard plant resolved from the project file, and a flat untextured slab.
 - `dotnet test godot/Forge.Project.Tests/Forge.Project.Tests.csproj` — the planner, the manifest, and a headless generate when `GODOT` is set.
-- Godot 4.7.2 .NET `--headless` wrote `models/Obj_Tree/Obj_Tree.tscn`, `maps/HyruleField.tscn`, a BC7 `textures/Bark_Alb.res`, and `.ocarina/manifest.json`. A second run printed `skipped` and did not rewrite the mesh. `--check` loaded the map and the model.
+- Godot 4.7.2 .NET `--headless` wrote `models/Obj_Tree/Obj_Tree.tscn`, `maps/HyruleField.tscn`, a BC7 `textures/Bark_Alb.res`, and `.ocarina/manifest.json`. A second run printed `skipped` and did not rewrite the mesh. `--check` loaded the map and the model. The synthetic tree has no FSKA, so the check still prints `check curves not imported`.
+- A second headless process saved an 8×8 RGBA8 `Texture2DArray` and the same pixels as a PNG, then loaded both. The array came back with a null image (`probe array` / `image null`). The PNG reloaded (`probe png image ok`) and `CreateFromImages` rebuilt an array from it (`probe bind ok`, 8×8, one layer). That is the editor error `img.is_null()` and `_create_from_images != OK`. Reading the layer back with `GetLayerData` is empty under the headless dummy renderer, so the probe checks the array's width and layer count.
 
 Not verified, so this does not claim them:
 
-- Windows, an AMD GPU, or any retail dump. There is no dump in this environment.
-- Thumbnails in the editor. The files are `PackedScene`, `ArrayMesh`, `StandardMaterial3D`, and `ImageTexture` saved by `ResourceSaver`. Godot's FileSystem dock builds previews when the editor scans them. That scan was not watched here.
+- Windows, an AMD GPU, or any retail dump. There is no dump in this environment. The owner's editor still has to show the terrain after reimport, and an animal's Animation panel still has to list its clips.
+- Thumbnails in the editor. The files are `PackedScene`, `ArrayMesh`, `StandardMaterial3D`, and `ImageTexture` saved by `ResourceSaver`. Godot's FileSystem dock builds previews when the editor scans them. That scan was not watched here. The terrain array is rebuilt by the tool script when the scene enters the tree. The headless probe showed a saved `Texture2DArray` reloads empty and a PNG does not. The editor viewport on his machine was not opened.
 - That the generated Hyrule Field matches the game, or the owner's last fly-through. He has to open the project.
 
 ## Layout
@@ -36,13 +37,14 @@ maps/HyruleField.tscn          terrain plus one instance per placed actor
 maps/HyruleField/terrain.res
 maps/HyruleField/terrain.tres
 maps/HyruleField/terrain.gdshader
+maps/HyruleField/layer_N.png     one RGBA8 layer of the terrain array
 maps/HyruleField/occluder.res
 scenes/benchmark.tscn          the fly camera, instancing main.tscn
 ```
 
 An actor is an instance of its model scene, with the banc translate / rotate / scale. Helpers, bounds boxes, and the other omitted shapes are not written. LOD 0 ends at 72 m and LOD 1 begins there, the same ranges as the viewer. The viewer batches repeats with MultiMesh. The project keeps one node per actor so they can be moved.
 
-`.ocarina/manifest.json` is version 1. `files` maps a `res://` path to `kind`, `sources` (romfs paths; a pack member is `archive#member`), and `hash`. The hash is SHA-256 of the importer id `godot-project-1` plus the raw bytes of those files. It is not a hash of the Godot file, so a hand edit of an unchanged output is left in place. A source change rewrites that output. A later exporter can generate a second, untouched project and diff the two. Orphan files from a removed actor are not deleted.
+`.ocarina/manifest.json` is version 1. `files` maps a `res://` path to `kind`, `sources` (romfs paths; a pack member is `archive#member`), and `hash`. The hash is SHA-256 of the importer id `godot-project-2` plus the raw bytes of those files. It is not a hash of the Godot file, so a hand edit of an unchanged output is left in place. A source change, or a project whose manifest still says `godot-project-1`, rewrites that output. A later exporter can generate a second, untouched project and diff the two. Orphan files from a removed actor are not deleted. The viewer's import cache is a separate id, `godot-spike-4`.
 
 The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport from dump). Reimport refreshes the addon sources and DLLs, then generates. It does not delete `models/`, `textures/`, or `maps/`.
 
@@ -50,17 +52,17 @@ The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport 
 
 - BFRES meshes, LODs 0 and 1, normals, UVs (V flipped to Godot), and the bind-pose bake the viewer already does.
 - `Skeleton3D` from FSKL: name, parent, local translation, quaternion (Euler flag `0x1000` is converted first), scale. The synthetic tree has no FSKL, so its scene has an empty skeleton. A model that has one gets a bone per dictionary entry.
-- `AnimationPlayer` with an empty `AnimationLibrary`, so the Animation panel has a player to attach to later.
+- FSKA clips on that skeleton's `AnimationPlayer`. Each clip is an animation named from the file: `Skeleton:<bone>` tracks for position, rotation, and scale, at 30 frames per second. Loop follows flags bit 2. Euler clips are converted to a quaternion before the key is written. A model with skin weights gets a `Skin` from the rest pose, and the weighted meshes are children of the skeleton. Vertices stay in the baked model space, so the rest pose does not move them twice. The synthetic tree has no FSKA, so its library stays empty and the check still says `check curves not imported`. A file that has clips prints `check clips N`, and the scene metadata says the 30 fps rate was not measured.
 - `StandardMaterial3D` for opaque, alpha, and scissor materials. Water is one shared unshaded material. Missing albedo uses the same flat colours as the viewer. sRGB BC7 sets `albedo_texture_force_srgb`.
 - Textures as `ImageTexture` resources whose image is the compressed blocks (BC7, BC1, BC3, BC4, BC5, RGBA8). ASTC is transcoded to BC7 the same way as the viewer (long edge 1024) because desktop AMD does not sample ASTC. `Image.Compress` needs the Godot editor binary, including `--headless`.
-- Terrain as a mesh plus the viewer's blend shader (chosen layer, other layer, blend weight). MaterialAlb layers are separate `.res` files and one `Texture2DArray`. No `.mate` means the flat earth colour, which is what the synthetic field does.
+- Terrain as a mesh plus the viewer's blend shader (chosen layer, other layer, blend weight). Each MaterialAlb layer is decompressed to RGBA8, resized to one shared size (long edge at most 1024), and written as `maps/HyruleField/layer_N.png`. The terrain node is a tool script that builds the `Texture2DArray` from those PNGs when the scene enters the tree, in the editor and at play. `ResourceSaver` does not keep the array's images: a saved array reloads with `img.is_null()`, and the editor draws the magenta checker. No `.mate` means the flat earth colour, which is what the synthetic field does.
 - The editor light rig from the browser viewport (not a measured in-game sun): directional colour `(1, 0.949, 0.839)` energy 2.6 from `(18, 36, 14)`, ambient `(0.557, 0.627, 0.565)` energy 0.55, background `(0.078, 0.106, 0.086)`, ACES exposure 1.05, shadows off.
-- Texture search, helper hiding, and plant name suffixes from the viewer. Those readers are unchanged.
+- Texture search, helper hiding, and plant name suffixes from the viewer, plus the shorter-stem bundle search, the letter suffix, and the flat-slab hide described in [formats.md](formats.md). The load summary adds `load omitted` and the benchmark JSON adds `shapesOmitted` (and, on the viewer, `omitted` with the shape names).
 
 ## Not converted
 
-- **FSKA and every other animation curve.** No reader in this repo decodes them. Longshot `content.model` is a static model and `Tex/` textures. `has()` has no animation getter. The skeleton is the bind pose only. Left: bone tracks (and material tracks, if a file has them) into the `AnimationLibrary` on the player that is already in the scene.
-- Skin weights are not bound. Vertices are baked into model space, the same as the viewer, so a `Skin` would move them a second time. Left: keep the unbaked positions and a `Skin` once curves exist.
+- **Material, visibility, and shape animation.** FSKA bone curves are read. `FMAA` / `FSHU`, bone visibility, and shape curves are not. The 30 fps playback rate is a guess. Cubic curves are sampled, then Godot interpolates those samples linearly. The viewer still bakes poses and does not play the clips.
+- Unbaked local positions. The `Skin` uses the baked model-space vertices, so the rest pose is identity. A later pass can store the pre-skin positions if a clip has to be composed with a different bind.
 - Actor behaviour, exported properties, AI, and events.
 - Audio.
 - Phive collision. The terrain occluder is a render occluder, not gameplay collision.
@@ -84,17 +86,20 @@ dotnet run --project godot/Forge.Cli -- new /path/to/dump /path/to/hyrule-field-
 "$GODOT" --path /path/to/hyrule-field-godot -- --benchmark --benchmark-out field-loop-160m.json
 ```
 
-Windows PowerShell, from the repo:
+Windows PowerShell, from the repo. `reimport` writes into the project folder that already exists. The importer id `godot-project-2` makes the first reimport rewrite every output. The viewer's cache id is `godot-spike-4`, so clear the old cache before the viewer run.
 
 ```powershell
 $env:GODOT = "C:\Godot\Godot_v4.7.2-stable_mono_win64.exe"
 dotnet test godot\Forge.Import.Tests\Forge.Import.Tests.csproj
 dotnet test godot\Forge.Project.Tests\Forge.Project.Tests.csproj
-dotnet run --project godot\Forge.Cli -- new D:\dump D:\hyrule-field-godot --godot $env:GODOT
+dotnet run --project godot\Forge.Cli -- reimport D:\hyrule-field-godot --godot $env:GODOT
 & $env:GODOT --path D:\hyrule-field-godot -- --benchmark --benchmark-out field-loop-160m.json
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\OcarinaForge\godot-cache" -ErrorAction SilentlyContinue
+dotnet build godot\viewer\OcarinaForge.Viewer.csproj
+& $env:GODOT --path godot\viewer -- --dump "D:\dump" --benchmark --benchmark-out field-loop-160m.json
 ```
 
-Open `D:\hyrule-field-godot` in the Godot editor to fly the field, or open `scenes/benchmark.tscn`. The dock button **Reimport from dump** runs the same generate. `ocarina-forge-godot reimport <projectDir>` does that from the shell. `ocarina-forge-godot check <projectDir>` loads the map and the first model and prints bone count.
+Open `D:\hyrule-field-godot` in the Godot editor to fly the field, or open `scenes/benchmark.tscn`. The terrain node rebuilds the texture array when the scene opens. An animal scene's Animation panel lists the FSKA clips on its `AnimationPlayer`. The dock button **Reimport from dump** runs the same generate. `ocarina-forge-godot reimport <projectDir>` does that from the shell. `ocarina-forge-godot check <projectDir>` loads the map and the first model and prints bone count. A model with clips prints `check clips N`. The viewer's load block adds `shapesOmitted` and `omitted` (the gyaml, shape, and material of each hidden slab or proxy). `texturesMissing` is the count still unresolved after the shorter-stem search.
 
 Another banc:
 

@@ -19,37 +19,43 @@ public static class ModelLocator
         var plan = new List<(string Label, byte[]? Blob, string Relative)>();
         var pairs = new List<(string Project, string Fmdb)>();
         var named = new List<string>();
-        string packRel = $"Pack/Actor/{gyaml}.pack.zs";
-        if (dump.Exists(packRel) || dump.Exists($"Pack/Actor/{gyaml}.pack"))
+        var openedPacks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void ConsiderPack(string stem)
         {
-            string used = dump.Exists(packRel) ? packRel : $"Pack/Actor/{gyaml}.pack";
-            try
+            foreach (string suffix in new[] { ".pack.zs", ".pack" })
             {
-                var archive = new SarcArchive(dump.Read(used));
-                foreach (string name in archive.Names)
+                string used = $"Pack/Actor/{stem}{suffix}";
+                if (!openedPacks.Add(used) || !dump.Exists(used)) continue;
+                try
                 {
-                    var blob = archive.Read(name);
-                    if (name.Contains("ModelInfo", StringComparison.Ordinal) || name.EndsWith("engine__component__ModelInfo.bgyml", StringComparison.Ordinal))
+                    var archive = new SarcArchive(dump.Read(used));
+                    foreach (string name in archive.Names)
                     {
-                        if (blob.Length >= 2 && blob[0] == (byte)'Y' && blob[1] == (byte)'B' && Byml.Load(blob) is Dictionary<string, object?> document)
-                            pairs.AddRange(Pairs(document));
+                        var blob = archive.Read(name);
+                        if (name.Contains("ModelInfo", StringComparison.Ordinal) || name.EndsWith("engine__component__ModelInfo.bgyml", StringComparison.Ordinal))
+                        {
+                            if (blob.Length >= 2 && blob[0] == (byte)'Y' && blob[1] == (byte)'B' && Byml.Load(blob) is Dictionary<string, object?> document)
+                                pairs.AddRange(Pairs(document));
+                        }
+                        else if (name.EndsWith(".bfres", StringComparison.OrdinalIgnoreCase) || (blob.Length >= 8 && blob[0] == (byte)'F' && blob[4] == (byte)' '))
+                            plan.Add(($"{used}:{name}", blob, ""));
+                        else if (blob.Length >= 2 && blob[0] == (byte)'Y' && blob[1] == (byte)'B' && !name.Contains("ModelInfo", StringComparison.Ordinal))
+                        {
+                            if (Byml.Load(blob) is object document)
+                                WalkNames(document, "", named);
+                        }
+                        foreach (string path in ModelPaths(blob))
+                            if (!named.Contains(path)) named.Add(path);
                     }
-                    else if (name.EndsWith(".bfres", StringComparison.OrdinalIgnoreCase) || (blob.Length >= 8 && blob[0] == (byte)'F' && blob[4] == (byte)' '))
-                        plan.Add(($"{used}:{name}", blob, ""));
-                    else if (blob.Length >= 2 && blob[0] == (byte)'Y' && blob[1] == (byte)'B' && !name.Contains("ModelInfo", StringComparison.Ordinal))
-                    {
-                        if (Byml.Load(blob) is object document)
-                            WalkNames(document, "", named);
-                    }
-                    foreach (string path in ModelPaths(blob))
-                        if (!named.Contains(path)) named.Add(path);
+                }
+                catch (ImportException exc)
+                {
+                    notes.Add($"{used}: {exc.Message}");
                 }
             }
-            catch (ImportException exc)
-            {
-                notes.Add($"{used}: {exc.Message}");
-            }
         }
+        foreach (string stem in PlacementStems(gyaml))
+            ConsiderPack(stem);
         var files = new List<string>();
         void Add(string relative)
         {
@@ -205,17 +211,27 @@ public static class ModelLocator
 
     /// <summary>
     /// <c>Land_kokiri_Plant_A_02_DropFixed_03</c> is a placement of <c>Land_kokiri_Plant_A_02</c>.
-    /// The trailing <c>_08</c> on <c>Land_Graveyard_Plants_A_08</c> is the same kind of suffix.
-    /// The file is still <c>Model/&lt;Project&gt;.&lt;stem&gt;.bfres</c>.
+    /// The trailing <c>_08</c> on <c>Land_Graveyard_Plants_A_08</c> is the same kind of suffix,
+    /// and a single trailing letter (<c>Land_Graveyard_Plants_A</c>) is the project the pack is named after.
+    /// The file is still <c>Model/&lt;Project&gt;.&lt;stem&gt;.bfres</c>. None of these stems was counted in a retail <c>Model/</c> listing.
     /// </summary>
     public static IEnumerable<string> PlacementStems(string gyaml)
     {
-        yield return gyaml;
+        var stems = new List<string>();
+        void Add(string stem)
+        {
+            if (stem.Length > 0 && !stems.Contains(stem)) stems.Add(stem);
+        }
+        Add(gyaml);
         string drop = System.Text.RegularExpressions.Regex.Replace(gyaml, "_DropFixed_\\d+$", "");
-        if (!drop.Equals(gyaml, StringComparison.Ordinal)) yield return drop;
+        Add(drop);
         var trimmed = System.Text.RegularExpressions.Regex.Match(drop, @"^(?<stem>.+)_\d+$");
-        if (trimmed.Success && trimmed.Groups["stem"].Value.Length >= 8 && !trimmed.Groups["stem"].Value.Equals(drop, StringComparison.Ordinal))
-            yield return trimmed.Groups["stem"].Value;
+        string current = trimmed.Success && trimmed.Groups["stem"].Value.Length >= 8 ? trimmed.Groups["stem"].Value : drop;
+        Add(current);
+        var letter = System.Text.RegularExpressions.Regex.Match(current, @"^(?<stem>.+)_[A-Za-z]$");
+        if (letter.Success && letter.Groups["stem"].Value.Length >= 8)
+            Add(letter.Groups["stem"].Value);
+        return stems;
     }
 
     static void WalkNames(object? node, string key, List<string> named)

@@ -53,7 +53,7 @@ public sealed class ProjectJob
 
 public static class ProjectPlan
 {
-    public const string ImporterVersion = "godot-project-1";
+    public const string ImporterVersion = "godot-project-2";
 
     public static ProjectJob Build(DumpFolder dump, ImportedField field, ManifestDocument? existing, string projectDir)
     {
@@ -144,7 +144,6 @@ public static class ProjectPlan
             mapOutputs.Add(new PlannedOutput { ResPath = ProjectPaths.TerrainOccluder, Kind = "occluder" });
             if (field.TerrainAlbedo.Count > 0)
             {
-                mapOutputs.Add(new PlannedOutput { ResPath = ProjectPaths.TerrainArray, Kind = "texture" });
                 for (int i = 0; i < field.TerrainAlbedo.Count; i++)
                     mapOutputs.Add(new PlannedOutput { ResPath = ProjectPaths.TerrainLayer(i), Kind = "texture" });
             }
@@ -188,6 +187,7 @@ public static class ProjectPlan
                 TexturesMissing = job.Field.Report.TexturesMissing,
                 MaterialsUnbound = job.Field.Report.MaterialsUnbound,
                 ShapesFailed = job.Field.Report.ShapesFailed,
+                ShapesOmitted = job.Field.Report.ShapesOmitted,
             },
         };
         void Add(IEnumerable<PlannedOutput> outputs, string hash, List<string> sources)

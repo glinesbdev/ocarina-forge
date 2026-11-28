@@ -47,6 +47,9 @@ public sealed class ManifestSummary
 
     [JsonPropertyName("shapesFailed")]
     public int ShapesFailed { get; set; }
+
+    [JsonPropertyName("shapesOmitted")]
+    public int ShapesOmitted { get; set; }
 }
 
 public sealed class ManifestDocument

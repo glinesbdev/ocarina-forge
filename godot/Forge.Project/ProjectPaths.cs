@@ -42,7 +42,7 @@ public static class ProjectPaths
 
     public static string Texture(string name) => $"res://textures/{Safe(name)}.res";
 
-    public static string TerrainLayer(int index) => $"res://maps/HyruleField/layer_{index}.res";
+    public static string TerrainLayer(int index) => $"res://maps/HyruleField/layer_{index}.png";
 
     public static string Disk(string projectDir, string resPath)
     {

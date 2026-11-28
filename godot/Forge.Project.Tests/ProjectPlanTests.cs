@@ -22,7 +22,7 @@ public class ProjectPlanTests
         Assert.False(job.Map.Current);
         Assert.Contains(job.Map.Sources, source => source.Contains("HyruleField_Child_Static", StringComparison.Ordinal));
         Assert.Contains(job.Map.Sources, source => source.Contains("Field.tscb", StringComparison.Ordinal));
-        Assert.Equal(ProjectPlan.ImporterVersion, "godot-project-1");
+        Assert.Equal(ProjectPlan.ImporterVersion, "godot-project-2");
         if (model.Model.Skeleton.Count > 0)
             Assert.All(model.Model.Skeleton, bone => Assert.False(string.IsNullOrWhiteSpace(bone.Name)));
     }
@@ -76,6 +76,12 @@ public class ProjectPlanTests
         string dump = SyntheticDump.Write(Temp("gen-dump"));
         string project = Temp("gen-project");
         Assert.Equal(0, Generator.Run(new[] { "new", dump, project, "--godot", godot }));
+        string saved = Godot(godot, project, "--probe-save");
+        Assert.Contains("probe saved", saved);
+        string loaded = Godot(godot, project, "--probe-load");
+        Assert.Contains("image null", loaded.Split('\n').First(line => line.Contains("probe array")));
+        Assert.Contains("image ok", loaded.Split('\n').First(line => line.Contains("probe png")));
+        Assert.Contains("probe bind ok", loaded);
         string scene = Path.Combine(project, "models", "Obj_Tree", "Obj_Tree.tscn");
         string map = Path.Combine(project, "maps", "HyruleField.tscn");
         string manifest = Path.Combine(project, ".ocarina", "manifest.json");
@@ -97,4 +103,22 @@ public class ProjectPlanTests
     }
 
     static string Temp(string name) => Path.Combine(Path.GetTempPath(), "of-project-" + name + "-" + Guid.NewGuid().ToString("N"));
+
+    static string Godot(string godot, string project, string argument)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo(godot)
+        {
+            WorkingDirectory = project,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (string item in new[] { "--headless", "--path", project, "--", argument })
+            start.ArgumentList.Add(item);
+        using var process = System.Diagnostics.Process.Start(start) ?? throw new InvalidOperationException(godot);
+        string output = process.StandardOutput.ReadToEnd() + "\n" + process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, output);
+        return output;
+    }
 }

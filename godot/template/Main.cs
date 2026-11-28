@@ -44,6 +44,16 @@ public partial class Main : Node3D
             GetTree().Quit(ProjectEmitter.Check());
             return;
         }
+        if (args.ContainsKey("probe-save"))
+        {
+            GetTree().Quit(ProjectEmitter.Probe(false));
+            return;
+        }
+        if (args.ContainsKey("probe-load"))
+        {
+            GetTree().Quit(ProjectEmitter.Probe(true));
+            return;
+        }
         _benchmark = args.ContainsKey("benchmark");
         _benchmarkOut = args.GetValueOrDefault("benchmark-out") ?? "";
         if (ResourceLoader.Exists(ProjectPaths.MapScene)) OpenMap();
@@ -169,6 +179,7 @@ public partial class Main : Node3D
                 ["texturesMissing"] = _summary.TexturesMissing,
                 ["materialsUnbound"] = _summary.MaterialsUnbound,
                 ["shapesFailed"] = _summary.ShapesFailed,
+                ["shapesOmitted"] = _summary.ShapesOmitted,
             },
             ["note"] = "Same camera path and 1/60 s step as the browser field-loop-160m. The scene is the generated maps/HyruleField.tscn. cpuMs is Godot's measured render CPU plus frame setup. gpuMs is present when the renderer reports it.",
         };

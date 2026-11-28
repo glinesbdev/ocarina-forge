@@ -29,9 +29,14 @@ public sealed class ImportedPart
     public List<float>? MaterialBlend { get; set; }
     public string Helper { get; init; } = "";
     public bool Water { get; init; }
+    /// <summary>Four bone indices and weights per vertex, in skeleton order. Null when the shape is not skinned.</summary>
+    public List<VertexSkin>? Weights { get; init; }
 }
 
-/// <summary>One FSKL bone. The rotation is a quaternion. Curves are not stored; FSKA is not read.</summary>
+/// <summary>Up to four influences. Unused slots stay at bone 0 with weight 0.</summary>
+public readonly record struct VertexSkin(int A, int B, int C, int D, float Wa, float Wb, float Wc, float Wd);
+
+    /// <summary>One FSKL bone. The rotation is a quaternion. Curves live on <see cref="ImportedModel.Clips"/>.</summary>
 public sealed class ImportedBone
 {
     public string Name { get; init; } = "";
@@ -55,8 +60,10 @@ public sealed class ImportedModel
     public Dictionary<string, CompressedTexture> Images { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Romfs path of the file that supplied each embedded or companion image, keyed by image name.</summary>
     public Dictionary<string, string> ImageSources { get; init; } = new(StringComparer.OrdinalIgnoreCase);
-    /// <summary>Bind-pose skeleton. Empty when the model has no FSKL. Animation curves are not included.</summary>
+    /// <summary>Bind-pose skeleton. Empty when the model has no FSKL.</summary>
     public List<ImportedBone> Skeleton { get; init; } = new();
+    /// <summary>FSKA clips from the same file. Empty when the file has none.</summary>
+    public List<ImportedClip> Clips { get; set; } = new();
     public List<string> Notes { get; init; } = new();
     public List<string> TextureHints { get; init; } = new();
 }
@@ -114,9 +121,17 @@ public static class ShapeFilter
             string low = $"{part.Name} {part.Material}".ToLowerInvariant();
             return low.Contains("front", StringComparison.Ordinal) && (low.Contains("water", StringComparison.Ordinal) || low.Contains("flow", StringComparison.Ordinal));
         });
+        bool proxy = parts.Count > 0
+            && parts.All(part => part.Uvs is not { Count: > 0 } && part.Texture.Length == 0)
+            && parts.Max(part => Span(part)) >= 8;
         foreach (var part in parts)
         {
             if (part.OmitReason.Length > 0) continue;
+            if (proxy)
+            {
+                part.OmitReason = $"terrain proxy is not drawn ({part.Name} / {part.Material})";
+                continue;
+            }
             if (part.Helper.Length > 0)
             {
                 part.OmitReason = $"{part.Helper} helper is not drawn";
@@ -129,8 +144,38 @@ public static class ShapeFilter
                 continue;
             }
             if (BoundsBox(part, parts))
-                part.OmitReason = "untextured bounds box is not drawn";
+            {
+                part.OmitReason = $"untextured bounds box is not drawn ({part.Name} / {part.Material})";
+                continue;
+            }
+            if (FlatSlab(part))
+                part.OmitReason = $"flat untextured slab is not drawn ({part.Name} / {part.Material})";
         }
+    }
+
+    /// <summary>
+    /// A wide sheet with no UVs. The castle bounds box is the 8-vertex case; the field slabs
+    /// are the same kind of mesh with more vertices, so the 24-vertex cap does not see them.
+    /// A part that has UVs is a real surface and stays.
+    /// </summary>
+    static bool FlatSlab(ImportedPart part)
+    {
+        if (part.Uvs is { Count: > 0 } || part.Positions.Count == 0) return false;
+        double span = Span(part);
+        if (span < 8) return false;
+        return Thickness(part) <= Math.Max(1.0, span * 0.04);
+    }
+
+    static double Thickness(ImportedPart part)
+    {
+        double minX = part.Positions[0].X, maxX = minX, minY = part.Positions[0].Y, maxY = minY, minZ = part.Positions[0].Z, maxZ = minZ;
+        foreach (var point in part.Positions)
+        {
+            minX = Math.Min(minX, point.X); maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y); maxY = Math.Max(maxY, point.Y);
+            minZ = Math.Min(minZ, point.Z); maxZ = Math.Max(maxZ, point.Z);
+        }
+        return Math.Min(maxX - minX, Math.Min(maxY - minY, maxZ - minZ));
     }
 
     static bool BoundsBox(ImportedPart part, List<ImportedPart> parts)

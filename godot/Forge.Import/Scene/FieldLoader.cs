@@ -75,6 +75,14 @@ public static class FieldLoader
                 }
                 resolved = (found.Path, found.Model);
                 cache[placement.Gyaml] = resolved;
+                foreach (var part in resolved.Model.Parts)
+                {
+                    if (part.OmitReason.Length == 0) continue;
+                    if (part.OmitReason.Contains("slab", StringComparison.Ordinal)
+                        || part.OmitReason.Contains("terrain proxy", StringComparison.Ordinal)
+                        || part.OmitReason.Contains("bounds", StringComparison.Ordinal))
+                        field.Report.NoteOmitted($"{placement.Gyaml} {part.Name}/{part.Material}: {part.OmitReason}");
+                }
                 foreach (string imageName in resolved.Model.Images.Keys)
                     resolved.Model.ImageSources.TryAdd(imageName, resolved.Path);
             }

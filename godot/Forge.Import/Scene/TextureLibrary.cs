@@ -92,7 +92,106 @@ public sealed class TextureLibrary
                 if (image is not null) return image;
             }
         }
+        return Bundle(name, hints);
+    }
+
+    /// <summary>
+    /// A BNTX or <c>.Tex.bfres</c> whose file stem sits inside the texture name.
+    /// <c>CmnTex_Rock.bntx</c> holds <c>CmnTex_Rock_HrlField_UmeCliff_Near_A_Alb</c>.
+    /// The exact stem is already tried. This is <c>models.py</c> <c>_search_bundles</c>
+    /// plus a companion whose prefix is the texture name, not the actor.
+    /// </summary>
+    CompressedTexture? Bundle(string name, IReadOnlyList<string> hints)
+    {
+        string wanted = Stem(name).ToLowerInvariant();
+        if (wanted.Length < 6) return null;
+        var hits = new List<(int Rank, string Kind, string Pack, string Member)>();
+        foreach (var (stem, path) in Loose())
+        {
+            if (!StemHits(stem, wanted)) continue;
+            hits.Add((stem.Length, "file", path, ""));
+        }
+        foreach (string pack in ActorPacks(hints).Concat(SharedPacks()).Concat(NamePacks(name)))
+        {
+            foreach (var (stem, member) in PackIndex(pack))
+            {
+                if (!StemHits(stem, wanted)) continue;
+                hits.Add((stem.Length, "pack", pack, member));
+            }
+        }
+        foreach (string relative in TextureArchives(wanted))
+            hits.Add((Stem(relative).Length, "bfres", relative, ""));
+        hits.Sort((a, b) => b.Rank.CompareTo(a.Rank));
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        int opened = 0;
+        foreach (var hit in hits)
+        {
+            string key = hit.Kind + "\n" + hit.Pack + "\n" + hit.Member;
+            if (!seen.Add(key)) continue;
+            if (opened++ >= 8) break;
+            CompressedTexture? image = hit.Kind switch
+            {
+                "file" => ReadFile(hit.Pack, name, named: true),
+                "pack" => ReadMember(hit.Pack, hit.Member, name, named: true),
+                _ => FromArchive(hit.Pack, name),
+            };
+            if (image is not null) return image;
+        }
         return null;
+    }
+
+    public static bool StemHits(string fileStem, string wantedStem)
+    {
+        string file = fileStem.ToLowerInvariant();
+        string wanted = wantedStem.ToLowerInvariant();
+        if (file.Length < 6 || wanted.Length < 6 || file.Equals(wanted, StringComparison.Ordinal)) return false;
+        return wanted.Contains(file, StringComparison.Ordinal) || file.Contains(wanted, StringComparison.Ordinal);
+    }
+
+    string[]? _texBfres;
+
+    IEnumerable<string> TextureArchives(string wanted)
+    {
+        if (_texBfres is null)
+        {
+            string dir = Path.Combine(_dump.Romfs, "Model");
+            var found = new List<string>();
+            if (Directory.Exists(dir))
+            {
+                foreach (string path in Directory.EnumerateFiles(dir))
+                {
+                    string file = Path.GetFileName(path);
+                    if (IsCompanion(file)) found.Add("Model/" + file);
+                }
+            }
+            _texBfres = found.ToArray();
+        }
+        foreach (string relative in _texBfres)
+        {
+            string stem = Stem(Path.GetFileName(relative)).ToLowerInvariant();
+            stem = stem.Replace(".tex", "", StringComparison.Ordinal).Replace("_tex", "", StringComparison.Ordinal);
+            if (stem.Length >= 6 && (StemHits(stem, wanted) || wanted.StartsWith(stem, StringComparison.Ordinal)))
+                yield return relative;
+        }
+    }
+
+    CompressedTexture? FromArchive(string relative, string name)
+    {
+        if (!_companions.TryGetValue(relative, out var images))
+        {
+            images = new Dictionary<string, CompressedTexture>(StringComparer.OrdinalIgnoreCase);
+            _companions[relative] = images;
+            try
+            {
+                foreach (var parsed in BfresReader.Read(_dump.Read(relative)))
+                    foreach (var (imageName, image) in parsed.Images)
+                        images.TryAdd(imageName, image);
+            }
+            catch (ImportException) { }
+        }
+        var match = PickNamed(images.Values, name);
+        if (match is not null) LastSource = relative.Replace('\\', '/');
+        return match;
     }
 
     public static List<string> Hints(string gyaml, string modelPath, string modelName)
@@ -340,18 +439,19 @@ public sealed class TextureLibrary
         return index;
     }
 
-    CompressedTexture? ReadFile(string relative, string name)
+    CompressedTexture? ReadFile(string relative, string name, bool named = false)
     {
         try
         {
-            var image = Pick(BntxReader.Read(_dump.Read(relative)), name);
+            var images = BntxReader.Read(_dump.Read(relative));
+            var image = named ? PickNamed(images, name) : Pick(images, name);
             if (image is not null) LastSource = relative.Replace('\\', '/');
             return image;
         }
         catch (ImportException) { return null; }
     }
 
-    CompressedTexture? ReadMember(string pack, string member, string name)
+    CompressedTexture? ReadMember(string pack, string member, string name, bool named = false)
     {
         try
         {
@@ -361,7 +461,8 @@ public sealed class TextureLibrary
             if (!BntxReader.LooksLike(blob))
                 blob = ZstdFrames.Decompress(blob, _dump.Dictionaries);
             if (!BntxReader.LooksLike(blob)) return null;
-            var image = Pick(BntxReader.Read(blob), name);
+            var images = BntxReader.Read(blob);
+            var image = named ? PickNamed(images, name) : Pick(images, name);
             if (image is not null) LastSource = pack.Replace('\\', '/') + "#" + member.Replace('\\', '/');
             return image;
         }
@@ -405,6 +506,24 @@ public sealed class TextureLibrary
             if (match is not null) return match;
         }
         return images.Count == 1 ? images[0] : null;
+    }
+
+    static CompressedTexture? PickNamed(IEnumerable<CompressedTexture> images, string name)
+    {
+        string stem = Stem(name).ToLowerInvariant();
+        CompressedTexture? loose = null;
+        foreach (var image in images)
+        {
+            string current = Stem(image.Name).ToLowerInvariant();
+            if (current.Length == 0) continue;
+            if (current.Equals(stem, StringComparison.Ordinal) || image.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                return image;
+            if (loose is null && stem.Contains(current, StringComparison.Ordinal) && current.Contains("alb", StringComparison.Ordinal))
+                loose = image;
+            if (loose is null && current.Contains(stem, StringComparison.Ordinal) && current.Contains("alb", StringComparison.Ordinal))
+                loose = image;
+        }
+        return loose;
     }
 
     static IEnumerable<string> TexCandidates(string name)

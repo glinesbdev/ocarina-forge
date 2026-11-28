@@ -95,7 +95,8 @@ public static class ProjectEmitter
         var player = Find<AnimationPlayer>(model);
         GD.Print($"check skeleton {skeleton?.GetBoneCount() ?? -1}");
         GD.Print(player is null ? "check animation missing" : "check animation player");
-        GD.Print("check curves not imported");
+        int clips = player?.GetAnimationLibrary("")?.GetAnimationListSize() ?? 0;
+        GD.Print(clips == 0 ? "check curves not imported" : $"check clips {clips}");
         string manifest = Path.Combine(ProjectSettings.GlobalizePath("res://"), ".ocarina", "manifest.json");
         GD.Print(File.Exists(manifest) ? "check manifest" : "check manifest missing");
         map.Free();
@@ -112,10 +113,16 @@ public static class ProjectEmitter
         bool hasFar = job.Model.Parts.Any(part => part.Lod > 0 && ProjectPaths.Drawn(part));
         var root = new Node3D { Name = ProjectPaths.Safe(job.Gyaml) };
         root.SetMeta("ocarina_source", job.ModelPath);
-        root.SetMeta("ocarina_animation", "FSKA curves are not imported. Skeleton3D is the bind pose. AnimationPlayer has an empty library.");
-        AddSkeleton(root, job.Model.Skeleton);
+        root.SetMeta("ocarina_animation", job.Model.Clips.Count == 0
+            ? "FSKA curves are not imported. Skeleton3D is the bind pose. AnimationPlayer has an empty library."
+            : $"{job.Model.Clips.Count} FSKA clips. Playback is 30 frames per second, which was not measured on a retail file. Cubic curves are sampled as Hermite.");
+        var names = AddSkeleton(root, job.Model.Skeleton);
+        var skeleton = root.GetNode<Skeleton3D>("Skeleton");
+        Skin? skin = skeleton.GetBoneCount() > 0 && job.Model.Parts.Any(part => part.Weights is { Count: > 0 })
+            ? skeleton.CreateSkinFromRestTransforms()
+            : null;
         var player = new AnimationPlayer { Name = "AnimationPlayer" };
-        player.AddAnimationLibrary("", new AnimationLibrary());
+        player.AddAnimationLibrary("", Library(job.Model.Clips, names));
         root.AddChild(player);
         var used = new HashSet<string>(StringComparer.Ordinal);
         foreach (var part in job.Model.Parts.Where(ProjectPaths.Drawn))
@@ -134,7 +141,12 @@ public static class ProjectEmitter
                 CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
             };
             ApplyRange(body, part, hasFar);
-            root.AddChild(body);
+            if (skin is not null && part.Weights is { Count: > 0 })
+            {
+                body.Skin = skin;
+                skeleton.AddChild(body);
+            }
+            else root.AddChild(body);
         }
         Own(root);
         var packed = new PackedScene();
@@ -231,7 +243,7 @@ public static class ProjectEmitter
         Save(MakeMesh(terrain), ProjectPaths.TerrainMesh);
         Material material = TerrainMaterial(field);
         Save(material, ProjectPaths.TerrainMaterial);
-        var body = new MeshInstance3D
+        var body = new TerrainAlbedo
         {
             Name = "Terrain",
             Mesh = Load<ArrayMesh>(ProjectPaths.TerrainMesh),
@@ -272,20 +284,15 @@ public static class ProjectEmitter
                 break;
             }
             images.Add(picture);
-            var layer = ImageTexture.CreateFromImage(picture);
-            Save(layer, ProjectPaths.TerrainLayer(i));
         }
         if (images.Count > 0)
         {
-            var array = new Texture2DArray();
-            if (array.CreateFromImages(images) == Error.Ok)
+            var uniform = UniformLayers(images);
+            if (uniform.Count == images.Count && SaveLayers(uniform))
             {
-                Save(array, ProjectPaths.TerrainArray);
                 var shader = ResourceLoader.Load<Shader>(ProjectPaths.TerrainShader, cacheMode: ResourceLoader.CacheMode.Replace);
                 if (shader is null) shader = new Shader { Code = TerrainShaderText.Code };
-                var material = new ShaderMaterial { Shader = shader };
-                material.SetShaderParameter("albedo", Load<Texture2DArray>(ProjectPaths.TerrainArray));
-                return material;
+                return new ShaderMaterial { Shader = shader };
             }
             field.Report.AddReason("terrain texture array was rejected");
         }
@@ -321,10 +328,11 @@ public static class ProjectEmitter
         root.AddChild(sun);
     }
 
-    static void AddSkeleton(Node3D root, List<ImportedBone> bones)
+    static List<(string Original, string Unique)> AddSkeleton(Node3D root, List<ImportedBone> bones)
     {
         var skeleton = new Skeleton3D { Name = "Skeleton" };
         var used = new HashSet<string>(StringComparer.Ordinal);
+        var names = new List<(string, string)>();
         foreach (var bone in bones)
         {
             string unique = ProjectPaths.Safe(bone.Name);
@@ -332,6 +340,7 @@ public static class ProjectEmitter
             string candidate = unique;
             int n = 2;
             while (!used.Add(candidate)) candidate = unique + "_" + n++;
+            names.Add((bone.Name, candidate));
             skeleton.AddBone(candidate);
         }
         for (int i = 0; i < bones.Count; i++)
@@ -350,6 +359,142 @@ public static class ProjectEmitter
             skeleton.SetBonePoseScale(i, scale);
         }
         root.AddChild(skeleton);
+        return names;
+    }
+
+    static AnimationLibrary Library(List<ImportedClip> clips, List<(string Original, string Unique)> bones)
+    {
+        var library = new AnimationLibrary();
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var clip in clips.Take(64))
+        {
+            var animation = new Animation { Length = Math.Max(clip.FrameCount / 30f, 1f / 30f) };
+            animation.LoopMode = clip.Loop ? Animation.LoopModeEnum.Linear : Animation.LoopModeEnum.None;
+            foreach (var track in clip.Bones)
+            {
+                string bone = "";
+                if (track.Index >= 0 && track.Index < bones.Count) bone = bones[track.Index].Unique;
+                if (bone.Length == 0)
+                {
+                    foreach (var (original, unique) in bones)
+                        if (original.Equals(track.Bone, StringComparison.OrdinalIgnoreCase) || unique.Equals(ProjectPaths.Safe(track.Bone), StringComparison.Ordinal))
+                            bone = unique;
+                }
+                if (bone.Length == 0 || track.Keys.Count == 0) continue;
+                var path = new NodePath("Skeleton:" + bone);
+                int pos = animation.AddTrack(Animation.TrackType.Position3D);
+                int rot = animation.AddTrack(Animation.TrackType.Rotation3D);
+                int scale = animation.AddTrack(Animation.TrackType.Scale3D);
+                animation.TrackSetPath(pos, path);
+                animation.TrackSetPath(rot, path);
+                animation.TrackSetPath(scale, path);
+                float end = 0;
+                foreach (var key in track.Keys)
+                {
+                    float time = key.Frame / 30f;
+                    end = Math.Max(end, time);
+                    animation.PositionTrackInsertKey(pos, time, new Vector3(key.Px, key.Py, key.Pz));
+                    var quat = new Quaternion(key.Rx, key.Ry, key.Rz, key.Rw);
+                    quat = quat.LengthSquared() < 1e-8f ? Quaternion.Identity : quat.Normalized();
+                    animation.RotationTrackInsertKey(rot, time, quat);
+                    animation.ScaleTrackInsertKey(scale, time, new Vector3(
+                        key.Sx == 0 ? 1 : key.Sx, key.Sy == 0 ? 1 : key.Sy, key.Sz == 0 ? 1 : key.Sz));
+                }
+                if (end > animation.Length) animation.Length = end;
+            }
+            if (animation.GetTrackCount() == 0) continue;
+            string name = ProjectPaths.Safe(clip.Name);
+            if (name.Length == 0) name = "clip";
+            string uniqueName = name;
+            int n = 2;
+            while (!used.Add(uniqueName)) uniqueName = name + "_" + n++;
+            library.AddAnimation(uniqueName, animation);
+        }
+        return library;
+    }
+
+    /// <summary>
+    /// Every terrain layer becomes RGBA8 at one size. Mips are rebuilt when the array is created,
+    /// because a PNG stores the base level. The array itself is not saved: <c>ResourceSaver</c>
+    /// writes a <c>Texture2DArray</c> whose images are null on the next load.
+    /// </summary>
+    static Godot.Collections.Array<Image> UniformLayers(Godot.Collections.Array<Image> images)
+    {
+        var prepared = new List<Image>();
+        foreach (var source in images)
+        {
+            var copy = (Image)source.Duplicate();
+            if (copy.IsCompressed()) copy.Decompress();
+            if (copy.GetFormat() != Image.Format.Rgba8) copy.Convert(Image.Format.Rgba8);
+            if (copy.GetWidth() <= 0 || copy.GetHeight() <= 0) continue;
+            prepared.Add(copy);
+        }
+        var uniform = new Godot.Collections.Array<Image>();
+        if (prepared.Count == 0) return uniform;
+        int width = prepared.Max(image => image.GetWidth());
+        int height = prepared.Max(image => image.GetHeight());
+        width = Math.Clamp(width, 4, 1024);
+        height = Math.Clamp(height, 4, 1024);
+        foreach (var image in prepared)
+        {
+            if (image.GetWidth() != width || image.GetHeight() != height)
+                image.Resize(width, height, Image.Interpolation.Lanczos);
+            if (image.HasMipmaps()) image.ClearMipmaps();
+            uniform.Add(image);
+        }
+        return uniform;
+    }
+
+    static bool SaveLayers(Godot.Collections.Array<Image> layers)
+    {
+        for (int i = 0; i < layers.Count; i++)
+        {
+            string disk = ProjectSettings.GlobalizePath(ProjectPaths.TerrainLayer(i));
+            Directory.CreateDirectory(Path.GetDirectoryName(disk)!);
+            if (layers[i].SavePng(disk) != Error.Ok) return false;
+        }
+        return true;
+    }
+
+    public static int Probe(bool load)
+    {
+        string arrayPath = "res://maps/HyruleField/probe-array.res";
+        string png = ProjectSettings.GlobalizePath("res://maps/HyruleField/probe.png");
+        if (!load)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(png)!);
+            var image = Image.CreateEmpty(8, 8, false, Image.Format.Rgba8);
+            image.Fill(new Color(0.2f, 0.4f, 0.6f));
+            var layers = new Godot.Collections.Array<Image> { image, (Image)image.Duplicate() };
+            var array = new Texture2DArray();
+            if (array.CreateFromImages(layers) != Error.Ok) throw new InvalidOperationException("rgba array rejected");
+            Save(array, arrayPath);
+            if (image.SavePng(png) != Error.Ok) throw new InvalidOperationException("png save failed");
+            GD.Print("probe saved");
+            return 0;
+        }
+        GD.Print(Describe("array", arrayPath));
+        var loaded = Image.LoadFromFile(png);
+        GD.Print(loaded is null || loaded.IsEmpty() ? "probe png image null" : $"probe png image ok {loaded.GetWidth()}x{loaded.GetHeight()}");
+        if (loaded is not null && !loaded.IsEmpty())
+        {
+            var layers = new Godot.Collections.Array<Image> { loaded };
+            var rebuilt = new Texture2DArray();
+            Error error = rebuilt.CreateFromImages(layers);
+            GD.Print(error == Error.Ok && rebuilt.GetLayers() == 1 && rebuilt.GetWidth() == 8
+                ? $"probe bind ok {rebuilt.GetWidth()}x{rebuilt.GetHeight()} layers {rebuilt.GetLayers()}"
+                : $"probe bind failed {error} layers {rebuilt.GetLayers()}");
+        }
+        return 0;
+    }
+
+    static string Describe(string label, string path)
+    {
+        var array = ResourceLoader.Load<Texture2DArray>(path, cacheMode: ResourceLoader.CacheMode.Ignore);
+        if (array is null) return $"probe {label} missing";
+        var image = array.GetLayerData(0);
+        string state = image is null || image.IsEmpty() ? "image null" : $"image ok {image.GetWidth()}x{image.GetHeight()}";
+        return $"probe {label} layers {array.GetLayers()} {state}";
     }
 
     static void ApplyRange(GeometryInstance3D body, ImportedPart part, bool hasFar)
@@ -415,6 +560,25 @@ public static class ProjectEmitter
         if (uv2 is not null) arrays[(int)Mesh.ArrayType.TexUV2] = uv2;
         if (colors is not null) arrays[(int)Mesh.ArrayType.Color] = colors;
         if (normals is not null) arrays[(int)Mesh.ArrayType.Normal] = normals;
+        if (part.Weights is { Count: > 0 } && part.Weights.Count == part.Positions.Count)
+        {
+            var bones = new int[part.Weights.Count * 4];
+            var weights = new float[part.Weights.Count * 4];
+            for (int i = 0; i < part.Weights.Count; i++)
+            {
+                var skin = part.Weights[i];
+                bones[i * 4] = skin.A;
+                bones[i * 4 + 1] = skin.B;
+                bones[i * 4 + 2] = skin.C;
+                bones[i * 4 + 3] = skin.D;
+                weights[i * 4] = skin.Wa;
+                weights[i * 4 + 1] = skin.Wb;
+                weights[i * 4 + 2] = skin.Wc;
+                weights[i * 4 + 3] = skin.Wd;
+            }
+            arrays[(int)Mesh.ArrayType.Bones] = bones;
+            arrays[(int)Mesh.ArrayType.Weights] = weights;
+        }
         var mesh = new ArrayMesh();
         mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
         return mesh;

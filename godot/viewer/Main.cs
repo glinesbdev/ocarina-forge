@@ -228,6 +228,9 @@ public partial class Main : Node3D
                 ["texturesMissing"] = _field.Report.TexturesMissing,
                 ["materialsUnbound"] = _field.Report.MaterialsUnbound,
                 ["shapesFailed"] = _field.Report.ShapesFailed,
+                ["shapesOmitted"] = _field.Report.ShapesOmitted,
+                ["omitted"] = _field.Report.Omitted.OrderByDescending(item => item.Value).Take(8)
+                    .Select(item => new Dictionary<string, object> { ["name"] = item.Key, ["count"] = item.Value }).ToList(),
                 ["missingTextures"] = _field.Report.MissingTextures.OrderByDescending(item => item.Value).Take(8)
                     .Select(item => new Dictionary<string, object> { ["name"] = item.Key, ["count"] = item.Value }).ToList(),
                 ["missing"] = _field.Report.Missing.OrderByDescending(item => item.Value).Take(8)
