@@ -21,7 +21,9 @@ public sealed class ImportedBoneTrack
     public string Bone { get; init; } = "";
     /// <summary>Skeleton index from the FSKA bind-index table. -1 when the table does not name one.</summary>
     public int Index { get; init; } = -1;
-    public List<ImportedPoseKey> Keys { get; init; } = new();
+    public List<ImportedPoseKey> Keys { get; set; } = new();
+    /// <summary>Keys before segment-scale compensation. Later clip files recompute from this copy.</summary>
+    public List<ImportedPoseKey>? RawKeys { get; set; }
 }
 
 public sealed class ImportedClip
@@ -31,6 +33,7 @@ public sealed class ImportedClip
     public bool Loop { get; init; }
     /// <summary>Rotation curves are Euler XYZ radians. Otherwise they are a quaternion.</summary>
     public bool Euler { get; init; }
+    public bool KeysCompensated { get; set; }
     public List<ImportedBoneTrack> Bones { get; init; } = new();
 }
 

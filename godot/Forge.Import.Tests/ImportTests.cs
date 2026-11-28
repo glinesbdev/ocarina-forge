@@ -573,6 +573,145 @@ public class ImportTests
         Assert.Equal(16, bc5[0].BytesPerBlock);
     }
 
+    [Fact]
+    public void InvertAndDecomposeRoundTripAYaw()
+    {
+        var turn = BindPose.Euler(0, Math.PI / 2, 0);
+        var matrix = BindPose.Trs(1, 2, 3, turn.X, turn.Y, turn.Z, turn.W, 1, 1, 1);
+        var back = BindPose.Multiply(matrix, BindPose.Invert(matrix));
+        Assert.InRange(back[0], 1 - 1e-6, 1 + 1e-6);
+        Assert.InRange(back[5], 1 - 1e-6, 1 + 1e-6);
+        Assert.InRange(Math.Abs(back[3]), 0, 1e-5);
+        var decomposed = BindPose.Decompose(matrix);
+        Assert.InRange(decomposed.Px, 1 - 1e-5, 1 + 1e-5);
+        Assert.InRange(decomposed.Pz, 3 - 1e-5, 3 + 1e-5);
+        Assert.InRange(decomposed.Ry, turn.Y - 1e-5, turn.Y + 1e-5);
+    }
+
+    [Fact]
+    public void ScaleCompensationFoldsParentScaleIntoTheChild()
+    {
+        var model = Rig("ParentScale");
+        model.Skeleton[0].Sx = model.Skeleton[0].Sy = model.Skeleton[0].Sz = 2;
+        model.Skeleton[0].BindSx = model.Skeleton[0].BindSy = model.Skeleton[0].BindSz = 2;
+        model.Skeleton[1].ScaleCompensate = true;
+        model.Skeleton[1].Py = 1;
+        SkinBinder.Apply(model);
+        Assert.InRange(model.Skeleton[1].Py, 1 - 1e-4, 1 + 1e-4);
+        Assert.InRange(model.Skeleton[1].Sy, 0.5 - 1e-4, 0.5 + 1e-4);
+        Assert.True(model.Skeleton[1].RestCompensated);
+    }
+
+    [Fact]
+    public void ASmallPoseStaysNearRestAndAWrongIndexBlowsTheBounds()
+    {
+        var calm = SkinnedQuad("Player_Adult", bone: 2);
+        calm.Clips.Add(Move("Wait", "Hand", 2, 0, 2, 0.4f, 1));
+        SkinBinder.Apply(calm);
+        Assert.InRange(SkinBinder.WorstExtentRatio(calm), 0.5, 1.5);
+        Assert.DoesNotContain(calm.SkinFindings, line => line.Contains("posed bounds", StringComparison.Ordinal));
+
+        var blown = SkinnedQuad("Player_Child", bone: 1);
+        blown.Clips.Add(Move("Wait", "Decoy", 1, 4, 0, 4, 8));
+        SkinBinder.Apply(blown);
+        Assert.True(SkinBinder.WorstExtentRatio(blown) > 3);
+        Assert.Contains(blown.SkinFindings, line => line.Contains("posed bounds", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ShapeTableBeatsAPaletteThatScalesTheWrongBone()
+    {
+        var model = SkinnedQuad("Player_Adult", bone: 0);
+        model.Parts[0].SkinCount = 2;
+        model.Parts[0].ShapeBones = new List<int> { 2 };
+        model.MatrixPalette = new List<int> { 1, 2, 0 };
+        model.SmoothMatrices = 3;
+        model.Clips.Add(Move("Wait", "Decoy", 1, 4, 0, 4, 8));
+        SkinBinder.Apply(model);
+        Assert.Contains(model.SkinMapping, new[] { "shape", "shape-direct" });
+        Assert.All(model.Parts[0].Weights!, skin => Assert.Equal(2, skin.A));
+        Assert.InRange(SkinBinder.WorstExtentRatio(model), 0.5, 1.5);
+    }
+
+    [Fact]
+    public void RigidTailBakesABoneLocalVertexOntoThatBone()
+    {
+        var model = Rig("Player_Child");
+        model.Skeleton[2].Rigid = 0;
+        model.MatrixPalette = new List<int> { 1, 2 };
+        model.SmoothMatrices = 1;
+        model.RigidMatrices = 1;
+        model.Parts.Add(new ImportedPart
+        {
+            Name = "Hat",
+            SkinCount = 1,
+            Positions = new List<Vec3> { new(0, 0, 0), new(0.2, 0, 0), new(0, 0.2, 0), new(0.2, 0.2, 0) },
+            Weights = new List<VertexSkin>
+            {
+                new(0, 0, 0, 0, 1, 0, 0, 0), new(0, 0, 0, 0, 1, 0, 0, 0),
+                new(0, 0, 0, 0, 1, 0, 0, 0), new(0, 0, 0, 0, 1, 0, 0, 0),
+            },
+        });
+        model.Clips.Add(Move("Wait", "Decoy", 1, 4, 0, 4, 8));
+        SkinBinder.Apply(model);
+        Assert.Equal("rigid-tail", model.SkinMapping);
+        Assert.All(model.Parts[0].Positions, point => Assert.InRange(point.Y, 1.9, 2.3));
+        Assert.InRange(SkinBinder.WorstExtentRatio(model), 0.5, 1.5);
+    }
+
+    [Fact]
+    public void AnIndexPastTheSkeletonIsFlagged()
+    {
+        var model = SkinnedQuad("Cow", bone: 40);
+        SkinBinder.Apply(model);
+        Assert.Contains(model.SkinFindings, line => line.Contains("outside 0..2", StringComparison.Ordinal));
+        Assert.All(model.Parts[0].Weights!, skin => Assert.Equal(0, skin.A));
+    }
+
+    static ImportedModel Rig(string name) => new()
+    {
+        Name = name,
+        Skeleton = new List<ImportedBone>
+        {
+            new() { Name = "Root", Parent = -1, Rw = 1, Sx = 1, Sy = 1, Sz = 1, BindSx = 1, BindSy = 1, BindSz = 1, Rigid = -1 },
+            new() { Name = "Decoy", Parent = 0, Px = 4, Rw = 1, Sx = 1, Sy = 1, Sz = 1, BindSx = 1, BindSy = 1, BindSz = 1, Rigid = -1 },
+            new() { Name = "Hand", Parent = 0, Py = 2, Rw = 1, Sx = 1, Sy = 1, Sz = 1, BindSx = 1, BindSy = 1, BindSz = 1, Rigid = -1 },
+        },
+    };
+
+    static ImportedModel SkinnedQuad(string name, int bone)
+    {
+        var model = Rig(name);
+        var weight = new VertexSkin(bone, 0, 0, 0, 1, 0, 0, 0);
+        model.Parts.Add(new ImportedPart
+        {
+            Name = "Body",
+            SkinCount = 2,
+            Positions = new List<Vec3> { new(0, 2, 0), new(0.3, 2, 0), new(0, 2.3, 0), new(0.3, 2.3, 0) },
+            Weights = new List<VertexSkin> { weight, weight, weight, weight },
+        });
+        return model;
+    }
+
+    static ImportedClip Move(string name, string bone, int index, float x0, float y0, float x1, float scale) => new()
+    {
+        Name = name,
+        FrameCount = 11,
+        Bones = new List<ImportedBoneTrack>
+        {
+            new()
+            {
+                Bone = bone,
+                Index = index,
+                Keys = new List<ImportedPoseKey>
+                {
+                    new() { Frame = 0, Px = x0, Py = y0, Rw = 1, Sx = 1, Sy = 1, Sz = 1 },
+                    new() { Frame = 10, Px = x1, Py = y0, Rw = 1, Sx = scale, Sy = scale, Sz = scale },
+                },
+            },
+        },
+    };
+
     static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     sealed class ExpectedModel

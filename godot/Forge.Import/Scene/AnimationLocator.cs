@@ -51,6 +51,7 @@ public sealed class AnimationLocator(DumpFolder dump)
                     clips.Add(clip);
         }
         model.Clips = clips;
+        SkinBinder.Apply(model);
     }
 
     void ReadAnimationRef(string actor, List<string> projects, List<string> sources, bool allowRetargeted)

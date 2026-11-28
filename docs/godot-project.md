@@ -81,7 +81,7 @@ scenes/benchmark.tscn          the fly camera, instancing main.tscn
 
 An actor is an instance of its model scene, with the banc translate / rotate / scale. Helpers, bounds boxes, and the other omitted shapes are not written. LOD 0 ends at 72 m and LOD 1 begins there, the same ranges as the viewer. The viewer batches repeats with MultiMesh. The project keeps one node per actor so they can be moved.
 
-`.ocarina/manifest.json` is version 1. `files` maps a `res://` path to `kind`, `sources` (romfs paths; a pack member is `archive#member`), and `hash`. The hash is SHA-256 of the importer id `godot-project-5` plus the raw bytes of those files. It is not a hash of the Godot file, so a hand edit of an unchanged output is left in place. A source change, or a project whose manifest has an earlier importer version, rewrites that output. A later exporter can generate a second, untouched project and diff the two. Orphan files from a removed actor are not deleted. The viewer's import cache is a separate id, `godot-spike-6`.
+`.ocarina/manifest.json` is version 1. `files` maps a `res://` path to `kind`, `sources` (romfs paths; a pack member is `archive#member`), and `hash`. The hash is SHA-256 of the importer id `godot-project-6` plus the raw bytes of those files. It is not a hash of the Godot file, so a hand edit of an unchanged output is left in place. A source change, or a project whose manifest has an earlier importer version, rewrites that output. A later exporter can generate a second, untouched project and diff the two. Orphan files from a removed actor are not deleted. The viewer's import cache is a separate id, `godot-spike-7`.
 
 The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport from dump). Reimport refreshes the addon sources and DLLs, then generates. It does not delete `models/`, `textures/`, or `maps/`.
 
@@ -89,7 +89,7 @@ The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport 
 
 - BFRES meshes, LODs 0 and 1, normals, UVs (V flipped to Godot), and the bind-pose bake the viewer already does.
 - `Skeleton3D` from FSKL: name, parent, local translation, quaternion (Euler flag `0x1000` is converted first), scale. The synthetic tree has no FSKL, so its scene has an empty skeleton. A model that has one gets a bone per dictionary entry.
-- FSKA clips on that skeleton's `AnimationPlayer`. Each clip is an animation named from the file: `Skeleton:<bone>` tracks for position, rotation, and scale, at 30 frames per second. Loop follows flags bit 2. Euler clips are converted to a quaternion before the key is written. A model with skin weights gets a `Skin` from the rest pose, and the weighted meshes are children of the skeleton. Vertices stay in the baked model space, so the rest pose does not move them twice. The synthetic tree has no FSKA, so its library stays empty and the check still says `check curves not imported`. A file that has clips prints `check clips N`, and the scene metadata says the 30 fps rate was not measured.
+- FSKA clips on that skeleton's `AnimationPlayer`. Each clip is an animation named from the file: `Skeleton:<bone>` tracks for position, rotation, and scale, at 30 frames per second. Loop follows flags bit 2. Euler clips are converted to a quaternion before the key is written. A model with skin weights gets a `Skin` from the rest pose, and the weighted meshes are children of the skeleton. Smooth vertices stay in model space. Skin 0 and skin 1 are bone-local and are baked into model space when the bone has a rigid-matrix index. The index space (palette, shape table, or the rigid half of the palette) is the one whose posed bounds stay near the rest bounds. Bone flag `0x800000` is folded into the rest locals and the clip keys. The synthetic tree has no FSKA, so its library stays empty and the check still says `check curves not imported`. A file that has clips prints `check clips N`, and the scene metadata says the 30 fps rate was not measured.
 - `StandardMaterial3D` for opaque, alpha, and scissor materials. Water is one shared unshaded material. Missing albedo uses the same flat colours as the viewer. sRGB BC7 sets `albedo_texture_force_srgb`.
 - Textures as `ImageTexture` resources whose image is the compressed blocks (BC7, BC1, BC3, BC4, BC5, RGBA8). ASTC is transcoded to BC7 the same way as the viewer (long edge 1024) because desktop AMD does not sample ASTC. `Image.Compress` needs the Godot editor binary, including `--headless`.
 - Terrain as a mesh plus the viewer's blend shader (chosen layer, other layer, blend weight). Each MaterialAlb layer is decompressed to RGBA8, resized to one shared size (long edge at most 1024), and written as `maps/HyruleField/layer_N.png`. The terrain node is a tool script that builds the `Texture2DArray` from those PNGs when the scene enters the tree, in the editor and at play. `ResourceSaver` does not keep the array's images: a saved array reloads with `img.is_null()`, and the editor draws the magenta checker. No `.mate` means the flat earth colour, which is what the synthetic field does.
@@ -99,7 +99,7 @@ The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport 
 ## Not converted
 
 - **Material, visibility, and shape animation.** FSKA bone curves are read. `FMAA` / `FSHU`, bone visibility, and shape curves are not. The 30 fps playback rate is a guess. Cubic curves are sampled, then Godot interpolates those samples linearly. The viewer still bakes poses and does not play the clips.
-- Unbaked local positions. The `Skin` uses the baked model-space vertices, so the rest pose is identity. A later pass can store the pre-skin positions if a clip has to be composed with a different bind.
+- A retail confirmation of the skin-index choice. The binder is checked on a synthetic skeleton (`Player_Adult` calm, `Player_Child` exploding, a shape table, and a rigid-half index). `skin-check` is what walks the dump. It was not run on a retail catalog here.
 - Actor behaviour, exported properties, AI, and events.
 - Audio.
 - Phive collision. The terrain occluder is a render occluder, not gameplay collision.
@@ -123,12 +123,14 @@ dotnet run --project godot/Forge.Cli -- new /path/to/dump /path/to/hyrule-field-
 "$GODOT" --path /path/to/hyrule-field-godot -- --benchmark --benchmark-out field-loop-160m.json
 ```
 
-Windows PowerShell, from the repo. `reimport` writes into the project folder that already exists. The importer id `godot-project-5` makes the first reimport rewrite every generated output. Use `new` with a fresh directory to keep an edited project. The viewer ignores caches from earlier importer versions.
+Windows PowerShell, from the repo. `reimport` writes into the project folder that already exists. The importer id `godot-project-6` makes the first reimport rewrite every generated output. Use `new` with a fresh directory to keep an edited project. The viewer ignores caches from earlier importer versions. `skin-check` reads the dump and does not write the project. It exits 0 even when a model is flagged, so the report is the output.
 
 ```powershell
 $env:GODOT = "C:\Godot\Godot_v4.7.2-stable_mono_win64.exe"
 dotnet test godot\Forge.Import.Tests\Forge.Import.Tests.csproj
 dotnet test godot\Forge.Project.Tests\Forge.Project.Tests.csproj
+dotnet run --project godot\Forge.Cli -- skin-check D:\dump
+dotnet run --project godot\Forge.Cli -- skin-check D:\dump --prefix Player
 dotnet run --project godot\Forge.Cli -- reimport D:\hyrule-field-godot --godot $env:GODOT
 & $env:GODOT --path D:\hyrule-field-godot -- --benchmark --benchmark-out field-loop-160m.json
 dotnet build godot\viewer\OcarinaForge.Viewer.csproj

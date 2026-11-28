@@ -37,7 +37,7 @@ The first Windows run rejected 113 textures. `CreateFromData` wanted the chain t
 
 `MaterialAlb` stays ASTC in the library. The viewer transcodes it to BC7 before the cache is written, because an AMD desktop GPU does not sample ASTC and uploading the blocks would still draw the flat colour. Godot's `Image.Decompress` then `Image.Compress(Bptc)` do it. `Image.Compress` only works in an editor build, which is how this project is launched. The long edge is capped at 1024, the same cap the browser uses for an albedo. Only layers the drawn `.mate` samples ask for are encoded. A `.mate` texel is material A, material B, then two blend bytes. (0, 0, 0, 0) is empty. An index above 89 is not a layer. A blend byte other than 0 or 0x7f is that byte over 255, and 0x7f alone is a halfway mix. The chosen index stays on A unless that weight is 128 or more. The shader mixes the two layers by that weight. UVs are world XZ with an 8 m repeat, which is still a guess. If decompress or BC7 compress fails, the summary says so and the ground stays flat. That transcode was exercised here only on an 8×8 void-extent block, not on a retail atlas.
 
-The cache key includes the importer id `godot-spike-6`. A cache written by `godot-spike-1`, `godot-spike-2`, `godot-spike-3`, `godot-spike-4`, or `godot-spike-5` is ignored. The folder can stay; the old files are a different hash. `godot-spike-3` is the one that still missed the shared cliff albedos (1710 missing textures on the owner's field) and still drew the flat sheets.
+The cache key includes the importer id `godot-spike-7`. A cache written by `godot-spike-1` through `godot-spike-6` is ignored. The folder can stay; the old files are a different hash. `godot-spike-3` is the one that still missed the shared cliff albedos (1710 missing textures on the owner's field) and still drew the flat sheets. `godot-spike-6` is the one from before the skin-index binder.
 
 The first successful load writes a cache **outside the repo**:
 
@@ -106,7 +106,7 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\OcarinaForge\godot-cache" -ErrorA
 & "C:\Godot\Godot_v4.7.2-stable_mono_win64.exe" --path godot\viewer -- --dump "D:\dump" --benchmark --benchmark-out field-loop-160m.json
 ```
 
-`Remove-Item` drops the `godot-spike-3` cache from the previous Windows run. The importer id `godot-spike-6` already ignores those files. The first open imports again. The console ends with `load actors`, `load textures` (ok, failed, missing), `load materials unbound`, `load omitted`, and `load missing texture`.
+`Remove-Item` drops the `godot-spike-3` cache from the previous Windows run. The importer id `godot-spike-7` already ignores those files. The first open imports again. The console ends with `load actors`, `load textures` (ok, failed, missing), `load materials unbound`, `load omitted`, and `load missing texture`.
 
 `D:\dump` is the folder that contains `romfs\`, or the `romfs` folder itself. The first launch with no `--dump` and no saved path opens a folder picker and stores the choice. Later launches reuse it. `--cache <dir>` moves the import cache.
 

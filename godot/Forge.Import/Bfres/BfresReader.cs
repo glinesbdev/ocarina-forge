@@ -97,6 +97,7 @@ public static class BfresReader
                 var (model, next) = Model(at, key, images);
                 model.Notes.AddRange(imageNotes);
                 model.Clips = clips;
+                SkinBinder.Apply(model);
                 found.Add(model);
                 at = next;
             }
@@ -192,7 +193,8 @@ public static class BfresReader
             List<BindPose.Bone> bones;
             List<ImportedBone> skeleton;
             List<int> palette;
-            if (skel != 0) (bones, skeleton) = Bones(skel, out palette);
+            int smoothMatrices = 0, rigidMatrices = 0;
+            if (skel != 0) (bones, skeleton) = Bones(skel, out palette, out smoothMatrices, out rigidMatrices);
             else
             {
                 bones = new List<BindPose.Bone>();
@@ -235,13 +237,18 @@ public static class BfresReader
                 Parts = parts,
                 Images = images,
                 Skeleton = skeleton,
+                MatrixPalette = palette,
+                SmoothMatrices = smoothMatrices,
+                RigidMatrices = rigidMatrices,
                 Notes = notes,
             }, end);
         }
 
-        (List<BindPose.Bone> Bones, List<ImportedBone> Skeleton) Bones(int at, out List<int> palette)
+        (List<BindPose.Bone> Bones, List<ImportedBone> Skeleton) Bones(int at, out List<int> palette, out int smoothMatrices, out int rigidMatrices)
         {
             palette = new List<int>();
+            smoothMatrices = 0;
+            rigidMatrices = 0;
             var bones = new List<BindPose.Bone>();
             var skeleton = new List<ImportedBone>();
             if (at + 4 > _data.Length || _data[at] != (byte)'F' || _data[at + 1] != (byte)'S')
@@ -261,6 +268,7 @@ public static class BfresReader
                 cursor += 2;
                 int parent = Bin.I16(_data, cursor);
                 cursor += 2;
+                int smoothIndex = Bin.I16(_data, cursor);
                 cursor += 2;
                 int rigid = Bin.I16(_data, cursor);
                 cursor += 2;
@@ -289,17 +297,25 @@ public static class BfresReader
                     Px = px, Py = py, Pz = pz,
                     Rx = rx, Ry = ry, Rz = rz, Rw = rw,
                     Sx = sx, Sy = sy, Sz = sz,
+                    ScaleCompensate = (flags & 0x800000) != 0,
+                    Smooth = smoothIndex,
+                    Rigid = rigid,
+                    BindSx = sx, BindSy = sy, BindSz = sz,
                 });
             }
-            palette = MatrixPalette(at, bones.Count);
+            palette = MatrixPalette(at, bones.Count, out smoothMatrices, out rigidMatrices);
             return (bones, skeleton);
         }
 
-        List<int> MatrixPalette(int at, int boneCount)
+        List<int> MatrixPalette(int at, int boneCount, out int smooth, out int rigid)
         {
+            smooth = 0;
+            rigid = 0;
             if (Major < 9 || boneCount <= 0 || at + 0x40 > _data.Length) return new List<int>();
             int paletteAt = (int)Bin.U64(_data, at + 0x18);
-            int count = Bin.U16(_data, at + 0x3A) + Bin.U16(_data, at + 0x3C);
+            smooth = Bin.U16(_data, at + 0x3A);
+            rigid = Bin.U16(_data, at + 0x3C);
+            int count = smooth + rigid;
             if (paletteAt == 0 || count is <= 0 or > 4096 || paletteAt + count * 2 > _data.Length) return new List<int>();
             var palette = new List<int>(count);
             for (int i = 0; i < count; i++)
@@ -523,6 +539,7 @@ public static class BfresReader
             int boneIndex = Bin.U16(_data, cursor);
             cursor += 2;
             cursor += 2;
+            int skinBoneCount = Bin.U16(_data, cursor);
             cursor += 2;
             int skinCount = _data[cursor];
             cursor += 1;
@@ -535,6 +552,7 @@ public static class BfresReader
             bool standard = vtx != 0 && meshCount > 0 && vtx + 4 <= _data.Length
                 && _data[vtx] == (byte)'F' && _data[vtx + 1] == (byte)'V';
             var material = materialIndex >= 0 && materialIndex < materials.Count ? materials[materialIndex] : null;
+            var shapeBones = ShapeBones(at, skinBoneCount);
             if (!standard)
             {
                 if ((flags & 0x10) != 0 && Bin.U32(_data, 0x08) == 0x000A0400)
@@ -550,15 +568,13 @@ public static class BfresReader
                             var positions = level.Positions.Select(item => new Vec3(item.X, item.Y, item.Z)).ToList();
                             List<VertexSkin>? weights = null;
                             if (bones.Count > 0 && skinCount == 0)
-                            {
                                 weights = RigidSkin(boneIndex, bones.Count, positions.Count);
-                                Bake(positions, bones, palette, boneIndex, null);
-                            }
                             var uvs = level.UvSets.Count == 0 ? null : level.UvSets[0].Select(item => new Vec2(item.U, item.V)).ToList();
                             var normals = level.Normals.Count == 0 ? null : level.Normals.Select(item => new Vec3(item.X, item.Y, item.Z)).ToList();
-                            if (normals is not null && bones.Count > 0)
-                                BindPose.BakeNormals(normals, bones, palette, boneIndex, null);
-                            made.Add(PartFrom(name, positions, level.Indices, uvs, normals, material, materialIndex, level.Number, weights));
+                            var meshlet = PartFrom(name, positions, level.Indices, uvs, normals, material, materialIndex, level.Number, weights);
+                            meshlet.SkinCount = skinCount;
+                            meshlet.ShapeBones = shapeBones;
+                            made.Add(meshlet);
                         }
                         return (made, end, false);
                     }
@@ -576,16 +592,10 @@ public static class BfresReader
             if (positions2.Count == 0 || lod.Indices.Count == 0)
                 return (new List<ImportedPart>(), end, (flags & 0x10) != 0);
             var normals2 = ReadNormals(fvtx, positions2.Count);
-            var weights2 = SkinOf(fvtx, positions2.Count, skinCount, boneIndex, bones, palette);
-            if (bones.Count > 0 && skinCount is 0 or 1)
-            {
-                List<int>? slots = skinCount == 1 ? SkinSlots(fvtx, positions2.Count) : null;
-                Bake(positions2, bones, palette, boneIndex, slots);
-                if (normals2 is not null) BindPose.BakeNormals(normals2, bones, palette, boneIndex, slots);
-            }
+            var weights2 = SkinOf(fvtx, positions2.Count, skinCount, boneIndex, bones);
             var made2 = new List<ImportedPart>
             {
-                PartFrom(name, positions2, lod.Indices, uvs2, normals2, material, materialIndex, 0, weights2),
+                Tag(PartFrom(name, positions2, lod.Indices, uvs2, normals2, material, materialIndex, 0, weights2), skinCount, shapeBones),
             };
             if (meshCount > 1)
             {
@@ -601,13 +611,7 @@ public static class BfresReader
                     {
                         var (farPos, farUv) = Vertices(fvtx, coarser);
                         var farNormals = ReadNormals(fvtx, farPos.Count);
-                        var farWeights = SkinOf(fvtx, farPos.Count, skinCount, boneIndex, bones, palette);
-                        if (bones.Count > 0 && skinCount is 0 or 1)
-                        {
-                            var farSlots = skinCount == 1 ? SkinSlots(fvtx, farPos.Count) : null;
-                            Bake(farPos, bones, palette, boneIndex, farSlots);
-                            if (farNormals is not null) BindPose.BakeNormals(farNormals, bones, palette, boneIndex, farSlots);
-                        }
+                        var farWeights = SkinOf(fvtx, farPos.Count, skinCount, boneIndex, bones);
                         if (farPos.Count == 0) continue;
                         best = (farPos, farUv, farNormals, farWeights, coarser.Indices);
                         bestLevel = level;
@@ -615,7 +619,7 @@ public static class BfresReader
                     catch (ImportException) { continue; }
                 }
                 if (best is not null)
-                    made2.Add(PartFrom(name, best.Value.Pos, best.Value.Idx, best.Value.Uv, best.Value.Normal, material, materialIndex, bestLevel, best.Value.Weights));
+                    made2.Add(Tag(PartFrom(name, best.Value.Pos, best.Value.Idx, best.Value.Uv, best.Value.Normal, material, materialIndex, bestLevel, best.Value.Weights), skinCount, shapeBones));
             }
             return (made2, end, false);
         }
@@ -883,14 +887,26 @@ public static class BfresReader
             _ => 0,
         };
 
-        List<VertexSkin>? SkinOf(FvtxBuffer fvtx, int count, int skinCount, int boneIndex, List<BindPose.Bone> bones, List<int> palette)
+        static ImportedPart Tag(ImportedPart part, int skinCount, List<int> shapeBones)
+        {
+            part.SkinCount = skinCount;
+            part.ShapeBones = shapeBones;
+            return part;
+        }
+
+        List<int> ShapeBones(int at, int count)
+        {
+            var bones = new List<int>();
+            if (Major < 9 || count is <= 0 or > 4096 || at + 0x28 > _data.Length) return bones;
+            int listAt = (int)Bin.U64(_data, at + 0x20);
+            if (listAt <= 0 || listAt + count * 2 > _data.Length) return bones;
+            for (int i = 0; i < count; i++) bones.Add(Bin.U16(_data, listAt + i * 2));
+            return bones;
+        }
+
+        List<VertexSkin>? SkinOf(FvtxBuffer fvtx, int count, int skinCount, int boneIndex, List<BindPose.Bone> bones)
         {
             if (bones.Count == 0 || count <= 0 || skinCount > 8) return null;
-            int Map(int slot)
-            {
-                if (palette.Count > 0 && slot >= 0 && slot < palette.Count) return palette[slot];
-                return slot >= 0 && slot < bones.Count ? slot : 0;
-            }
             if (skinCount == 0)
                 return RigidSkin(boneIndex, bones.Count, count);
             var indexAttr = Attr(fvtx, "_i0", "i0", "_i");
@@ -924,7 +940,8 @@ public static class BfresReader
                             for (int i = 0; i < skinCount; i++) weights[i] /= total;
                         else weights[0] = 1;
                     }
-                    for (int i = 0; i < skinCount; i++) ids[i] = weights[i] > 0 ? Map(ids[i]) : 0;
+                    for (int i = 0; i < skinCount; i++)
+                        if (weights[i] <= 0) ids[i] = 0;
                     skin.Add(new VertexSkin(ids[0], ids[1], ids[2], ids[3], weights[0], weights[1], weights[2], weights[3],
                         ids[4], ids[5], ids[6], ids[7], weights[4], weights[5], weights[6], weights[7]));
                 }

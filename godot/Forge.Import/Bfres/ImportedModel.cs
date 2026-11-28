@@ -10,7 +10,7 @@ public sealed class ImportedPart
     public List<Vec3> Positions { get; init; } = new();
     public List<int> Indices { get; init; } = new();
     public List<Vec2>? Uvs { get; init; }
-    public List<Vec3>? Normals { get; init; }
+    public List<Vec3>? Normals { get; set; }
     /// <summary>MaterialAlb layer per vertex. -1 is the flat earth colour. Null when the mesh has no grid.</summary>
     public List<int>? MaterialLayers { get; init; }
     public string Material { get; init; } = "";
@@ -30,7 +30,16 @@ public sealed class ImportedPart
     public string Helper { get; init; } = "";
     public bool Water { get; init; }
     /// <summary>Bone indices and weights per vertex, in skeleton order. Null when the shape is not skinned.</summary>
-    public List<VertexSkin>? Weights { get; init; }
+    public List<VertexSkin>? Weights { get; set; }
+    /// <summary>0 is the shape bone, 1 is one influence, 2 or more is smooth. Slots stay raw until skin binding.</summary>
+    public int SkinCount { get; set; }
+    /// <summary>FSHP skin-bone table. A vertex slot may index this before the model matrix palette.</summary>
+    public List<int> ShapeBones { get; set; } = new();
+    /// <summary>Positions before rigid baking, so a later clip can pick a different index space.</summary>
+    public List<Vec3>? LocalPositions { get; set; }
+    public List<Vec3>? LocalNormals { get; set; }
+    /// <summary>Influence slots as stored in the vertex buffer.</summary>
+    public List<VertexSkin>? RawWeights { get; set; }
 }
 
 /// <summary>Up to eight influences. Unused slots stay at bone 0 with weight 0.</summary>
@@ -45,16 +54,27 @@ public sealed class ImportedBone
 {
     public string Name { get; init; } = "";
     public int Parent { get; init; } = -1;
-    public double Px { get; init; }
-    public double Py { get; init; }
-    public double Pz { get; init; }
-    public double Rx { get; init; }
-    public double Ry { get; init; }
-    public double Rz { get; init; }
-    public double Rw { get; init; } = 1;
-    public double Sx { get; init; } = 1;
-    public double Sy { get; init; } = 1;
-    public double Sz { get; init; } = 1;
+    public double Px { get; set; }
+    public double Py { get; set; }
+    public double Pz { get; set; }
+    public double Rx { get; set; }
+    public double Ry { get; set; }
+    public double Rz { get; set; }
+    public double Rw { get; set; } = 1;
+    public double Sx { get; set; } = 1;
+    public double Sy { get; set; } = 1;
+    public double Sz { get; set; } = 1;
+    /// <summary>Bone flag <c>0x800000</c>. The local transform Godot stores has this folded in.</summary>
+    public bool ScaleCompensate { get; set; }
+    public bool RestCompensated { get; set; }
+    /// <summary>Index into the rigid half of the matrix palette. -1 when this bone is not a rigid slot.</summary>
+    public int Rigid { get; set; } = -1;
+    /// <summary>Index into the smooth half of the matrix palette. -1 when this bone has no smooth slot.</summary>
+    public int Smooth { get; set; } = -1;
+    /// <summary>Scale from the file, before segment-scale compensation was folded into <see cref="Sx"/>.</summary>
+    public double BindSx { get; set; } = 1;
+    public double BindSy { get; set; } = 1;
+    public double BindSz { get; set; } = 1;
 }
 
 public sealed class ImportedModel
@@ -66,6 +86,15 @@ public sealed class ImportedModel
     public Dictionary<string, string> ImageSources { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Bind-pose skeleton. Empty when the model has no FSKL.</summary>
     public List<ImportedBone> Skeleton { get; init; } = new();
+    /// <summary>FSKL matrix-to-bone list. Smooth entries come first, then rigid entries. Counts are <see cref="SmoothMatrices"/> and <see cref="RigidMatrices"/>.</summary>
+    public List<int> MatrixPalette { get; set; } = new();
+    public int SmoothMatrices { get; set; }
+    public int RigidMatrices { get; set; }
+    /// <summary>Index space chosen for this model: palette, shape, shape-direct, direct, or rigid-tail.</summary>
+    public string SkinMapping { get; set; } = "";
+    public bool SkinBound { get; set; }
+    /// <summary>Bone indices that missed the skeleton, and posed bounds that left the rest size.</summary>
+    public List<string> SkinFindings { get; } = new();
     /// <summary>Embedded FSKA clips and any clips resolved by the project importer.</summary>
     public List<ImportedClip> Clips { get; set; } = new();
     public List<string> AnimationSources { get; } = new();

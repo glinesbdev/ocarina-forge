@@ -26,6 +26,7 @@ public static class Generator
                 "models" => Models(args.Skip(1).ToArray()),
                 "reimport" => Reimport(args.Skip(1).ToArray()),
                 "check" => Check(args.Skip(1).ToArray()),
+                "skin-check" => SkinCheck(args.Skip(1).ToArray()),
                 _ => Unknown(args[0]),
             };
         }
@@ -96,6 +97,56 @@ public static class Generator
             request.ModelsOnly, request.ModelPrefix);
         Console.WriteLine($"refreshed addon in {project}");
         return Generate(project, options.Get("godot"));
+    }
+
+    static int SkinCheck(string[] args)
+    {
+        var options = Options.Parse(args);
+        if (options.Positionals.Count != 1)
+        {
+            Console.Error.WriteLine("usage: ocarina-forge-godot skin-check <dump> [--prefix <model or actor prefix>]");
+            return 2;
+        }
+        var dump = DumpFolder.Open(Path.GetFullPath(options.Positionals[0]));
+        string prefix = options.Get("prefix") ?? "";
+        var notes = new List<string>();
+        var sources = ModelCatalog.Discover(dump, prefix, notes).ToList();
+        var animations = new AnimationLocator(dump);
+        int skinned = 0, flagged = 0, failed = 0;
+        var mappings = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var source in sources)
+        {
+            List<ImportedModel> models;
+            try { models = BfresReader.Read(source.Read(dump)); }
+            catch (Exception exc) when (exc is ImportException or IOException)
+            {
+                failed++;
+                Console.WriteLine($"skip {source.Path}: {exc.Message}");
+                continue;
+            }
+            foreach (var model in models)
+            {
+                if (!model.Parts.Any(part => part.Weights is { Count: > 0 } || part.SkinCount > 0)) continue;
+                string actor = source.Actor ?? model.Name;
+                try { animations.Attach(actor, new ResolvedModel { Model = model, Path = source.Path }, notes); }
+                catch (Exception exc) when (exc is ImportException or IOException)
+                {
+                    notes.Add($"{actor}: {exc.Message}");
+                }
+                skinned++;
+                string mapping = model.SkinMapping.Length == 0 ? "unbound" : model.SkinMapping;
+                mappings[mapping] = mappings.GetValueOrDefault(mapping) + 1;
+                if (model.SkinFindings.Count == 0) continue;
+                flagged++;
+                Console.WriteLine($"{actor} {model.Name} mapping {mapping}");
+                foreach (string finding in model.SkinFindings) Console.WriteLine($"  {finding}");
+            }
+        }
+        var tally = string.Join(", ", mappings.OrderBy(item => item.Key).Select(item => $"{item.Key} {item.Value}"));
+        Console.WriteLine($"skin-check sources {sources.Count} skinned {skinned} flagged {flagged} unreadable {failed}");
+        if (tally.Length > 0) Console.WriteLine($"skin-check mappings {tally}");
+        foreach (string note in notes.Take(12)) Console.WriteLine($"note {note}");
+        return 0;
     }
 
     static int Check(string[] args)
@@ -180,6 +231,7 @@ public static class Generator
             ocarina-forge-godot models <dump> <projectDir> [--godot <Godot exe>] [--prefix <model or actor prefix>] [--template <dir>]
             ocarina-forge-godot reimport <projectDir> [--godot <Godot exe>] [--template <dir>]
             ocarina-forge-godot check <projectDir> [--godot <Godot exe>]
+            ocarina-forge-godot skin-check <dump> [--prefix <model or actor prefix>]
 
             Writes a Godot 4.7 project. Models, materials, textures, and maps/HyruleField.tscn
             are native resources. .ocarina/manifest.json records each output, its romfs sources, and a hash.

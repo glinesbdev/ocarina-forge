@@ -12,7 +12,7 @@ public static class ImportCache
 {
     public const string Magic = "OFM1";
     public const int Version = 1;
-    public const string ImporterVersion = "godot-spike-6";
+    public const string ImporterVersion = "godot-spike-7";
 
     public static string DefaultDirectory()
     {

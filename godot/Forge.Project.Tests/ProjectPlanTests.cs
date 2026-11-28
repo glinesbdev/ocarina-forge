@@ -22,7 +22,7 @@ public class ProjectPlanTests
         Assert.False(job.Map.Current);
         Assert.Contains(job.Map.Sources, source => source.Contains("HyruleField_Child_Static", StringComparison.Ordinal));
         Assert.Contains(job.Map.Sources, source => source.Contains("Field.tscb", StringComparison.Ordinal));
-        Assert.Equal("godot-project-5", ProjectPlan.ImporterVersion);
+        Assert.Equal("godot-project-6", ProjectPlan.ImporterVersion);
         if (model.Model.Skeleton.Count > 0)
             Assert.All(model.Model.Skeleton, bone => Assert.False(string.IsNullOrWhiteSpace(bone.Name)));
     }

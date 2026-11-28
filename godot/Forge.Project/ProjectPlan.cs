@@ -53,7 +53,7 @@ public sealed class ProjectJob
 
 public static class ProjectPlan
 {
-    public const string ImporterVersion = "godot-project-5";
+    public const string ImporterVersion = "godot-project-6";
 
     public static ProjectJob Build(DumpFolder dump, ImportedField field, ManifestDocument? existing, string projectDir,
         Dictionary<string, string>? textureOwners = null, bool modelsOnly = false)

@@ -147,7 +147,7 @@ public static partial class ProjectEmitter
             string meshPath = ProjectPaths.Mesh(job.Gyaml, part.Name, part.Lod);
             if (!meshes.TryGetValue(meshPath, out var mesh))
             {
-                mesh = MakeMesh(part, reverseWinding: true);
+                mesh = MakeMesh(part, reverseWinding: true, boneCount: skeleton.GetBoneCount());
                 Save(mesh, meshPath);
                 mesh.SetPathCache(meshPath);
                 meshes.Add(meshPath, mesh);
@@ -542,7 +542,7 @@ public static partial class ProjectEmitter
         }
     }
 
-    static ArrayMesh MakeMesh(ImportedPart part, bool reverseWinding = false)
+    static ArrayMesh MakeMesh(ImportedPart part, bool reverseWinding = false, int boneCount = 0)
     {
         var vertices = new Vector3[part.Positions.Count];
         for (int i = 0; i < vertices.Length; i++)
@@ -605,19 +605,20 @@ public static partial class ProjectEmitter
             {
                 var skin = part.Weights[i];
                 int at = i * slots;
-                bones[at] = skin.A;
-                bones[at + 1] = skin.B;
-                bones[at + 2] = skin.C;
-                bones[at + 3] = skin.D;
+                int Bone(int index) => boneCount > 0 && (uint)index >= (uint)boneCount ? 0 : index;
+                bones[at] = Bone(skin.A);
+                bones[at + 1] = Bone(skin.B);
+                bones[at + 2] = Bone(skin.C);
+                bones[at + 3] = Bone(skin.D);
                 weights[at] = skin.Wa;
                 weights[at + 1] = skin.Wb;
                 weights[at + 2] = skin.Wc;
                 weights[at + 3] = skin.Wd;
                 if (!eight) continue;
-                bones[at + 4] = skin.E;
-                bones[at + 5] = skin.F;
-                bones[at + 6] = skin.G;
-                bones[at + 7] = skin.H;
+                bones[at + 4] = Bone(skin.E);
+                bones[at + 5] = Bone(skin.F);
+                bones[at + 6] = Bone(skin.G);
+                bones[at + 7] = Bone(skin.H);
                 weights[at + 4] = skin.We;
                 weights[at + 5] = skin.Wf;
                 weights[at + 6] = skin.Wg;
