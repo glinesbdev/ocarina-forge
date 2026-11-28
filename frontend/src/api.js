@@ -125,6 +125,7 @@ export const api = {
     if (options.load) params.set("load", options.load);
     return `/api/ground/surface?${params}`;
   },
+  bakeSceneTiles: (body) => request("/api/scene-tiles/bake", { method: "POST", body: JSON.stringify(body || {}) }),
   exportMod: (body) => request("/api/export", { method: "POST", body: JSON.stringify(body) }),
   importAto: (path) => request("/api/import/ato", { method: "POST", body: JSON.stringify({ path }) }),
 };

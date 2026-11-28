@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { FIELD_FLIGHT, createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
+import { FIELD_FLIGHT, benchmarkMayFly, createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
 
 test("the field loop uses 160 m sides and closes", () => {
   const points = FIELD_FLIGHT.points;
@@ -33,6 +33,14 @@ test("a settled stream is idle and a pending load is not", () => {
   assert.equal(streamSettled({ queued: 1, loading: 0, background: 0, pending: 0 }), false);
 });
 
+test("the fly does not start before a scene has streamed", () => {
+  assert.equal(benchmarkMayFly({ actors: 0, busy: false, resident: 0 }), false);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: false, loaded: 0, resident: 0, sawWork: false }), false);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: true, resident: 20, sawWork: true }), false);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: false, resident: 800, sawWork: true }), true);
+  assert.equal(benchmarkMayFly({ actors: 4000, busy: false, loaded: 120, resident: 0 }), true);
+});
+
 test("the summary reports avg and p95 and skips null gpu samples", () => {
   const summary = summarizeBenchmark([
     { submitMs: 10, updateMs: 4, draws: 20, batches: 8, heapBytes: 100, gpuMs: null, writeTex: 1 },
@@ -60,6 +68,39 @@ test("the benchmark stays off unless Profile or the query flag starts it", () =>
   assert.doesNotMatch(viewport, /render-bundles/);
   assert.doesNotMatch(viewport, /blend-array/);
   assert.match(main, /get\("benchmark"\) === "1"/);
+  assert.match(main, /get\("tiles"\) === "1"/);
+  assert.match(viewport, /import\("\.\/scene-tiles-runtime\.js"\)/);
+  assert.doesNotMatch(viewport, /from "3d-tiles-renderer/);
+  assert.match(viewport, /tileHides\(/);
+  assert.match(viewport, /tileBakeError/);
+  assert.match(viewport, /status === "failed"/);
+  assert.match(viewport, /fallBackToBatches/);
+  assert.match(viewport, /tileLoaded/);
+  assert.match(viewport, /onTileBakeError/);
+  assert.match(viewport, /bakeMs: tileBakeMs/);
+  assert.match(viewport, /benchmarkMayFly/);
+  assert.match(viewport, /entries\.size === 0/);
+  assert.match(viewport, /actorsBaked: tileActorCount/);
+  assert.match(viewport, /status: tilesOn/);
+  assert.match(main, /onTileBakeError/);
+  assert.match(viewport, /shouldRequestTileBake/);
+  const runtime = readFileSync(new URL("./scene-tiles-runtime.js", import.meta.url), "utf8");
+  assert.match(runtime, /3d-tiles-renderer\/three/);
+  assert.match(runtime, /import \{ GLTFLoader \} from "three\/addons\/loaders\/GLTFLoader.js"/);
+  assert.match(runtime, /import \{ KTX2Loader \} from "three\/addons\/loaders\/KTX2Loader.js"/);
+  assert.match(runtime, /import \{ MeshoptDecoder \} from "meshoptimizer\/decoder"/);
+  assert.match(runtime, /setMeshoptDecoder/);
+  assert.match(runtime, /KTX2Loader/);
+  assert.match(runtime, /addHandler/);
+  assert.doesNotMatch(runtime, /import\(["'][^"']*GLTFExtensionsPlugin/);
+  assert.doesNotMatch(runtime, /from ["'][^"']*GLTFExtensionsPlugin/);
+  assert.doesNotMatch(runtime, /BatchedTilesPlugin/);
+  assert.doesNotMatch(runtime, /TilesFadePlugin/);
+  assert.doesNotMatch(runtime, /MeshFeatures/);
+  assert.doesNotMatch(runtime, /TextureReadUtility/);
+  assert.match(runtime, /maxBytesSize = TILE_CACHE_BYTES/);
+  assert.match(html, /Tiles \(experimental\)/);
+  assert.doesNotMatch(html, /id="show-tiles"[^>]*checked/);
   assert.doesNotMatch(html, /id="show-profile"[^>]*checked/);
   assert.doesNotMatch(main, /ocarinaforge\.benchmark/);
 });

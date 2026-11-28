@@ -24,6 +24,10 @@ mods/<name>/romfs/...
 
 A scene name looks like `KokiriForest_Child_Static` or `HyruleField_Adult_Dynamic`. Static and Dynamic are separate bancs. The editor opens one of them as the file it writes, and draws the other (same folder, same age, `_Static` swapped with `_Dynamic`) as a companion overlay. Kokiri houses live in the Dynamic banc; the NPCs in Static stand on them.
 
+## Editor tile cache
+
+`tiles/sets/<hash>/tileset.json` under the model cache is a drawing cache for static scenery. It is not a game file, not a banc, and it is not written into a mod. Longshot's actor API loads a BFRES pack from `Pack/Actor`. It does not load a 3D Tiles tileset. The editor serves the file at `/api/scene-tiles/<hash>/tileset.json`, so child glbs stay under that directory. `asset.gltfUpAxis` is `z`: the bake is already in the editor's Y-up coordinates, and the tiles renderer would otherwise rotate a Y-up glTF by 90° around X. Each vertex or instance stores `_FEATURE_ID_0`, the editor's 24-bit actor id, as an uncompressed float. meshopt's quantize step skips that accessor because the ids sit outside [-1, 1], and the values stay in the file.
+
 ## BYML
 
 Version 7, little endian, magic `YB`. Ocarina Forge reads and writes hash maps (`0x20` u32 keys, `0x21` u64 keys) as well as the usual arrays, dicts, strings, and numeric types. Identical containers are shared. Bool is not stored as an int.

@@ -30,6 +30,24 @@ export function streamSettled({ queued = 0, loading = 0, background = 0, pending
   return Number(queued) === 0 && Number(loading) === 0 && Number(background) === 0 && Number(pending) === 0;
 }
 
+/**
+ * An idle counter before the scene exists is not a settled Field. The fly
+ * waits until actors are on screen and streaming has either run or already
+ * left models resident. A scene that finished streaming before the button
+ * may fly on the first check.
+ */
+export function benchmarkMayFly({
+  actors = 0,
+  busy = false,
+  loaded = 0,
+  resident = 0,
+  sawWork = false,
+} = {}) {
+  if (Number(actors) <= 0) return false;
+  if (busy) return false;
+  return Boolean(sawWork || Number(loaded) > 0 || Number(resident) > 0);
+}
+
 export function createFlight(spec = FIELD_FLIGHT) {
   const points = spec.points;
   let seg = 0;
@@ -92,6 +110,7 @@ const SUMMARY_FIELDS = [
   "writeTex", "indirectFills", "lodFlips", "heapBytes", "draws", "batches",
   "cpuMs", "gpuMs", "flyMs", "textureMs", "pipelines", "versions", "binds",
   "geomBytes", "bc7Bytes", "objects",
+  "tilesLoaded", "tilesVisible", "tilesBytes", "bakeMs",
 ];
 
 function finite(value) {

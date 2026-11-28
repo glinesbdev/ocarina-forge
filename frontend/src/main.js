@@ -281,6 +281,7 @@ viewport = await createViewport($("viewport"), {
     }
   },
   onDeviceLost: (message) => toast(message, { persistent: true }),
+  onTileBakeError: (message) => toast(message, { persistent: true }),
   onFrame() {
     refreshStreamLog();
   },
@@ -450,6 +451,15 @@ if (profileBox) {
     } catch {
       /* private mode */
     }
+  });
+}
+const tilesBox = $("show-tiles");
+if (tilesBox && viewport.setTiles) {
+  const tilesOn = new URLSearchParams(window.location.search).get("tiles") === "1";
+  tilesBox.checked = tilesOn;
+  if (tilesOn) viewport.setTiles(true);
+  tilesBox.addEventListener("change", () => {
+    viewport.setTiles(tilesBox.checked);
   });
 }
 const benchQuery = new URLSearchParams(window.location.search).get("benchmark") === "1";

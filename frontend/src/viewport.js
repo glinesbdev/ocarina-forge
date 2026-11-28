@@ -47,7 +47,9 @@ import { ensureWaterUv, FISHING_POND_WATER, fishingPondFish, fishingPondPreviewO
 import { compileObjectPipeline, createBackendRenderer, drawTotal, warmWebGLPrograms } from "./backend.js";
 import { frontendBuild, shortRevision } from "./build-info.js";
 import { formatMemoryNote, formatStatusLabel, keepRendering } from "./frame.js";
-import { createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
+import { api } from "./api.js";
+import { benchmarkMayFly, createFlight, streamSettled, summarizeBenchmark } from "./field-benchmark.js";
+import { actorKeyFromFeature, featureIdOnHit, shouldRequestTileBake, tileCounters, tileEligible, tileHides } from "./scene-tiles.js";
 import { buildCapture, countTextures, createProfileWindow, formatProfileHud, recommendNext } from "./frame-profile.js";
 import { createFrameTimer } from "./gpu-timer.js";
 import { actorLayer, planAssetFetches, wantsMesh } from "./layers.js";
@@ -388,6 +390,20 @@ export async function createViewport(host, hooks) {
   let statLodFlips = 0;
   let benchmarkRun = null;
   let benchmarkResult = null;
+  let tilesOn = false;
+  let tileLayer = null;
+  let tileHeld = new Set();
+  let tileActors = new Map();
+  const tileLoaded = new Set();
+  let tileBakeMs = 0;
+  let tileBakeStatus = "off";
+  let tileCellCount = 0;
+  let tileActorCount = 0;
+  let tileBakeToken = 0;
+  let tileBakeTimer = 0;
+  let tileSettleBake = false;
+  let tileBakeError = "";
+  let tileBakeFlight = null;
   let lastRendering = false;
   let serverHead = "";
   let serverLines = [];
@@ -1197,6 +1213,7 @@ let convertSlots = 8;
     textureAssigned += (report || []).filter((row) => row && row.status === "applied").length;
     rememberTextureNote(gyaml, formatTextureReport(report));
     refreshBlendMaps(parsed.parts);
+    if (tilesOn && tileLayer) rebindTileMaterials();
     if (generation !== textureGeneration || !parsedTemplates.has(url)) return;
     presentTextures(parsed.parts, texturesShown);
     finishTextureEdit(parsed.parts);
@@ -1353,6 +1370,7 @@ let convertSlots = 8;
     clearSnapGrid();
     selected = null;
     hovered = null;
+    disposeTileLayer();
     foregroundModelNames.clear();
     detailCandidates.clear();
     detailParses.length = 0;
@@ -1634,6 +1652,7 @@ let convertSlots = 8;
       region,
       companion: Boolean(actor.companion),
       layer: actor.layer || "",
+      banc: actor.banc || "",
       parts: null,
       farNames: null,
       slots: [],
@@ -1667,6 +1686,17 @@ let convertSlots = 8;
   }
 
   function setActors(actors, options = {}) {
+    if (tilesOn) {
+      tileBakeToken += 1;
+      if (tileLayer) {
+        tileLayer.dispose();
+        tileLayer = null;
+      }
+      tileHeld.clear();
+      tileActors.clear();
+      tileLoaded.clear();
+      tileSettleBake = true;
+    }
     const reloadTerrain = shouldReloadTerrain(terrainBanc, options.banc);
     if (reloadTerrain && terrainBanc) rememberSceneTemplates(terrainBanc);
     clearActors({ keepBatches: !reloadTerrain });
@@ -3243,7 +3273,13 @@ let convertSlots = 8;
         const slot = entry.slots[i];
         const probe = cullProbes[i];
         const lod = resolveLod(cullWanted.get(slot.family), cullLevels.get(slot.family));
-        const show = probe.inFrustum && lod === slot.lod;
+        const show = !tileHides({
+          tilesOn,
+          held: tileHeld.has(entry.key),
+          opened: tileOpened(entry),
+          live: tileLoaded.has(entry.key),
+        }) && probe.inFrustum && lod === slot.lod;
+        if (tilesOn && tileHeld.has(entry.key) && slot.mesh) slot.mesh.userData.forgeTileMesh = true;
         if (slot.shown !== show) {
           const wasHidden = slot.shown === false;
           slot.shown = show;
@@ -3257,6 +3293,19 @@ let convertSlots = 8;
       }
     }
     statInstances = instances;
+    if (tilesOn && tileHeld.size) {
+      const live = new Set();
+      for (const entry of entries.values()) {
+        for (const slot of entry.slots || []) {
+          if (slot.shown && slot.mesh) live.add(slot.mesh);
+        }
+      }
+      for (const batch of batches) {
+        const mesh = batch.mesh;
+        if (!mesh || !mesh.userData.forgeTileMesh || batch.water || batch.helper) continue;
+        mesh.visible = live.has(mesh);
+      }
+    }
     statCulled = instances - visible;
     cullWorld.copy(camera.matrixWorld);
     cullProjection.copy(camera.projectionMatrix);
@@ -4531,6 +4580,7 @@ uniform float terrainLayerMissing;`
     prioritizeLoad();
     for (const entry of entries.values()) paint(entry);
     syncBatchVisibility();
+    if (tileLayer) tileLayer.hide(openedTileUris());
     attach();
     syncLabels();
     updateSnapGrid(selected ? entries.get(selected) : null);
@@ -5150,7 +5200,10 @@ uniform float terrainLayerMissing;`
     const scale = pivotScale(entry.pivot);
     const pose = { translate, rotate, scale, commit };
     for (const follow of actorTransformFollowers) follow(entry, pose);
-    if (commit) hooks.onTransform(entry.id, translate, rotate, scale);
+    if (commit) {
+      hooks.onTransform(entry.id, translate, rotate, scale);
+      scheduleTileBake();
+    }
     else hooks.onPreview(entry.id, translate, rotate, scale);
     requestRender();
     return pose;
@@ -5239,6 +5292,7 @@ uniform float terrainLayerMissing;`
     setPointer(event);
     const roots = [];
     for (const batch of batches) roots.push(batch.mesh);
+    if (tilesOn && tileLayer && tileLayer.group) roots.push(tileLayer.group);
     if (includePreview && scenePreview?.root.parent) {
       for (const meshes of scenePreview.models.values()) roots.push(...meshes);
     }
@@ -5285,6 +5339,11 @@ uniform float terrainLayerMissing;`
   }
 
   function idOfHit(hit) {
+    const feature = featureIdOnHit(hit);
+    if (feature) {
+      const key = actorKeyFromFeature(feature, (id) => gpuPicker.keyFor(id));
+      if (key) return key;
+    }
     const index = hit.batchId !== undefined ? hit.batchId : hit.instanceId;
     if (index !== undefined) {
       const batch = batches.find((item) => item.mesh === hit.object);
@@ -6167,7 +6226,17 @@ uniform float terrainLayerMissing;`
       bc7Bytes: assetBudgetCache ? assetBudgetCache.bc7 : null,
     });
     if (benchmarkRun && benchmarkRun.recording && profileWindow.latest()) {
-      benchmarkRun.samples.push({ ...profileWindow.latest() });
+      const tiles = tileLayer && tileLayer.stats ? tileLayer.stats() : {};
+      benchmarkRun.samples.push({
+        ...profileWindow.latest(),
+        ...tileCounters({
+          enabled: tilesOn,
+          loaded: tiles.loaded,
+          visible: tiles.visible,
+          cachedBytes: tiles.cachedBytes,
+          bakeMs: tileBakeMs,
+        }),
+      });
     }
   }
 
@@ -6226,6 +6295,292 @@ uniform float terrainLayerMissing;`
     if (on && gpuProfile) armFrameCounters(gpuProfile);
   }
 
+  function tileOpened(entry) {
+    if (!entry || !selected || !tileHeld.has(selected)) return false;
+    const open = tileActors.get(selected);
+    const mine = tileActors.get(entry.key);
+    return Boolean(open && mine && open.leaf === mine.leaf);
+  }
+
+  function openedTileUris() {
+    const uris = tileActors.get(selected);
+    if (!uris) return [];
+    return [uris.leaf, uris.hlod].filter(Boolean);
+  }
+
+  function disposeTileLayer() {
+    tileBakeToken += 1;
+    if (tileBakeTimer) clearTimeout(tileBakeTimer);
+    tileBakeTimer = 0;
+    tileHeld.clear();
+    tileActors.clear();
+    tileLoaded.clear();
+    if (tileLayer) {
+      tileLayer.dispose();
+      tileLayer = null;
+    }
+  }
+
+  function fallBackToBatches() {
+    tileHeld.clear();
+    tileActors.clear();
+    tileLoaded.clear();
+    if (tileLayer) {
+      tileLayer.dispose();
+      tileLayer = null;
+    }
+    releaseTileMeshes();
+    bumpCull();
+    requestRender();
+  }
+
+  function noteTileModel(url) {
+    const file = String(url || "");
+    if (!file) return;
+    let changed = false;
+    for (const [key, uris] of tileActors) {
+      if (!uris || tileLoaded.has(key)) continue;
+      const leaf = uris.leaf || "";
+      const hlod = uris.hlod || "";
+      if ((leaf && file.endsWith(leaf)) || (hlod && file.endsWith(hlod))) {
+        tileLoaded.add(key);
+        changed = true;
+      }
+    }
+    if (changed) bumpCull();
+  }
+
+  function releaseTileMeshes() {
+    for (const batch of batches) {
+      const mesh = batch.mesh;
+      if (!mesh || !mesh.userData.forgeTileMesh) continue;
+      mesh.userData.forgeTileMesh = false;
+      if (batch.water) mesh.visible = showWater;
+      else if (batch.helper) mesh.visible = showHelpers;
+      else mesh.visible = true;
+    }
+  }
+
+  function forgeSource(forge) {
+    if (!forge || !forge.image) return null;
+    for (const entry of entries.values()) {
+      for (const part of entry.parts || []) {
+        const user = part.material && part.material.userData;
+        if (user && user.forgeAlbedoName === forge.image && part.material.map) return part.material;
+      }
+    }
+    return null;
+  }
+
+  function prepareTileMaterial(material, mesh) {
+    const forge = material.userData && material.userData.forge;
+    const source = forgeSource(forge);
+    if (source) {
+      material.map = source.map;
+      material.color.copy(source.color);
+      material.opacity = source.opacity;
+      material.transparent = source.transparent;
+      material.depthWrite = source.depthWrite;
+      material.alphaTest = source.alphaTest;
+      material.side = source.side;
+      material.alphaToCoverage = source.alphaToCoverage;
+      material.userData.banc = source.userData.banc;
+      material.userData.blend = source.userData.blend;
+      material.userData.blendMap = source.userData.blendMap;
+      material.userData.forgeAlbedoName = source.userData.forgeAlbedoName;
+      for (const key of ["blendScaleUniform", "blendTranslateUniform", "blendDebugUniform", "blendChannelUniform", "blendUv1Uniform", "blendMapUniform"]) {
+        if (source.userData[key]) material.userData[key] = source.userData[key];
+      }
+    }
+    material.userData.bancPrepared = false;
+    prepareMaterial(material);
+    promoteBlendMask(material, mesh && mesh.geometry);
+    if (blendNodes && material.userData.blend && material.userData.blendMap && material.map && !material.userData.blendNode) {
+      blendNodes.attachBlend(material);
+    }
+  }
+
+  function rebindTileMaterials() {
+    if (!tileLayer || !tileLayer.group) return;
+    tileLayer.group.traverse((child) => {
+      if (!child.isMesh) return;
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) {
+        if (material) prepareTileMaterial(material, child);
+      }
+    });
+  }
+
+  function collectTileActors() {
+    const partsByGyaml = new Map();
+    for (const entry of entries.values()) {
+      if (!entry.gyaml || partsByGyaml.has(entry.gyaml) || !entry.parts) continue;
+      const parts = [];
+      for (const part of entry.parts) {
+        if (!part || part.lod) continue;
+        parts.push({
+          family: part.family || "",
+          image: (part.material && part.material.userData && part.material.userData.forgeAlbedoName) || "",
+          alpha: part.material && part.material.transparent ? "blend" : (part.material && part.material.alphaTest > 0 ? "mask" : "opaque"),
+        });
+      }
+      if (parts.length) partsByGyaml.set(entry.gyaml, parts);
+    }
+    const actors = [];
+    for (const entry of entries.values()) {
+      if (!tileEligible(entry)) continue;
+      actors.push({
+        featureId: gpuPicker.idFor(entry.key),
+        gyaml: entry.gyaml,
+        banc: entry.banc,
+        layer: entry.layer,
+        category: entry.category,
+        volume: Boolean(entry.volume),
+        region: Boolean(entry.region),
+        translation: [entry.pivot.position.x, entry.pivot.position.y, entry.pivot.position.z],
+        rotation: fileRotate(entry.pivot),
+        scale: [entry.pivot.scale.x, entry.pivot.scale.y, entry.pivot.scale.z],
+        parts: partsByGyaml.get(entry.gyaml) || [],
+      });
+    }
+    return actors;
+  }
+
+  function applyTileManifest(result) {
+    tileHeld.clear();
+    tileActors.clear();
+    const actors = result && result.actors || {};
+    for (const [feature, uris] of Object.entries(actors)) {
+      const key = gpuPicker.keyFor(Number(feature));
+      if (!key || !uris) continue;
+      tileHeld.add(key);
+      tileActors.set(key, uris);
+    }
+  }
+
+  async function mountTileLayer(url) {
+    const runtime = await import("./scene-tiles-runtime.js");
+    if (!tilesOn) return;
+    const layer = await runtime.createTileLayer({
+      url,
+      scene,
+      camera,
+      renderer,
+      pickLayer: PICK_LAYER,
+      prepare: prepareTileMaterial,
+      onModel: noteTileModel,
+    });
+    if (!tilesOn) {
+      layer.dispose();
+      return;
+    }
+    if (tileLayer) tileLayer.dispose();
+    tileLayer = layer;
+  }
+
+  function tileErrorLine(message) {
+    const lines = String(message || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    return lines.find((line) => line.startsWith("Error:")) || lines.find((line) => !line.startsWith("The tile bake failed")) || "The tile bake failed.";
+  }
+
+  function noteTileBakeError(error) {
+    const message = error && error.message ? String(error.message) : String(error || "The tile bake failed.");
+    tileSettleBake = false;
+    if (tileBakeError === message) return;
+    tileBakeError = message;
+    console.error(message);
+    if (hooks.onTileBakeError) hooks.onTileBakeError(tileErrorLine(message));
+  }
+
+  async function ensureTiles(reason) {
+    if (!tilesOn) return "off";
+    if (!shouldRequestTileBake({ failed: Boolean(tileBakeError), reason })) return "failed";
+    if (reason === "toggle" || reason === "save") tileBakeError = "";
+    if (tileBakeFlight && reason !== "toggle" && reason !== "save") return tileBakeFlight;
+    const flight = requestTileBake();
+    tileBakeFlight = flight;
+    try {
+      return await flight;
+    } finally {
+      if (tileBakeFlight === flight) tileBakeFlight = null;
+    }
+  }
+
+  function rememberTileBake(result, status) {
+    tileBakeStatus = status;
+    tileBakeMs = Number(result && result.bakeMs) || tileBakeMs;
+    tileCellCount = Number(result && result.tiles) || 0;
+    tileActorCount = result && result.actors ? Object.keys(result.actors).length : 0;
+  }
+
+  async function requestTileBake() {
+    if (entries.size === 0) {
+      tileBakeStatus = "waiting";
+      return "waiting";
+    }
+    const token = ++tileBakeToken;
+    tileBakeStatus = "pending";
+    let result = null;
+    try {
+      result = await api.bakeSceneTiles({ actors: collectTileActors() });
+    } catch (error) {
+      noteTileBakeError(error);
+      tileBakeStatus = "failed";
+      fallBackToBatches();
+      return "failed";
+    }
+    if (token !== tileBakeToken || !tilesOn) {
+      tileBakeStatus = "stale";
+      return "stale";
+    }
+    if (!result || !result.url) {
+      rememberTileBake(result, "empty");
+      fallBackToBatches();
+      return "empty";
+    }
+    rememberTileBake(result, "applied");
+    applyTileManifest(result);
+    try {
+      await mountTileLayer(result.url);
+    } catch (error) {
+      noteTileBakeError(error);
+      tileBakeStatus = "failed";
+      fallBackToBatches();
+      return "failed";
+    }
+    if (token !== tileBakeToken || !tilesOn) {
+      tileBakeStatus = "stale";
+      return "stale";
+    }
+    bumpCull();
+    requestRender();
+    return "applied";
+  }
+
+  function scheduleTileBake() {
+    if (!tilesOn) return;
+    if (tileBakeTimer) clearTimeout(tileBakeTimer);
+    tileBakeTimer = setTimeout(() => {
+      tileBakeTimer = 0;
+      ensureTiles("save");
+    }, 400);
+  }
+
+  function setTiles(on) {
+    const next = Boolean(on);
+    if (next === tilesOn) return;
+    tilesOn = next;
+    tileSettleBake = next;
+    if (!next) {
+      disposeTileLayer();
+      releaseTileMeshes();
+      bumpCull();
+      requestRender();
+      return;
+    }
+    ensureTiles("toggle");
+  }
+
   function startFieldBenchmark() {
     if (benchmarkRun) return benchmarkResult;
     if (!showProfile) {
@@ -6275,7 +6630,21 @@ uniform float terrainLayerMissing;`
       geomBytes: budget ? budget.geometry : null,
       bc7Bytes: budget ? budget.bc7 : null,
       capped: statCapped,
-      note: "avg and p95 are the fly after streaming settles or the wait ends. submit, update, priority, labels, and cull are CPU milliseconds. writeTex counts queue.writeTexture while Profile is on. indirectFills counts WebGPU merged-draw fills. lodFlips counts instance visibility changes. heap.avg is the fly; heap.final is the last sample. capped is the resident cap count at the end. draws and batches are in summary.",
+      tiles: {
+        enabled: tilesOn,
+        status: tilesOn ? (tileBakeStatus || "pending") : "off",
+        error: tileBakeError || "",
+        cells: tileCellCount,
+        actorsBaked: tileActorCount,
+        loaded: samples.length ? samples[samples.length - 1].tilesLoaded || 0 : 0,
+        visible: samples.length ? samples[samples.length - 1].tilesVisible || 0 : 0,
+        cachedBytes: samples.length ? samples[samples.length - 1].tilesBytes || 0 : 0,
+        bakeMs: tileBakeMs,
+      },
+      ...(tileBakeError ? { error: tileBakeError } : {}),
+      note: tileBakeError
+        ? "The tile path failed. The fly kept the current batches, and tiles.bakeMs is the bake that did finish. The error was shown once."
+        : "avg and p95 are the fly after streaming settles or the wait ends. submit, update, priority, labels, and cull are CPU milliseconds. writeTex counts queue.writeTexture while Profile is on. indirectFills counts WebGPU merged-draw fills. lodFlips counts instance visibility changes. heap.avg is the fly; heap.final is the last sample. capped is the resident cap count at the end. draws and batches are in summary. tiles counts the experimental tileset; with the toggle off those counts stay 0.",
     };
     const json = JSON.stringify(benchmarkResult, null, 2);
     console.info(json);
@@ -6293,15 +6662,47 @@ uniform float terrainLayerMissing;`
     if (!run.flight) {
       const pending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
         || (modelStage && modelStage.pending && modelStage.pending.size > 0);
-      const settled = streamSettled({
+      const busy = !streamSettled({
         queued: statQueued,
         loading: statLoading,
         background: (statDeferred || 0) + (statBackgroundLoading || 0),
         pending: pending ? 1 : 0,
       });
+      if (busy) run.sawWork = true;
+      const mayFly = benchmarkMayFly({
+        actors: entries.size,
+        busy,
+        loaded: statLoaded,
+        resident: residentMeshNames().size,
+        sawWork: Boolean(run.sawWork),
+      });
       run.waited += 1;
-      if (!settled && run.waited < 60 * 90) return true;
-      run.settled = settled;
+      // No scene yet is not a settled Field. Once actors exist, match main:
+      // wait for streaming to go idle, and give up after about 90 seconds.
+      if (!mayFly && (entries.size === 0 || run.waited < 60 * 90)) return true;
+      if (tilesOn && !run.tilesReady) {
+        if (!run.tilesPromise) {
+          run.tilesPromise = ensureTiles("benchmark").then((status) => {
+            run.tilesPromise = null;
+            if (status === "waiting" || status === "pending") {
+              requestRender();
+              return;
+            }
+            if (status === "failed" || status === "applied" || status === "empty" || status === "off" || status === "stale" || !tilesOn) {
+              run.tilesReady = true;
+            }
+            requestRender();
+          }, () => {
+            run.tilesPromise = null;
+            fallBackToBatches();
+            tileBakeStatus = "failed";
+            run.tilesReady = true;
+            requestRender();
+          });
+        }
+        if (!run.tilesReady && run.waited < 60 * 180) return true;
+      }
+      run.settled = mayFly && !busy;
       run.waitFrames = run.waited;
       run.flight = createFlight();
       run.recording = true;
@@ -6392,6 +6793,23 @@ uniform float terrainLayerMissing;`
       transform.size = THREE.MathUtils.clamp(distance / 14, 0.55, 2.4);
     }
     const updateTail = performance.now() - tailStart;
+    if (tilesOn && tileSettleBake && !tileBakeError && entries.size > 0 && !(benchmarkRun && benchmarkRun.tilesPromise)) {
+      const tilesPending = statLoading > 0 || statQueued > 0 || pendingLoads > 0 || statBackgroundLoading > 0
+        || (modelStage && modelStage.pending && modelStage.pending.size > 0);
+      if (!tilesPending) {
+        tileSettleBake = false;
+        ensureTiles("settle");
+      }
+    }
+    if (tilesOn && tileLayer) {
+      try {
+        tileLayer.update(camera, renderer);
+        tileLayer.hide(openedTileUris());
+      } catch (error) {
+        noteTileBakeError(error);
+        fallBackToBatches();
+      }
+    }
     if (renderer.isWebGPURenderer && renderer.info && typeof renderer.info.reset === "function") renderer.info.reset();
     const profiling = showProfile;
     let submitMs = 0;
@@ -6731,6 +7149,7 @@ uniform float terrainLayerMissing;`
       serverLines = status && Array.isArray(status.lines) ? status.lines.slice() : [];
       if (showProfile) paintProfile();
     },
+    setTiles,
     setShowProfile(on) {
       const next = Boolean(on);
       if (next && !showProfile) profileWindow.clear();

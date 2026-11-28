@@ -14,6 +14,7 @@ import { Node, NodeMaterial } from "three/webgpu";
 import {
   Fn,
   Node as TslNode,
+  attribute,
   cameraPosition,
   drawIndex,
   float,
@@ -92,7 +93,13 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
     let id;
     const pickTex = resolvePickTexture(object?.userData?.forgePickTexture);
     const indirect = resolvePickTexture(object?.userData?.forgeIndirect) || resolvePickTexture(object?._indirectTexture);
-    if (object && object.isBatchedMesh && pickTex && indirect) {
+    const feature = geometry && (
+      (typeof geometry.hasAttribute === "function" && geometry.hasAttribute("_feature_id_0"))
+      || (geometry.attributes && geometry.attributes._feature_id_0)
+    );
+    if (feature) {
+      id = attribute("_feature_id_0", "float");
+    } else if (object && object.isBatchedMesh && pickTex && indirect) {
       const drawId = builder.getDrawIndex() === null ? instanceIndex : drawIndex;
       id = sampleR(pickTex, sampleR(indirect, drawId));
     } else if (object && object.isInstancedMesh && pickTex) {
@@ -117,6 +124,10 @@ export function createNodePickMaterial({ uniforms, getActiveObject }) {
     const mask = pickMask(material);
     const cut = mask.map ? `cut-${mask.channel}` : "solid";
     const tex = object?.userData?.forgePickTexture?.uuid || "none";
+    const featureAttr = object?.geometry && (
+      object.geometry.getAttribute?.("_feature_id_0") || object.geometry.attributes?._feature_id_0
+    );
+    if (featureAttr) return `forge-pick-feature-${cut}`;
     if (object?.isInstancedMesh) return `forge-pick-inst-${object.uuid}-${cut}-${tex}`;
     if (object?.isBatchedMesh) return `forge-pick-batch-${cut}-${tex}`;
     return `forge-pick-mesh-${cut}`;
