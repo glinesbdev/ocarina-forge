@@ -1,0 +1,28 @@
+<Project Sdk="Godot.NET.Sdk/4.7.2">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>OcarinaForge.Generated</RootNamespace>
+    <AssemblyName>OcarinaForge.Generated</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="OcarinaForge.Import">
+      <HintPath>addons/ocarina_forge/lib/OcarinaForge.Import.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OcarinaForge.Project">
+      <HintPath>addons/ocarina_forge/lib/OcarinaForge.Project.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="ZstdSharp">
+      <HintPath>addons/ocarina_forge/lib/ZstdSharp.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="AssetRipper.TextureDecoder">
+      <HintPath>addons/ocarina_forge/lib/AssetRipper.TextureDecoder.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

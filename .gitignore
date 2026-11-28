@@ -22,3 +22,16 @@ tools/wasm-bench/dist/
 tools/wasm-bench/pkg/
 tools/wasm-bench/data/*.bin
 tools/wasm-bench/data/*.json
+
+# Godot. Imported output, build trees, and logs stay on the machine that owns the dump.
+**/.godot/
+**/.ocarina/
+**/bin/
+**/obj/
+godot/**/*.user
+godot-cache/
+godot/out/
+*.log
+
+# local run output
+godot/viewer/field-loop-*.json

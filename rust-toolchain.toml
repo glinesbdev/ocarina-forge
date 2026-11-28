@@ -1,5 +1,0 @@
-[toolchain]
-channel = "1.83.0"
-profile = "minimal"
-# wasm32-unknown-unknown is not listed here. The builder installs it after a yes,
-# so opening this directory does not download the target.

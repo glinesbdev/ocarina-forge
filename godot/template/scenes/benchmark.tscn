@@ -1,0 +1,5 @@
+[gd_scene load_steps=2 format=3 uid="uid://ocarinaforgebench"]
+
+[ext_resource type="PackedScene" path="res://main.tscn" id="1_main"]
+
+[node name="Benchmark" instance=ExtResource("1_main")]

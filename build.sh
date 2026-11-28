@@ -1,152 +1,108 @@
 #!/usr/bin/env bash
-# Set up, build, and launch Ocarina Forge.
-# Package installs run only after a yes. Rust is installed only when the wasm module is out of date.
+# Restore, build, and test the Godot project. Pass --dump and --out to generate a project.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-confirm() {
-  local reply
-  printf '%s [y/N] ' "$1"
-  if ! read -r reply; then
-    return 1
-  fi
-  [[ "$reply" == [yY] || "$reply" == [yY][eE][sS] ]]
+DUMP=""
+OUT=""
+GODOT_ARG="${GODOT_BIN:-${GODOT:-}}"
+DOTNET_URL="https://dotnet.microsoft.com/download/dotnet/8.0"
+GODOT_URL="https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_mono_linux_x86_64.zip"
+
+usage() {
+  echo "usage: ./build.sh [--godot <Godot 4 .NET binary>] [--dump <dump>] --out <project>"
+  echo "  GODOT_BIN or GODOT names the binary when --godot is omitted."
+  echo "  --dump is the folder that contains romfs/, or the romfs folder itself."
+  echo "  Without --dump and --out, this restores, builds, and tests."
 }
 
-# Keep this in sync with linux_family() in ocarina_forge/builder.py.
-distro_family() {
-  local blob=""
-  if [[ -r /etc/os-release ]]; then
-    # shellcheck disable=SC1091
-    . /etc/os-release
-    blob="${ID:-} ${ID_LIKE:-}"
-  fi
-  case "$blob" in
-    *debian*|*ubuntu*|*mint*|*pop*) echo apt ;;
-    *fedora*|*rhel*|*centos*|*rocky*|*alma*) echo dnf ;;
-    *arch*|*manjaro*) echo pacman ;;
-    *) echo unknown ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dump)
+      [[ $# -ge 2 ]] || { echo "--dump needs a path"; exit 2; }
+      DUMP="$2"; shift 2 ;;
+    --out)
+      [[ $# -ge 2 ]] || { echo "--out needs a path"; exit 2; }
+      OUT="$2"; shift 2 ;;
+    --godot)
+      [[ $# -ge 2 ]] || { echo "--godot needs a path"; exit 2; }
+      GODOT_ARG="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument $1"; usage; exit 2 ;;
   esac
-}
+done
 
-# Used only when Python itself is missing, so builder.py cannot print the command yet.
-# Keep this in sync with install_commands() in ocarina_forge/builder.py.
-python_install_command() {
-  case "$(distro_family)" in
-    apt) echo "sudo apt-get install -y python3 python3-venv" ;;
-    dnf) echo "sudo dnf install -y python3" ;;
-    pacman) echo "sudo pacman -S --needed python" ;;
-    *) echo "" ;;
-  esac
-}
+if [[ -n "$DUMP" && -z "$OUT" ]] || [[ -z "$DUMP" && -n "$OUT" ]]; then
+  echo "Pass both --dump and --out, or neither."
+  exit 2
+fi
 
-run_confirmed() {
-  local prompt="$1"
-  local cmd="$2"
-  if [[ -z "$cmd" ]]; then
-    echo "error: this distro has no install command here. Install it, then run ./build.sh again." >&2
-    exit 1
+export DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+if ! command -v dotnet >/dev/null 2>&1; then
+  echo "The .NET 8 SDK was not found on PATH."
+  echo "Install it from ${DOTNET_URL}"
+  exit 1
+fi
+if ! dotnet --list-sdks | grep -q '^8\.'; then
+  echo "dotnet is on PATH, and the .NET 8 SDK is not."
+  echo "Install it from ${DOTNET_URL}"
+  exit 1
+fi
+
+find_godot() {
+  if [[ -n "$GODOT_ARG" && -f "$GODOT_ARG" ]]; then
+    printf '%s\n' "$GODOT_ARG"
+    return 0
   fi
-  echo "$cmd"
-  if confirm "$prompt"; then
-    if ! bash -c "$cmd"; then
-      echo "error: that install did not finish." >&2
-      exit 1
-    fi
-    hash -r || true
-  else
-    echo "error: install skipped. Run ./build.sh again when it is installed." >&2
-    exit 1
-  fi
-}
-
-find_python() {
-  local cmd
-  for cmd in python3 python; do
-    if command -v "$cmd" >/dev/null 2>&1; then
-      if "$cmd" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
-        echo "$cmd"
-        return 0
-      fi
+  local name
+  for name in godot godot4 Godot; do
+    if command -v "$name" >/dev/null 2>&1; then
+      command -v "$name"
+      return 0
     fi
   done
   return 1
 }
 
-check_only=0
-for arg in "$@"; do
-  if [[ "$arg" == "--check" ]]; then
-    check_only=1
-  fi
-done
-
-if [[ -f "$HOME/.cargo/env" ]]; then
-  # shellcheck disable=SC1091
-  source "$HOME/.cargo/env"
-fi
-
-python=""
-if ! python="$(find_python)"; then
-  cmd="$(python_install_command)"
-  echo "Python 3.11 or newer was not found."
-  if [[ "$check_only" == 1 ]]; then
-    if [[ -n "$cmd" ]]; then
-      echo "$cmd"
-    else
-      echo "Install Python 3.11 or newer, then run ./build.sh --check again."
-    fi
+GODOT_BIN_FOUND=""
+if GODOT_BIN_FOUND="$(find_godot)"; then
+  GODOT_VERSION="$("$GODOT_BIN_FOUND" --version 2>/dev/null || true)"
+  if [[ "$GODOT_VERSION" != 4.* ]]; then
+    echo "Godot at ${GODOT_BIN_FOUND} reported '${GODOT_VERSION}'."
+    echo "This project needs Godot 4.x .NET (mono)."
+    echo "Download ${GODOT_URL}"
     exit 1
   fi
-  run_confirmed "Install Python?" "$cmd"
-  if ! python="$(find_python)"; then
-    echo "error: Python is still not on PATH. Open a new terminal and run ./build.sh again." >&2
+  if [[ "$GODOT_VERSION" != *mono* ]]; then
+    echo "Godot at ${GODOT_BIN_FOUND} reported '${GODOT_VERSION}'."
+    echo "That build is not the .NET (mono) editor. The C# scripts need Godot 4.x .NET."
+    echo "Download ${GODOT_URL}"
     exit 1
   fi
+  echo "godot ${GODOT_BIN_FOUND} (${GODOT_VERSION})"
+elif [[ -n "$DUMP" ]]; then
+  echo "Godot 4.x .NET (mono) was not found."
+  echo "Pass --godot, or set GODOT_BIN to the editor binary."
+  echo "Download ${GODOT_URL}"
+  exit 1
+else
+  echo "Godot 4.x .NET (mono) was not found. Restore, build, and the Godot-free tests still run."
+  echo "Headless generate and the viewer self-test are skipped."
+  echo "Pass --godot, or set GODOT_BIN. Download ${GODOT_URL}"
 fi
 
-if [[ "$check_only" == 1 ]]; then
-  exec "$python" -m ocarina_forge.builder "$@"
+dotnet restore godot/OcarinaForge.sln --nologo
+dotnet build godot/OcarinaForge.sln -c Debug --nologo
+dotnet test godot/Forge.Import.Tests/Forge.Import.Tests.csproj --nologo --no-build
+
+project_test=(dotnet test godot/Forge.Project.Tests/Forge.Project.Tests.csproj --nologo)
+if [[ -n "$GODOT_BIN_FOUND" ]]; then
+  "$GODOT_BIN_FOUND" --headless --path godot/viewer -- --self-test
+  project_test+=(--environment "GODOT=${GODOT_BIN_FOUND}" --environment REQUIRE_GODOT=1)
 fi
+"${project_test[@]}"
 
-status="$(FORGE_BUILDER_STATUS=shell "$python" -m ocarina_forge.builder --check)"
-# shellcheck disable=SC2086
-eval "$status"
-
-install_if_missing() {
-  local name="$1"
-  local cmd="$2"
-  local prompt="$3"
-  case " ${missing:-} " in
-    *" ${name} "*) run_confirmed "$prompt" "$cmd" ;;
-  esac
-}
-
-install_if_missing python "${python_cmd:-}" "Install Python?"
-install_if_missing venv "${venv_cmd:-}" "Install the Python venv module?"
-install_if_missing node "${node_cmd:-}" "Install Node?"
-install_if_missing npm "${npm_cmd:-}" "Install npm?"
-install_if_missing linker "${linker_cmd:-}" "Install a C linker?"
-
-case " ${missing:-} " in
-  *" rust "*)
-    echo "${rust_cmd:-}"
-    if confirm "Install Rust with rustup?"; then
-      if ! bash -c "${rust_cmd:-}"; then
-        echo "error: rustup did not finish." >&2
-        exit 1
-      fi
-    else
-      echo "error: Rust is required to rebuild the wasm module." >&2
-      exit 1
-    fi
-    ;;
-esac
-
-if [[ -f "$HOME/.cargo/env" ]]; then
-  # shellcheck disable=SC1091
-  source "$HOME/.cargo/env"
+if [[ -n "$DUMP" ]]; then
+  dotnet run --project godot/Forge.Cli --no-build -- new "$DUMP" "$OUT" --godot "$GODOT_BIN_FOUND"
 fi
-hash -r || true
-unset FORGE_BUILDER_STATUS
-
-exec "$python" -m ocarina_forge.builder "$@"

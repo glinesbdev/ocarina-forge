@@ -1,0 +1,11 @@
+.godot/
+.mono/
+bin/
+obj/
+.ocarina/
+models/
+textures/
+materials/
+maps/
+*.uid
+field-loop-160m.json

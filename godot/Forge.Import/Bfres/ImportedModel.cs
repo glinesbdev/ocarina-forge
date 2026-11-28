@@ -1,0 +1,239 @@
+namespace OcarinaForge.Import;
+
+public readonly record struct Vec2(double U, double V);
+public readonly record struct Vec3(double X, double Y, double Z);
+
+public sealed class ImportedPart
+{
+    public string Name { get; init; } = "";
+    public int Lod { get; init; }
+    public List<Vec3> Positions { get; init; } = new();
+    public List<int> Indices { get; init; } = new();
+    public List<Vec2>? Uvs { get; init; }
+    public List<Vec3>? Normals { get; set; }
+    /// <summary>MaterialAlb layer per vertex. -1 is the flat earth colour. Null when the mesh has no grid.</summary>
+    public List<int>? MaterialLayers { get; init; }
+    public string Material { get; init; } = "";
+    public int MaterialIndex { get; init; } = -1;
+    public string Texture { get; init; } = "";
+    public string OverlayTexture { get; init; } = "";
+    public string AlbedoSampler { get; init; } = "";
+    public string Alpha { get; init; } = "opaque";
+    public double Cutoff { get; init; } = 0.5;
+    public bool DoubleSided { get; init; } = true;
+    public List<(string Sampler, string Texture)> Binds { get; init; } = new();
+    public string OmitReason { get; set; } = "";
+    /// <summary>Second MaterialAlb index. -1 means there is no blend partner.</summary>
+    public List<int>? MaterialLayerB { get; set; }
+    /// <summary>Blend toward <see cref="MaterialLayerB"/>, 0 on material A.</summary>
+    public List<float>? MaterialBlend { get; set; }
+    public string Helper { get; init; } = "";
+    public bool Water { get; init; }
+    /// <summary>Bone indices and weights per vertex, in skeleton order. Null when the shape is not skinned.</summary>
+    public List<VertexSkin>? Weights { get; set; }
+    /// <summary>0 is the shape bone, 1 is one influence, 2 or more is smooth. Slots stay raw until skin binding.</summary>
+    public int SkinCount { get; set; }
+    /// <summary>FSHP skin-bone table. A vertex slot may index this before the model matrix palette.</summary>
+    public List<int> ShapeBones { get; set; } = new();
+    /// <summary>Positions before rigid baking, so a later clip can pick a different index space.</summary>
+    public List<Vec3>? LocalPositions { get; set; }
+    public List<Vec3>? LocalNormals { get; set; }
+    /// <summary>Influence slots as stored in the vertex buffer.</summary>
+    public List<VertexSkin>? RawWeights { get; set; }
+}
+
+/// <summary>Up to eight influences. Unused slots stay at bone 0 with weight 0.</summary>
+public readonly record struct VertexSkin(int A, int B, int C, int D, float Wa, float Wb, float Wc, float Wd,
+    int E = 0, int F = 0, int G = 0, int H = 0, float We = 0, float Wf = 0, float Wg = 0, float Wh = 0)
+{
+    public bool HasExtraInfluences => We > 0 || Wf > 0 || Wg > 0 || Wh > 0;
+}
+
+    /// <summary>One FSKL bone. The rotation is a quaternion. Curves live on <see cref="ImportedModel.Clips"/>.</summary>
+public sealed class ImportedBone
+{
+    public string Name { get; init; } = "";
+    public int Parent { get; init; } = -1;
+    public double Px { get; set; }
+    public double Py { get; set; }
+    public double Pz { get; set; }
+    public double Rx { get; set; }
+    public double Ry { get; set; }
+    public double Rz { get; set; }
+    public double Rw { get; set; } = 1;
+    public double Sx { get; set; } = 1;
+    public double Sy { get; set; } = 1;
+    public double Sz { get; set; } = 1;
+    /// <summary>Bone flag <c>0x800000</c>. The local transform Godot stores has this folded in.</summary>
+    public bool ScaleCompensate { get; set; }
+    public bool RestCompensated { get; set; }
+    /// <summary>Index into the rigid half of the matrix palette. -1 when this bone is not a rigid slot.</summary>
+    public int Rigid { get; set; } = -1;
+    /// <summary>Index into the smooth half of the matrix palette. -1 when this bone has no smooth slot.</summary>
+    public int Smooth { get; set; } = -1;
+    /// <summary>Scale from the file, before segment-scale compensation was folded into <see cref="Sx"/>.</summary>
+    public double BindSx { get; set; } = 1;
+    public double BindSy { get; set; } = 1;
+    public double BindSz { get; set; } = 1;
+}
+
+public sealed class ImportedModel
+{
+    public string Name { get; init; } = "";
+    public List<ImportedPart> Parts { get; init; } = new();
+    public Dictionary<string, CompressedTexture> Images { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Romfs path of the file that supplied each embedded or companion image, keyed by image name.</summary>
+    public Dictionary<string, string> ImageSources { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Bind-pose skeleton. Empty when the model has no FSKL.</summary>
+    public List<ImportedBone> Skeleton { get; init; } = new();
+    /// <summary>FSKL matrix-to-bone list. Smooth entries come first, then rigid entries. Counts are <see cref="SmoothMatrices"/> and <see cref="RigidMatrices"/>.</summary>
+    public List<int> MatrixPalette { get; set; } = new();
+    public int SmoothMatrices { get; set; }
+    public int RigidMatrices { get; set; }
+    /// <summary>Index space chosen for this model: palette, shape, shape-direct, direct, or rigid-tail.</summary>
+    public string SkinMapping { get; set; } = "";
+    public bool SkinBound { get; set; }
+    /// <summary>Bone indices that missed the skeleton, and posed bounds that left the rest size.</summary>
+    public List<string> SkinFindings { get; } = new();
+    /// <summary>Embedded FSKA clips and any clips resolved by the project importer.</summary>
+    public List<ImportedClip> Clips { get; set; } = new();
+    public List<string> AnimationSources { get; } = new();
+    public List<string> Notes { get; init; } = new();
+    public List<string> TextureHints { get; init; } = new();
+}
+
+public static class ShapeFilter
+{
+    static readonly (string Token, string Kind)[] Helpers =
+    {
+        ("blackfade", "fade"), ("fadeblack", "fade"), ("blackborad", "board"), ("blackboard", "board"),
+        ("darkplane", "dark"), ("shadowboard", "shadow"),
+    };
+
+    public static string HelperKind(string shape, string material)
+    {
+        string compact = (shape + material).ToLowerInvariant().Replace("_", "").Replace(" ", "");
+        foreach (var (token, kind) in Helpers)
+            if (compact.Contains(token, StringComparison.Ordinal)) return kind;
+        return "";
+    }
+
+    public static string OmitReason(string shape, string material)
+    {
+        string compact = $"{shape} {material}".ToLowerInvariant().Replace("_", "").Replace(" ", "");
+        if (compact.Contains("watervolume", StringComparison.Ordinal)) return "water volume is not drawn";
+        if (compact.Contains("bakeshadowproxy", StringComparison.Ordinal)) return "bake shadow proxy is not drawn";
+        if (compact.Contains("innermesh", StringComparison.Ordinal)) return "inner mesh is not drawn";
+        if (compact.Contains("eyeouter", StringComparison.Ordinal) || compact.Contains("eyeshadow", StringComparison.Ordinal))
+            return "eye overlay is not drawn";
+        foreach (var (word, reason) in new (string, string)[]
+        {
+            ("occluder", "occluder is not drawn"),
+            ("navmesh", "navmesh proxy is not drawn"),
+            ("minimap", "minimap model is not drawn"),
+            ("mapicon", "map icon is not drawn"),
+            ("sightblock", "sight blocker is not drawn"),
+            ("charactersight", "sight blocker is not drawn"),
+            ("collision", "collision mesh is not drawn"),
+            ("collider", "collision mesh is not drawn"),
+            ("impostor", "impostor is not drawn"),
+        })
+        {
+            if (compact.Contains(word, StringComparison.Ordinal)) return reason;
+        }
+        return "";
+    }
+
+    /// <summary>
+    /// The same hides as <c>models.py</c>: helper planes, the back water sheet when a front
+    /// sheet exists, and a coarse untextured box under a smaller mesh that has UVs.
+    /// </summary>
+    public static void Hide(List<ImportedPart> parts)
+    {
+        bool front = parts.Any(part =>
+        {
+            string low = $"{part.Name} {part.Material}".ToLowerInvariant();
+            return low.Contains("front", StringComparison.Ordinal) && (low.Contains("water", StringComparison.Ordinal) || low.Contains("flow", StringComparison.Ordinal));
+        });
+        bool proxy = parts.Count > 0
+            && parts.All(part => part.Uvs is not { Count: > 0 } && part.Texture.Length == 0)
+            && parts.Max(part => Span(part)) >= 8;
+        foreach (var part in parts)
+        {
+            if (part.OmitReason.Length > 0) continue;
+            if (proxy)
+            {
+                part.OmitReason = $"terrain proxy is not drawn ({part.Name} / {part.Material})";
+                continue;
+            }
+            if (part.Helper.Length > 0)
+            {
+                part.OmitReason = $"{part.Helper} helper is not drawn";
+                continue;
+            }
+            string low = $"{part.Name} {part.Material}".ToLowerInvariant();
+            if (front && low.Contains("back", StringComparison.Ordinal) && (low.Contains("water", StringComparison.Ordinal) || low.Contains("flow", StringComparison.Ordinal)))
+            {
+                part.OmitReason = "back water layer is not drawn";
+                continue;
+            }
+            if (BoundsBox(part, parts))
+            {
+                part.OmitReason = $"untextured bounds box is not drawn ({part.Name} / {part.Material})";
+                continue;
+            }
+            if (FlatSlab(part))
+                part.OmitReason = $"flat untextured slab is not drawn ({part.Name} / {part.Material})";
+        }
+    }
+
+    /// <summary>
+    /// A wide sheet with no UVs. The castle bounds box is the 8-vertex case; the field slabs
+    /// are the same kind of mesh with more vertices, so the 24-vertex cap does not see them.
+    /// A part that has UVs is a real surface and stays.
+    /// </summary>
+    static bool FlatSlab(ImportedPart part)
+    {
+        if (part.Uvs is { Count: > 0 } || part.Positions.Count == 0) return false;
+        double span = Span(part);
+        if (span < 8) return false;
+        return Thickness(part) <= Math.Max(1.0, span * 0.04);
+    }
+
+    static double Thickness(ImportedPart part)
+    {
+        double minX = part.Positions[0].X, maxX = minX, minY = part.Positions[0].Y, maxY = minY, minZ = part.Positions[0].Z, maxZ = minZ;
+        foreach (var point in part.Positions)
+        {
+            minX = Math.Min(minX, point.X); maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y); maxY = Math.Max(maxY, point.Y);
+            minZ = Math.Min(minZ, point.Z); maxZ = Math.Max(maxZ, point.Z);
+        }
+        return Math.Min(maxX - minX, Math.Min(maxY - minY, maxZ - minZ));
+    }
+
+    static bool BoundsBox(ImportedPart part, List<ImportedPart> parts)
+    {
+        if (part.Uvs is { Count: > 0 } || part.Positions.Count > 24 || Span(part) < 4) return false;
+        return parts.Any(other => !ReferenceEquals(other, part) && other.Uvs is { Count: > 0 } && other.Positions.Count > part.Positions.Count);
+    }
+
+    static double Span(ImportedPart part)
+    {
+        if (part.Positions.Count == 0) return 0;
+        double minX = part.Positions[0].X, maxX = minX, minY = part.Positions[0].Y, maxY = minY, minZ = part.Positions[0].Z, maxZ = minZ;
+        foreach (var point in part.Positions)
+        {
+            minX = Math.Min(minX, point.X); maxX = Math.Max(maxX, point.X);
+            minY = Math.Min(minY, point.Y); maxY = Math.Max(maxY, point.Y);
+            minZ = Math.Min(minZ, point.Z); maxZ = Math.Max(maxZ, point.Z);
+        }
+        return Math.Max(maxX - minX, Math.Max(maxY - minY, maxZ - minZ));
+    }
+
+    public static bool IsWater(string shape, string material)
+    {
+        string low = $"{shape} {material}".ToLowerInvariant();
+        return low.Contains("water", StringComparison.Ordinal) || low.Contains("flow", StringComparison.Ordinal);
+    }
+}

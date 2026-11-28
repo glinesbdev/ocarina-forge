@@ -1,5 +1,7 @@
 # One-click builder
 
+This page describes the archived web editor (`web-editor-final`). The current build is [../README.md](../README.md): `./build.sh` and `build.ps1`.
+
 `build.bat` and `build.sh` set Forge up, build what changed, and open the editor. They are the way to start a checkout. Rust is not part of that unless the wasm module committed under `frontend/wasm/` no longer matches `native/`.
 
 Windows: double-click `build.bat`. It runs `scripts/builder.ps1` with `-ExecutionPolicy Bypass`.

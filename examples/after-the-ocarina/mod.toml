@@ -1,4 +1,0 @@
-# Folder name under the Longshot mods root. See docs/longshot.md for load order.
-# Names that start with "_" or "-" are left unloaded.
-id = "after-ocarina"
-name = "After the Ocarina"

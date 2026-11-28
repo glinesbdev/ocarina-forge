@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>OcarinaForge.Project</RootNamespace>
+    <AssemblyName>OcarinaForge.Project</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <Description>Plans a Godot project from a dump. No Godot dependency. The editor plugin writes the resources.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Forge.Import\Forge.Import.csproj" />
+  </ItemGroup>
+</Project>
