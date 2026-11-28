@@ -185,11 +185,13 @@ public static class BfresReader
             cursor += 10;
             int end = cursor;
             List<BindPose.Bone> bones;
+            List<ImportedBone> skeleton;
             List<int> palette;
-            if (skel != 0) bones = Bones(skel, out palette);
+            if (skel != 0) (bones, skeleton) = Bones(skel, out palette);
             else
             {
                 bones = new List<BindPose.Bone>();
+                skeleton = new List<ImportedBone>();
                 palette = new List<int>();
             }
             var materials = Materials(matValues, matDict, materialCount);
@@ -227,23 +229,25 @@ public static class BfresReader
                 Name = name.Length == 0 ? fallback : name,
                 Parts = parts,
                 Images = images,
+                Skeleton = skeleton,
                 Notes = notes,
             }, end);
         }
 
-        List<BindPose.Bone> Bones(int at, out List<int> palette)
+        (List<BindPose.Bone> Bones, List<ImportedBone> Skeleton) Bones(int at, out List<int> palette)
         {
             palette = new List<int>();
+            var bones = new List<BindPose.Bone>();
+            var skeleton = new List<ImportedBone>();
             if (at + 4 > _data.Length || _data[at] != (byte)'F' || _data[at + 1] != (byte)'S')
-                return new List<BindPose.Bone>();
+                return (bones, skeleton);
             int cursor = at + 4 + (Major >= 9 ? 4 : 12);
             int dict = (int)Bin.U64(_data, cursor);
             cursor += 8;
             int array = (int)Bin.U64(_data, cursor);
             var names = DictKeys(dict);
-            var bones = new List<BindPose.Bone>();
             cursor = array;
-            foreach (string _ in names)
+            foreach (string rawName in names)
             {
                 if (cursor == 0) break;
                 cursor += 24;
@@ -272,9 +276,18 @@ public static class BfresReader
                 }
                 else { rx = r0; ry = r1; rz = r2; rw = r3; }
                 bones.Add(new BindPose.Bone(parent, px, py, pz, rx, ry, rz, rw, sx, sy, sz, flags, rigid));
+                string boneName = rawName.Length == 0 ? $"bone_{bones.Count - 1}" : rawName;
+                skeleton.Add(new ImportedBone
+                {
+                    Name = boneName,
+                    Parent = parent,
+                    Px = px, Py = py, Pz = pz,
+                    Rx = rx, Ry = ry, Rz = rz, Rw = rw,
+                    Sx = sx, Sy = sy, Sz = sz,
+                });
             }
             palette = MatrixPalette(at, bones.Count);
-            return bones;
+            return (bones, skeleton);
         }
 
         List<int> MatrixPalette(int at, int boneCount)

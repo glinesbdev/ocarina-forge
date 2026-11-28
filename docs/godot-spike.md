@@ -1,6 +1,6 @@
 # Godot spike
 
-A native Hyrule Field viewer, to see whether Ocarina Forge should leave the browser. The web editor is unchanged. This folder reads the dump from disk. It does not start a server, and it does not launch the game.
+A native Hyrule Field viewer, to see whether Ocarina Forge should leave the browser. The web editor is unchanged. This folder reads the dump from disk. It does not start a server, and it does not launch the game. The next step, a generated Godot project, is [godot-project.md](godot-project.md). The viewer in this note stays.
 
 ## What was built, and what was not run
 

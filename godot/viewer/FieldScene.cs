@@ -78,17 +78,17 @@ public static class FieldScene
 
     static void ApplyRange(GeometryInstance3D body, ImportedPart part, bool hasFar)
     {
-        if (hasFar && part.Lod == 0)
+            if (hasFar && part.Lod == 0)
         {
-            body.VisibilityRangeEnd = 72;
+            body.VisibilityRangeEnd = EditorRig.LodNearEnd;
             body.VisibilityRangeEndMargin = 0;
             body.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled;
         }
-        else         if (part.Lod > 0)
+        else if (part.Lod > 0)
         {
-            body.VisibilityRangeBegin = 72;
+            body.VisibilityRangeBegin = EditorRig.LodNearEnd;
             body.VisibilityRangeBeginMargin = 0;
-            body.VisibilityRangeEnd = 8000;
+            body.VisibilityRangeEnd = EditorRig.LodFarEnd;
             body.VisibilityRangeFadeMode = GeometryInstance3D.VisibilityRangeFadeModeEnum.Disabled;
         }
         else
@@ -272,14 +272,8 @@ public static class FieldScene
 
     static Color FlatColor(string material, string texture)
     {
-        string blob = (material + " " + texture).ToLowerInvariant();
-        if (blob.Contains("leaf") || blob.Contains("plant") || blob.Contains("grass") || blob.Contains("vine") || blob.Contains("bush"))
-            return new Color(0.25f, 0.38f, 0.18f);
-        if (blob.Contains("rock") || blob.Contains("stone") || blob.Contains("cliff"))
-            return new Color(0.45f, 0.42f, 0.38f);
-        if (blob.Contains("wood") || blob.Contains("trunk") || blob.Contains("bark"))
-            return new Color(0.42f, 0.32f, 0.2f);
-        return new Color(0.55f, 0.52f, 0.48f);
+        var (r, g, b) = FlatColour.For(material, texture);
+        return new Color(r, g, b);
     }
 
     static Material TerrainMaterial(ImportedField field)
@@ -300,7 +294,7 @@ public static class FieldScene
             var array = new Texture2DArray();
             if (array.CreateFromImages(images) == Error.Ok)
             {
-                var shader = new Shader { Code = TerrainShader };
+                var shader = new Shader { Code = TerrainShaderText.Code };
                 var material = new ShaderMaterial { Shader = shader };
                 material.SetShaderParameter("albedo", array);
                 return material;
@@ -314,27 +308,6 @@ public static class FieldScene
             Roughness = 1,
         };
     }
-
-    const string TerrainShader = """
-        shader_type spatial;
-        render_mode cull_disabled;
-        uniform sampler2DArray albedo : source_color, repeat_enable, filter_linear_mipmap;
-        uniform vec3 earth = vec3(0.45, 0.38, 0.22);
-        varying flat int layer_a;
-        varying flat int layer_b;
-        varying float blend_w;
-        void vertex() {
-            layer_a = int(UV2.x);
-            layer_b = int(UV2.y);
-            blend_w = COLOR.r;
-        }
-        void fragment() {
-            vec3 primary = layer_a < 0 ? earth : texture(albedo, vec3(UV, float(layer_a))).rgb;
-            vec3 secondary = layer_b < 0 ? primary : texture(albedo, vec3(UV, float(layer_b))).rgb;
-            ALBEDO = mix(primary, secondary, blend_w);
-            ROUGHNESS = 1.0;
-        }
-        """;
 
     static OccluderInstance3D Occluder(ImportedPart terrain)
     {

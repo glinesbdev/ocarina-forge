@@ -543,13 +543,15 @@ The lighting-capture mod's manifest is checked against this table when it is ins
 
 The native viewer in `godot/` does not add a format. It ports the readers already described above (BYML, SARC, zstd dictionaries, BFRES 10 / FMAT `0xB0`, meshlets, BNTX block-linear, TSCB / `.hght`). Longshot was checked again before the texture search changed: `content.model` is in `has()`, `gfx.textures` is not, and both are in-game APIs. `docs/modding/assets.md` still says the material's texture name is a file under `Tex/`. The viewer also opens `Model/<prefix>.Tex.bfres`, which that page does not describe and which the browser already searches. The spike never launches the game. See [godot-spike.md](godot-spike.md).
 
+The project generator in [godot-project.md](godot-project.md) uses those same readers. It writes the FSKL bind pose (bone name, parent, local translation, quaternion or the Euler flag `0x1000`, scale) into a Godot `Skeleton3D`. It does not read FSKA, FMAA, or any other curve subfile. Longshot `content.model` is a static model plus `Tex/` textures. It does not return animation curves, and `has()` has no animation getter. No FSKA layout was measured for this step. Skeletal curves, material animation, audio, and Phive collision are not converted.
+
 BC4 (`0x1D01`, 8 bytes a block) and BC5 (`0x1E01`, 16 bytes a block) upload as RGTC. They are still not albedo. A `.mate` blend byte other than 0 or 0x7f is that byte over 255, and 0x7f alone is halfway; the chosen index stays on material A unless the weight is 128 or more. A gyaml ending in `_DropFixed_<digits>` or `_<digits>` is also looked up without that suffix. That suffix rule was not counted in a retail `Model/` directory.
 
 One behaviour is worth stating next to the version-10 material notes. `sample_v10_bfres` stores the sampler count at FMAT `+0xA2` and the texture count at `+0xA3`. Longshot `host/bfres_edit.c` reads the texture-name count from `+0xA2`. The C# reader, like the Python reader, takes the longest real name list among `+0xA2`, `+0xA3`, and the sampler dictionary. That is the rule the synthetic v10 fixture passes. It is not a new retail measurement.
 
 ### Copy into after-the-ocarina `docs/game-formats.md`
 
-No new retail layout was measured for the Godot spike. The native reader uses the layouts already written up. The part a game-formats page needs, if it does not already have it:
+No new retail layout was measured for the Godot spike or the Godot project generator. The native reader uses the layouts already written up. FSKA (skeletal animation curves) is not decoded: the generator writes the FSKL bind pose only. The part a game-formats page needs, if it does not already have it:
 
 BFRES here is little-endian Switch, version word major 10 (`0x000Axxxx`). Version 10's FMDL has the material array and then the material dictionary, with no reserved qword between them. `+0x48` is a different pointer. FMAT is `0xB0` bytes. Name is `+0x08`, texture-name pointer array `+0x20`, sampler dictionary `+0x38`, render-state string array `+0x40`. The byte at `+0xA2` is the texture-name count in Longshot's editor (`host/bfres_edit.c`). Files written as samples store the sampler count at `+0xA2` and the texture count at `+0xA3`. Render-state slot 10 is cull (`front` / `both`), slot 11 is the alpha mode.
 

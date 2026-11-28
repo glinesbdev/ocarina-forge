@@ -1,0 +1,29 @@
+; Engine configuration file.
+config_version=5
+
+[application]
+
+config/name="Ocarina Forge"
+config/description="Godot project generated from a local dump. Game files stay on the machine that owns the dump."
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7", "C#")
+config/icon="res://icon.svg"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+
+[dotnet]
+
+project/assembly_name="OcarinaForge.Generated"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/ocarina_forge/plugin.cfg")
+
+[rendering]
+
+renderer/rendering_method="forward_plus"
+occlusion_culling/use_occlusion_culling=true
+lights_and_shadows/directional_shadow/soft_shadow_filter_quality=0

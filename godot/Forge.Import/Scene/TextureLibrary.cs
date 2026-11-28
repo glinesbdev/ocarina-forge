@@ -18,6 +18,11 @@ public sealed class TextureLibrary
 
     public TextureLibrary(DumpFolder dump) => _dump = dump;
 
+    /// <summary>Romfs path of the last texture <see cref="Find"/> returned. A pack member is <c>pack#member</c>.</summary>
+    public string LastSource { get; private set; } = "";
+
+    public List<string> CompanionPaths(string modelPath, string gyaml) => CompanionFiles(modelPath, gyaml).ToList();
+
     public void AttachCompanions(ImportedModel model, string modelPath, string gyaml)
     {
         foreach (string relative in CompanionFiles(modelPath, gyaml))
@@ -35,15 +40,25 @@ public sealed class TextureLibrary
                 catch (ImportException) { }
             }
             foreach (var (name, image) in images)
-                model.Images.TryAdd(name, image);
+            {
+                if (model.Images.TryAdd(name, image))
+                    model.ImageSources[name] = relative;
+            }
         }
     }
 
     public CompressedTexture? Find(ImportedModel model, string name, IReadOnlyList<string> hints)
     {
+        LastSource = "";
         if (name.Length == 0) return null;
         var image = FromImages(model.Images, name);
-        if (image is not null) return image;
+        if (image is not null)
+        {
+            if (!model.ImageSources.TryGetValue(image.Name, out var source))
+                model.ImageSources.TryGetValue(name, out source);
+            LastSource = source ?? "";
+            return image;
+        }
         foreach (string relative in TexCandidates(name))
         {
             if (!_dump.Exists(relative)) continue;
@@ -327,7 +342,12 @@ public sealed class TextureLibrary
 
     CompressedTexture? ReadFile(string relative, string name)
     {
-        try { return Pick(BntxReader.Read(_dump.Read(relative)), name); }
+        try
+        {
+            var image = Pick(BntxReader.Read(_dump.Read(relative)), name);
+            if (image is not null) LastSource = relative.Replace('\\', '/');
+            return image;
+        }
         catch (ImportException) { return null; }
     }
 
@@ -341,7 +361,9 @@ public sealed class TextureLibrary
             if (!BntxReader.LooksLike(blob))
                 blob = ZstdFrames.Decompress(blob, _dump.Dictionaries);
             if (!BntxReader.LooksLike(blob)) return null;
-            return Pick(BntxReader.Read(blob), name);
+            var image = Pick(BntxReader.Read(blob), name);
+            if (image is not null) LastSource = pack.Replace('\\', '/') + "#" + member.Replace('\\', '/');
+            return image;
         }
         catch (ImportException) { return null; }
     }

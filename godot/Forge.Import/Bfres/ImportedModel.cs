@@ -31,11 +31,32 @@ public sealed class ImportedPart
     public bool Water { get; init; }
 }
 
+/// <summary>One FSKL bone. The rotation is a quaternion. Curves are not stored; FSKA is not read.</summary>
+public sealed class ImportedBone
+{
+    public string Name { get; init; } = "";
+    public int Parent { get; init; } = -1;
+    public double Px { get; init; }
+    public double Py { get; init; }
+    public double Pz { get; init; }
+    public double Rx { get; init; }
+    public double Ry { get; init; }
+    public double Rz { get; init; }
+    public double Rw { get; init; } = 1;
+    public double Sx { get; init; } = 1;
+    public double Sy { get; init; } = 1;
+    public double Sz { get; init; } = 1;
+}
+
 public sealed class ImportedModel
 {
     public string Name { get; init; } = "";
     public List<ImportedPart> Parts { get; init; } = new();
     public Dictionary<string, CompressedTexture> Images { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Romfs path of the file that supplied each embedded or companion image, keyed by image name.</summary>
+    public Dictionary<string, string> ImageSources { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Bind-pose skeleton. Empty when the model has no FSKL. Animation curves are not included.</summary>
+    public List<ImportedBone> Skeleton { get; init; } = new();
     public List<string> Notes { get; init; } = new();
     public List<string> TextureHints { get; init; } = new();
 }

@@ -270,19 +270,19 @@ public partial class Main : Node3D
         var environment = new Godot.Environment
         {
             BackgroundMode = Godot.Environment.BGMode.Color,
-            BackgroundColor = new Color(0.078f, 0.106f, 0.086f),
+            BackgroundColor = new Color(EditorRig.BackgroundR, EditorRig.BackgroundG, EditorRig.BackgroundB),
             AmbientLightSource = Godot.Environment.AmbientSource.Color,
-            AmbientLightColor = new Color(0.557f, 0.627f, 0.565f),
-            AmbientLightEnergy = 0.55f,
+            AmbientLightColor = new Color(EditorRig.AmbientR, EditorRig.AmbientG, EditorRig.AmbientB),
+            AmbientLightEnergy = EditorRig.AmbientEnergy,
             TonemapMode = Godot.Environment.ToneMapper.Aces,
-            TonemapExposure = 1.05f,
+            TonemapExposure = EditorRig.Exposure,
         };
         AddChild(new WorldEnvironment { Environment = environment });
         var sun = GetNode<DirectionalLight3D>("Sun");
-        sun.LightColor = new Color(1f, 0.949f, 0.839f);
-        sun.LightEnergy = 2.6f;
+        sun.LightColor = new Color(EditorRig.SunR, EditorRig.SunG, EditorRig.SunB);
+        sun.LightEnergy = EditorRig.SunEnergy;
         sun.ShadowEnabled = false;
-        sun.LookAtFromPosition(new Vector3(18, 36, 14), Vector3.Zero, Vector3.Up);
+        sun.LookAtFromPosition(new Vector3(EditorRig.SunX, EditorRig.SunY, EditorRig.SunZ), Vector3.Zero, Vector3.Up);
     }
 
     static Dictionary<string, string> Parse(string[] args)

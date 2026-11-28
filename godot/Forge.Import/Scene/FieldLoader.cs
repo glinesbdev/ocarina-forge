@@ -6,6 +6,8 @@ public sealed class FieldActor
     public string ModelPath { get; init; } = "";
     public ImportedModel? Model { get; init; }
     public Dictionary<string, CompressedTexture> Textures { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Romfs path for each texture name. A pack member is <c>archive#member</c>.</summary>
+    public Dictionary<string, string> TextureSources { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     public string Note { get; init; } = "";
 }
 
@@ -22,6 +24,8 @@ public sealed class ImportedField
     public LoadReport Report { get; set; } = new();
     /// <summary>MaterialAlb layers in shader-index order, still ASTC until the viewer transcodes them.</summary>
     public List<CompressedTexture> TerrainAlbedo { get; set; } = new();
+    /// <summary>Romfs paths the terrain mesh was built from: param, TSCB, height, mate, MaterialAlb.</summary>
+    public List<string> TerrainSources { get; } = new();
 }
 
 public static class FieldLoader
@@ -45,6 +49,7 @@ public static class FieldLoader
             placements.AddRange(ActorList.Read(dump.ReadByml(dynamic), "dynamic"));
         var cache = new Dictionary<string, (string Path, ImportedModel Model)>(StringComparer.Ordinal);
         var texturesByModel = new Dictionary<string, Dictionary<string, CompressedTexture>>(StringComparer.Ordinal);
+        var sourcesByModel = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         var library = new TextureLibrary(dump);
         foreach (var placement in placements)
         {
@@ -70,11 +75,14 @@ public static class FieldLoader
                 }
                 resolved = (found.Path, found.Model);
                 cache[placement.Gyaml] = resolved;
+                foreach (string imageName in resolved.Model.Images.Keys)
+                    resolved.Model.ImageSources.TryAdd(imageName, resolved.Path);
             }
             if (!texturesByModel.TryGetValue(placement.Gyaml, out var textures))
             {
                 library.AttachCompanions(resolved.Model, resolved.Path, placement.Gyaml);
                 textures = new Dictionary<string, CompressedTexture>(StringComparer.OrdinalIgnoreCase);
+                var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 var hints = TextureLibrary.Hints(placement.Gyaml, resolved.Path, resolved.Model.Name);
                 foreach (var part in resolved.Model.Parts)
                 {
@@ -87,10 +95,16 @@ public static class FieldLoader
                     if (textures.ContainsKey(part.Texture)) continue;
                     var image = library.Find(resolved.Model, part.Texture, hints);
                     if (image is null) field.Report.MissTexture(part.Texture);
-                    else textures[part.Texture] = image;
+                    else
+                    {
+                        textures[part.Texture] = image;
+                        sources[part.Texture] = library.LastSource;
+                    }
                 }
                 texturesByModel[placement.Gyaml] = textures;
+                sourcesByModel[placement.Gyaml] = sources;
             }
+            sourcesByModel.TryGetValue(placement.Gyaml, out var textureSources);
             field.Report.ActorsLoaded++;
             field.Actors.Add(new FieldActor
             {
@@ -98,6 +112,7 @@ public static class FieldLoader
                 ModelPath = resolved.Path,
                 Model = resolved.Model,
                 Textures = textures,
+                TextureSources = textureSources ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
             });
         }
         TryTerrain(dump, relative, placements, field);
@@ -140,6 +155,7 @@ public static class FieldLoader
             {
                 if (!dump.Exists(relative)) continue;
                 document = ReadParam(dump, relative, field.Notes, new HashSet<string>(), 0);
+                if (document is not null) field.TerrainSources.Add(relative.Replace('\\', '/'));
                 break;
             }
             if (document is not null) break;
@@ -164,6 +180,7 @@ public static class FieldLoader
             return;
         }
         field.Scene = scene.Length > 0 ? scene : Path.GetFileNameWithoutExtension(tscb).Replace(".tscb", "");
+        field.TerrainSources.Add(tscb.Replace('\\', '/'));
         var (scale, heightScale, tiles) = TerrainMesh.ReadTscb(dump.Read(tscb));
         string folder = Path.GetDirectoryName(tscb.Replace('\\', '/'))?.Replace('\\', '/') ?? "TerrainArc";
         string sceneDir = field.Scene;
@@ -175,6 +192,7 @@ public static class FieldLoader
         {
             string path = HeightPath(dump, folder, sceneDir, tile.Name);
             if (path.Length == 0) continue;
+            field.TerrainSources.Add(path.Replace('\\', '/'));
             try
             {
                 var payload = TerrainMesh.UnpackHght(dump.Read(path), dump.Dictionaries);
@@ -188,6 +206,7 @@ public static class FieldLoader
                 })
                 {
                     if (!dump.Exists(matePath)) continue;
+                    field.TerrainSources.Add(matePath.Replace('\\', '/'));
                     try { mate = TerrainMesh.ReadMateGrid(dump.Read(matePath), dump.Dictionaries); }
                     catch (ImportException) { mate = null; }
                     break;
@@ -239,6 +258,7 @@ public static class FieldLoader
         Collect(part.MaterialLayerB);
         string path = dump.Exists("Tex/MaterialAlb.bntx.zs") ? "Tex/MaterialAlb.bntx.zs"
             : dump.Exists("Tex/MaterialAlb.bntx") ? "Tex/MaterialAlb.bntx" : "";
+        if (path.Length > 0) field.TerrainSources.Add(path);
         if (path.Length == 0)
         {
             field.Report.AddReason("Tex/MaterialAlb.bntx is not in this dump");

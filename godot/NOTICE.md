@@ -13,4 +13,4 @@ People and libraries this work depends on or follows:
 - **zstd** (Meta / Facebook) — the format ZstdSharp ports. BSD license, https://github.com/facebook/zstd
 - **Godot Engine 4.7.2** — MIT. https://godotengine.org
 
-No Nintendo titles, characters, or game files are in this folder. Import caches and `.godot/` output stay on the machine that owns the dump.
+No Nintendo titles, characters, or game files are in this folder. Import caches, `.godot/` output, and a project produced by `ocarina-forge-godot new` stay on the machine that owns the dump. The generator does not copy the dump into the repository.
