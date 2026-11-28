@@ -13,10 +13,18 @@ public sealed class TextureLibrary
     readonly Dictionary<string, Dictionary<string, string>> _packs = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, SarcArchive?> _archives = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Dictionary<string, CompressedTexture>> _companions = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<string, IReadOnlyList<CompressedTexture>> _textureFiles = new(StringComparer.OrdinalIgnoreCase);
     string[]? _actorPacks;
     string[]? _sharedPacks;
 
     public TextureLibrary(DumpFolder dump) => _dump = dump;
+
+    public void ClearDecoded()
+    {
+        _archives.Clear();
+        _companions.Clear();
+        _textureFiles.Clear();
+    }
 
     /// <summary>Romfs path of the last texture <see cref="Find"/> returned. A pack member is <c>pack#member</c>.</summary>
     public string LastSource { get; private set; } = "";
@@ -150,23 +158,12 @@ public sealed class TextureLibrary
 
     string[]? _texBfres;
 
+    string[] CompanionArchives() => _texBfres ??= _dump.Files("Model", "*")
+        .Where(path => IsCompanion(Path.GetFileName(path))).Order(StringComparer.Ordinal).ToArray();
+
     IEnumerable<string> TextureArchives(string wanted)
     {
-        if (_texBfres is null)
-        {
-            string dir = Path.Combine(_dump.Romfs, "Model");
-            var found = new List<string>();
-            if (Directory.Exists(dir))
-            {
-                foreach (string path in Directory.EnumerateFiles(dir))
-                {
-                    string file = Path.GetFileName(path);
-                    if (IsCompanion(file)) found.Add("Model/" + file);
-                }
-            }
-            _texBfres = found.ToArray();
-        }
-        foreach (string relative in _texBfres)
+        foreach (string relative in CompanionArchives())
         {
             string stem = Stem(Path.GetFileName(relative)).ToLowerInvariant();
             stem = stem.Replace(".tex", "", StringComparison.Ordinal).Replace("_tex", "", StringComparison.Ordinal);
@@ -237,21 +234,17 @@ public sealed class TextureLibrary
             if (relative.Length == 0 || found.Contains(relative) || relative.Equals(modelPath, StringComparison.OrdinalIgnoreCase)) return;
             if (_dump.Exists(relative)) found.Add(relative);
         }
-        foreach (string prefix in Hints(gyaml, modelPath, ""))
+        var prefixes = Hints(gyaml, modelPath, "");
+        foreach (string prefix in prefixes)
         {
             Add($"Model/{prefix}.Tex.bfres.zs");
             Add($"Model/{prefix}.Tex.bfres");
             Add($"Model/{prefix}_Tex.bfres.zs");
             Add($"Model/{prefix}_Tex.bfres");
         }
-        string dir = Path.Combine(_dump.Romfs, "Model");
-        if (!Directory.Exists(dir)) return found;
-        var prefixes = Hints(gyaml, modelPath, "").Select(item => item.ToLowerInvariant()).ToList();
-        foreach (string path in Directory.EnumerateFiles(dir))
+        foreach (string path in CompanionArchives())
         {
-            string file = Path.GetFileName(path);
-            if (!IsCompanion(file)) continue;
-            string stem = file;
+            string stem = Path.GetFileName(path);
             foreach (string suffix in new[] { ".bfres.zs", ".bfres" })
             {
                 if (stem.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
@@ -261,7 +254,7 @@ public sealed class TextureLibrary
                 }
             }
             if (prefixes.Any(prefix => stem.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
-                Add("Model/" + file);
+                Add(path);
         }
         return found;
     }
@@ -441,14 +434,15 @@ public sealed class TextureLibrary
 
     CompressedTexture? ReadFile(string relative, string name, bool named = false)
     {
-        try
+        if (!_textureFiles.TryGetValue(relative, out var images))
         {
-            var images = BntxReader.Read(_dump.Read(relative));
-            var image = named ? PickNamed(images, name) : Pick(images, name);
-            if (image is not null) LastSource = relative.Replace('\\', '/');
-            return image;
+            try { images = BntxReader.Read(_dump.Read(relative)); }
+            catch (ImportException) { images = Array.Empty<CompressedTexture>(); }
+            _textureFiles[relative] = images;
         }
-        catch (ImportException) { return null; }
+        var image = named ? PickNamed(images, name) : Pick(images, name);
+        if (image is not null) LastSource = relative.Replace('\\', '/');
+        return image;
     }
 
     CompressedTexture? ReadMember(string pack, string member, string name, bool named = false)

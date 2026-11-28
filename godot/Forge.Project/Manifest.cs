@@ -80,6 +80,12 @@ public sealed class ProjectRequest
 
     [JsonPropertyName("banc")]
     public string Banc { get; set; } = FieldLoader.DefaultBanc;
+
+    [JsonPropertyName("modelsOnly")]
+    public bool ModelsOnly { get; set; }
+
+    [JsonPropertyName("modelPrefix")]
+    public string ModelPrefix { get; set; } = "";
 }
 
 public static class ManifestStore
@@ -97,7 +103,13 @@ public static class ManifestStore
     {
         string path = Path.Combine(projectDir, ProjectPaths.Manifest.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, JsonSerializer.Serialize(document, Json) + "\n");
+        string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            using (var stream = File.Create(temp)) JsonSerializer.Serialize(stream, document, Json);
+            File.Move(temp, path, overwrite: true);
+        }
+        finally { File.Delete(temp); }
     }
 
     public static ProjectRequest LoadRequest(string projectDir)

@@ -38,9 +38,8 @@ public sealed class ImportedClip
 /// Switch FSKA for BFRES major 9 and 10. Longshot <c>has()</c> has no animation getter and
 /// <c>content.model</c> does not return curves. The layout is the public v9+ Switch header
 /// (BfresLibrary's FSKA reader and the documented curve flags): absolute u64 offsets, flags
-/// immediately after the signature, and 16 reserved bytes on each bone track. Version 10 uses
-/// that same FSKA header; the v10 file difference is the external GPU section, which this
-/// reader does not need. No retail FSKA was in this tree, so a hand-built clip is the check.
+/// immediately after the signature, and 16 reserved bytes on each bone track. Retail v10.4
+/// also uses compact value and slope keys, as documented by Switch 2 Toolbox.
 /// Material, visibility, and shape curves are not read.
 /// </summary>
 public static class FskaReader
@@ -50,6 +49,14 @@ public static class FskaReader
     const int CurveSize = 48;
     const int TranslateX = 0x10;
     const int RotateX = 0x20;
+
+    public static List<ImportedClip> ReadFile(byte[] data)
+    {
+        if (data.Length < 0x68 || !data.AsSpan(0, 8).SequenceEqual("FRES    "u8)
+            || Bin.U16(data, 0x0C) != 0xFEFF)
+            throw new ImportException("not a little-endian Switch BFRES animation file");
+        return Read(data, Bin.U16(data, 0x0A));
+    }
 
     public static List<ImportedClip> Read(byte[] data, int major)
     {
@@ -256,31 +263,47 @@ public static class FskaReader
         int frameType = flags & 3;
         int keyType = (flags >> 2) & 3;
         int kind = (flags >> 4) & 7;
+        if (frameType == 3) return null;
         int elements = kind switch { 0 => 4, 1 => 2, _ => 1 };
         int frameStep = frameType == 0 ? 4 : 2;
         if (frameType == 2) frameStep = 1;
         int keyStep = keyType switch { 0 => 4, 1 => 2, 2 => 1, _ => 0 };
         if (keyStep == 0) return null;
         if ((long)frameAt + (long)count * frameStep > data.Length) return null;
-        if ((long)keyAt + (long)count * elements * keyStep > data.Length) return null;
+        // Retail v10.4 marks compact keys with 0x4000. Older v9+ files keep the original row layout.
+        bool compact = (flags & 0x4000) != 0;
+        bool cubic = kind == 0;
+        if (compact) elements = cubic ? 2 : 1;
+        int slopeHeader = compact && cubic && keyType != 0 ? 8 : 0;
+        if ((long)keyAt + slopeHeader + (long)count * elements * keyStep > data.Length) return null;
+        float frameScale = compact && (flags & 0x0400) != 0 ? Bin.F32(data, at + 32) : frameType == 1 ? 1f / 32f : 1f;
+        float scale = compact ? Bin.F32(data, at + 36) : Bin.F32(data, at + 32);
+        float offset = compact ? Bin.F32(data, at + 40) : Bin.F32(data, at + 36);
+        float slopeScale = slopeHeader > 0 ? Bin.F32(data, keyAt) : 1;
+        float slopeOffset = slopeHeader > 0 ? Bin.F32(data, keyAt + 4) : 0;
+        keyAt += slopeHeader;
         var frames = new float[count];
         var keys = new float[count][];
         for (int i = 0; i < count; i++)
         {
-            frames[i] = Frame(data, frameAt + i * frameStep, frameType);
+            frames[i] = Frame(data, frameAt + i * frameStep, frameType) * frameScale;
+            if (!float.IsFinite(frames[i]) || frames[i] < 0 || (i > 0 && frames[i] < frames[i - 1])) return null;
             var row = new float[elements];
             for (int e = 0; e < elements; e++)
-                row[e] = Key(data, keyAt + (i * elements + e) * keyStep, keyType);
+                row[e] = Key(data, keyAt + (i * elements + e) * keyStep, keyType, compact);
+            if (compact && keyType != 0)
+            {
+                row[0] = offset + row[0] * scale;
+                if (cubic) row[1] = slopeOffset + row[1] * slopeScale;
+            }
             keys[i] = row;
         }
-        float scale = Bin.F32(data, at + 32);
-        if (scale == 0) scale = 1;
         return new Curve
         {
             Kind = kind,
             Target = (int)Bin.U32(data, at + 20),
-            Scale = scale,
-            Offset = Bin.F32(data, at + 36),
+            Scale = compact || scale == 0 ? 1 : scale,
+            Offset = compact ? 0 : offset,
             Frames = frames,
             Keys = keys,
         };
@@ -290,14 +313,14 @@ public static class FskaReader
     {
         if (kind == 0) return Bin.F32(data, at);
         if (kind == 2) return data[at];
-        return Bin.I16(data, at) / 32f;
+        return Bin.U16(data, at);
     }
 
-    static float Key(byte[] data, int at, int kind)
+    static float Key(byte[] data, int at, int kind, bool unsigned)
     {
         if (kind == 0) return Bin.F32(data, at);
-        if (kind == 2) return (sbyte)data[at];
-        return Bin.I16(data, at);
+        if (kind == 2) return unsigned ? data[at] : (sbyte)data[at];
+        return unsigned ? Bin.U16(data, at) : Bin.I16(data, at);
     }
 
     static string Text(byte[] data, int at) => Bin.LengthString(data, at);

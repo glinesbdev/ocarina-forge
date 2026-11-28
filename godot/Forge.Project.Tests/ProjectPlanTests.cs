@@ -22,7 +22,7 @@ public class ProjectPlanTests
         Assert.False(job.Map.Current);
         Assert.Contains(job.Map.Sources, source => source.Contains("HyruleField_Child_Static", StringComparison.Ordinal));
         Assert.Contains(job.Map.Sources, source => source.Contains("Field.tscb", StringComparison.Ordinal));
-        Assert.Equal(ProjectPlan.ImporterVersion, "godot-project-2");
+        Assert.Equal("godot-project-5", ProjectPlan.ImporterVersion);
         if (model.Model.Skeleton.Count > 0)
             Assert.All(model.Model.Skeleton, bone => Assert.False(string.IsNullOrWhiteSpace(bone.Name)));
     }
@@ -64,6 +64,71 @@ public class ProjectPlanTests
     }
 
     [Fact]
+    public void AnimationResourceHasTheStandaloneClipAsAManifestSource()
+    {
+        string root = SyntheticDump.Write(Temp("animations"));
+        var dump = DumpFolder.Open(root);
+        var field = FieldLoader.Load(dump);
+        var model = field.Actors.First(actor => actor.Model is not null).Model!;
+        const string source = "Model/TreeAnimation.anim.bfres";
+        File.WriteAllBytes(Path.Combine(dump.Romfs, source), new byte[] { 1 });
+        model.AnimationSources.Add(source);
+        model.Clips.Add(new ImportedClip { Name = "Test" });
+        var first = ProjectPlan.Build(dump, field, null, root);
+        string path = ProjectPaths.Animations("Obj_Tree");
+        var entry = ProjectPlan.ToManifest(first).Files[path];
+        Assert.Equal("animations", entry.Kind);
+        Assert.Contains(source, entry.Sources);
+
+        File.WriteAllBytes(Path.Combine(dump.Romfs, source), new byte[] { 2 });
+        var second = ProjectPlan.Build(dump, field, null, root);
+        Assert.NotEqual(entry.Hash, ProjectPlan.ToManifest(second).Files[path].Hash);
+    }
+
+    [Fact]
+    public void HeadlessCatalogWritesLooseAndPackedModelsWithoutPlacements()
+    {
+        string? godot = Environment.GetEnvironmentVariable("GODOT");
+        if (string.IsNullOrEmpty(godot) || !File.Exists(godot))
+        {
+            if (Environment.GetEnvironmentVariable("REQUIRE_GODOT") == "1")
+                Assert.Fail("GODOT must point at the Godot 4.7 .NET binary");
+            return;
+        }
+        string dump = SyntheticDump.Write(Temp("catalog-dump"));
+        string romfs = DumpFolder.Open(dump).Romfs;
+        File.Delete(Path.Combine(romfs, FieldLoader.DefaultBanc[..^3]));
+        string model = Path.Combine(romfs, "Model", "Obj_Tree.Obj_Tree.bfres");
+        File.Copy(model, Path.Combine(romfs, "Model", "Unplaced.bfres"));
+        string packs = Path.Combine(romfs, "Pack", "Actor");
+        Directory.CreateDirectory(packs);
+        File.WriteAllBytes(Path.Combine(packs, "PackedActor.pack"), SarcArchive.Pack(new Dictionary<string, byte[]>
+        {
+            ["Model/Embedded.bfres"] = File.ReadAllBytes(model),
+        }));
+        string project = Temp("catalog-project");
+        Assert.Equal(0, Generator.Run(["models", dump, project, "--godot", godot]));
+        Assert.True(ManifestStore.LoadRequest(project).ModelsOnly);
+        Assert.False(File.Exists(ProjectPaths.Disk(project, ProjectPaths.MapScene)));
+        var manifest = ManifestStore.Load(project)!;
+        var scenes = manifest.Files.Where(pair => pair.Value.Kind == "model").ToArray();
+        Assert.Equal(3, scenes.Length);
+        Assert.Contains(scenes, pair => pair.Value.Sources.Contains("Model/Unplaced.bfres"));
+        Assert.Contains(scenes, pair => pair.Value.Sources.Contains("Pack/Actor/PackedActor.pack#Model/Embedded.bfres"));
+        Assert.Equal(0, Generator.Run(["check", project, "--godot", godot]));
+        string scene = ProjectPaths.Disk(project, ProjectPaths.ModelScene("PackedActor"));
+        string sceneText = File.ReadAllText(scene);
+        Assert.Contains("[ext_resource type=\"ArrayMesh\"", sceneText);
+        Assert.Contains("res://models/PackedActor/materials/Mt_Bark.tres", sceneText);
+        Assert.Contains(Directory.GetFiles(Path.Combine(project, "models", "PackedActor", "materials"), "*.tres"),
+            path => File.ReadAllText(path).Contains("res://textures/Bark_Alb.res", StringComparison.Ordinal));
+        var written = File.GetLastWriteTimeUtc(scene);
+        Assert.Equal(0, Generator.Run(["reimport", project, "--godot", godot]));
+        Assert.Equal(written, File.GetLastWriteTimeUtc(scene));
+        Assert.True(ManifestStore.LoadRequest(project).ModelsOnly);
+    }
+
+    [Fact]
     public void HeadlessGenerateWritesScenesAndSkipsTheSecondRun()
     {
         string? godot = Environment.GetEnvironmentVariable("GODOT");
@@ -76,12 +141,16 @@ public class ProjectPlanTests
         string dump = SyntheticDump.Write(Temp("gen-dump"));
         string project = Temp("gen-project");
         Assert.Equal(0, Generator.Run(new[] { "new", dump, project, "--godot", godot }));
-        string saved = Godot(godot, project, "--probe-save");
-        Assert.Contains("probe saved", saved);
-        string loaded = Godot(godot, project, "--probe-load");
-        Assert.Contains("image null", loaded.Split('\n').First(line => line.Contains("probe array")));
-        Assert.Contains("image ok", loaded.Split('\n').First(line => line.Contains("probe png")));
-        Assert.Contains("probe bind ok", loaded);
+        // Loading the deliberately broken Texture2DArray can hang Godot 4.7.2 headless on Windows.
+        if (!OperatingSystem.IsWindows())
+        {
+            string saved = Godot(godot, project, "--probe-save");
+            Assert.Contains("probe saved", saved);
+            string loaded = Godot(godot, project, "--probe-load");
+            Assert.Contains("image null", loaded.Split('\n').First(line => line.Contains("probe array")));
+            Assert.Contains("image ok", loaded.Split('\n').First(line => line.Contains("probe png")));
+            Assert.Contains("probe bind ok", loaded);
+        }
         string scene = Path.Combine(project, "models", "Obj_Tree", "Obj_Tree.tscn");
         string map = Path.Combine(project, "maps", "HyruleField.tscn");
         string manifest = Path.Combine(project, ".ocarina", "manifest.json");

@@ -37,6 +37,8 @@ public static class ProjectPaths
     public static string Mesh(string gyaml, string part, int lod) =>
         $"res://models/{Safe(gyaml)}/meshes/{Safe(part)}_lod{lod}.res";
 
+    public static string Animations(string gyaml) => $"res://models/{Safe(gyaml)}/animations.res";
+
     public static string Material(string gyaml, string name) =>
         $"res://models/{Safe(gyaml)}/materials/{Safe(name)}.tres";
 

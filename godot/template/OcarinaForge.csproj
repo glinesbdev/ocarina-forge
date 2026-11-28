@@ -20,5 +20,9 @@
       <HintPath>addons/ocarina_forge/lib/ZstdSharp.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="AssetRipper.TextureDecoder">
+      <HintPath>addons/ocarina_forge/lib/AssetRipper.TextureDecoder.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
   </ItemGroup>
 </Project>

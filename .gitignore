@@ -31,3 +31,7 @@ godot/**/obj/
 godot/**/*.user
 godot-cache/
 godot/out/
+
+# local run output
+godot-run.log.txt
+godot/viewer/field-loop-*.json

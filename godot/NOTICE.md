@@ -12,5 +12,6 @@ People and libraries this work depends on or follows:
 - **ZstdSharp.Port 0.8.5** (Oleg Stepanischev) — MIT. Used to decompress zstd frames and dictionary packs. https://github.com/oleg-st/ZstdSharp
 - **zstd** (Meta / Facebook) — the format ZstdSharp ports. BSD license, https://github.com/facebook/zstd
 - **Godot Engine 4.7.2** — MIT. https://godotengine.org
+- **AssetRipper.TextureDecoder 2.6.3** (ds5678) — MIT. Used for ASTC footprints outside the Godot CPU image decoder. https://github.com/AssetRipper/AssetRipper.TextureDecoder
 
 No Nintendo titles, characters, or game files are in this folder. Import caches, `.godot/` output, and a project produced by `ocarina-forge-godot new` stay on the machine that owns the dump. The generator does not copy the dump into the repository.

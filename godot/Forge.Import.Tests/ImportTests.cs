@@ -184,6 +184,9 @@ public class ImportTests
     {
         Assert.Equal(200, BfresReader.PaletteSlot(new byte[] { 200, 1, 2, 3 }, 0x010B, 0));
         Assert.Equal(255, BfresReader.PaletteSlot(new byte[] { 255, 0, 0, 0 }, 0x020B, 0));
+        Assert.Equal(200, BfresReader.PaletteSlot(new byte[] { 200 }, 0x0302, 0));
+        Assert.Equal(200, BfresReader.PaletteSlot(new byte[] { 200, 1 }, 0x0309, 0));
+        Assert.Equal(200, BfresReader.PaletteSlot(new byte[] { 200, 1, 2, 3 }, 0x030B, 0));
     }
 
     [Fact]
@@ -409,6 +412,107 @@ public class ImportTests
         Assert.InRange(end.Px, 10 - 1e-3f, 10 + 1e-3f);
         var mid = bone.Keys.FirstOrDefault(key => Math.Abs(key.Frame - 5) < 0.01f);
         if (mid is not null) Assert.InRange(mid.Px, 5 - 0.05f, 5 + 0.05f);
+    }
+
+    [Fact]
+    public void CompactFskaUsesUnsignedKeysAndSeparateFrameValueAndSlopeScales()
+    {
+        var data = LinearClip();
+        void U16(int at, ushort value) => System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(data.AsSpan(at), value);
+        void F32(int at, float value) => System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(data.AsSpan(at), value);
+        U16(0x290, 0x4C06);
+        data[0x300] = 0;
+        data[0x301] = 20;
+        F32(0x2A0, 0.5f);
+        F32(0x2A4, 0.00025f);
+        F32(0x2A8, 10f);
+        F32(0x320, 0.1f);
+        F32(0x324, -1f);
+        U16(0x328, 0);
+        U16(0x32A, 10);
+        U16(0x32C, 40000);
+        U16(0x32E, 20);
+        var keys = Assert.Single(Assert.Single(FskaReader.Read(data, 10)).Bones).Keys;
+        Assert.Equal(new[] { 0f, 5f, 10f }, keys.Select(key => key.Frame));
+        Assert.Equal(10f, keys[0].Px, 4);
+        Assert.Equal(13.75f, keys[1].Px, 4);
+        Assert.Equal(20f, keys[2].Px, 4);
+    }
+
+    [Theory]
+    [InlineData("TestActor", false, true)]
+    [InlineData("Animal_Epona_Adult", false, true)]
+    [InlineData("Animal_Epona_Child", true, false)]
+    public void ActorAnimationReferenceRespectsTheChildEponaRig(string gyaml, bool retarget, bool importsClip)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "of-animation-" + Guid.NewGuid().ToString("N"));
+        string romfs = Path.Combine(root, "romfs");
+        Directory.CreateDirectory(Path.Combine(romfs, "Model"));
+        Directory.CreateDirectory(Path.Combine(romfs, "Pack", "Actor"));
+        try
+        {
+            const string component = "Component/AnimationParam/Shared.engine__component__AnimationParam.bgyml";
+            var actor = new Dictionary<string, object?>
+            {
+                ["Components"] = new Dictionary<string, object?> { ["AnimationRef"] = "?" + component },
+            };
+            var animation = new Dictionary<string, object?>
+            {
+                ["AnimationResources"] = new List<object?>
+                {
+                    new Dictionary<string, object?> { ["ModelProjectName"] = "Shared", ["IsRetarget"] = retarget },
+                },
+            };
+            File.WriteAllBytes(Path.Combine(romfs, "Pack", "Actor", gyaml + ".pack"),
+                SarcArchive.Pack(new Dictionary<string, byte[]>
+                {
+                    [$"Actor/{gyaml}.engine__actor__ActorParam.bgyml"] = BymlWriter.Dump(actor),
+                    [component] = BymlWriter.Dump(animation),
+                }));
+            var clip = LinearClip();
+            "FRES    "u8.CopyTo(clip);
+            clip[0x0A] = 10;
+            clip[0x0C] = 0xFF;
+            clip[0x0D] = 0xFE;
+            File.WriteAllBytes(Path.Combine(romfs, "Model", "Shared.anim.bfres"), clip);
+            var resolved = new ResolvedModel
+            {
+                Model = new ImportedModel
+                {
+                    Name = "DifferentModel",
+                    Skeleton = new List<ImportedBone> { new() { Name = "Other" }, new() { Name = "Root" } },
+                },
+            };
+            var notes = new List<string>();
+            new AnimationLocator(DumpFolder.Open(root)).Attach(gyaml, resolved, notes);
+            Assert.Contains($"Pack/Actor/{gyaml}.pack#{component}", resolved.Model.AnimationSources);
+            if (importsClip)
+            {
+                Assert.Equal("Walk", Assert.Single(resolved.Model.Clips).Name);
+                Assert.Contains("Model/Shared.anim.bfres", resolved.Model.AnimationSources);
+            }
+            else
+            {
+                Assert.Empty(resolved.Model.Clips);
+                Assert.DoesNotContain("Model/Shared.anim.bfres", resolved.Model.AnimationSources);
+            }
+            Assert.Empty(notes);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public void AstcSixBySixDecodesSrgbAlbedo()
+    {
+        // One LDR void-extent block with RGBA channels 255, 128, 0, 255.
+        byte[] block = [0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x80, 0x80, 0, 0, 0xFF, 0xFF];
+        var image = Assert.Single(BntxReader.Read(BntxReader.WriteLinear("Albedo", 6, 6, 0x3106, block)));
+        Assert.True(image.Srgb);
+        Assert.Equal(6, image.BlockW);
+        Assert.Equal(6, image.BlockH);
+        var rgba = AstcPixels.DecodeMipZero(image);
+        Assert.Equal(6 * 6 * 4, rgba.Length);
+        Assert.All(rgba.Chunk(4), pixel => Assert.Equal(new byte[] { 255, 128, 0, 255 }, pixel));
     }
 
     static byte[] LinearClip()

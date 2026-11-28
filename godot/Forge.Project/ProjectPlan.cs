@@ -53,11 +53,12 @@ public sealed class ProjectJob
 
 public static class ProjectPlan
 {
-    public const string ImporterVersion = "godot-project-2";
+    public const string ImporterVersion = "godot-project-5";
 
-    public static ProjectJob Build(DumpFolder dump, ImportedField field, ManifestDocument? existing, string projectDir)
+    public static ProjectJob Build(DumpFolder dump, ImportedField field, ManifestDocument? existing, string projectDir,
+        Dictionary<string, string>? textureOwners = null, bool modelsOnly = false)
     {
-        var textureOwners = new Dictionary<string, string>(StringComparer.Ordinal);
+        textureOwners ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var textures = new Dictionary<string, TextureJob>(StringComparer.Ordinal);
         var models = new List<ModelJob>();
         bool water = false;
@@ -66,7 +67,9 @@ public static class ProjectPlan
             var actors = group.ToList();
             var model = actors[0].Model!;
             var sources = new List<string> { actors[0].ModelPath };
-            sources.AddRange(new TextureLibrary(dump).CompanionPaths(actors[0].ModelPath, group.Key));
+            sources.AddRange(model.AnimationSources);
+            if (!modelsOnly)
+                sources.AddRange(new TextureLibrary(dump).CompanionPaths(actors[0].ModelPath, group.Key));
             foreach (var (name, source) in actors[0].TextureSources)
                 if (source.Length > 0) sources.Add(source);
             string hash = SourceHash.Of(dump, sources);
@@ -74,6 +77,8 @@ public static class ProjectPlan
             {
                 new() { ResPath = ProjectPaths.ModelScene(group.Key), Kind = "model" },
             };
+            if (model.Clips.Count > 0)
+                outputs.Add(new PlannedOutput { ResPath = ProjectPaths.Animations(group.Key), Kind = "animations" });
             var texturePaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var (name, image) in actors[0].Textures)
             {
@@ -125,6 +130,10 @@ public static class ProjectPlan
                 Actors = actors,
             });
         }
+
+        if (modelsOnly)
+            return new ProjectJob { Dump = dump.Root, Field = field, Textures = textures.Values.ToList(), Models = models,
+                Map = new MapJob { HasWater = water } };
 
         var mapSources = new List<string> { field.Banc };
         string dynamic = field.Banc.Replace("_Static", "_Dynamic", StringComparison.Ordinal);

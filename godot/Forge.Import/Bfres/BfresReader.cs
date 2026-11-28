@@ -14,6 +14,7 @@ public static class BfresReader
     const int F32 = 0x0516, F32_2 = 0x0517, F32_3 = 0x0518, F32_4 = 0x0519;
     const int F16 = 0x050A, F16_2 = 0x0512, F16_4 = 0x0515;
     const int U8 = 0x0102, U8_2 = 0x0109, U8_4 = 0x010B, S8_4 = 0x020B;
+    const int UInt8 = 0x0302, UInt8_2 = 0x0309, UInt8_4 = 0x030B;
     const int U16_2 = 0x0112, S16_2 = 0x0212, SN10 = 0x020E, UN10 = 0x000B;
     static readonly Regex TexName = new(@"^[A-Za-z0-9_./+-]{1,120}$", RegexOptions.Compiled);
 
@@ -24,14 +25,14 @@ public static class BfresReader
     }
 
     /// <summary>
-    /// Palette slot for <c>_i0</c>. U8, U8_2, U8_4, and S8_4 are the first byte, not a 0–1 colour.
+    /// Palette slot for <c>_i0</c>. Byte formats use the raw byte, not a 0–1 colour.
     /// Dividing a U8_4 byte by 255 and multiplying back can land on the next bone.
     /// </summary>
     public static int PaletteSlot(ReadOnlySpan<byte> buffer, int format, int at)
     {
         if ((uint)at >= (uint)buffer.Length)
             throw new ImportException("a bone index does not fit in its buffer");
-        if (format is U8 or U8_2 or U8_4 or S8_4) return buffer[at];
+        if (format is U8 or U8_2 or U8_4 or S8_4 or UInt8 or UInt8_2 or UInt8_4) return buffer[at];
         if (format == U16_2)
         {
             if (at + 2 > buffer.Length) throw new ImportException("a bone index does not fit in its buffer");
@@ -873,9 +874,9 @@ public static class BfresReader
 
         static int FormatSize(int fmt) => fmt switch
         {
-            U8 => 1,
-            U8_2 or F16 => 2,
-            U8_4 or S8_4 or U16_2 or S16_2 or F16_2 or F32 or SN10 or UN10 => 4,
+            U8 or UInt8 => 1,
+            U8_2 or UInt8_2 or F16 => 2,
+            U8_4 or S8_4 or UInt8_4 or U16_2 or S16_2 or F16_2 or F32 or SN10 or UN10 => 4,
             F16_4 or F32_2 => 8,
             F32_3 => 12,
             F32_4 => 16,
@@ -884,7 +885,7 @@ public static class BfresReader
 
         List<VertexSkin>? SkinOf(FvtxBuffer fvtx, int count, int skinCount, int boneIndex, List<BindPose.Bone> bones, List<int> palette)
         {
-            if (bones.Count == 0 || count <= 0 || skinCount > 4) return null;
+            if (bones.Count == 0 || count <= 0 || skinCount > 8) return null;
             int Map(int slot)
             {
                 if (palette.Count > 0 && slot >= 0 && slot < palette.Count) return palette[slot];
@@ -895,31 +896,37 @@ public static class BfresReader
             var indexAttr = Attr(fvtx, "_i0", "i0", "_i");
             if (indexAttr is null) return skinCount == 1 ? null : RigidSkin(boneIndex, bones.Count, count);
             var weightAttr = Attr(fvtx, "_w0", "w0", "_w");
+            var extraIndices = skinCount > 4 ? Attr(fvtx, "_i1", "i1") : null;
+            var extraWeights = skinCount > 4 ? Attr(fvtx, "_w1", "w1") : null;
+            if (skinCount > 4 && (weightAttr is null || extraIndices is null || extraWeights is null)) return null;
             var skin = new List<VertexSkin>(count);
+            Span<int> ids = stackalloc int[8];
+            Span<float> weights = stackalloc float[8];
             try
             {
                 for (int vertex = 0; vertex < count; vertex++)
                 {
-                    var ids = ReadIndices(fvtx, indexAttr, vertex);
-                    float wa = 1, wb = 0, wc = 0, wd = 0;
+                    ids.Clear();
+                    weights.Clear();
+                    ReadIndices(fvtx, indexAttr, vertex, ids[..4]);
+                    weights[0] = 1;
                     if (skinCount > 1 && weightAttr is not null)
                     {
-                        var raw = Decode(fvtx, weightAttr, vertex);
-                        wa = raw.Length > 0 ? (float)raw[0] : 0;
-                        wb = raw.Length > 1 && skinCount > 1 ? (float)raw[1] : 0;
-                        wc = raw.Length > 2 && skinCount > 2 ? (float)raw[2] : 0;
-                        wd = raw.Length > 3 && skinCount > 3 ? (float)raw[3] : 0;
-                        float sum = wa + wb + wc + wd;
-                        if (sum > 1e-6f) { wa /= sum; wb /= sum; wc /= sum; wd /= sum; }
-                        else wa = 1;
+                        CopyWeights(Decode(fvtx, weightAttr, vertex), weights[..Math.Min(skinCount, 4)]);
+                        if (extraIndices is not null && extraWeights is not null)
+                        {
+                            ReadIndices(fvtx, extraIndices, vertex, ids[4..]);
+                            CopyWeights(Decode(fvtx, extraWeights, vertex), weights[4..skinCount]);
+                        }
+                        float total = 0;
+                        for (int i = 0; i < skinCount; i++) total += weights[i];
+                        if (total > 1e-6f)
+                            for (int i = 0; i < skinCount; i++) weights[i] /= total;
+                        else weights[0] = 1;
                     }
-                    int used = Math.Max(skinCount, 1);
-                    skin.Add(new VertexSkin(
-                        Map(ids[0]),
-                        used > 1 ? Map(ids[1]) : 0,
-                        used > 2 ? Map(ids[2]) : 0,
-                        used > 3 ? Map(ids[3]) : 0,
-                        wa, used > 1 ? wb : 0, used > 2 ? wc : 0, used > 3 ? wd : 0));
+                    for (int i = 0; i < skinCount; i++) ids[i] = weights[i] > 0 ? Map(ids[i]) : 0;
+                    skin.Add(new VertexSkin(ids[0], ids[1], ids[2], ids[3], weights[0], weights[1], weights[2], weights[3],
+                        ids[4], ids[5], ids[6], ids[7], weights[4], weights[5], weights[6], weights[7]));
                 }
             }
             catch (ImportException) { return null; }
@@ -935,21 +942,31 @@ public static class BfresReader
             return skin;
         }
 
-        static int[] ReadIndices(FvtxBuffer fvtx, Attribute attribute, int index)
+        static void CopyWeights(double[] values, Span<float> destination)
+        {
+            destination.Clear();
+            for (int i = 0; i < Math.Min(values.Length, destination.Length); i++)
+                destination[i] = (float)Math.Max(0, values[i]);
+        }
+
+        static void ReadIndices(FvtxBuffer fvtx, Attribute attribute, int index, Span<int> ids)
         {
             var buffer = fvtx.Buffers[attribute.Buffer];
             int stride = fvtx.Strides[attribute.Buffer];
             if (stride == 0) stride = FormatSize(attribute.Format);
             int at = index * stride + attribute.Offset;
-            var ids = new int[4];
-            if (attribute.Format is U8_4 or S8_4)
+            int byteCount = attribute.Format switch
             {
-                if (at + 4 > buffer.Length) throw new ImportException("a bone index does not fit in its buffer");
-                for (int i = 0; i < 4; i++) ids[i] = buffer[at + i];
-                return ids;
+                U8_4 or S8_4 or UInt8_4 => 4,
+                U8_2 or UInt8_2 => 2,
+                _ => 0,
+            };
+            if (byteCount > 0)
+            {
+                if (at + byteCount > buffer.Length) throw new ImportException("a bone index does not fit in its buffer");
+                for (int i = 0; i < byteCount; i++) ids[i] = buffer[at + i];
             }
-            ids[0] = ReadIndex(fvtx, attribute, index);
-            return ids;
+            else ids[0] = ReadIndex(fvtx, attribute, index);
         }
 
         static ImportedPart PartFrom(

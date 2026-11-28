@@ -21,7 +21,8 @@ public static class ProjectScaffold
     }
 
     /// <summary>Copies the editor shell and refreshes the addon. Leaves models, maps, and textures in place.</summary>
-    public static void Write(string templateDir, string projectDir, string dump, string banc)
+    public static void Write(string templateDir, string projectDir, string dump, string banc,
+        bool modelsOnly = false, string modelPrefix = "")
     {
         Directory.CreateDirectory(projectDir);
         foreach (string source in Directory.EnumerateFiles(templateDir, "*", SearchOption.AllDirectories))
@@ -34,7 +35,8 @@ public static class ProjectScaffold
             File.Copy(source, dest, true);
         }
         CopyLibraries(projectDir);
-        ManifestStore.SaveRequest(projectDir, new ProjectRequest { Dump = Path.GetFullPath(dump), Banc = banc });
+        ManifestStore.SaveRequest(projectDir, new ProjectRequest { Dump = Path.GetFullPath(dump), Banc = banc,
+            ModelsOnly = modelsOnly, ModelPrefix = modelPrefix });
     }
 
     public static void CopyLibraries(string projectDir)
@@ -48,6 +50,7 @@ public static class ProjectScaffold
         {
             string zstd = Path.Combine(folder, "ZstdSharp.dll");
             if (File.Exists(zstd)) Copy(zstd, dest);
+            Copy(Path.Combine(folder, "AssetRipper.TextureDecoder.dll"), dest);
         }
     }
 

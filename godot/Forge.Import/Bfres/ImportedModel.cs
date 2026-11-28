@@ -29,12 +29,16 @@ public sealed class ImportedPart
     public List<float>? MaterialBlend { get; set; }
     public string Helper { get; init; } = "";
     public bool Water { get; init; }
-    /// <summary>Four bone indices and weights per vertex, in skeleton order. Null when the shape is not skinned.</summary>
+    /// <summary>Bone indices and weights per vertex, in skeleton order. Null when the shape is not skinned.</summary>
     public List<VertexSkin>? Weights { get; init; }
 }
 
-/// <summary>Up to four influences. Unused slots stay at bone 0 with weight 0.</summary>
-public readonly record struct VertexSkin(int A, int B, int C, int D, float Wa, float Wb, float Wc, float Wd);
+/// <summary>Up to eight influences. Unused slots stay at bone 0 with weight 0.</summary>
+public readonly record struct VertexSkin(int A, int B, int C, int D, float Wa, float Wb, float Wc, float Wd,
+    int E = 0, int F = 0, int G = 0, int H = 0, float We = 0, float Wf = 0, float Wg = 0, float Wh = 0)
+{
+    public bool HasExtraInfluences => We > 0 || Wf > 0 || Wg > 0 || Wh > 0;
+}
 
     /// <summary>One FSKL bone. The rotation is a quaternion. Curves live on <see cref="ImportedModel.Clips"/>.</summary>
 public sealed class ImportedBone
@@ -62,8 +66,9 @@ public sealed class ImportedModel
     public Dictionary<string, string> ImageSources { get; init; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>Bind-pose skeleton. Empty when the model has no FSKL.</summary>
     public List<ImportedBone> Skeleton { get; init; } = new();
-    /// <summary>FSKA clips from the same file. Empty when the file has none.</summary>
+    /// <summary>Embedded FSKA clips and any clips resolved by the project importer.</summary>
     public List<ImportedClip> Clips { get; set; } = new();
+    public List<string> AnimationSources { get; } = new();
     public List<string> Notes { get; init; } = new();
     public List<string> TextureHints { get; init; } = new();
 }

@@ -23,6 +23,7 @@ public static class Generator
             return args[0] switch
             {
                 "new" => New(args.Skip(1).ToArray()),
+                "models" => Models(args.Skip(1).ToArray()),
                 "reimport" => Reimport(args.Skip(1).ToArray()),
                 "check" => Check(args.Skip(1).ToArray()),
                 _ => Unknown(args[0]),
@@ -45,6 +46,8 @@ public static class Generator
         }
         string dump = Path.GetFullPath(options.Positionals[0]);
         string project = Path.GetFullPath(options.Positionals[1]);
+        if (File.Exists(ProjectPaths.Disk(project, ProjectPaths.Request)) && ManifestStore.LoadRequest(project).ModelsOnly)
+            throw new InvalidOperationException("Choose an output folder for the map project, or use reimport for this model catalog.");
         var opened = DumpFolder.Open(dump);
         string banc = options.Get("banc") ?? FieldLoader.DefaultBanc;
         if (!opened.Exists(banc))
@@ -56,6 +59,24 @@ public static class Generator
             throw new ImportException($"placement file is not in this dump: {banc}");
         ProjectScaffold.Write(ProjectScaffold.FindTemplate(options.Get("template")), project, dump, banc);
         Console.WriteLine($"scaffolded {project}");
+        return Generate(project, options.Get("godot"));
+    }
+
+    static int Models(string[] args)
+    {
+        var options = Options.Parse(args);
+        if (options.Positionals.Count != 2 || options.Get("banc") is not null)
+        {
+            Console.Error.WriteLine("usage: ocarina-forge-godot models <dump> <projectDir> [--godot <path>] [--prefix <model or actor prefix>]");
+            return 2;
+        }
+        var dump = DumpFolder.Open(options.Positionals[0]);
+        string project = Path.GetFullPath(options.Positionals[1]);
+        if (File.Exists(Path.Combine(project, "project.godot")))
+            throw new InvalidOperationException("Choose a new catalog folder. Use reimport to update an existing catalog.");
+        ProjectScaffold.Write(ProjectScaffold.FindTemplate(options.Get("template")), project, dump.Root, "",
+            modelsOnly: true, modelPrefix: options.Get("prefix") ?? "");
+        Console.WriteLine($"scaffolded model catalog {project}");
         return Generate(project, options.Get("godot"));
     }
 
@@ -71,7 +92,8 @@ public static class Generator
         var request = ManifestStore.LoadRequest(project);
         if (!Directory.Exists(request.Dump))
             throw new ImportException($"dump folder does not exist: {request.Dump}");
-        ProjectScaffold.Write(ProjectScaffold.FindTemplate(options.Get("template")), project, request.Dump, request.Banc);
+        ProjectScaffold.Write(ProjectScaffold.FindTemplate(options.Get("template")), project, request.Dump, request.Banc,
+            request.ModelsOnly, request.ModelPrefix);
         Console.WriteLine($"refreshed addon in {project}");
         return Generate(project, options.Get("godot"));
     }
@@ -155,6 +177,7 @@ public static class Generator
     {
         Console.WriteLine("""
             ocarina-forge-godot new <dump> <projectDir> [--godot <Godot exe>] [--banc <romfs path>] [--template <dir>]
+            ocarina-forge-godot models <dump> <projectDir> [--godot <Godot exe>] [--prefix <model or actor prefix>] [--template <dir>]
             ocarina-forge-godot reimport <projectDir> [--godot <Godot exe>] [--template <dir>]
             ocarina-forge-godot check <projectDir> [--godot <Godot exe>]
 
@@ -177,7 +200,7 @@ public static class Generator
             for (int i = 0; i < args.Length; i++)
             {
                 string arg = args[i];
-                if (arg is "--godot" or "--banc" or "--template")
+                if (arg is "--godot" or "--banc" or "--template" or "--prefix")
                 {
                     if (i + 1 >= args.Length) throw new InvalidOperationException($"{arg} needs a value");
                     options._flags[arg[2..]] = args[++i];

@@ -5,7 +5,7 @@ using OcarinaForge.Project;
 namespace OcarinaForge.Generated;
 
 /// <summary>Writes native Godot resources from a dump. The CLI and the editor plugin both call <see cref="Generate"/>.</summary>
-public static class ProjectEmitter
+public static partial class ProjectEmitter
 {
     public static int Generate()
     {
@@ -14,7 +14,8 @@ public static class ProjectEmitter
         {
             var request = ManifestStore.LoadRequest(projectDir);
             var dump = DumpFolder.Open(request.Dump);
-            var field = FieldLoader.Load(dump, request.Banc);
+            if (request.ModelsOnly) return GenerateCatalog(projectDir, request, dump);
+            var field = FieldLoader.Load(dump, request.Banc, includeAnimations: true);
             AstcTranscode.Apply(field);
             var existing = ManifestStore.Load(projectDir);
             var job = ProjectPlan.Build(dump, field, existing, projectDir);
@@ -28,7 +29,7 @@ public static class ProjectEmitter
                     GD.Print($"generate texture {texture.Name} skipped");
                     continue;
                 }
-                if (SaveTexture(texture.Image, texture.ResPath, field.Report) is null)
+                if (!SaveTexture(texture.Image, texture.ResPath, field.Report))
                     throw new InvalidOperationException($"could not write {texture.ResPath}");
                 texturesWritten++;
                 GD.Print($"generate texture {texture.Name} written");
@@ -74,6 +75,8 @@ public static class ProjectEmitter
 
     public static int Check()
     {
+        string projectDir = ProjectSettings.GlobalizePath("res://");
+        if (ManifestStore.LoadRequest(projectDir).ModelsOnly) return CheckCatalog(projectDir);
         if (!ResourceLoader.Exists(ProjectPaths.MapScene))
         {
             GD.PrintErr("check map missing");
@@ -108,9 +111,16 @@ public static class ProjectEmitter
 
     static void WriteModel(ModelJob job)
     {
-        foreach (var part in job.Model.Parts.Where(ProjectPaths.Drawn))
-            WriteMaterial(job, part);
-        bool hasFar = job.Model.Parts.Any(part => part.Lod > 0 && ProjectPaths.Drawn(part));
+        var textures = new Dictionary<string, Texture2D>(StringComparer.Ordinal);
+        var materials = new Dictionary<string, Material>(StringComparer.Ordinal);
+        var meshes = new Dictionary<string, ArrayMesh>(StringComparer.Ordinal);
+        var parts = job.Model.Parts.Where(ProjectPaths.Drawn).ToArray();
+        foreach (var group in parts.GroupBy(part => MaterialPath(job, part), StringComparer.Ordinal))
+        {
+            var part = group.Last();
+            materials.Add(group.Key, part.Water ? LoadUncached<Material>(group.Key) : WriteMaterial(job, part, textures));
+        }
+        bool hasFar = parts.Any(part => part.Lod > 0);
         var root = new Node3D { Name = ProjectPaths.Safe(job.Gyaml) };
         root.SetMeta("ocarina_source", job.ModelPath);
         root.SetMeta("ocarina_animation", job.Model.Clips.Count == 0
@@ -122,13 +132,26 @@ public static class ProjectEmitter
             ? skeleton.CreateSkinFromRestTransforms()
             : null;
         var player = new AnimationPlayer { Name = "AnimationPlayer" };
-        player.AddAnimationLibrary("", Library(job.Model.Clips, names));
+        var library = Library(job.Model.Clips, names);
+        if (job.Model.Clips.Count > 0)
+        {
+            string path = ProjectPaths.Animations(job.Gyaml);
+            Save(library, path, ResourceSaver.SaverFlags.Compress);
+            library.SetPathCache(path);
+        }
+        player.AddAnimationLibrary("", library);
         root.AddChild(player);
         var used = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var part in job.Model.Parts.Where(ProjectPaths.Drawn))
+        foreach (var part in parts)
         {
             string meshPath = ProjectPaths.Mesh(job.Gyaml, part.Name, part.Lod);
-            if (used.Add(meshPath)) Save(MakeMesh(part), meshPath);
+            if (!meshes.TryGetValue(meshPath, out var mesh))
+            {
+                mesh = MakeMesh(part, reverseWinding: true);
+                Save(mesh, meshPath);
+                mesh.SetPathCache(meshPath);
+                meshes.Add(meshPath, mesh);
+            }
             string name = NodeName(part.Name, part.Lod);
             string nodeName = name;
             int n = 2;
@@ -136,8 +159,8 @@ public static class ProjectEmitter
             var body = new MeshInstance3D
             {
                 Name = nodeName,
-                Mesh = Load<ArrayMesh>(meshPath),
-                MaterialOverride = Load<Material>(MaterialPath(job, part)),
+                Mesh = mesh,
+                MaterialOverride = materials[MaterialPath(job, part)],
                 CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
             };
             ApplyRange(body, part, hasFar);
@@ -145,6 +168,7 @@ public static class ProjectEmitter
             {
                 body.Skin = skin;
                 skeleton.AddChild(body);
+                body.Skeleton = new NodePath("..");
             }
             else root.AddChild(body);
         }
@@ -153,12 +177,15 @@ public static class ProjectEmitter
         if (packed.Pack(root) != Error.Ok) throw new InvalidOperationException($"could not pack {job.Gyaml}");
         Save(packed, ProjectPaths.ModelScene(job.Gyaml));
         root.Free();
+        GC.KeepAlive(textures);
+        GC.KeepAlive(materials);
+        GC.KeepAlive(meshes);
+        GC.KeepAlive(library);
     }
 
-    static void WriteMaterial(ModelJob job, ImportedPart part)
+    static StandardMaterial3D WriteMaterial(ModelJob job, ImportedPart part, Dictionary<string, Texture2D> textures)
     {
         string path = MaterialPath(job, part);
-        if (part.Water) return;
         var material = new StandardMaterial3D { Roughness = 0.85f, ResourceName = ProjectPaths.Safe(ProjectPlan.MaterialKey(part)) };
         if (!part.DoubleSided) material.CullMode = BaseMaterial3D.CullModeEnum.Back;
         else material.CullMode = BaseMaterial3D.CullModeEnum.Disabled;
@@ -171,7 +198,12 @@ public static class ProjectEmitter
             material.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
         if (part.Texture.Length > 0 && job.TexturePaths.TryGetValue(part.Texture, out var texturePath) && ResourceLoader.Exists(texturePath))
         {
-            material.AlbedoTexture = Load<Texture2D>(texturePath);
+            if (!textures.TryGetValue(texturePath, out var texture))
+            {
+                texture = LoadUncached<Texture2D>(texturePath);
+                textures.Add(texturePath, texture);
+            }
+            material.AlbedoTexture = texture;
             if (job.Textures.TryGetValue(part.Texture, out var image))
                 material.AlbedoTextureForceSrgb = image.Srgb;
         }
@@ -182,6 +214,8 @@ public static class ProjectEmitter
             material.Transparency = BaseMaterial3D.TransparencyEnum.Disabled;
         }
         Save(material, path);
+        material.SetPathCache(path);
+        return material;
     }
 
     static string MaterialPath(ModelJob job, ImportedPart part) =>
@@ -366,21 +400,15 @@ public static class ProjectEmitter
     {
         var library = new AnimationLibrary();
         var used = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var clip in clips.Take(64))
+        var boneNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (original, unique) in bones) boneNames.TryAdd(original, unique);
+        foreach (var clip in clips)
         {
             var animation = new Animation { Length = Math.Max(clip.FrameCount / 30f, 1f / 30f) };
             animation.LoopMode = clip.Loop ? Animation.LoopModeEnum.Linear : Animation.LoopModeEnum.None;
             foreach (var track in clip.Bones)
             {
-                string bone = "";
-                if (track.Index >= 0 && track.Index < bones.Count) bone = bones[track.Index].Unique;
-                if (bone.Length == 0)
-                {
-                    foreach (var (original, unique) in bones)
-                        if (original.Equals(track.Bone, StringComparison.OrdinalIgnoreCase) || unique.Equals(ProjectPaths.Safe(track.Bone), StringComparison.Ordinal))
-                            bone = unique;
-                }
-                if (bone.Length == 0 || track.Keys.Count == 0) continue;
+                if (!boneNames.TryGetValue(track.Bone, out var bone) || track.Keys.Count == 0) continue;
                 var path = new NodePath("Skeleton:" + bone);
                 int pos = animation.AddTrack(Animation.TrackType.Position3D);
                 int rot = animation.AddTrack(Animation.TrackType.Rotation3D);
@@ -514,7 +542,7 @@ public static class ProjectEmitter
         }
     }
 
-    static ArrayMesh MakeMesh(ImportedPart part)
+    static ArrayMesh MakeMesh(ImportedPart part, bool reverseWinding = false)
     {
         var vertices = new Vector3[part.Positions.Count];
         for (int i = 0; i < vertices.Length; i++)
@@ -555,43 +583,62 @@ public static class ProjectEmitter
         var arrays = new Godot.Collections.Array();
         arrays.Resize((int)Mesh.ArrayType.Max);
         arrays[(int)Mesh.ArrayType.Vertex] = vertices;
-        arrays[(int)Mesh.ArrayType.Index] = part.Indices.ToArray();
+        var indices = part.Indices.ToArray();
+        // BFRES actor meshes face counterclockwise. Godot culls the opposite side.
+        if (reverseWinding)
+            for (int i = 0; i + 2 < indices.Length; i += 3)
+                (indices[i + 1], indices[i + 2]) = (indices[i + 2], indices[i + 1]);
+        arrays[(int)Mesh.ArrayType.Index] = indices;
         if (uvs is not null) arrays[(int)Mesh.ArrayType.TexUV] = uvs;
         if (uv2 is not null) arrays[(int)Mesh.ArrayType.TexUV2] = uv2;
         if (colors is not null) arrays[(int)Mesh.ArrayType.Color] = colors;
         if (normals is not null) arrays[(int)Mesh.ArrayType.Normal] = normals;
+        var flags = (Mesh.ArrayFormat)0;
         if (part.Weights is { Count: > 0 } && part.Weights.Count == part.Positions.Count)
         {
-            var bones = new int[part.Weights.Count * 4];
-            var weights = new float[part.Weights.Count * 4];
+            bool eight = part.Weights.Any(skin => skin.HasExtraInfluences);
+            int slots = eight ? 8 : 4;
+            if (eight) flags = Mesh.ArrayFormat.FlagUse8BoneWeights;
+            var bones = new int[part.Weights.Count * slots];
+            var weights = new float[part.Weights.Count * slots];
             for (int i = 0; i < part.Weights.Count; i++)
             {
                 var skin = part.Weights[i];
-                bones[i * 4] = skin.A;
-                bones[i * 4 + 1] = skin.B;
-                bones[i * 4 + 2] = skin.C;
-                bones[i * 4 + 3] = skin.D;
-                weights[i * 4] = skin.Wa;
-                weights[i * 4 + 1] = skin.Wb;
-                weights[i * 4 + 2] = skin.Wc;
-                weights[i * 4 + 3] = skin.Wd;
+                int at = i * slots;
+                bones[at] = skin.A;
+                bones[at + 1] = skin.B;
+                bones[at + 2] = skin.C;
+                bones[at + 3] = skin.D;
+                weights[at] = skin.Wa;
+                weights[at + 1] = skin.Wb;
+                weights[at + 2] = skin.Wc;
+                weights[at + 3] = skin.Wd;
+                if (!eight) continue;
+                bones[at + 4] = skin.E;
+                bones[at + 5] = skin.F;
+                bones[at + 6] = skin.G;
+                bones[at + 7] = skin.H;
+                weights[at + 4] = skin.We;
+                weights[at + 5] = skin.Wf;
+                weights[at + 6] = skin.Wg;
+                weights[at + 7] = skin.Wh;
             }
             arrays[(int)Mesh.ArrayType.Bones] = bones;
             arrays[(int)Mesh.ArrayType.Weights] = weights;
         }
         var mesh = new ArrayMesh();
-        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+        mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays, flags: flags);
         return mesh;
     }
 
-    static Texture2D? SaveTexture(CompressedTexture image, string resPath, LoadReport report)
+    static bool SaveTexture(CompressedTexture image, string resPath, LoadReport report)
     {
-        var picture = Picture(image, report);
-        if (picture is null) return null;
-        var texture = ImageTexture.CreateFromImage(picture);
+        using var picture = Picture(image, report);
+        if (picture is null) return false;
+        using var texture = ImageTexture.CreateFromImage(picture);
         texture.ResourceName = image.Name;
         Save(texture, resPath);
-        return Load<Texture2D>(resPath);
+        return true;
     }
 
     static Image? Picture(CompressedTexture image, LoadReport report)
@@ -629,11 +676,11 @@ public static class ProjectEmitter
         return picture;
     }
 
-    static void Save(Resource resource, string resPath)
+    static void Save(Resource resource, string resPath, ResourceSaver.SaverFlags flags = ResourceSaver.SaverFlags.None)
     {
         string disk = ProjectSettings.GlobalizePath(resPath);
         Directory.CreateDirectory(Path.GetDirectoryName(disk)!);
-        Error err = ResourceSaver.Save(resource, resPath);
+        Error err = ResourceSaver.Save(resource, resPath, flags);
         if (err != Error.Ok) throw new InvalidOperationException($"save {resPath} returned {err}");
     }
 
@@ -641,6 +688,15 @@ public static class ProjectEmitter
     {
         var loaded = ResourceLoader.Load<T>(resPath, cacheMode: ResourceLoader.CacheMode.Replace);
         if (loaded is null) throw new InvalidOperationException($"could not load {resPath}");
+        return loaded;
+    }
+
+    static T LoadUncached<T>(string resPath) where T : Resource
+    {
+        // Avoid resurrecting a cached native resource whose .NET wrapper is awaiting finalization.
+        var loaded = ResourceLoader.Load<T>(resPath, cacheMode: ResourceLoader.CacheMode.IgnoreDeep)
+            ?? throw new InvalidOperationException($"could not load {resPath}");
+        loaded.SetPathCache(resPath);
         return loaded;
     }
 

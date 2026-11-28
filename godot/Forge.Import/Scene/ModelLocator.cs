@@ -308,7 +308,7 @@ public static class ModelLocator
         }
     }
 
-    static List<(string, string)> Pairs(Dictionary<string, object?> document)
+    internal static List<(string, string)> Pairs(Dictionary<string, object?> document)
     {
         var found = new List<(string, string)>();
         void Add(Dictionary<string, object?> node)

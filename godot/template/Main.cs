@@ -54,6 +54,13 @@ public partial class Main : Node3D
             GetTree().Quit(ProjectEmitter.Probe(true));
             return;
         }
+        if (File.Exists(ProjectPaths.Disk(ProjectSettings.GlobalizePath("res://"), ProjectPaths.Request))
+            && ManifestStore.LoadRequest(ProjectSettings.GlobalizePath("res://")).ModelsOnly)
+        {
+            _stats.Text = "Ocarina Forge model catalog\nOpen a scene under models/ in the FileSystem dock.";
+            if (DisplayServer.GetName() == "headless") GetTree().Quit();
+            return;
+        }
         _benchmark = args.ContainsKey("benchmark");
         _benchmarkOut = args.GetValueOrDefault("benchmark-out") ?? "";
         if (ResourceLoader.Exists(ProjectPaths.MapScene)) OpenMap();

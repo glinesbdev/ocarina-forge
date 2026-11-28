@@ -100,19 +100,25 @@ public static class TexturePrep
         var format = image.BlockW == 8 && image.BlockH == 8 ? Image.Format.Astc8X8
             : image.BlockW == 4 && image.BlockH == 4 ? Image.Format.Astc4X4
             : (Image.Format?)null;
-        if (format is null)
-        {
-            report.AddReason($"{image.Name}: ASTC {image.BlockW}x{image.BlockH} is not transcoded");
-            return null;
-        }
         int mip0 = MipChain.LevelBytes(image.Width, image.Height, image.BlockW, image.BlockH, image.BytesPerBlock, false);
         if (image.Blocks.Length < mip0)
         {
             report.AddReason($"{image.Name}: ASTC mip 0 is {image.Blocks.Length} bytes, needs {mip0}");
             return null;
         }
-        var picture = Image.CreateFromData(image.Width, image.Height, false, format.Value, image.Blocks.AsSpan(0, mip0).ToArray());
-        if (picture is null || picture.IsEmpty() || picture.Decompress() != Error.Ok)
+        Image? picture;
+        try
+        {
+            picture = format is null
+                ? Image.CreateFromData(image.Width, image.Height, false, Image.Format.Rgba8, AstcPixels.DecodeMipZero(image))
+                : Image.CreateFromData(image.Width, image.Height, false, format.Value, image.Blocks.AsSpan(0, mip0).ToArray());
+        }
+        catch (ArgumentException exc)
+        {
+            report.AddReason($"{image.Name}: ASTC decode failed: {exc.Message}");
+            return null;
+        }
+        if (picture is null || picture.IsEmpty() || (picture.IsCompressed() && picture.Decompress() != Error.Ok))
         {
             report.AddReason($"{image.Name}: ASTC decompress failed");
             return null;

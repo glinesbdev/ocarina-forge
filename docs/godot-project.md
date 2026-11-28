@@ -6,7 +6,7 @@ This builds on the viewer in [godot-spike.md](godot-spike.md) (PR #78). The view
 
 ## What was run, and what was not
 
-Verified on Linux, with the synthetic dump only (no retail assets, no GPU):
+The original generator checks ran on Linux with the synthetic dump:
 
 - `dotnet test godot/Forge.Import.Tests/Forge.Import.Tests.csproj` — the importer tests, including a hand-built linear FSKA clip, a `CmnTex` albedo stored under a shorter `.bntx` stem, a graveyard plant resolved from the project file, and a flat untextured slab.
 - `dotnet test godot/Forge.Project.Tests/Forge.Project.Tests.csproj` — the planner, the manifest, and a headless generate when `GODOT` is set.
@@ -15,9 +15,45 @@ Verified on Linux, with the synthetic dump only (no retail assets, no GPU):
 
 Not verified, so this does not claim them:
 
-- Windows, an AMD GPU, or any retail dump. There is no dump in this environment. The owner's editor still has to show the terrain after reimport, and an animal's Animation panel still has to list its clips.
+- GPU rendering and animation playback in the Windows editor.
 - Thumbnails in the editor. The files are `PackedScene`, `ArrayMesh`, `StandardMaterial3D`, and `ImageTexture` saved by `ResourceSaver`. Godot's FileSystem dock builds previews when the editor scans them. That scan was not watched here. The terrain array is rebuilt by the tool script when the scene enters the tree. The headless probe showed a saved `Texture2DArray` reloads empty and a PNG does not. The editor viewport on his machine was not opened.
 - That the generated Hyrule Field matches the game, or the owner's last fly-through. He has to open the project.
+
+## Hyrule Field follow-up on Windows
+
+On Windows with Godot 4.7.2 .NET, a fresh headless import wrote 639 texture resources and reported 3 missing texture slots, down from 1,710 in the previous generated project. The loose cliff albedo, `Tex/CmnTex_Rock_HrlField_UmeCliff_Near_A_Alb.bntx.zs`, decoded as sRGB ASTC 6×6 and was linked from the generated cliff material.
+
+The generated map passed `--check` with 4,516 actors. Godot reopened 294 skeletal clips for child Epona, including its model-pose clip, and 16 for Cow. The track paths resolved against the names in each skeleton. The generator exited successfully and logged Godot .NET handle errors while saving the retail map and at shutdown. A separate process reopened the map successfully. Visual playback and a GPU benchmark remain open.
+
+The generator loads standalone FSKA by following `Components.AnimationRef` in the actor pack to `AnimationResources`. It also checks exact model and actor filenames for companion clips. It binds tracks by exact bone name and records the source files in the manifest. The curves are saved in a compressed Godot `AnimationLibrary` resource referenced by the model scene. The generator does not evaluate ASB state machines or apply the game's retarget scale.
+
+Godot decodes ASTC 4×4 and 8×8. Other ASTC footprints use the managed AssetRipper decoder and feed into the same BC7 transcode path.
+
+## Cow and Epona playback
+
+All four Cow mesh resources and all 46 bone definitions matched between the previous project and the first textured import. Both exports lacked mesh-skin bindings for the Cow. The generator now reads the unsigned palette indices and attaches the weighted meshes to their skeletons. Actor triangle winding is converted for Godot while preserving the BFRES normals. Child Epona's body uses the eight-weight surface format.
+
+On Windows, a focused Godot 4.7.2 headless run reopened the regenerated Cow and child Epona scenes, checked their winding and rest-pose vertices, and verified vertex motion after seeking `Def_Normal_Talk_A` and `Appear`. Those clips use the compact FSKA curve layout. The full Field and editor viewport were outside this playback check.
+
+## Separate Epona libraries
+
+Child Epona exports its own model-pose clip and the three child-rig clips from the Melody Get sequence. The adult file named with `IsRetarget: true` in the child's animation component is excluded from this scene. Adult Epona retains its own library. Reimport with importer version 5 replaces the earlier child library.
+
+## Model catalog
+
+The `models` command writes an editable Godot library from a dump, independently of map placements. It discovers loose BFRES containers under `romfs/Model` and BFRES members of actor packs, then reads the mesh entries inside each container. Standalone animation, skeleton and texture companion files are excluded from the model list. When actor ModelInfo names the model, the importer can follow that actor's animation component. The catalog uses the same mesh, material, skin and animation writers as the map generator.
+
+```powershell
+dotnet run --project godot/Forge.Cli -- models D:\dump D:\ocarina-models --godot $env:GODOT
+```
+
+Omit `--prefix` to scan the whole dump. Add `--prefix Animal_` for a smaller catalog. Open `project.godot` and choose a scene under `models/` in Godot's FileSystem dock. `reimport` retains the catalog's source and filter. It checks the same source manifest and skips current resources. A catalog does not need a banc or a generated map.
+
+The generator writes `.ocarina/model-catalog.json` with the status and source of each model. It records unsupported containers, models without a drawable mesh, missing texture references, and write failures. See the format limitations below for external GPU buffers and unsupported shapes.
+
+Godot 4.7.2 .NET can report `Handle is not initialized` while retrieving cached resources during large imports. Forge now loads each model's texture dependencies outside the resource cache and keeps those references alive while saving the model. If an older catalog process stops, run `reimport` after it exits to pick up the updated addon and reuse the saved checkpoints. [Godot issue #112067](https://github.com/godotengine/godot/issues/112067)
+
+The long line visible in child Epona's cutscene preview connects `Root` to `Skl_Root`. Godot draws it as a skeleton link. The child cutscene moves `Skl_Root` away from the local origin by up to about 13 m while the limbs keep their proportions. The catalog preserves that authored movement.
 
 ## Layout
 
@@ -31,6 +67,7 @@ addons/ocarina_forge/          plugin, writer, and the Forge DLLs
 textures/<name>.res            shared compressed textures
 materials/water.tres
 models/<Model>/<Model>.tscn    Skeleton3D, AnimationPlayer, one mesh node per part
+models/<Model>/animations.res   linked AnimationLibrary when the model has clips
 models/<Model>/meshes/<part>_lodN.res
 models/<Model>/materials/<Material>.tres
 maps/HyruleField.tscn          terrain plus one instance per placed actor
@@ -44,7 +81,7 @@ scenes/benchmark.tscn          the fly camera, instancing main.tscn
 
 An actor is an instance of its model scene, with the banc translate / rotate / scale. Helpers, bounds boxes, and the other omitted shapes are not written. LOD 0 ends at 72 m and LOD 1 begins there, the same ranges as the viewer. The viewer batches repeats with MultiMesh. The project keeps one node per actor so they can be moved.
 
-`.ocarina/manifest.json` is version 1. `files` maps a `res://` path to `kind`, `sources` (romfs paths; a pack member is `archive#member`), and `hash`. The hash is SHA-256 of the importer id `godot-project-2` plus the raw bytes of those files. It is not a hash of the Godot file, so a hand edit of an unchanged output is left in place. A source change, or a project whose manifest still says `godot-project-1`, rewrites that output. A later exporter can generate a second, untouched project and diff the two. Orphan files from a removed actor are not deleted. The viewer's import cache is a separate id, `godot-spike-4`.
+`.ocarina/manifest.json` is version 1. `files` maps a `res://` path to `kind`, `sources` (romfs paths; a pack member is `archive#member`), and `hash`. The hash is SHA-256 of the importer id `godot-project-5` plus the raw bytes of those files. It is not a hash of the Godot file, so a hand edit of an unchanged output is left in place. A source change, or a project whose manifest has an earlier importer version, rewrites that output. A later exporter can generate a second, untouched project and diff the two. Orphan files from a removed actor are not deleted. The viewer's import cache is a separate id, `godot-spike-6`.
 
 The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport from dump). Reimport refreshes the addon sources and DLLs, then generates. It does not delete `models/`, `textures/`, or `maps/`.
 
@@ -73,7 +110,7 @@ The same writer runs from the CLI and from the **Ocarina Forge** dock (Reimport 
 
 ## Commands
 
-Godot is **4.7.2 stable .NET**. The Windows editor is typically `Godot_v4.7.2-stable_mono_win64.exe`. Set `GODOT` or pass `--godot`. The first generate transcodes MaterialAlb and walks texture archives. The second generate skips outputs whose sources have not changed.
+Godot is **4.7.2 stable .NET**. The Windows editor is typically `Godot_v4.7.2-stable_mono_win64.exe`. Set `GODOT` or pass `--godot`. The first generate transcodes ASTC albedos and MaterialAlb and walks texture archives. The second generate skips outputs whose sources have not changed.
 
 Linux, from the repo:
 
@@ -86,7 +123,7 @@ dotnet run --project godot/Forge.Cli -- new /path/to/dump /path/to/hyrule-field-
 "$GODOT" --path /path/to/hyrule-field-godot -- --benchmark --benchmark-out field-loop-160m.json
 ```
 
-Windows PowerShell, from the repo. `reimport` writes into the project folder that already exists. The importer id `godot-project-2` makes the first reimport rewrite every output. The viewer's cache id is `godot-spike-4`, so clear the old cache before the viewer run.
+Windows PowerShell, from the repo. `reimport` writes into the project folder that already exists. The importer id `godot-project-5` makes the first reimport rewrite every generated output. Use `new` with a fresh directory to keep an edited project. The viewer ignores caches from earlier importer versions.
 
 ```powershell
 $env:GODOT = "C:\Godot\Godot_v4.7.2-stable_mono_win64.exe"
@@ -94,7 +131,6 @@ dotnet test godot\Forge.Import.Tests\Forge.Import.Tests.csproj
 dotnet test godot\Forge.Project.Tests\Forge.Project.Tests.csproj
 dotnet run --project godot\Forge.Cli -- reimport D:\hyrule-field-godot --godot $env:GODOT
 & $env:GODOT --path D:\hyrule-field-godot -- --benchmark --benchmark-out field-loop-160m.json
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\OcarinaForge\godot-cache" -ErrorAction SilentlyContinue
 dotnet build godot\viewer\OcarinaForge.Viewer.csproj
 & $env:GODOT --path godot\viewer -- --dump "D:\dump" --benchmark --benchmark-out field-loop-160m.json
 ```

@@ -32,7 +32,7 @@ public static class FieldLoader
 {
     public const string DefaultBanc = "Banc/HyruleField/HyruleField_Child_Static.bcett.byml.zs";
 
-    public static ImportedField Load(DumpFolder dump, string? banc = null)
+    public static ImportedField Load(DumpFolder dump, string? banc = null, bool includeAnimations = false)
     {
         string relative = string.IsNullOrWhiteSpace(banc) ? DefaultBanc : banc.Replace('\\', '/');
         if (!dump.Exists(relative))
@@ -51,6 +51,7 @@ public static class FieldLoader
         var texturesByModel = new Dictionary<string, Dictionary<string, CompressedTexture>>(StringComparer.Ordinal);
         var sourcesByModel = new Dictionary<string, Dictionary<string, string>>(StringComparer.Ordinal);
         var library = new TextureLibrary(dump);
+        var animations = includeAnimations ? new AnimationLocator(dump) : null;
         foreach (var placement in placements)
         {
             if (!placement.Draw)
@@ -73,6 +74,7 @@ public static class FieldLoader
                     field.Report.ShapesFailed++;
                     field.Report.AddReason(note);
                 }
+                animations?.Attach(placement.Gyaml, found, field.Notes);
                 resolved = (found.Path, found.Model);
                 cache[placement.Gyaml] = resolved;
                 foreach (var part in resolved.Model.Parts)
@@ -83,32 +85,11 @@ public static class FieldLoader
                         || part.OmitReason.Contains("bounds", StringComparison.Ordinal))
                         field.Report.NoteOmitted($"{placement.Gyaml} {part.Name}/{part.Material}: {part.OmitReason}");
                 }
-                foreach (string imageName in resolved.Model.Images.Keys)
-                    resolved.Model.ImageSources.TryAdd(imageName, resolved.Path);
             }
             if (!texturesByModel.TryGetValue(placement.Gyaml, out var textures))
             {
-                library.AttachCompanions(resolved.Model, resolved.Path, placement.Gyaml);
-                textures = new Dictionary<string, CompressedTexture>(StringComparer.OrdinalIgnoreCase);
-                var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                var hints = TextureLibrary.Hints(placement.Gyaml, resolved.Path, resolved.Model.Name);
-                foreach (var part in resolved.Model.Parts)
-                {
-                    if (part.OmitReason.Length > 0 || part.Helper.Length > 0 || part.Lod != 0 && part.Lod != 1) continue;
-                    if (part.Texture.Length == 0)
-                    {
-                        field.Report.MaterialsUnbound++;
-                        continue;
-                    }
-                    if (textures.ContainsKey(part.Texture)) continue;
-                    var image = library.Find(resolved.Model, part.Texture, hints);
-                    if (image is null) field.Report.MissTexture(part.Texture);
-                    else
-                    {
-                        textures[part.Texture] = image;
-                        sources[part.Texture] = library.LastSource;
-                    }
-                }
+                var (foundTextures, sources) = ReadTextures(library, resolved.Model, resolved.Path, placement.Gyaml, field.Report);
+                textures = foundTextures;
                 texturesByModel[placement.Gyaml] = textures;
                 sourcesByModel[placement.Gyaml] = sources;
             }
@@ -151,6 +132,35 @@ public static class FieldLoader
         foreach (string note in field.Notes)
             field.Report.AddReason(note);
         return field;
+    }
+
+    public static (Dictionary<string, CompressedTexture> Textures, Dictionary<string, string> Sources) ReadTextures(
+        TextureLibrary library, ImportedModel model, string path, string actor, LoadReport report)
+    {
+        foreach (string imageName in model.Images.Keys)
+            model.ImageSources.TryAdd(imageName, path);
+        library.AttachCompanions(model, path, actor);
+        var textures = new Dictionary<string, CompressedTexture>(StringComparer.OrdinalIgnoreCase);
+        var sources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var hints = TextureLibrary.Hints(actor, path, model.Name);
+        foreach (var part in model.Parts)
+        {
+            if (part.OmitReason.Length > 0 || part.Helper.Length > 0 || part.Lod != 0 && part.Lod != 1) continue;
+            if (part.Texture.Length == 0)
+            {
+                report.MaterialsUnbound++;
+                continue;
+            }
+            if (textures.ContainsKey(part.Texture)) continue;
+            var image = library.Find(model, part.Texture, hints);
+            if (image is null) report.MissTexture(part.Texture);
+            else
+            {
+                textures[part.Texture] = image;
+                sources[part.Texture] = library.LastSource;
+            }
+        }
+        return (textures, sources);
     }
 
     static void TryTerrain(DumpFolder dump, string banc, List<ActorPlacement> placements, ImportedField field)
